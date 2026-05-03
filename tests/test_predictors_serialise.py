@@ -18,6 +18,7 @@ from hybridmodels.predictors import (
     CovariateSelector,
     KANPredictor,
     MLPPredictor,
+    NeuralNPolynomial,
     Predictor,
     RatePair,
 )
@@ -76,6 +77,27 @@ def _kan_predictor() -> KANPredictor:
     )
 
 
+def _neural_npoly() -> NeuralNPolynomial:
+    return _neural_npoly_with_key(jr.PRNGKey(0))
+
+
+def _neural_npoly_with_key(key: Array) -> NeuralNPolynomial:
+    coeff_net = MLPPredictor(
+        in_size=3,
+        out_size=6,
+        width_size=8,
+        depth=2,
+        activation_name="tanh",
+        key=key,
+    )
+    return NeuralNPolynomial(
+        coeff_net=coeff_net,
+        exponents=(0.0, 1.0, 2.0),
+        in_size=3,
+        out_size=2,
+    )
+
+
 def _different_template(predictor: eqx.Module) -> eqx.Module:
     if isinstance(predictor, RatePair):
         return RatePair(
@@ -100,6 +122,8 @@ def _different_template(predictor: eqx.Module) -> eqx.Module:
             basis=predictor.basis,
             key=jr.PRNGKey(123),
         )
+    if isinstance(predictor, NeuralNPolynomial):
+        return _neural_npoly_with_key(jr.PRNGKey(77))
     return _bounded_predictor_with_key(jr.PRNGKey(1))
 
 
@@ -108,6 +132,7 @@ PREDICTOR_FACTORIES: list[tuple[str, Callable[[], eqx.Module]]] = [
     ("rate_pair", _rate_pair),
     ("mlp_predictor", _mlp_predictor),
     ("kan_predictor", _kan_predictor),
+    ("neural_npoly", _neural_npoly),
 ]
 
 

@@ -14,6 +14,7 @@ def test_package_imports() -> None:
         "KANPredictor",
         "LOSS_REGISTRY",
         "MLPPredictor",
+        "NeuralNPolynomial",
         "OptaxTrainingConfig",
         "Predictor",
         "RatePair",
