@@ -18,6 +18,7 @@ def test_package_imports() -> None:
         "bal_mle",
         "bal_mse",
         "default_trainable",
+        "fold",
         "freeze_modules_of_type",
         "freeze_paths",
         "freeze_where",

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         RatePair,
         reinitialize_with_key,
     )
+    from hybridmodels.rng import fold
     from hybridmodels.solver import SOLVER_REGISTRY, SolverConfig, register_solver
     from hybridmodels.trainable import (
         default_trainable,
@@ -54,6 +55,7 @@ __all__: list[str] = [
     "bal_mle",
     "bal_mse",
     "default_trainable",
+    "fold",
     "freeze_modules_of_type",
     "freeze_paths",
     "freeze_where",
@@ -86,6 +88,7 @@ _EXPORTS: dict[str, str] = {
     "bal_mle": "hybridmodels.losses",
     "bal_mse": "hybridmodels.losses",
     "default_trainable": "hybridmodels.trainable",
+    "fold": "hybridmodels.rng",
     "freeze_modules_of_type": "hybridmodels.trainable",
     "freeze_paths": "hybridmodels.trainable",
     "freeze_where": "hybridmodels.trainable",
