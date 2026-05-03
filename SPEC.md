@@ -406,10 +406,11 @@ class BucketPayload(NamedTuple):
     n_obs: Int[Array, ""]                          # total observed (mask sum), for weighted reductions
 
 class Dataset(eqx.Module):
-    bucket_payloads: tuple[BucketPayload, ...] = eqx.field(static=True)
+    bucket_payloads: tuple[BucketPayload, ...]
     state_to_output: Callable = eqx.field(static=True)
     output_channel_names: tuple[str, ...] = eqx.field(static=True)
     covariate_names: tuple[str, ...] = eqx.field(static=True)
+    _experiments: tuple[Experiment, ...] = ()       # private; enables split_dataset re-bucketing
 ```
 
 **Functions:**
