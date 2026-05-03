@@ -11,31 +11,51 @@ if TYPE_CHECKING:
         make_experiment,
         split_dataset,
     )
+    from hybridmodels.predictors import (
+        BoundedPredictor,
+        BoundScaler,
+        CovariateSelector,
+        Predictor,
+        RatePair,
+        reinitialize_with_key,
+    )
     from hybridmodels.solver import SOLVER_REGISTRY, SolverConfig, register_solver
 
 __all__: list[str] = [
+    "BoundedPredictor",
+    "BoundScaler",
     "BucketPayload",
     "ChannelObs",
+    "CovariateSelector",
     "Dataset",
     "Experiment",
+    "Predictor",
+    "RatePair",
     "SOLVER_REGISTRY",
     "SolverConfig",
     "make_dataset",
     "make_experiment",
     "register_solver",
+    "reinitialize_with_key",
     "split_dataset",
 ]
 
 _EXPORTS: dict[str, str] = {
+    "BoundedPredictor": "hybridmodels.predictors",
+    "BoundScaler": "hybridmodels.predictors",
     "BucketPayload": "hybridmodels.data",
     "ChannelObs": "hybridmodels.data",
+    "CovariateSelector": "hybridmodels.predictors",
     "Dataset": "hybridmodels.data",
     "Experiment": "hybridmodels.data",
+    "Predictor": "hybridmodels.predictors",
+    "RatePair": "hybridmodels.predictors",
     "SOLVER_REGISTRY": "hybridmodels.solver",
     "SolverConfig": "hybridmodels.solver",
     "make_dataset": "hybridmodels.data",
     "make_experiment": "hybridmodels.data",
     "register_solver": "hybridmodels.solver",
+    "reinitialize_with_key": "hybridmodels.predictors",
     "split_dataset": "hybridmodels.data",
 }
 
