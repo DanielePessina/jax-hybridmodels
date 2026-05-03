@@ -9,6 +9,7 @@ def test_package_imports() -> None:
         "CovariateSelector",
         "Dataset",
         "Experiment",
+        "MLPPredictor",
         "Predictor",
         "RatePair",
         "SOLVER_REGISTRY",

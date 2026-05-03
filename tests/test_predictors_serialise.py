@@ -16,6 +16,7 @@ from hybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     CovariateSelector,
+    MLPPredictor,
     Predictor,
     RatePair,
 )
@@ -52,11 +53,31 @@ def _rate_pair() -> RatePair:
     return RatePair(nucleation=_bounded_predictor(), growth=_bounded_predictor())
 
 
+def _mlp_predictor() -> MLPPredictor:
+    return MLPPredictor(
+        in_size=3,
+        out_size=2,
+        width_size=8,
+        depth=2,
+        activation_name="tanh",
+        key=jr.PRNGKey(0),
+    )
+
+
 def _different_template(predictor: eqx.Module) -> eqx.Module:
     if isinstance(predictor, RatePair):
         return RatePair(
             nucleation=_bounded_predictor_with_key(jr.PRNGKey(1)),
             growth=_bounded_predictor_with_key(jr.PRNGKey(2)),
+        )
+    if isinstance(predictor, MLPPredictor):
+        return MLPPredictor(
+            in_size=predictor.in_size,
+            out_size=predictor.out_size,
+            width_size=predictor.width_size,
+            depth=predictor.depth,
+            activation_name=predictor.activation_name,
+            key=jr.PRNGKey(99),
         )
     return _bounded_predictor_with_key(jr.PRNGKey(1))
 
@@ -64,6 +85,7 @@ def _different_template(predictor: eqx.Module) -> eqx.Module:
 PREDICTOR_FACTORIES: list[tuple[str, Callable[[], eqx.Module]]] = [
     ("bounded_predictor", _bounded_predictor),
     ("rate_pair", _rate_pair),
+    ("mlp_predictor", _mlp_predictor),
 ]
 
 
