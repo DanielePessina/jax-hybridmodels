@@ -38,7 +38,7 @@ if TYPE_CHECKING:
         trainable_mask,
     )
     from hybridmodels.training import OptaxTrainingConfig, train_with_optax
-    from hybridmodels.ui import EvosaxUI, SilentUI, TrainingUI
+    from hybridmodels.ui import EvosaxUI, RichTrainingUI, SilentUI, TrainingUI
 
 __all__: list[str] = [
     "BoundedPredictor",
@@ -54,6 +54,7 @@ __all__: list[str] = [
     "OptaxTrainingConfig",
     "Predictor",
     "RatePair",
+    "RichTrainingUI",
     "SOLVER_REGISTRY",
     "SilentUI",
     "SolverConfig",
@@ -92,6 +93,7 @@ _EXPORTS: dict[str, str] = {
     "OptaxTrainingConfig": "hybridmodels.training",
     "Predictor": "hybridmodels.predictors",
     "RatePair": "hybridmodels.predictors",
+    "RichTrainingUI": "hybridmodels.ui",
     "SOLVER_REGISTRY": "hybridmodels.solver",
     "SilentUI": "hybridmodels.ui",
     "SolverConfig": "hybridmodels.solver",

@@ -32,6 +32,7 @@ from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
 from hybridmodels.ui.base import SilentUI, TrainingUI
+from hybridmodels.ui.optax import RichTrainingUI
 
 _PHASE_KEYED_FIELDS: tuple[str, ...] = (
     "lr",
@@ -246,11 +247,12 @@ def _shared_tournament(
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
+    # R-U2: explicit ui= wins; otherwise verbose=True picks the Rich live
+    # dashboard and verbose=False silences output entirely.
     if ui is not None:
         return ui
-    # TODO Phase 10: switch to RichTrainingUI when verbose=True.
-    # why: RichTrainingUI is implemented in Phase 10; until then both verbose
-    # branches reduce to silent.
+    if verbose:
+        return RichTrainingUI()
     return SilentUI()
 
 

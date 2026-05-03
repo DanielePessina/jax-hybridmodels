@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Source-package data copies (not for distribution)
+examples/crystallisation/data/

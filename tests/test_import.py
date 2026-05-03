@@ -15,6 +15,7 @@ def test_package_imports() -> None:
         "OptaxTrainingConfig",
         "Predictor",
         "RatePair",
+        "RichTrainingUI",
         "SOLVER_REGISTRY",
         "SilentUI",
         "SolverConfig",
