@@ -8,6 +8,7 @@ def test_package_imports() -> None:
         "ChannelObs",
         "CovariateSelector",
         "Dataset",
+        "EvosaxTrainingConfig",
         "EvosaxUI",
         "Experiment",
         "LOSS_REGISTRY",
@@ -36,6 +37,7 @@ def test_package_imports() -> None:
         "register_solver",
         "reinitialize_with_key",
         "split_dataset",
+        "train_with_evosax",
         "train_with_optax",
         "trainable_mask",
     }
