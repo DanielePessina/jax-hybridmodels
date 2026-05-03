@@ -63,6 +63,7 @@ from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
 from hybridmodels.ui.base import EvosaxUI, SilentUI
+from hybridmodels.ui.evosax import RichEvosaxUI
 
 _SUPPORTED_INIT_MODES: tuple[str, ...] = ("warm", "uniform_box", "lhs_box")
 _SUPPORTED_ALGORITHMS: tuple[str, ...] = ("CMA_ES",)
@@ -307,17 +308,10 @@ def _initial_population(
 
 
 def _select_ui(ui: EvosaxUI | None, verbose: bool) -> EvosaxUI:
-    """Pick the concrete UI: explicit ``ui`` wins, else verbose toggles silent/Rich (R-U2).
-
-    Phase 12 has not yet shipped ``RichEvosaxUI``; until it does, ``verbose=True``
-    falls back to ``SilentUI`` so ``train_with_evosax`` stays runnable without
-    importing a not-yet-existing module. Once Phase 12 lands, swap the import
-    here for ``hybridmodels.ui.evosax.RichEvosaxUI``.
-    """
+    """Pick the concrete UI: explicit ``ui`` wins, else verbose toggles Rich/Silent (R-U2)."""
     if ui is not None:
         return ui
-    # TODO Phase 12: replace with RichEvosaxUI() once ui/evosax.py ships.
-    return SilentUI()
+    return RichEvosaxUI() if verbose else SilentUI()
 
 
 def train_with_evosax(
