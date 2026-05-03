@@ -1,0 +1,56 @@
+[project]
+name = "hybridmodels"
+version = "0.1.0"
+description = "Hybrid ODE and neural models in JAX"
+readme = "README.md"
+authors = [
+    { name = "Daniele Pessina", email = "daniele.pessina18@imperial.ac.uk" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "diffrax>=0.7.2",
+    "equinox>=0.13.7",
+    "evosax>=0.2.0",
+    "jax>=0.10.0",
+    "jaxkan>=0.3.7",
+    "jaxlib>=0.10.0",
+    "jaxtyping>=0.3.9",
+    "numpy>=2.4.4",
+    "optax>=0.2.8",
+    "rich>=15.0.0",
+    "scipy>=1.17.1",
+]
+
+[project.optional-dependencies]
+examples = [
+    "matplotlib",
+    "openpyxl",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "hatchling>=1.29.0",
+    "mypy>=1.20.2",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.12",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+ignore_missing_imports = true
