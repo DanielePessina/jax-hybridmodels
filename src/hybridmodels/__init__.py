@@ -31,6 +31,12 @@ if TYPE_CHECKING:
         reinitialize_with_key,
     )
     from hybridmodels.rng import fold
+    from hybridmodels.serialise import (
+        load_predictor,
+        load_run,
+        save_predictor,
+        save_run,
+    )
     from hybridmodels.solver import SOLVER_REGISTRY, SolverConfig, register_solver
     from hybridmodels.trainable import (
         default_trainable,
@@ -83,6 +89,8 @@ __all__: list[str] = [
     "freeze_modules_of_type",
     "freeze_paths",
     "freeze_where",
+    "load_predictor",
+    "load_run",
     "make_dataset",
     "make_experiment",
     "masked_mle",
@@ -91,6 +99,8 @@ __all__: list[str] = [
     "predict_dataset",
     "register_solver",
     "reinitialize_with_key",
+    "save_predictor",
+    "save_run",
     "split_dataset",
     "train_with_evosax",
     "train_with_optax",
@@ -127,6 +137,8 @@ _EXPORTS: dict[str, str] = {
     "freeze_modules_of_type": "hybridmodels.trainable",
     "freeze_paths": "hybridmodels.trainable",
     "freeze_where": "hybridmodels.trainable",
+    "load_predictor": "hybridmodels.serialise",
+    "load_run": "hybridmodels.serialise",
     "make_dataset": "hybridmodels.data",
     "make_experiment": "hybridmodels.data",
     "masked_mle": "hybridmodels.losses",
@@ -135,6 +147,8 @@ _EXPORTS: dict[str, str] = {
     "predict_dataset": "hybridmodels.prediction",
     "register_solver": "hybridmodels.solver",
     "reinitialize_with_key": "hybridmodels.predictors",
+    "save_predictor": "hybridmodels.serialise",
+    "save_run": "hybridmodels.serialise",
     "split_dataset": "hybridmodels.data",
     "train_with_evosax": "hybridmodels.training",
     "train_with_optax": "hybridmodels.training",
