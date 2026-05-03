@@ -11,6 +11,7 @@ def test_package_imports() -> None:
         "EvosaxTrainingConfig",
         "EvosaxUI",
         "Experiment",
+        "KANPredictor",
         "LOSS_REGISTRY",
         "MLPPredictor",
         "OptaxTrainingConfig",

@@ -6,12 +6,14 @@ from hybridmodels.predictors.base import (
     RatePair,
     reinitialize_with_key,
 )
+from hybridmodels.predictors.kan import KANPredictor
 from hybridmodels.predictors.mlp import MLPPredictor
 
 __all__ = [
     "BoundedPredictor",
     "BoundScaler",
     "CovariateSelector",
+    "KANPredictor",
     "MLPPredictor",
     "Predictor",
     "RatePair",
