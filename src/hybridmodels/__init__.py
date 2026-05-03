@@ -29,6 +29,13 @@ if TYPE_CHECKING:
         reinitialize_with_key,
     )
     from hybridmodels.solver import SOLVER_REGISTRY, SolverConfig, register_solver
+    from hybridmodels.trainable import (
+        default_trainable,
+        freeze_modules_of_type,
+        freeze_paths,
+        freeze_where,
+        trainable_mask,
+    )
 
 __all__: list[str] = [
     "BoundedPredictor",
@@ -46,6 +53,10 @@ __all__: list[str] = [
     "SolverConfig",
     "bal_mle",
     "bal_mse",
+    "default_trainable",
+    "freeze_modules_of_type",
+    "freeze_paths",
+    "freeze_where",
     "make_dataset",
     "make_experiment",
     "masked_mle",
@@ -55,6 +66,7 @@ __all__: list[str] = [
     "register_solver",
     "reinitialize_with_key",
     "split_dataset",
+    "trainable_mask",
 ]
 
 _EXPORTS: dict[str, str] = {
@@ -73,6 +85,10 @@ _EXPORTS: dict[str, str] = {
     "SolverConfig": "hybridmodels.solver",
     "bal_mle": "hybridmodels.losses",
     "bal_mse": "hybridmodels.losses",
+    "default_trainable": "hybridmodels.trainable",
+    "freeze_modules_of_type": "hybridmodels.trainable",
+    "freeze_paths": "hybridmodels.trainable",
+    "freeze_where": "hybridmodels.trainable",
     "make_dataset": "hybridmodels.data",
     "make_experiment": "hybridmodels.data",
     "masked_mle": "hybridmodels.losses",
@@ -82,6 +98,7 @@ _EXPORTS: dict[str, str] = {
     "register_solver": "hybridmodels.solver",
     "reinitialize_with_key": "hybridmodels.predictors",
     "split_dataset": "hybridmodels.data",
+    "trainable_mask": "hybridmodels.trainable",
 }
 
 
