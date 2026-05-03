@@ -19,7 +19,7 @@ This file is your starting point. The substantive content lives elsewhere.
   - Make assumptions explicit. If SPEC.md is silent on a decision, ask — don't pick.
   - Keep classes minimal. The framework deliberately has very few classes; do not add more without grounding in SPEC.
 - **Composition over inheritance** for any new predictor or scaler. Equinox's abstract/final pattern applies.
-- **No comments by default.** The code should explain itself through naming. Add a comment only when the *why* is non-obvious (a hidden invariant, a workaround, a subtle interaction with JAX tracing).
+- **Write informative comments.** Module docstrings explain the file's role and what invariants it owns. Function docstrings explain intent, contract, and shape conventions for non-trivial functions. Inline comments mark non-obvious *why* — hidden invariants, JAX tracing subtleties, deliberate references to spec/ADR sections, or workarounds. Avoid redundant comments that restate the next line of code (`i += 1  # increment i`).
 - **No emojis** in code, comments, or docs unless explicitly requested.
 - **Update `CONTEXT.md` inline** when a term's meaning changes. It's not a frozen artifact.
 

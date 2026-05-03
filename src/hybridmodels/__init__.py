@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         freeze_where,
         trainable_mask,
     )
+    from hybridmodels.training import OptaxTrainingConfig, train_with_optax
     from hybridmodels.ui import EvosaxUI, SilentUI, TrainingUI
 
 __all__: list[str] = [
@@ -50,6 +51,7 @@ __all__: list[str] = [
     "Experiment",
     "LOSS_REGISTRY",
     "MLPPredictor",
+    "OptaxTrainingConfig",
     "Predictor",
     "RatePair",
     "SOLVER_REGISTRY",
@@ -72,6 +74,7 @@ __all__: list[str] = [
     "register_solver",
     "reinitialize_with_key",
     "split_dataset",
+    "train_with_optax",
     "trainable_mask",
 ]
 
@@ -86,6 +89,7 @@ _EXPORTS: dict[str, str] = {
     "Experiment": "hybridmodels.data",
     "LOSS_REGISTRY": "hybridmodels.losses",
     "MLPPredictor": "hybridmodels.predictors",
+    "OptaxTrainingConfig": "hybridmodels.training",
     "Predictor": "hybridmodels.predictors",
     "RatePair": "hybridmodels.predictors",
     "SOLVER_REGISTRY": "hybridmodels.solver",
@@ -108,6 +112,7 @@ _EXPORTS: dict[str, str] = {
     "register_solver": "hybridmodels.solver",
     "reinitialize_with_key": "hybridmodels.predictors",
     "split_dataset": "hybridmodels.data",
+    "train_with_optax": "hybridmodels.training",
     "trainable_mask": "hybridmodels.trainable",
 }
 

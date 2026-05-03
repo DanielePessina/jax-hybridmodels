@@ -1,7 +1,29 @@
+"""Spy UI for tests: records every lifecycle call instead of rendering it.
+
+Used by ``tests/test_ui_callbacks.py`` and any future training test that
+needs to assert on which events fired and in what order. Lives under the
+``hybridmodels.ui.testing`` namespace to keep it out of the main public
+``hybridmodels.ui`` re-export surface.
+"""
+
 from typing import Any
 
 
 class RecordingUI:
+    """Test spy implementing both ``TrainingUI`` and ``EvosaxUI``.
+
+    Every lifecycle method appends ``(name, kwargs_copy)`` to ``self.events``.
+    Tests can then assert on the sequence of names, the count of a particular
+    event, or the kwargs of a specific call. ``kwargs`` are shallow-copied so
+    later mutation of the caller's argument dict does not retroactively
+    change recorded values.
+
+    Attributes
+    ----------
+    events : list[tuple[str, dict[str, Any]]]
+        Ordered log of ``(method_name, kwargs)`` pairs, one per fired event.
+    """
+
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any]]] = []
 

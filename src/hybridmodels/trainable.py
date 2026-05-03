@@ -16,6 +16,13 @@ import jax.tree_util as jtu
 
 
 def default_trainable(leaf: Any) -> bool:
+    """Default leaf-trainability predicate (R-F2): ``True`` for inexact-array leaves only.
+
+    "Inexact" means JAX arrays with float (or complex) dtype — every other
+    leaf (ints, bools, Python scalars, static fields' frozen values) is
+    treated as non-trainable. This matches what gradient-based optimisers
+    can actually update.
+    """
     return bool(eqx.is_inexact_array(leaf))
 
 
@@ -23,6 +30,13 @@ def trainable_mask(
     predictor: Any,
     predicate: Callable[[Any], bool] = default_trainable,
 ) -> Any:
+    """Build a boolean PyTree mask matching ``predictor``'s structure (R-F1).
+
+    Maps ``predicate`` over every leaf of ``predictor`` to produce a mask of
+    the same tree shape with ``bool`` leaves. The result is consumed unchanged
+    by both Optax (``eqx.filter_value_and_grad(..., filter_spec=mask)``) and
+    Evosax (``eqx.partition(predictor, mask)``).
+    """
     return jtu.tree_map(predicate, predictor)
 
 
@@ -65,7 +79,15 @@ def _zero_subtree(submask: Any) -> Any:
 
 
 def freeze_modules_of_type(mask: Any, predictor: Any, cls: type) -> Any:
-    """Return a new mask with every leaf inside any subtree of type ``cls`` set to ``False``."""
+    """Return a new mask with every leaf inside any subtree of type ``cls`` set to ``False``.
+
+    Walks ``mask`` and ``predictor`` in lockstep; when a node in ``predictor``
+    is an instance of ``cls``, the corresponding sub-mask is replaced
+    wholesale by an all-``False`` subtree. Typical use:
+    ``freeze_modules_of_type(mask, predictor, BoundScaler)`` to freeze every
+    bound scaler's ``temperature`` leaf (the recommended convention; see
+    CONTEXT.md).
+    """
 
     def _is_target(node: Any) -> bool:
         return isinstance(node, cls)

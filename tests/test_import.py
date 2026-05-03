@@ -12,6 +12,7 @@ def test_package_imports() -> None:
         "Experiment",
         "LOSS_REGISTRY",
         "MLPPredictor",
+        "OptaxTrainingConfig",
         "Predictor",
         "RatePair",
         "SOLVER_REGISTRY",
@@ -34,6 +35,7 @@ def test_package_imports() -> None:
         "register_solver",
         "reinitialize_with_key",
         "split_dataset",
+        "train_with_optax",
         "trainable_mask",
     }
     assert set(hybridmodels.__all__) == expected

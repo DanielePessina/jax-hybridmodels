@@ -1,8 +1,25 @@
 """Data containers and dataset construction.
 
 Bucketed-irregular only (ADR-0004): per-channel sparse observations are
-unioned per experiment into a single timestamp axis at make_dataset time;
-experiments sharing union length are stacked into one BucketPayload.
+unioned per experiment into a single timestamp axis at ``make_dataset`` time;
+experiments sharing union length are stacked into one ``BucketPayload``.
+
+Lifecycle and lifetime
+----------------------
+``ChannelObs`` and ``Experiment`` are **host-side input containers**: users
+build them, then hand them to ``make_dataset``, which scatters them onto the
+per-experiment union axis and stacks bucket-shaped JAX arrays. After that,
+training and prediction operate exclusively on ``BucketPayload``; the
+original ``Experiment`` objects are kept on ``Dataset._experiments`` only so
+``split_dataset`` can re-bucket subsets.
+
+Shape conventions (used throughout the package)
+-----------------------------------------------
+- ``Tc`` — per-channel observation count (varies across channels)
+- ``T``  — per-experiment union timestamp count (``= len(union(ts_c)) over all channels c``)
+- ``D``  — number of output channels (``len(output_channel_names)``)
+- ``S``  — full state dimension (``y0`` size; defined by the user's ``simulate_fn``)
+- ``N``  — number of experiments stacked in a single bucket (i.e. sharing ``T``)
 """
 
 # ruff: noqa: F722
@@ -21,6 +38,32 @@ from jaxtyping import Array, Bool, Float, Int
 
 
 class ChannelObs(eqx.Module):
+    """Per-channel sparse observation triple ``(ts, values, variance)``.
+
+    One ``ChannelObs`` describes a single observable channel for a single
+    experiment. Channels are sparse: each channel carries its own ``Tc``
+    timestamps independent of other channels, and the framework computes the
+    union timestamp axis and resulting mask at ``make_dataset`` time (R-D2).
+
+    Shape contract
+    --------------
+    All three arrays share the same leading dimension ``Tc``. ``ts`` does not
+    need to be sorted — ``_per_experiment_arrays`` re-sorts when building the
+    union axis — but it should not contain duplicates within a single channel.
+
+    Attributes
+    ----------
+    ts : Float[Array, "Tc"]
+        Observation times for this channel (same time units the user's
+        ``simulate_fn`` consumes).
+    values : Float[Array, "Tc"]
+        Observed channel values aligned with ``ts``.
+    variance : Float[Array, "Tc"]
+        Per-observation variance used by ``masked_mle`` / ``bal_mle``. A
+        scalar passed to the constructor is broadcast to ``values.shape`` so
+        downstream code can assume rank-1.
+    """
+
     ts: Float[Array, " Tc"]
     values: Float[Array, " Tc"]
     variance: Float[Array, " Tc"]
@@ -31,6 +74,13 @@ class ChannelObs(eqx.Module):
         values: Any,
         variance: Any = 1.0,
     ) -> None:
+        """Construct a ``ChannelObs``, eagerly broadcasting scalar variance.
+
+        ``variance`` may be passed as a scalar (typical when the user has no
+        per-observation uncertainty estimate) or as a ``Tc``-shaped array; in
+        the scalar case it is broadcast to ``values.shape`` here so all three
+        attributes are guaranteed rank-1 thereafter.
+        """
         ts_arr = jnp.asarray(ts)
         values_arr = jnp.asarray(values)
         var_arr = jnp.asarray(variance)
@@ -42,6 +92,27 @@ class ChannelObs(eqx.Module):
 
 
 class Experiment(eqx.Module):
+    """One experiment: covariates, full initial state, and per-channel observations.
+
+    Built by ``make_experiment``; stored on ``Dataset._experiments`` so
+    ``split_dataset`` can re-bucket subsets after a permutation.
+
+    Attributes
+    ----------
+    covariates : dict[str, Array]
+        Named scalar covariates, **constant in time** (R-D5). Keys must agree
+        across all experiments handed to a single ``make_dataset`` call.
+    y0 : Float[Array, "S"]
+        Full model state at ``t=0``, constructed via the user's ``y0_fn`` hook
+        at import time (R-D6). Shape is whatever the user's ``simulate_fn``
+        consumes; the framework never inspects ``S``.
+    channels : dict[str, ChannelObs]
+        Per-channel sparse observations. Must contain every name listed in
+        ``make_dataset(..., output_channel_names=...)``.
+    exp_id : str
+        Identifier carried through for diagnostics (static field; not a leaf).
+    """
+
     covariates: dict[str, Array]
     y0: Float[Array, " S"]
     channels: dict[str, ChannelObs]
@@ -49,6 +120,43 @@ class Experiment(eqx.Module):
 
 
 class BucketPayload(NamedTuple):
+    """Bucket-shaped, JAX-traceable payload produced by ``make_dataset``.
+
+    A bucket holds ``N`` experiments that share the same union-timestamp
+    length ``T`` (R-D3). Within a bucket, individual experiments may still
+    have **different ts values and different masks** — the bucketing rule
+    only fixes ``len(union_ts)``, not the values themselves.
+
+    This is a ``NamedTuple`` (R-D4) rather than an ``eqx.Module`` because
+    every field is a stacked JAX array and there is no module-level method
+    surface; the whole struct is consumed positionally by jitted training
+    and prediction kernels.
+
+    Fields
+    ------
+    ts : Float[Array, "N T"]
+        Per-experiment union-timestamp axis, sorted ascending row-wise.
+    y_observed : Float[Array, "N T D"]
+        Channel observations scattered onto ``ts``. Cells where the channel
+        was not observed at that timestamp hold ``0.0``; consumers must read
+        ``mask`` to know which entries are real.
+    yvar : Float[Array, "N T D"]
+        Per-observation variance (used by MLE losses). Defaults to ``1.0``
+        at unobserved cells so masked positions never divide by zero.
+    mask : Bool[Array, "N T D"]
+        ``True`` iff the corresponding ``y_observed`` cell came from a real
+        ``ChannelObs`` entry; ``False`` for union-axis padding.
+    covariates : dict[str, Float[Array, "N"]]
+        Per-key covariate stacked across the bucket. Same keys as on
+        ``Experiment.covariates``, hoisted by an ``N`` axis.
+    y0 : Float[Array, "N S"]
+        Per-experiment full initial state, stacked.
+    n_obs : Int[Array, ""]
+        Total observed-cell count for the bucket (``mask.sum()``). Used by
+        weighted reductions; not used by ``masked_*`` (which compute their
+        own denominators).
+    """
+
     ts: Float[Array, "N T"]
     y_observed: Float[Array, "N T D"]
     yvar: Float[Array, "N T D"]
@@ -59,6 +167,34 @@ class BucketPayload(NamedTuple):
 
 
 class Dataset(eqx.Module):
+    """Container of bucketed experiments plus the static ``state_to_output`` hook.
+
+    A ``Dataset`` is the artifact training and prediction loops iterate over.
+    The ``bucket_payloads`` tuple is the dispatch list (one trace per bucket
+    shape, R-J3); ``state_to_output`` is held here so the loss pipeline can
+    apply it without the user threading it through every call site.
+
+    Attributes
+    ----------
+    bucket_payloads : tuple[BucketPayload, ...]
+        One ``BucketPayload`` per distinct ``len(union_ts)`` value, ordered
+        ascending by ``T``.
+    state_to_output : Callable[[Array], Array]
+        Pure mapping ``[T, S] -> [T, D]`` projecting full simulator state
+        onto observed channels (R-D7). Static — never serialised by the
+        framework; users re-import.
+    output_channel_names : tuple[str, ...]
+        Channel order along the trailing ``D`` axis of every payload. The
+        same order is honoured by ``make_dataset`` when scattering values.
+    covariate_names : tuple[str, ...]
+        Sorted covariate keys (matches each ``Experiment.covariates`` key
+        set; sorted for deterministic dict iteration).
+    _experiments : tuple[Experiment, ...]
+        Source experiments, retained so ``split_dataset`` can re-bucket
+        per-split subsets. Empty when a ``Dataset`` is constructed manually
+        from raw payloads (in which case ``split_dataset`` will raise).
+    """
+
     bucket_payloads: tuple[BucketPayload, ...]
     state_to_output: Callable[..., Array] = eqx.field(static=True)
     output_channel_names: tuple[str, ...] = eqx.field(static=True)
@@ -73,6 +209,26 @@ def make_experiment(
     y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array],
     exp_id: str = "",
 ) -> Experiment:
+    """Build one ``Experiment`` from raw covariates, channels, and a state-init hook.
+
+    The ``y0_fn`` hook receives the (already-jnp) covariates dict and the
+    channels dict and returns the full state at ``t=0`` as ``Float[Array, "S"]``.
+    For systems where the observed channels *are* the state, a typical hook is
+    ``lambda c, ch: jnp.array([ch["x"].values[0], ch["v"].values[0]])``. For
+    systems with hidden state (e.g. crystallisation moments), the hook
+    constructs the latent components from covariates: see CONTEXT.md ``y0_fn``.
+
+    Parameters
+    ----------
+    covariates
+        Scalar covariates; values are converted to 0-d ``jnp`` arrays.
+    channels
+        Sparse observations keyed by channel name.
+    y0_fn
+        Hook ``(covariates, channels) -> [S]`` building the full initial state.
+    exp_id
+        Optional human-readable id propagated to ``Experiment.exp_id``.
+    """
     cov_arr: dict[str, Array] = {k: jnp.asarray(v) for k, v in covariates.items()}
     y0 = jnp.asarray(y0_fn(cov_arr, channels))
     return Experiment(covariates=cov_arr, y0=y0, channels=channels, exp_id=exp_id)
@@ -82,6 +238,29 @@ def _per_experiment_arrays(
     experiment: Experiment,
     output_channel_names: tuple[str, ...],
 ) -> tuple[Array, Array, Array, Array]:
+    """Build the per-experiment union-axis tensors ``(ts, y_observed, yvar, mask)``.
+
+    Computes ``T = len(union(ts_c) for c in output_channel_names)`` for one
+    experiment, allocates ``[T]`` and ``[T, D]`` host buffers, then scatters
+    each channel's ``(values, variance)`` into the rows matching its ``ts``
+    and lights the corresponding ``mask`` entries.
+
+    Done host-side via ``numpy`` (rather than ``jnp``) because this is a
+    one-shot build at import time, not a traced operation; falling back to
+    plain Python loops keeps the timestamp set-membership cheap and avoids
+    spuriously promoting these dtypes to JAX defaults.
+
+    Returns
+    -------
+    ts : Float[Array, "T"]
+        Sorted union timestamp axis.
+    y_observed : Float[Array, "T D"]
+        Channel values scattered onto ``ts``; ``0.0`` at unobserved cells.
+    yvar : Float[Array, "T D"]
+        Per-cell variance; ``1.0`` at unobserved cells (read only via mask).
+    mask : Bool[Array, "T D"]
+        ``True`` iff cell ``[t, d]`` came from a real ``ChannelObs`` entry.
+    """
     ordered_ts: list[float] = []
     seen: dict[float, int] = {}
     val_dtypes: list[np.dtype[Any]] = []
@@ -139,6 +318,38 @@ def make_dataset(
     state_to_output: Callable[..., Array],
     output_channel_names: tuple[str, ...] | list[str],
 ) -> Dataset:
+    """Bucket and stack ``experiments`` into a JAX-traceable ``Dataset``.
+
+    Three things happen here, in order:
+
+    1. **Validation.** All experiments must agree on the set of covariate
+       keys, and each must define every requested output channel. Mismatches
+       raise immediately with the offending ``exp_id``.
+    2. **Per-experiment scattering.** For each experiment, ``_per_experiment_arrays``
+       builds its union timestamp axis and the ``[T, D]`` observation/mask
+       tensors.
+    3. **Bucketing (R-D3).** Experiments are grouped by ``T = len(union_ts)``,
+       and each group is stacked along a new leading ``N`` axis to produce
+       one ``BucketPayload``. Buckets are emitted in ascending ``T`` order.
+
+    Parameters
+    ----------
+    experiments
+        Non-empty sequence of ``Experiment`` objects (typically built via
+        ``make_experiment``).
+    state_to_output
+        Pure mapping ``[T, S] -> [T, D]`` projecting full state onto the
+        observed channels. Stored static on the resulting ``Dataset``.
+    output_channel_names
+        Channel order for the trailing ``D`` axis. Coerced to a tuple before
+        being captured statically on the ``Dataset``.
+
+    Returns
+    -------
+    Dataset
+        ``bucket_payloads`` ordered ascending by ``T``; ``_experiments``
+        retained so ``split_dataset`` can re-bucket subsets.
+    """
     if not experiments:
         raise ValueError("make_dataset requires at least one experiment")
     output_channel_names = tuple(output_channel_names)
@@ -206,6 +417,29 @@ def split_dataset(
     test: float = 0.1,
     key: Array,
 ) -> tuple[Dataset, Dataset, Dataset]:
+    """Permute experiments and re-bucket each split independently (R-D8).
+
+    Splits are computed at the ``Experiment`` level — *not* by carving up
+    bucket payloads — so each split is re-bucketed from scratch. Counts use
+    ``floor(train*n)`` and ``floor(val*n)``; the test split takes the
+    remainder so the three sizes sum to ``n`` even with rounding. An empty
+    split is returned as a ``Dataset`` with no payloads (and no
+    ``_experiments``, so it cannot be split again).
+
+    Parameters
+    ----------
+    dataset
+        Source dataset; must carry ``_experiments`` (raises otherwise).
+    train, val, test
+        Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``).
+    key
+        Required ``jr.PRNGKey`` for the permutation (R-R1: no silent default).
+
+    Returns
+    -------
+    tuple[Dataset, Dataset, Dataset]
+        ``(train_dataset, val_dataset, test_dataset)``.
+    """
     if any(f < 0.0 or f > 1.0 for f in (train, val, test)):
         raise ValueError("train, val, and test fractions must each be in [0, 1]")
     total = train + val + test
