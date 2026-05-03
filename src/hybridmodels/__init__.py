@@ -11,14 +11,18 @@ if TYPE_CHECKING:
         make_experiment,
         split_dataset,
     )
+    from hybridmodels.solver import SOLVER_REGISTRY, SolverConfig, register_solver
 
 __all__: list[str] = [
     "BucketPayload",
     "ChannelObs",
     "Dataset",
     "Experiment",
+    "SOLVER_REGISTRY",
+    "SolverConfig",
     "make_dataset",
     "make_experiment",
+    "register_solver",
     "split_dataset",
 ]
 
@@ -27,8 +31,11 @@ _EXPORTS: dict[str, str] = {
     "ChannelObs": "hybridmodels.data",
     "Dataset": "hybridmodels.data",
     "Experiment": "hybridmodels.data",
+    "SOLVER_REGISTRY": "hybridmodels.solver",
+    "SolverConfig": "hybridmodels.solver",
     "make_dataset": "hybridmodels.data",
     "make_experiment": "hybridmodels.data",
+    "register_solver": "hybridmodels.solver",
     "split_dataset": "hybridmodels.data",
 }
 
