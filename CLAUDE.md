@@ -37,3 +37,17 @@ This file is your starting point. The substantive content lives elsewhere.
 ## When something is unclear
 
 Ask the user. The spec is intentionally tight; the design was locked through a long grilling session. If a question can't be answered from `SPEC.md` + `CONTEXT.md` + ADRs, it probably means the spec needs to grow — which is fine, but should be a deliberate update, not an inferred default.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `DanielePessina/jax-hybridmodels`, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles, default strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
