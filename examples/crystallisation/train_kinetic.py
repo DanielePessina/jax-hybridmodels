@@ -87,13 +87,14 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import diffrax  # noqa: E402  # x64 must be set before diffrax imports JAX dtypes.
+import equinox as eqx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import jax.random as jr  # noqa: E402
 import pandas as pd  # noqa: E402
 from jax import Array  # noqa: E402
 from jaxtyping import Float  # noqa: E402
 
-from hybridmodels import (
+from hybridmodels import (  # noqa: E402
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -103,7 +104,7 @@ from hybridmodels import (
     make_dataset,
     make_experiment,
 )
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Constants                                                                   #
@@ -136,16 +137,24 @@ third input key to each direct-rate predictor. The lower bound is at the
 nucleation/growth threshold (``S = 1``); the upper end is generous for the
 thesis dataset's typical ``S`` range."""
 
-LOG10_GROWTH_BOUNDS: tuple[float, float] = (-12.0, -3.0)
-"""Bounds on ``log10(G)`` where ``G`` is growth velocity in m/s. The exponent
-range covers ~9 decades; the vector field exponentiates with ``10**log10_G``
-to recover physical units. Wide enough to subsume the source-package
-power-law output range (``10**Ag * (S-1)**g`` with ``Ag ∈ [-10, 6]``)."""
+LOG10_GROWTH_BOUNDS: tuple[float, float] = (-15.0, -5.0)
+"""Bounds on ``log10(G)`` where ``G`` is growth velocity in m/s. Centred at
+``-10`` (sigmoid midpoint), so a random-init predictor lands at
+``G ≈ 1e-10 m/s`` — physically reasonable for early-time growth and matched
+to the source-package's power-law growth-rate range. Earlier draft used
+``(-12, -3)``; that put the midpoint at ``G ≈ 3e-8 m/s``, large enough that
+random-init weights produced ODE rates the moment-balance solver could not
+track within ``max_steps``."""
 
-LOG10_NUCLEATION_BOUNDS: tuple[float, float] = (0.0, 15.0)
+LOG10_NUCLEATION_BOUNDS: tuple[float, float] = (-6.5, 13.0)
 """Bounds on ``log10(J)`` where ``J`` is nucleation rate in #/(m^3·s).
-The CNT form in the kinetic-parameter path produces values up to ~1e15
-when supersaturation is high; this bound keeps the direct path commensurate."""
+Centred at ``+3.25`` so a random-init predictor produces ``J ≈ 1800``
+#/(m³·s) — equivalent to the source-package's ``J = exp(log_rate)`` with
+``log_rate ∈ (-15, 30)`` (midpoint ``J = exp(7.5) ≈ 1800``). The width
+spans ~19.5 decades, the same dynamic range. Earlier draft used
+``(0, 15)``; that put the midpoint at ``J ≈ 3e7`` — ~17,000× too large,
+which made the moment ODE intractably stiff at random init even though
+the same ODE solves cleanly with sensible kinetic parameters."""
 
 # Kinetic-parameter path (2) — bounds reproduced from the source-package
 # thesis runs; consumed only by the commented-out ``_build_kinetic_predictor``
@@ -297,10 +306,20 @@ def _d43_from_moments(mu3: Float[Array, " T"], mu4: Float[Array, " T"]) -> Float
     ``[0, _D43_MAX]`` and ``mu3 < eps`` is replaced with ``0`` to avoid
     division blow-ups during the early-time near-zero-moments regime.
     Mirrors ``hybridcrystals/mechanistic.py::d43_from_moments``.
+
+    Autodiff-safe ``where``: a naive ``jnp.where(mu3 > eps, mu4 / mu3, 0.0)``
+    still computes ``mu4 / mu3`` on the masked-out branch, producing
+    ``inf`` / ``nan`` whose gradient flows back through ``jnp.where`` and
+    poisons the loss. Wrapping the divisor in a second
+    ``jnp.where(cond, mu3, 1.0)`` makes the unused branch evaluate
+    ``mu4 / 1.0 = mu4`` (finite), so the gradient is finite on both sides
+    and the outer ``where`` selects the correct branch. This is the
+    canonical JAX-grad-safe pattern for guarded division.
     """
-    raw = jnp.where(mu3 > _D43_MU3_EPS, (mu4 / mu3) * 1e6, 0.0)
-    finite_positive = jnp.isfinite(raw) & (raw > 0.0)
-    guarded = jnp.where(finite_positive, raw, 0.0)
+    safe_mu3 = jnp.where(mu3 > _D43_MU3_EPS, mu3, 1.0)
+    ratio = jnp.where(mu3 > _D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
+    finite_positive = jnp.isfinite(ratio) & (ratio > 0.0)
+    guarded = jnp.where(finite_positive, ratio, 0.0)
     return jnp.clip(guarded, 0.0, _D43_MAX)
 
 
@@ -557,6 +576,33 @@ def _simulate_fn(
 # --------------------------------------------------------------------------- #
 
 
+def _zero_final_head(predictor: MLPPredictor) -> MLPPredictor:
+    """Return ``predictor`` with the inner MLP's final ``Linear`` layer zeroed.
+
+    The hidden layers keep their random LeCun-uniform weights so the input
+    feature transformation is non-degenerate, but the final readout becomes
+    ``z_out = 0`` for any input. Composed inside a ``BoundedPredictor``,
+    that latent zero maps via ``out_scaler.from_latent(0)`` to the *exact*
+    midpoint of the physical bound box — a known-good starting rate
+    regardless of the random key.
+
+    Why this matters here: a standard random init makes the inner MLP's
+    output ``z`` roughly ``Normal(0, 1)``, so ``sigmoid(z)`` covers
+    ``(0.27, 0.73)`` of the bound box — for ~19-decade rate bounds that
+    means the unlucky-draw initial rate is several decades from midpoint
+    and can be too extreme for the moment-balance ODE to resolve within
+    ``max_steps``. Zeroing the readout removes that variance from
+    initialisation while leaving every other parameter learnable.
+    """
+    final = predictor.mlp.layers[-1]
+    zeroed_final = eqx.tree_at(
+        lambda layer: (layer.weight, layer.bias),
+        final,
+        (jnp.zeros_like(final.weight), jnp.zeros_like(final.bias)),
+    )
+    return eqx.tree_at(lambda mp: mp.mlp.layers[-1], predictor, zeroed_final)
+
+
 def _build_direct_rate_predictors(
     key: Array,
 ) -> tuple[BoundedPredictor, BoundedPredictor]:
@@ -572,11 +618,18 @@ def _build_direct_rate_predictors(
 
         BoundedPredictor.input_keys : dict -> [3] in declared INPUT_KEYS_DIRECT order
         in_scaler                   : [3] physical -> [3] latent (logit-of-normalised)
-        MLPPredictor                : [3] -> [1]   (tanh, depth=2, width=16)
+        MLPPredictor                : [3] -> [1]   (tanh, depth=2, width=16; final head zeroed)
         out_scaler                  : [1] latent -> [1] physical (sigmoid into log-bounds)
 
     The two branches receive *independent* MLP weights via key splitting so
     the network architecture is identical but the initial parameters differ.
+    The final readout layer of each inner MLP is **zero-initialised** via
+    :func:`_zero_final_head` so the predictor's initial output sits at the
+    physical midpoint of its rate bound (``G ≈ 1e-10 m/s``,
+    ``J ≈ 1.8e3 #/(m³·s)``) — an empirically reasonable starting point that
+    keeps the moment-balance ODE solvable at random init. Without this, an
+    unlucky random key produces sigmoid outputs near 0 or 1, mapping to
+    rates several decades off midpoint that drown the solver in stiffness.
     """
     k_growth, k_nucleation = jr.split(key, 2)
 
@@ -589,13 +642,15 @@ def _build_direct_rate_predictors(
         transform="sigmoid",
     )
 
-    growth_inner = MLPPredictor(
-        in_size=len(INPUT_KEYS_DIRECT),
-        out_size=1,
-        width_size=16,
-        depth=2,
-        activation_name="tanh",
-        key=k_growth,
+    growth_inner = _zero_final_head(
+        MLPPredictor(
+            in_size=len(INPUT_KEYS_DIRECT),
+            out_size=1,
+            width_size=16,
+            depth=2,
+            activation_name="tanh",
+            key=k_growth,
+        )
     )
     growth_out_scaler = BoundScaler(
         bounds=(LOG10_GROWTH_BOUNDS,),
@@ -608,13 +663,15 @@ def _build_direct_rate_predictors(
         out_scaler=growth_out_scaler,
     )
 
-    nucleation_inner = MLPPredictor(
-        in_size=len(INPUT_KEYS_DIRECT),
-        out_size=1,
-        width_size=16,
-        depth=2,
-        activation_name="tanh",
-        key=k_nucleation,
+    nucleation_inner = _zero_final_head(
+        MLPPredictor(
+            in_size=len(INPUT_KEYS_DIRECT),
+            out_size=1,
+            width_size=16,
+            depth=2,
+            activation_name="tanh",
+            key=k_nucleation,
+        )
     )
     nucleation_out_scaler = BoundScaler(
         bounds=(LOG10_NUCLEATION_BOUNDS,),
