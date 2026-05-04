@@ -56,7 +56,6 @@ from hybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
-    CovariateSelector,
     Experiment,
     SolverConfig,
     make_dataset,
@@ -138,22 +137,22 @@ def _build_predictor(key: Array) -> BoundedPredictor:
 
     Pipeline ``dict[str, Array] -> [omega]``::
 
-        CovariateSelector  : ("dummy",) -> [1]
-        in_scaler          : [1] physical -> [1] latent (no-op in practice
-                             because the inner predictor ignores its input)
-        OmegaPredictor     : Array -> [1]   (returns the bounded latent omega)
-        out_scaler         : [1] latent -> [1] physical (sigmoid into OMEGA_BOUNDS)
+        BoundedPredictor.input_keys : ("dummy",) -> [1]
+        in_scaler                   : [1] physical -> [1] latent (no-op in practice
+                                      because the inner predictor ignores its input)
+        OmegaPredictor              : Array -> [1]   (returns the bounded latent omega)
+        out_scaler                  : [1] latent -> [1] physical (sigmoid into OMEGA_BOUNDS)
 
-    The ``CovariateSelector`` needs at least one key; we use a constant
-    ``"dummy"`` covariate to satisfy the framework's named-covariate
-    contract without leaking experiment-specific information.
+    ``BoundedPredictor`` needs at least one input slot (cardinality of
+    ``in_scaler.bounds``); we use a constant ``"dummy"`` covariate to
+    satisfy the framework's named-input contract without leaking
+    experiment-specific information.
     """
-    selector = CovariateSelector(keys=("dummy",))
     in_scaler = BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid")
     inner = OmegaPredictor(jr.normal(key))
     out_scaler = BoundScaler(bounds=(OMEGA_BOUNDS,), transform="sigmoid")
     return BoundedPredictor(
-        selector=selector,
+        input_keys=("dummy",),
         in_scaler=in_scaler,
         inner=inner,
         out_scaler=out_scaler,
@@ -261,7 +260,7 @@ def _build_experiments(noise_key: Array) -> list[Experiment]:
     ``Experiment`` whose ``y0_fn`` returns the ground-truth initial state.
 
     A single trivial covariate ``"dummy"`` is added so the predictor's
-    ``CovariateSelector`` has a key to pull on.
+    ``input_keys`` tuple has a slot to pull on.
     """
     ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
     experiments: list[Experiment] = []

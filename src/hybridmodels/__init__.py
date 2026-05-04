@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from hybridmodels.predictors import (
         BoundedPredictor,
         BoundScaler,
-        CovariateSelector,
         KANPredictor,
         MLPPredictor,
         Predictor,
@@ -63,7 +62,6 @@ __all__: list[str] = [
     "BoundScaler",
     "BucketPayload",
     "ChannelObs",
-    "CovariateSelector",
     "Dataset",
     "EvosaxTrainingConfig",
     "EvosaxUI",
@@ -110,7 +108,6 @@ _EXPORTS: dict[str, str] = {
     "BoundScaler": "hybridmodels.predictors",
     "BucketPayload": "hybridmodels.data",
     "ChannelObs": "hybridmodels.data",
-    "CovariateSelector": "hybridmodels.predictors",
     "Dataset": "hybridmodels.data",
     "EvosaxTrainingConfig": "hybridmodels.training",
     "EvosaxUI": "hybridmodels.ui",

@@ -15,7 +15,6 @@ from jaxtyping import Array, Float
 from hybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
-    CovariateSelector,
     KANPredictor,
     MLPPredictor,
     Predictor,
@@ -41,7 +40,7 @@ def _bounded_predictor() -> BoundedPredictor:
 
 def _bounded_predictor_with_key(key: Array) -> BoundedPredictor:
     return BoundedPredictor(
-        selector=CovariateSelector(keys=("a", "b")),
+        input_keys=("a", "b"),
         in_scaler=BoundScaler(
             bounds=((0.0, 1.0), (0.0, 2.0)),
             transform="sigmoid",

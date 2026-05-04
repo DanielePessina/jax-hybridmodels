@@ -11,7 +11,6 @@ from jaxtyping import Array, Float
 from hybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
-    CovariateSelector,
     Predictor,
     reinitialize_with_key,
 )
@@ -51,31 +50,6 @@ class _ConstantPredictor(Predictor):
 
     def __call__(self, x: Array) -> Array:
         return self.value
-
-
-class TestCovariateSelector:
-    def test_orders_by_keys(self):
-        selector = CovariateSelector(keys=("temp", "load"))
-        cov = {
-            "temp": jnp.array(2.0),
-            "load": jnp.array(5.0),
-            "extra": jnp.array(99.0),
-        }
-        out = selector(cov)
-        assert out.shape == (2,)
-        assert jnp.allclose(out, jnp.array([2.0, 5.0]))
-
-    def test_reordered_keys_change_output_order(self):
-        cov = {"a": jnp.array(1.0), "b": jnp.array(2.0)}
-        out_ab = CovariateSelector(keys=("a", "b"))(cov)
-        out_ba = CovariateSelector(keys=("b", "a"))(cov)
-        assert jnp.allclose(out_ab, jnp.array([1.0, 2.0]))
-        assert jnp.allclose(out_ba, jnp.array([2.0, 1.0]))
-
-    def test_missing_key_raises(self):
-        selector = CovariateSelector(keys=("temp", "absent"))
-        with pytest.raises(KeyError):
-            selector({"temp": jnp.array(1.0)})
 
 
 class TestBoundScaler:
@@ -126,23 +100,116 @@ class TestBoundScaler:
         assert jnp.allclose(s1.from_latent(z1), x, atol=1e-5)
 
 
+def _identity_bp(
+    *,
+    input_keys: tuple[str, ...] | None = None,
+    bounds: tuple[tuple[float, float], ...] = ((0.0, 1.0), (0.0, 1.0)),
+) -> BoundedPredictor:
+    """Two-in / two-out identity-through-latent BoundedPredictor for tests."""
+    n = len(bounds)
+    return BoundedPredictor(
+        input_keys=input_keys,
+        in_scaler=BoundScaler(bounds=bounds, transform="sigmoid"),
+        inner=_LinearPredictor(weights=jnp.eye(n)),
+        out_scaler=BoundScaler(bounds=bounds, transform="sigmoid"),
+    )
+
+
+class TestBoundedPredictorInputKeys:
+    """Contract for the ``input_keys`` static field and the polymorphic call.
+
+    The selector module was folded into BoundedPredictor: ``input_keys``
+    declares the named-input order, defaulting to ``("x1", ..., "xN")`` if
+    omitted, with cardinality matching ``in_scaler.bounds``. ``__call__``
+    accepts either a ``dict[str, Array]`` (subset extraction in declared
+    order) or a rank-1 ``Array`` (passed through unchanged).
+    """
+
+    def test_default_input_keys_autofill(self):
+        bp = _identity_bp(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
+        assert bp.input_keys == ("x1", "x2", "x3")
+
+    def test_explicit_input_keys_preserved(self):
+        bp = _identity_bp(input_keys=("a", "b"))
+        assert bp.input_keys == ("a", "b")
+
+    def test_cardinality_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            BoundedPredictor(
+                input_keys=("only_one",),
+                in_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
+                inner=_LinearPredictor(weights=jnp.eye(2)),
+                out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
+            )
+
+    def test_empty_bounds_raises(self):
+        # at-least-one-input rule per the user's "no training otherwise". The
+        # constructor checks bounds first, so input_keys can be omitted: this
+        # pins that the empty-bounds branch fires before the cardinality check.
+        with pytest.raises(ValueError):
+            BoundedPredictor(
+                in_scaler=BoundScaler(bounds=(), transform="sigmoid"),
+                inner=_LinearPredictor(weights=jnp.zeros((0, 1))),
+                out_scaler=BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid"),
+            )
+
+    def test_dict_input_extracts_in_declared_order(self):
+        bp = _identity_bp(input_keys=("a", "b"))
+        cov = {"a": jnp.array(0.4), "b": jnp.array(0.7)}
+        out = bp(cov)
+        assert jnp.allclose(out, jnp.array([0.4, 0.7]), atol=1e-5)
+
+    def test_dict_input_reordered_input_keys_swap_output(self):
+        bp_ab = _identity_bp(input_keys=("a", "b"))
+        bp_ba = _identity_bp(input_keys=("b", "a"))
+        cov = {"a": jnp.array(0.4), "b": jnp.array(0.7)}
+        assert jnp.allclose(bp_ab(cov), jnp.array([0.4, 0.7]), atol=1e-5)
+        assert jnp.allclose(bp_ba(cov), jnp.array([0.7, 0.4]), atol=1e-5)
+
+    def test_dict_input_extra_keys_ignored(self):
+        # subset-extraction contract: extra keys in the inputs dict are fine.
+        bp = _identity_bp(input_keys=("a", "b"))
+        cov = {"a": jnp.array(0.4), "b": jnp.array(0.7), "extra": jnp.array(99.0)}
+        out = bp(cov)
+        assert jnp.allclose(out, jnp.array([0.4, 0.7]), atol=1e-5)
+
+    def test_dict_input_missing_key_raises(self):
+        bp = _identity_bp(input_keys=("a", "b"))
+        with pytest.raises(KeyError):
+            bp({"a": jnp.array(0.4)})
+
+    def test_array_input_passthrough(self):
+        bp = _identity_bp(input_keys=("a", "b"))
+        x = jnp.array([0.4, 0.7])
+        out = bp(x)
+        assert jnp.allclose(out, jnp.array([0.4, 0.7]), atol=1e-5)
+
+    def test_array_input_wrong_length_raises(self):
+        # eqx.error_if: rank-1 array must match len(input_keys).
+        bp = _identity_bp(input_keys=("a", "b"))
+        with pytest.raises(Exception):  # noqa: B017 — eqx.error_if raises a concrete subtype
+            bp(jnp.array([0.4, 0.7, 0.1]))
+
+    def test_array_input_wrong_rank_raises(self):
+        bp = _identity_bp(input_keys=("a", "b"))
+        with pytest.raises(Exception):  # noqa: B017 — eqx.error_if raises a concrete subtype
+            bp(jnp.array([[0.4, 0.7]]))
+
+    def test_array_and_dict_yield_same_result(self):
+        # The dict path is just stack-then-Array. They must agree.
+        bp = _identity_bp(input_keys=("a", "b"))
+        x = jnp.array([0.4, 0.7])
+        cov = {"a": jnp.array(0.4), "b": jnp.array(0.7)}
+        assert jnp.allclose(bp(x), bp(cov), atol=1e-6)
+
+
 class TestBoundedPredictor:
     def test_pipeline_round_trip_with_identity_inner(self):
-        selector = CovariateSelector(keys=("a", "b"))
-        in_scaler = BoundScaler(
-            bounds=((0.0, 1.0), (0.0, 1.0)),
-            transform="sigmoid",
-        )
-        inner = _LinearPredictor(weights=jnp.eye(2))
-        out_scaler = BoundScaler(
-            bounds=((0.0, 1.0), (0.0, 1.0)),
-            transform="sigmoid",
-        )
         bp = BoundedPredictor(
-            selector=selector,
-            in_scaler=in_scaler,
-            inner=inner,
-            out_scaler=out_scaler,
+            input_keys=("a", "b"),
+            in_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
+            inner=_LinearPredictor(weights=jnp.eye(2)),
+            out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
         )
         cov = {"a": jnp.array(0.5), "b": jnp.array(0.3)}
         out = bp(cov)
@@ -150,18 +217,14 @@ class TestBoundedPredictor:
         assert jnp.allclose(out, jnp.array([0.5, 0.3]), atol=1e-5)
 
     def test_dimensions_independent(self):
-        selector = CovariateSelector(keys=("x",))
-        in_scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
-        inner = _LinearPredictor(weights=jnp.array([[1.0, 1.0]]))
-        out_scaler = BoundScaler(
-            bounds=((0.0, 100.0), (-50.0, 50.0)),
-            transform="sigmoid",
-        )
         bp = BoundedPredictor(
-            selector=selector,
-            in_scaler=in_scaler,
-            inner=inner,
-            out_scaler=out_scaler,
+            input_keys=("x",),
+            in_scaler=BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid"),
+            inner=_LinearPredictor(weights=jnp.array([[1.0, 1.0]])),
+            out_scaler=BoundScaler(
+                bounds=((0.0, 100.0), (-50.0, 50.0)),
+                transform="sigmoid",
+            ),
         )
         out = bp({"x": jnp.array(5.0)})
         assert out.shape == (2,)
@@ -182,7 +245,7 @@ class TestPredictorsTuple:
 
     def _bp(self, out_low: float, out_high: float) -> BoundedPredictor:
         return BoundedPredictor(
-            selector=CovariateSelector(keys=("T",)),
+            input_keys=("T",),
             in_scaler=BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid"),
             inner=_LinearPredictor(weights=jnp.array([[1.0]])),
             out_scaler=BoundScaler(bounds=((out_low, out_high),), transform="sigmoid"),
@@ -256,21 +319,21 @@ class TestReinitializeWithKey:
 
     def test_works_on_bounded_predictor(self):
         bp = BoundedPredictor(
-            selector=CovariateSelector(keys=("a",)),
+            input_keys=("a",),
             in_scaler=BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid"),
             inner=_LinearPredictor(weights=jnp.ones((1, 1))),
             out_scaler=BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid"),
         )
         bp_new = reinitialize_with_key(bp, jr.PRNGKey(0))
         assert not jnp.allclose(bp_new.inner.weights, bp.inner.weights)
-        assert bp_new.selector.keys == bp.selector.keys
+        assert bp_new.input_keys == bp.input_keys
         assert bp_new.in_scaler.bounds == bp.in_scaler.bounds
         assert bp_new.in_scaler.transform == bp.in_scaler.transform
 
 
 def test_jit_traces_through_bounded_predictor():
     bp = BoundedPredictor(
-        selector=CovariateSelector(keys=("a", "b")),
+        input_keys=("a", "b"),
         in_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
         inner=_LinearPredictor(weights=jnp.eye(2)),
         out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
@@ -282,4 +345,20 @@ def test_jit_traces_through_bounded_predictor():
 
     cov = {"a": jnp.array(0.5), "b": jnp.array(0.3)}
     out = call(bp, cov)
+    assert out.shape == (2,)
+
+
+def test_jit_traces_through_bounded_predictor_array_input():
+    bp = BoundedPredictor(
+        input_keys=("a", "b"),
+        in_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
+        inner=_LinearPredictor(weights=jnp.eye(2)),
+        out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
+    )
+
+    @jax.jit
+    def call(predictor: BoundedPredictor, x: Array) -> Array:
+        return predictor(x)
+
+    out = call(bp, jnp.array([0.5, 0.3]))
     assert out.shape == (2,)

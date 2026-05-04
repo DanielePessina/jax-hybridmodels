@@ -55,7 +55,7 @@ The script exercises the framework end-to-end:
 - ``hybridmodels.data`` — ``ChannelObs``, ``Experiment``, ``make_dataset``
 - ``hybridmodels.solver`` — ``SolverConfig``
 - ``hybridmodels.predictors`` — ``BoundedPredictor``, ``BoundScaler``,
-  ``CovariateSelector``, ``MLPPredictor``
+  ``MLPPredictor``
 - ``hybridmodels.losses`` (``masked_mse``) and ``hybridmodels.prediction``
 - ``hybridmodels.trainable`` (default mask via ``train_with_optax``)
 - ``hybridmodels.rng`` (consumed inside training internals)
@@ -78,19 +78,25 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
-import diffrax
 import jax
-import jax.numpy as jnp
-import jax.random as jr
-import pandas as pd
-from jax import Array
-from jaxtyping import Float
+
+# x64 is the default for this example — the population-balance moment ODE is
+# stiff enough that float32 mass balance drifts visibly within a single
+# experiment. Set before any other JAX-touching import so every dataset and
+# predictor leaf is constructed at float64.
+jax.config.update("jax_enable_x64", True)
+
+import diffrax  # noqa: E402  # x64 must be set before diffrax imports JAX dtypes.
+import jax.numpy as jnp  # noqa: E402
+import jax.random as jr  # noqa: E402
+import pandas as pd  # noqa: E402
+from jax import Array  # noqa: E402
+from jaxtyping import Float  # noqa: E402
 
 from hybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
-    CovariateSelector,
     Experiment,
     MLPPredictor,
     SolverConfig,
@@ -111,7 +117,7 @@ EXCEL_PATH_DEFAULT: Path = (
 Bundled into the repo at ``examples/crystallisation/data/`` so the script
 runs out-of-the-box; the path is resolved relative to this file."""
 
-DEFAULT_SHEETS: tuple[str, ...] = ("Unseeded",)
+DEFAULT_SHEETS: tuple[str, ...] = ("Unseeded_thesis",)
 """Excel sheets to load. Restricted to a single system so the example
 trains in a few minutes and avoids the multi-system conditioning
 problem, which is out of scope for this example."""
@@ -397,8 +403,8 @@ def _simulate_fn(
         # Construct the per-call predictor input dict. Key collision is
         # intentional: covariates' "temperature_C" / "loading" pass through
         # unchanged, "supersaturation" is the state-derived time-varying
-        # value (CONTEXT.md "Predictor inputs"). Each predictor's selector
-        # picks all three keys in its declared order.
+        # value (CONTEXT.md "Predictor inputs"). Each predictor pulls all
+        # three keys in its declared order via its ``input_keys`` field.
         inputs = {
             "temperature_C": covariates["temperature_C"],
             "loading": covariates["loading"],
@@ -564,17 +570,16 @@ def _build_direct_rate_predictors(
 
     Pipeline per branch::
 
-        CovariateSelector  : dict -> [3] in declared INPUT_KEYS_DIRECT order
-        in_scaler          : [3] physical -> [3] latent (logit-of-normalised)
-        MLPPredictor       : [3] -> [1]   (tanh, depth=2, width=16)
-        out_scaler         : [1] latent -> [1] physical (sigmoid into log-bounds)
+        BoundedPredictor.input_keys : dict -> [3] in declared INPUT_KEYS_DIRECT order
+        in_scaler                   : [3] physical -> [3] latent (logit-of-normalised)
+        MLPPredictor                : [3] -> [1]   (tanh, depth=2, width=16)
+        out_scaler                  : [1] latent -> [1] physical (sigmoid into log-bounds)
 
     The two branches receive *independent* MLP weights via key splitting so
     the network architecture is identical but the initial parameters differ.
     """
     k_growth, k_nucleation = jr.split(key, 2)
 
-    selector = CovariateSelector(keys=INPUT_KEYS_DIRECT)
     in_scaler = BoundScaler(
         bounds=(
             COVARIATE_BOUNDS["temperature_C"],
@@ -597,7 +602,7 @@ def _build_direct_rate_predictors(
         transform="sigmoid",
     )
     growth_bp = BoundedPredictor(
-        selector=selector,
+        input_keys=INPUT_KEYS_DIRECT,
         in_scaler=in_scaler,
         inner=growth_inner,
         out_scaler=growth_out_scaler,
@@ -616,7 +621,7 @@ def _build_direct_rate_predictors(
         transform="sigmoid",
     )
     nucleation_bp = BoundedPredictor(
-        selector=selector,
+        input_keys=INPUT_KEYS_DIRECT,
         in_scaler=in_scaler,
         inner=nucleation_inner,
         out_scaler=nucleation_out_scaler,
@@ -638,10 +643,10 @@ def _build_direct_rate_predictors(
 #
 #     Pipeline ``(temperature_C, loading) -> [logA, gamma, Ag, g]``::
 #
-#         CovariateSelector  : dict -> [2] in declared INPUT_KEYS_KINETIC order
-#         in_scaler          : [2] physical -> [2] latent (logit-of-normalised)
-#         MLPPredictor       : [2] -> [4]   (tanh, depth=2, width=16)
-#         out_scaler         : [4] latent -> [4] physical (sigmoid into bounds)
+#         BoundedPredictor.input_keys : dict -> [2] in declared INPUT_KEYS_KINETIC order
+#         in_scaler                   : [2] physical -> [2] latent (logit-of-normalised)
+#         MLPPredictor                : [2] -> [4]   (tanh, depth=2, width=16)
+#         out_scaler                  : [4] latent -> [4] physical (sigmoid into bounds)
 #
 #     Output is in physical units; the matching
 #     ``_simulate_fn_kinetic_params`` consumes it directly. Returned as
@@ -649,7 +654,6 @@ def _build_direct_rate_predictors(
 #     so the same training entry-point handles single-rate and
 #     multi-rate cases uniformly.
 #     """
-#     selector = CovariateSelector(keys=INPUT_KEYS_KINETIC)
 #     in_scaler = BoundScaler(
 #         bounds=tuple(COVARIATE_BOUNDS[k] for k in INPUT_KEYS_KINETIC),
 #         transform="sigmoid",
@@ -672,7 +676,7 @@ def _build_direct_rate_predictors(
 #         transform="sigmoid",
 #     )
 #     bp = BoundedPredictor(
-#         selector=selector,
+#         input_keys=INPUT_KEYS_KINETIC,
 #         in_scaler=in_scaler,
 #         inner=inner,
 #         out_scaler=out_scaler,
@@ -694,9 +698,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    # Enable float64 to match source-package thesis runs; mass-balance in the
-    # moment ODE is stiff enough that float32 sometimes drifts.
-    jax.config.update("jax_enable_x64", True)
+    # x64 is enabled at module import time (see top of file), so it's already
+    # active here regardless of how the script is launched.
 
     root_key = jr.PRNGKey(args.seed)
     k_init, k_train = jr.split(root_key, 2)
@@ -730,10 +733,18 @@ def main() -> None:
         )
 
     print("\n[build] solver + predictors (direct-rate path)")
+    # Per-state atol matched to natural moment magnitudes. The population-balance
+    # moments span ~18 decades during integration: mu0 ~ 1e11 (number density),
+    # mu1 ~ 1e6, mu2 ~ 1e2, mu3 ~ 1e-2, mu4 ~ 1e-7, conc ~ 1. A uniform atol=1e-5
+    # forces the PIDController to over-resolve the small components and
+    # under-resolve the large ones — the integrator hits max_steps before
+    # finishing one trajectory. Setting atol per-component at ~9 decades below
+    # each component's natural magnitude lets rtol=1e-4 dominate the error
+    # control once values are appreciable, with atol acting as a near-zero floor.
     solver = SolverConfig(
         solver=diffrax.Tsit5(),
         rtol=1e-4,
-        atol=(1e-5,) * 6,
+        atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),
         max_steps=500_000,
         dt0=None,
     )

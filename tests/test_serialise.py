@@ -49,7 +49,6 @@ from hybridmodels.losses import masked_mse
 from hybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
-    CovariateSelector,
     KANPredictor,
     MLPPredictor,
 )
@@ -98,7 +97,7 @@ def _bounded(key: Array | None = None) -> BoundedPredictor:
         key=jr.PRNGKey(0) if key is None else key,
     )
     return BoundedPredictor(
-        selector=CovariateSelector(keys=("a", "b")),
+        input_keys=("a", "b"),
         in_scaler=BoundScaler(
             bounds=((0.0, 1.0), (0.0, 2.0)),
             transform="sigmoid",

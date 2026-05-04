@@ -10,7 +10,6 @@ import jax.tree_util as jtu
 from hybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
-    CovariateSelector,
     MLPPredictor,
 )
 from hybridmodels.trainable import (
@@ -24,11 +23,9 @@ from hybridmodels.trainable import (
 
 def _bounded() -> BoundedPredictor:
     return BoundedPredictor(
-        selector=CovariateSelector(keys=("a", "b")),
+        input_keys=("a", "b"),
         in_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
-        inner=MLPPredictor(
-            in_size=2, out_size=2, width_size=4, depth=2, key=jr.PRNGKey(0)
-        ),
+        inner=MLPPredictor(in_size=2, out_size=2, width_size=4, depth=2, key=jr.PRNGKey(0)),
         out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0)), transform="sigmoid"),
     )
 
@@ -114,7 +111,6 @@ class TestFreezeModulesOfType:
         mask = trainable_mask(bp)
         new_mask = freeze_modules_of_type(mask, bp, BoundScaler)
         assert _leaves_equal(mask.inner, new_mask.inner)
-        assert _leaves_equal(mask.selector, new_mask.selector)
 
     def test_returns_new_mask_input_unmutated(self):
         bp = _bounded()
@@ -173,9 +169,21 @@ class TestFreezeWhere:
         assert bool(mask.in_scaler.temperature) is True
 
     def test_freezing_module_with_no_leaves_is_safe(self):
+        # No module in the natural predictor tree is now "leafless" — this
+        # test pins the leafless-module branch in freeze_where via a synthetic
+        # Predictor subclass with no inexact-array leaves. Freezing a node
+        # that contributes no leaves to the mask must leave the mask untouched.
+        from hybridmodels.predictors import Predictor
+
+        class _LeaflessPredictor(Predictor):
+            pass
+
+            def __call__(self, x):
+                return x
+
         bp = _bounded()
         mask = trainable_mask(bp)
-        new_mask = freeze_where(mask, bp, lambda m: isinstance(m, CovariateSelector))
+        new_mask = freeze_where(mask, bp, lambda m: isinstance(m, _LeaflessPredictor))
         for o, n in zip(jtu.tree_leaves(mask), jtu.tree_leaves(new_mask), strict=True):
             assert bool(o) is bool(n)
 
@@ -191,9 +199,7 @@ class TestFreezePaths:
     def test_zeros_multiple_named_leaves(self):
         bp = _bounded()
         mask = trainable_mask(bp)
-        new_mask = freeze_paths(
-            mask, ("in_scaler.temperature", "out_scaler.temperature")
-        )
+        new_mask = freeze_paths(mask, ("in_scaler.temperature", "out_scaler.temperature"))
         assert bool(new_mask.in_scaler.temperature) is False
         assert bool(new_mask.out_scaler.temperature) is False
 

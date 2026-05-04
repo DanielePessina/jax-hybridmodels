@@ -39,7 +39,6 @@ from hybridmodels.losses import masked_mse
 from hybridmodels.predictors.base import (
     BoundedPredictor,
     BoundScaler,
-    CovariateSelector,
     Predictor,
 )
 from hybridmodels.predictors.mlp import MLPPredictor
@@ -221,7 +220,7 @@ def test_flatten_unflatten_round_trip() -> None:
     # than the one we evaluate.
     inner = MLPPredictor(in_size=2, out_size=1, width_size=8, depth=2, key=jr.PRNGKey(0))
     pred = BoundedPredictor(
-        selector=CovariateSelector(keys=("a", "b")),
+        input_keys=("a", "b"),
         in_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0))),
         inner=inner,
         out_scaler=BoundScaler(bounds=((0.0, 1.0),)),
