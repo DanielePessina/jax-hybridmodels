@@ -33,25 +33,41 @@ npm --prefix docs run docs:check
 
 ### Build & deploy on CI — opt-in via commit message
 
-The `.github/workflows/docs.yml` workflow only runs when the **head commit
-message contains the literal trigger `[build docs]`**. Routine pushes — even
-ones that touch `docs/` or `src/` — do not redeploy the site, so the
-public Pages URL only updates when you explicitly mean it to.
+The `.github/workflows/docs.yml` workflow only runs when the head commit
+message contains one of two literal triggers. Routine pushes — even ones
+that touch `docs/` or `src/` — do not redeploy the site, so the public
+Pages URL only updates when you explicitly mean it to.
 
-To deploy:
+| Trigger | When to use it | What CI does |
+| --- | --- | --- |
+| `[build docs]` | You ran `npm run docs:gen` locally and committed the result. | Runs `docs:check:api` first; **fails fast** if the in-repo `docs/api/` is out of sync with current docstrings. Builds and deploys. |
+| `[regen docs]` | You only edited docstrings and didn't regenerate locally. | Runs `npm run docs:gen` on CI. If the API pages changed, **commits them back to the branch** with `[skip ci]` (so the auto-commit doesn't trigger another run). Builds and deploys. |
+
+Use whichever feels right for the change you just made. `[build docs]` is
+the safer default — it surfaces drift between docstrings and shipped docs
+loudly. `[regen docs]` is the convenience option for "I just touched a
+docstring, do the bookkeeping for me."
 
 ```bash
+# I already ran `npm run docs:gen` and committed the result:
 git commit -m "docs: rewrite the training guide [build docs]"
+
+# I only changed a docstring; let CI regenerate the API page for me:
+git commit -m "docs(predictors): clarify BoundedPredictor.input_keys [regen docs]"
+
 git push
 ```
 
-To deploy without a new commit (e.g. recovering from a failed run), use the
-**Run workflow** button on the [Actions tab](https://github.com/DanielePessina/jax-hybridmodels/actions) — `workflow_dispatch` bypasses the commit-message gate.
+To deploy without a new commit (e.g. recovering from a failed run), use
+the **Run workflow** button on the [Actions tab](https://github.com/DanielePessina/jax-hybridmodels/actions). `workflow_dispatch` bypasses the
+commit-message gate and follows the `[build docs]` semantics (check,
+don't regen).
 
-The workflow runs the API-docs `--check` first and fails if the generated
-markdown is out of sync with the source docstrings, so a `[build docs]`
-commit that forgot `npm run docs:gen` will surface in CI rather than silently
-deploy a stale API reference.
+> **GitHub Pages must be enabled** under **Settings → Pages → Source:
+> GitHub Actions** before the first deploy will succeed. The
+> `[regen docs]` path also requires the workflow's `contents: write`
+> permission, which is set in `docs.yml` — no extra repo configuration
+> needed.
 
 ### Regenerate the API reference
 

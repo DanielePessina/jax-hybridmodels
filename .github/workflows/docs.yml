@@ -1,34 +1,54 @@
 name: docs
 
-# The docs site is only rebuilt when the head commit message contains
-# the literal trigger ``[build docs]``. Routine code pushes — even ones
-# that touch ``docs/`` or ``src/`` — do not redeploy the site, so we
-# never pay CI minutes or surface a half-finished docs change in
-# production. ``workflow_dispatch`` keeps a manual escape hatch for
-# re-deploys without touching git.
+# The docs site is rebuilt only when the head commit message contains one
+# of two literal triggers:
+#
+#   [build docs] — verify the generated docs/api/*.md files match the
+#                  current docstrings (fails fast if not), then deploy.
+#                  Use this when you ran ``npm run docs:gen`` locally and
+#                  committed the result yourself.
+#
+#   [regen docs] — regenerate docs/api/*.md from current docstrings,
+#                  commit the result back to the branch (with [skip ci]
+#                  to avoid a loop), then deploy. Use this when you only
+#                  edited docstrings and don't want to re-run the
+#                  generator locally.
+#
+# Routine pushes — even ones that touch ``docs/`` or ``src/`` — do not
+# redeploy the site, so the public Pages URL only updates when you mean
+# it to. ``workflow_dispatch`` keeps a manual escape hatch (it implies
+# the [build docs] semantics: check, don't regen).
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# GitHub Pages deployment requires write access to pages + id-token.
+# Pages deployment needs write access to pages + id-token. The
+# ``[regen docs]`` path additionally pushes a commit back to the branch,
+# which requires ``contents: write``.
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 # Only one in-flight Pages deploy at a time; cancel any stale one when a
-# new ``[build docs]`` push lands.
+# new docs push lands.
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
   build:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build docs]') }}
+    if: ${{ github.event_name == 'workflow_dispatch'
+            || contains(github.event.head_commit.message, '[build docs]')
+            || contains(github.event.head_commit.message, '[regen docs]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Required so the auto-commit step on [regen docs] can push
+          # back to ``main``.
+          persist-credentials: true
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v3
@@ -51,8 +71,32 @@ jobs:
       - name: Install VitePress
         run: npm ci --prefix docs
 
-      - name: Verify generated API docs are up to date
+      # ----- [regen docs] path: regenerate, commit back, then build ----- #
+
+      - name: Regenerate API docs from docstrings
+        if: contains(github.event.head_commit.message, '[regen docs]')
+        run: npm --prefix docs run docs:gen
+
+      - name: Commit regenerated API docs back to branch
+        if: contains(github.event.head_commit.message, '[regen docs]')
+        run: |
+          if git diff --quiet -- docs/api; then
+            echo "No API-doc changes; nothing to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/api
+            git commit -m "docs: regenerate API reference from docstrings [skip ci]"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+
+      # ----- [build docs] path (and workflow_dispatch): fail fast on stale ----- #
+
+      - name: Verify generated API docs are in sync with docstrings
+        if: ${{ !contains(github.event.head_commit.message, '[regen docs]') }}
         run: npm --prefix docs run docs:check:api
+
+      # ----- Build the static site, upload artifact for the deploy job ----- #
 
       - name: Build VitePress site
         run: npm --prefix docs run docs:build
@@ -64,7 +108,6 @@ jobs:
 
   deploy:
     needs: build
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build docs]') }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
