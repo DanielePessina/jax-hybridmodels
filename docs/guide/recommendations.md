@@ -76,10 +76,10 @@ float32 mass balance can drift visibly within a single experiment — most often
 
 You have two parameterisations to choose from in any rate-law problem:
 
-- **Direct-rate.** One predictor per rate, consuming `(temperature, loading, supersaturation, ...)` and emitting a bounded log-rate. The network learns whatever `(inputs) → rate` mapping the data implies. Best when you don't want to commit to a kinetic mechanism.
-- **Kinetic-parameter.** One predictor consuming a smaller covariate set and emitting a few bounded scalars (`logA`, `gamma`, `Ag`, `g`). The vector field plugs these into classical CNT / power-law forms. Closer to a classical surrogate; smaller search space.
+- **Direct-rate.** One predictor per rate, consuming `(temperature, supersaturation, ...)` and emitting a bounded log-rate. The network learns whatever `(inputs) → rate` mapping the data implies. Best when you don't want to commit to a kinetic mechanism.
+- **Kinetic-parameter.** A small set of bounded scalars (`logA`, `gamma`, `Ag`, `g`) feeding classical CNT / power-law forms inside the vector field. Closer to a classical surrogate; smaller search space.
 
-The crystallisation example ships both, with the kinetic-parameter path preserved as commented-out reference code so flipping between them takes one line.
+The crystallisation walkthroughs ship both as sibling scripts: [`train_kinetic.py`](/examples/crystallisation) is the direct-rate hybrid trained with Optax, [`train_crystallisation_mechanistic.py`](/examples/crystallisation-mechanistic) is the four-scalar kinetic-parameter form trained with evosax.
 
 ### One BoundedPredictor per rate, not one per scalar
 
@@ -158,7 +158,7 @@ safe_divisor = jnp.where(divisor > eps, divisor, 1.0)
 result = jnp.where(divisor > eps, num / safe_divisor, 0.0)
 ```
 
-The unused branch evaluates `num / 1.0 = num` (finite), so the gradient is finite on both sides and the outer `where` selects correctly. The crystallisation example uses this pattern in `_d43_from_moments`.
+The unused branch evaluates `num / 1.0 = num` (finite), so the gradient is finite on both sides and the outer `where` selects correctly. The crystallisation example uses this pattern inside its `state_to_output` projector when computing `d43 = mu4 / mu3`.
 
 ### `make_dataset` validation requires every channel
 

@@ -1,14 +1,19 @@
 """Crystallisation kinetic-MLP training example.
 
-Loads the thesis crystallisation Excel dataset (irregular concentration + d43
-observations across many experiments), wraps each experiment into an
-``hybridmodels.Experiment``, and trains a hybrid model where two MLPs predict
-reaction rates that feed a method-of-moments ODE.
+Trains a hybrid model on four hardcoded crystallisation experiments
+(reproduced from the thesis ``Unseeded_LowData4`` cut), where two MLPs
+predict reaction rates that feed a method-of-moments ODE.
 
 Each MLP consumes ``(temperature_C, supersaturation)`` and emits a bounded
 log-rate — ``log10(G)`` for crystal growth, ``log10(J)`` for nucleation.
 ``supersaturation`` is state-derived inside the vector field; the
 population-balance moment ODEs and mass balance around them stay mechanistic.
+
+The four experiments are inlined as a tuple of dicts at module level so the
+script runs from a clean checkout with no Excel/CSV dependency. Concentration
+variance is a single made-up scalar (the thesis cuts carry per-row variances
+that are noisy and not needed to demonstrate the framework); the d43 variances
+are the rounded thesis values.
 
 Run: ``uv run python examples/crystallisation/train_kinetic.py``
 """
@@ -31,7 +36,6 @@ jax.config.update("jax_enable_x64", True)
 import diffrax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import jax.random as jr  # noqa: E402
-import pandas as pd  # noqa: E402
 from jax import Array  # noqa: E402
 from jaxtyping import Float  # noqa: E402
 
@@ -40,6 +44,7 @@ from hybridmodels import (  # noqa: E402
     BoundScaler,
     ChannelObs,
     Experiment,
+    KANPredictor,
     MLPPredictor,
     SolverConfig,
     make_dataset,
@@ -61,14 +66,53 @@ from _shared import (  # noqa: E402
 # Constants                                                                   #
 # --------------------------------------------------------------------------- #
 
-EXCEL_PATH_DEFAULT = (
-    Path(__file__).parent / "data" / "NODE_fullExperimental_dataset_ps3-dec2025__thesis.xlsx"
+# Four hardcoded experiments from the thesis ``Unseeded_LowData4`` sheet.
+# Conc and d43 are rounded to 1 dp; d43 variance to 3 dp; concentration
+# variance is a single made-up scalar (``CONC_VAR``) applied per row. Each
+# experiment carries one terminal d43 measurement, so the d43 channel's ``ts``
+# axis is sparser than the conc channel's — exactly the irregular layout
+# ``make_dataset`` is designed to bucket. The thesis ``Loading`` column is
+# uniformly zero across LowData4 and is intentionally omitted as a covariate.
+EXPERIMENTS_DATA: tuple[dict[str, object], ...] = (
+    {
+        "exp_id": "LowData4_3",
+        "temperature_C": 17.0,
+        "time_min": (0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 225.0, 270.0),
+        "conc": (14.7, 13.7, 7.7, 7.0, 5.7, 5.5, 5.4, 5.1, 5.2),
+        "d43_time_min": 270.0,
+        "d43": 9.2,
+        "d43_var": 5.345,
+    },
+    {
+        "exp_id": "LowData4_4",
+        "temperature_C": 17.0,
+        "time_min": (0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 225.0, 270.0),
+        "conc": (11.6, 10.8, 10.8, 10.5, 10.9, 9.5, 6.8, 6.1, 5.7),
+        "d43_time_min": 270.0,
+        "d43": 7.7,
+        "d43_var": 3.734,
+    },
+    {
+        "exp_id": "LowData4_7",
+        "temperature_C": 21.0,
+        "time_min": (0.0, 60.0, 120.0, 180.0, 240.0, 300.0, 360.0),
+        "conc": (16.8, 12.1, 8.6, 7.6, 7.2, 6.8, 6.4),
+        "d43_time_min": 360.0,
+        "d43": 10.5,
+        "d43_var": 1.421,
+    },
+    {
+        "exp_id": "LowData4_9",
+        "temperature_C": 21.0,
+        "time_min": (0.0, 60.0, 120.0, 180.0, 240.0, 300.0, 375.0),
+        "conc": (14.4, 14.2, 13.6, 10.1, 9.3, 7.6, 7.0),
+        "d43_time_min": 375.0,
+        "d43": 11.9,
+        "d43_var": 0.267,
+    },
 )
-# ``Unseeded_thesis`` is the full thesis cut: per-row variances and a
-# particle-size column (``d43`` in newer cuts, ``PS`` in legacy thesis cuts)
-# with ``-1`` as the missing-row sentinel. The bare ``Unseeded`` sheet has
-# only concentration; choosing it would silently skip every experiment.
-DEFAULT_SHEET = "Unseeded_thesis"
+# Made-up uniform concentration variance, broadcast across every row.
+CONC_VAR = 0.1
 
 # Predictor input/output bounds. Centring matters: a random-init network sits
 # near the sigmoid midpoint, so the midpoint must be a physically reasonable
@@ -211,11 +255,16 @@ def simulate_fn(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--excel", type=Path, default=EXCEL_PATH_DEFAULT)
-    parser.add_argument("--sheets", nargs="+", default=[DEFAULT_SHEET])
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
+    # KAN-specific hyperparameters. ``grid_size`` is the spline resolution
+    # per edge — 5 is the jaxkan default and is appropriate for the smooth
+    # log-rate surfaces we expect here. ``basis`` selects the layer
+    # parameterisation: ``spline`` is the canonical KAN (learnable spline
+    # + residual), ``base`` drops the spline and is kept as an ablation.
+    parser.add_argument("--kan-grid-size", type=int, default=5)
+    parser.add_argument("--kan-basis", choices=("spline", "base"), default="spline")
     parser.add_argument(
         "--plot-dir",
         type=Path,
@@ -227,87 +276,44 @@ def main() -> None:
     apply_default_style()
     k_init, k_train = jr.split(jr.PRNGKey(args.seed), 2)
 
-    # ---- Load experiments from the thesis Excel --------------------------- #
-    # Excel column contract: ``Exp_ID`` (group key), ``Time`` (min),
-    # ``Concentration`` (+ optional ``Concentration_var``), ``Temperature``
-    # (°C, per-experiment scalar), ``Loading`` (per-experiment scalar), and a
-    # particle-size column — ``d43`` in newer cuts, ``PS`` in legacy ones.
-    # The size column uses ``-1`` (and any non-finite value) as a "no
-    # observation at this row" sentinel; filtering those rows recovers the
-    # per-channel sparsity that ``make_dataset`` then turns into a union axis.
-    print(f"[load] {args.excel}")
-    sheet_dict = pd.read_excel(args.excel, sheet_name=list(args.sheets))
-    if not isinstance(sheet_dict, dict):
-        sheet_dict = {args.sheets[0]: sheet_dict}
-
+    # ---- Build experiments from the hardcoded LowData4 cut ----------------- #
+    # Each entry in ``EXPERIMENTS_DATA`` is converted into one
+    # ``hybridmodels.Experiment`` carrying two channels with their own ``ts``
+    # axes — the d43 channel has a single terminal observation, so
+    # ``make_dataset`` will form per-experiment union axes and bucket on
+    # length parity. ``CONC_VAR`` is broadcast to a per-row variance vector;
+    # the d43 variance is scalar (one observation per experiment).
     experiments: list[Experiment] = []
-    for sheet_name, df in sheet_dict.items():
-        d43_col = "d43" if "d43" in df.columns else ("PS" if "PS" in df.columns else None)
-        d43_var_col = (
-            "d43_var" if "d43_var" in df.columns else ("PS_var" if "PS_var" in df.columns else None)
-        )
-        for exp_id, df_exp in df.groupby("Exp_ID"):
-            time_min = jnp.asarray(df_exp["Time"].to_numpy(dtype=float))
-            conc = jnp.asarray(df_exp["Concentration"].to_numpy(dtype=float))
+    for data in EXPERIMENTS_DATA:
+        time_min = jnp.asarray(data["time_min"], dtype=float)
+        conc = jnp.asarray(data["conc"], dtype=float)
+        d43_ts = jnp.asarray((data["d43_time_min"],), dtype=float)
+        d43_vals = jnp.asarray((data["d43"],), dtype=float)
+        d43_var = jnp.asarray((data["d43_var"],), dtype=float)
 
-            if "Concentration_var" in df_exp.columns:
-                cv_raw = jnp.asarray(df_exp["Concentration_var"].to_numpy(dtype=float))
-                conc_var = jnp.where(jnp.isfinite(cv_raw) & (cv_raw > 0.0), cv_raw, 1e-4)
-            else:
-                conc_var = jnp.full_like(conc, 1e-4)
-
-            channels: dict[str, ChannelObs] = {
-                "conc": ChannelObs(ts=time_min, values=conc, variance=conc_var),
-            }
-
-            if d43_col is not None:
-                d43_arr = jnp.asarray(df_exp[d43_col].to_numpy(dtype=float))
-                valid_mask = (d43_arr > 0.0) & jnp.isfinite(d43_arr)
-                if bool(jnp.any(valid_mask)):
-                    valid_idx = jnp.where(valid_mask)[0]
-                    d43_ts = time_min[valid_idx]
-                    d43_vals = d43_arr[valid_idx]
-                    if d43_var_col is not None:
-                        var_raw = jnp.asarray(df_exp[d43_var_col].to_numpy(dtype=float))[valid_idx]
-                        d43_var = jnp.where(jnp.isfinite(var_raw) & (var_raw > 0.0), var_raw, 1e-2)
-                    else:
-                        d43_var = jnp.full(d43_vals.shape, 1e-2)
-                    channels["d43"] = ChannelObs(ts=d43_ts, values=d43_vals, variance=d43_var)
-
-            # ``make_dataset`` requires every experiment to define every
-            # channel listed in ``OUTPUT_CHANNELS``; skip experiments with no
-            # particle-size data rather than fabricate empty channels.
-            if "d43" not in channels:
-                continue
-
-            experiments.append(
-                make_experiment(
-                    covariates={
-                        "temperature_C": float(df_exp["Temperature"].iloc[0]),
-                        "loading": float(df_exp["Loading"].iloc[0]),
-                    },
-                    channels=channels,
-                    y0_fn=y0_fn,
-                    exp_id=f"{sheet_name}_{int(exp_id)}",
-                )
+        experiments.append(
+            make_experiment(
+                covariates={"temperature_C": float(data["temperature_C"])},  # type: ignore[arg-type]
+                channels={
+                    "conc": ChannelObs(
+                        ts=time_min,
+                        values=conc,
+                        variance=jnp.full_like(conc, CONC_VAR),
+                    ),
+                    "d43": ChannelObs(ts=d43_ts, values=d43_vals, variance=d43_var),
+                },
+                y0_fn=y0_fn,
+                exp_id=str(data["exp_id"]),
             )
-
-    if not experiments:
-        raise RuntimeError(
-            f"no experiments loaded from {args.excel} (sheets={args.sheets}); "
-            "check the file path and that PS/d43 observations exist."
         )
 
-    print(f"  {len(experiments)} experiments loaded from {args.sheets}")
-    for exp in experiments[:3]:
+    print(f"[load] {len(experiments)} hardcoded experiments")
+    for exp in experiments:
         print(
             f"    {exp.exp_id}: T={float(exp.covariates['temperature_C']):.1f}°C, "
-            f"L={float(exp.covariates['loading']):.2f}, "
             f"conc obs={exp.channels['conc'].values.shape[0]}, "
             f"d43 obs={exp.channels['d43'].values.shape[0]}"
         )
-    if len(experiments) > 3:
-        print(f"    ... and {len(experiments) - 3} more")
 
     # ---- Build dataset (bucket + union-axis logic) ------------------------ #
     print("\n[build] dataset")
@@ -340,47 +346,86 @@ def main() -> None:
         dt0=None,
     )
 
-    # ---- Build predictors (two BoundedPredictor branches) ----------------- #
-    # Each branch:
+    # ---- Build predictor pairs (MLP first, then KAN) ---------------------- #
+    # Each BoundedPredictor branch:
     #     dict -> [2] (INPUT_KEYS order)
     #          -> in_scaler  : physical -> latent (logit-of-normalised)
-    #          -> MLPPredictor: [2] -> [1] (relu, depth=1, width=64)
+    #          -> inner      : [2] -> [1] (MLPPredictor or KANPredictor)
     #          -> out_scaler : latent -> physical (sigmoid into log-bounds)
-    # Branches share the input scaler but get independent MLP weights via key
-    # splitting.
-    k_growth, k_nucleation = jr.split(k_init, 2)
+    # Both pairs share the input scaler; growth/nucleation branches inside
+    # each pair get independent inner weights via key splitting. KAN
+    # ``hidden_widths=(64,)`` mirrors the MLP's single hidden layer of width
+    # 64 so the comparison varies only the inner-network family.
     in_scaler = BoundScaler(
         bounds=(TEMPERATURE_BOUNDS, SUPERSATURATION_BOUNDS),
         transform="sigmoid",
     )
+    k_mlp, k_kan = jr.split(k_init, 2)
+    k_mlp_growth, k_mlp_nucleation = jr.split(k_mlp, 2)
+    k_kan_growth, k_kan_nucleation = jr.split(k_kan, 2)
 
-    growth_bp = BoundedPredictor(
-        input_keys=INPUT_KEYS,
-        in_scaler=in_scaler,
-        inner=MLPPredictor(
+    def _wrap(inner_growth, inner_nucleation):
+        growth_bp = BoundedPredictor(
+            input_keys=INPUT_KEYS,
+            in_scaler=in_scaler,
+            inner=inner_growth,
+            out_scaler=BoundScaler(bounds=(LOG10_GROWTH_BOUNDS,), transform="sigmoid"),
+        )
+        nucleation_bp = BoundedPredictor(
+            input_keys=INPUT_KEYS,
+            in_scaler=in_scaler,
+            inner=inner_nucleation,
+            out_scaler=BoundScaler(bounds=(LOG10_NUCLEATION_BOUNDS,), transform="sigmoid"),
+        )
+        return (growth_bp, nucleation_bp)
+
+    mlp_predictors = _wrap(
+        MLPPredictor(
             in_size=2,
             out_size=1,
             width_size=64,
             depth=1,
             activation_name="relu",
-            key=k_growth,
+            key=k_mlp_growth,
         ),
-        out_scaler=BoundScaler(bounds=(LOG10_GROWTH_BOUNDS,), transform="sigmoid"),
-    )
-    nucleation_bp = BoundedPredictor(
-        input_keys=INPUT_KEYS,
-        in_scaler=in_scaler,
-        inner=MLPPredictor(
+        MLPPredictor(
             in_size=2,
             out_size=1,
             width_size=64,
             depth=1,
             activation_name="relu",
-            key=k_nucleation,
+            key=k_mlp_nucleation,
         ),
-        out_scaler=BoundScaler(bounds=(LOG10_NUCLEATION_BOUNDS,), transform="sigmoid"),
     )
-    predictors = (growth_bp, nucleation_bp)
+    # ``with_zero_final_head`` zeroes the inner KAN's readout layer so the
+    # bounded predictor's init lands at the physical midpoint of each
+    # log-bound. Without this warm start, jaxkan's default spline+residual
+    # init produces a non-zero inner output that, composed with the
+    # asymmetric out-scaler ``low + (high-low)*sigmoid(z)`` for
+    # ``LOG10_NUCLEATION_BOUNDS = (-6.5, 20.0)``, parks log10_J several
+    # decades below the midpoint. With ``J ~ 2`` the moment ODE never
+    # evolves over the trajectory and ``∂loss/∂params`` through the
+    # integrator is numerically vanishing — Adam stays at a flat loss for
+    # the entire run. The MLP path is not affected because random linear
+    # init naturally produces near-zero output for a 2->64->1 net.
+    kan_predictors = _wrap(
+        KANPredictor(
+            in_size=2,
+            out_size=1,
+            hidden_widths=(64,),
+            grid_size=args.kan_grid_size,
+            basis=args.kan_basis,
+            key=k_kan_growth,
+        ).with_zero_final_head(),
+        KANPredictor(
+            in_size=2,
+            out_size=1,
+            hidden_widths=(64,),
+            grid_size=args.kan_grid_size,
+            basis=args.kan_basis,
+            key=k_kan_nucleation,
+        ).with_zero_final_head(),
+    )
 
     # Sanity-check evaluation at the first experiment's covariates and a
     # plausible mid-range supersaturation. Same input shape the vector field
@@ -390,16 +435,8 @@ def main() -> None:
         "temperature_C": jnp.asarray(sample_cov["temperature_C"]),
         "supersaturation": jnp.asarray(1.5),
     }
-    log10_G_init = float(jnp.squeeze(growth_bp(sample_inputs)))
-    log10_J_init = float(jnp.squeeze(nucleation_bp(sample_inputs)))
-    print(
-        f"\n[init] T={float(sample_cov['temperature_C']):.1f}°C, S=1.5 -> "
-        f"log10_G={log10_G_init:.2f} (G={10.0**log10_G_init:.2e} m/s), "
-        f"log10_J={log10_J_init:.2f} (J={10.0**log10_J_init:.2e} #/m³/s)"
-    )
 
-    # ---- Train ------------------------------------------------------------ #
-    print("\n[train] optax (single phase, mse loss)")
+    # ---- Train + diagnose + plot, once per family ------------------------ #
     config = OptaxTrainingConfig(
         steps=(args.steps,),
         lr=(args.lr,),
@@ -409,60 +446,84 @@ def main() -> None:
         loss="mse",
         verbose=True,
     )
-    history, trained_predictors = train_with_optax(
-        predictors,
-        dataset,
-        config,
-        simulate_fn=simulate_fn,
-        solver=solver,
-        key=k_train,
-    )
-    print(f"  {len(history)} steps; final loss {history[-1]:.6f}")
-    sample_every = max(1, len(history) // 10)
-    print(
-        f"  loss every ~{sample_every} steps: {[f'{loss:.4f}' for loss in history[::sample_every]]}"
-    )
 
-    trained_growth, trained_nucleation = trained_predictors
-    log10_G_final = float(jnp.squeeze(trained_growth(sample_inputs)))
-    log10_J_final = float(jnp.squeeze(trained_nucleation(sample_inputs)))
-    print(
-        f"  trained -> "
-        f"log10_G={log10_G_final:.2f} (G={10.0**log10_G_final:.2e} m/s), "
-        f"log10_J={log10_J_final:.2f} (J={10.0**log10_J_final:.2e} #/m³/s)"
-    )
+    def run_family(label: str, predictors_init):
+        """Train one predictor family end-to-end and write its plots.
 
-    # ---- Diagnostics + plots --------------------------------------------- #
-    # ``predict_dataset`` returns one ``[N, T, D]`` array per bucket; the
-    # helpers walk it in lockstep with the dataset.
-    print("\n[diagnostics] per-channel parity stats over the training set")
-    predictions = predict_dataset(
-        trained_predictors,
-        dataset,
-        simulate_fn=simulate_fn,
-        solver=solver,
-    )
-    diag = compute_diagnostics(predictions, dataset)
-    print_diagnostics(diag)
-
-    if not args.no_plot:
-        args.plot_dir.mkdir(parents=True, exist_ok=True)
-        parity_plot(
-            diag,
-            title="Crystallisation parity (trained model)",
-            save_path=args.plot_dir / "parity.png",
+        Reuses the outer-scope ``dataset``, ``solver``, ``config``,
+        ``k_train``, ``sample_inputs``, ``sample_cov``, and ``args``.
+        ``label`` becomes the plot subdirectory and is interpolated into
+        figure titles so MLP and KAN outputs land side by side under
+        ``args.plot_dir``.
+        """
+        growth_bp, nucleation_bp = predictors_init
+        log10_G_init = float(jnp.squeeze(growth_bp(sample_inputs)))
+        log10_J_init = float(jnp.squeeze(nucleation_bp(sample_inputs)))
+        print(
+            f"\n[{label}][init] T={float(sample_cov['temperature_C']):.1f}°C, S=1.5 -> "
+            f"log10_G={log10_G_init:.2f} (G={10.0**log10_G_init:.2e} m/s), "
+            f"log10_J={log10_J_init:.2f} (J={10.0**log10_J_init:.2e} #/m³/s)"
         )
-        trajectory_plot(
-            predictions,
+
+        print(f"\n[{label}][train] optax (single phase, mse loss)")
+        history, trained_predictors = train_with_optax(
+            predictors_init,
             dataset,
-            predictors=trained_predictors,
+            config,
             simulate_fn=simulate_fn,
             solver=solver,
-            max_experiments=6,
-            title="Crystallisation trajectories (first 6 experiments)",
-            save_path=args.plot_dir / "trajectories.png",
+            key=k_train,
         )
-        print(f"\n[plot] figures written to {args.plot_dir}")
+        print(f"  {len(history)} steps; final loss {history[-1]:.6f}")
+        sample_every = max(1, len(history) // 10)
+        print(
+            f"  loss every ~{sample_every} steps: {[f'{loss:.4f}' for loss in history[::sample_every]]}"
+        )
+
+        trained_growth, trained_nucleation = trained_predictors
+        log10_G_final = float(jnp.squeeze(trained_growth(sample_inputs)))
+        log10_J_final = float(jnp.squeeze(trained_nucleation(sample_inputs)))
+        print(
+            f"  trained -> "
+            f"log10_G={log10_G_final:.2f} (G={10.0**log10_G_final:.2e} m/s), "
+            f"log10_J={log10_J_final:.2f} (J={10.0**log10_J_final:.2e} #/m³/s)"
+        )
+
+        print(f"\n[{label}][diagnostics] per-channel parity stats over the training set")
+        predictions = predict_dataset(
+            trained_predictors,
+            dataset,
+            simulate_fn=simulate_fn,
+            solver=solver,
+        )
+        diag = compute_diagnostics(predictions, dataset)
+        print_diagnostics(diag)
+
+        if not args.no_plot:
+            family_dir = args.plot_dir / label
+            family_dir.mkdir(parents=True, exist_ok=True)
+            parity_plot(
+                diag,
+                title=f"Crystallisation parity ({label})",
+                save_path=family_dir / "parity.png",
+            )
+            trajectory_plot(
+                predictions,
+                dataset,
+                predictors=trained_predictors,
+                simulate_fn=simulate_fn,
+                solver=solver,
+                max_experiments=6,
+                title=f"Crystallisation trajectories ({label}, first 6 experiments)",
+                save_path=family_dir / "trajectories.png",
+            )
+            print(f"\n[{label}][plot] figures written to {family_dir}")
+
+        return float(history[-1])
+
+    final_loss_mlp = run_family("mlp", mlp_predictors)
+    final_loss_kan = run_family("kan", kan_predictors)
+    print(f"\n[summary] final loss — mlp: {final_loss_mlp:.6f}, kan: {final_loss_kan:.6f}")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """Crystallisation mechanistic-only training example (CNT + power-law growth).
 
-Same dataset and method-of-moments backbone as ``train_kinetic.py``, but the
-two MLP rate predictors are replaced by a four-scalar mechanistic kinetic law
-that is global across experiments:
+Same hardcoded LowData4 cut and method-of-moments backbone as
+``train_kinetic.py``, but the two MLP rate predictors are replaced by a
+four-scalar mechanistic kinetic law that is global across experiments:
 
 * CNT nucleation:    ``J = exp(logA) * S * exp(-16π γ³ v² / (3 (k_B T)³ ln²S))``
 * Power-law growth:  ``G = (10**Ag / 60) * max(S - 1, 0)**g``
@@ -39,7 +39,6 @@ jax.config.update("jax_enable_x64", True)
 import diffrax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import jax.random as jr  # noqa: E402
-import pandas as pd  # noqa: E402
 from jax import Array  # noqa: E402
 from jaxtyping import Float  # noqa: E402
 
@@ -67,14 +66,52 @@ from _shared import (  # noqa: E402
 # Constants                                                                   #
 # --------------------------------------------------------------------------- #
 
-EXCEL_PATH_DEFAULT = (
-    Path(__file__).parent / "data" / "NODE_fullExperimental_dataset_ps3-dec2025__thesis.xlsx"
+# Four hardcoded experiments from the thesis ``Unseeded_LowData4`` sheet,
+# identical to the dataset used by ``train_kinetic.py`` so the two scripts are
+# directly comparable. Conc and d43 rounded to 1 dp; d43 variance to 3 dp;
+# concentration variance is a single made-up scalar (``CONC_VAR``) applied per
+# row. The thesis ``Loading`` column is uniformly zero across LowData4 and is
+# intentionally omitted as a covariate.
+EXPERIMENTS_DATA: tuple[dict[str, object], ...] = (
+    {
+        "exp_id": "LowData4_3",
+        "temperature_C": 17.0,
+        "time_min": (0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 225.0, 270.0),
+        "conc": (14.7, 13.7, 7.7, 7.0, 5.7, 5.5, 5.4, 5.1, 5.2),
+        "d43_time_min": 270.0,
+        "d43": 9.2,
+        "d43_var": 5.345,
+    },
+    {
+        "exp_id": "LowData4_4",
+        "temperature_C": 17.0,
+        "time_min": (0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 225.0, 270.0),
+        "conc": (11.6, 10.8, 10.8, 10.5, 10.9, 9.5, 6.8, 6.1, 5.7),
+        "d43_time_min": 270.0,
+        "d43": 7.7,
+        "d43_var": 3.734,
+    },
+    {
+        "exp_id": "LowData4_7",
+        "temperature_C": 21.0,
+        "time_min": (0.0, 60.0, 120.0, 180.0, 240.0, 300.0, 360.0),
+        "conc": (16.8, 12.1, 8.6, 7.6, 7.2, 6.8, 6.4),
+        "d43_time_min": 360.0,
+        "d43": 10.5,
+        "d43_var": 1.421,
+    },
+    {
+        "exp_id": "LowData4_9",
+        "temperature_C": 21.0,
+        "time_min": (0.0, 60.0, 120.0, 180.0, 240.0, 300.0, 375.0),
+        "conc": (14.4, 14.2, 13.6, 10.1, 9.3, 7.6, 7.0),
+        "d43_time_min": 375.0,
+        "d43": 11.9,
+        "d43_var": 0.267,
+    },
 )
-# ``Unseeded_thesis`` is the full thesis cut: per-row variances and a
-# particle-size column (``d43`` in newer cuts, ``PS`` in legacy thesis cuts)
-# with ``-1`` as the missing-row sentinel. The bare ``Unseeded`` sheet has
-# only concentration; choosing it would silently skip every experiment.
-DEFAULT_SHEET = "Unseeded_thesis"
+# Made-up uniform concentration variance, broadcast across every row.
+CONC_VAR = 0.1
 
 # Bounds for the four mechanistic kinetic parameters. Reproduced from the
 # original thesis-package bounds in ``hybridcrystals/regressor_constants.py``
@@ -270,8 +307,6 @@ def simulate_fn(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--excel", type=Path, default=EXCEL_PATH_DEFAULT)
-    parser.add_argument("--sheets", nargs="+", default=[DEFAULT_SHEET])
     parser.add_argument("--population-size", type=int, default=64)
     parser.add_argument("--num-generations", type=int, default=80)
     parser.add_argument("--sigma-init", type=float, default=0.5)
@@ -294,87 +329,44 @@ def main() -> None:
     apply_default_style()
     k_init, k_train = jr.split(jr.PRNGKey(args.seed), 2)
 
-    # ---- Load experiments from the thesis Excel --------------------------- #
-    # Excel column contract: ``Exp_ID`` (group key), ``Time`` (min),
-    # ``Concentration`` (+ optional ``Concentration_var``), ``Temperature``
-    # (°C, per-experiment scalar), ``Loading`` (per-experiment scalar), and a
-    # particle-size column — ``d43`` in newer cuts, ``PS`` in legacy ones.
-    # The size column uses ``-1`` (and any non-finite value) as a "no
-    # observation at this row" sentinel; filtering those rows recovers the
-    # per-channel sparsity that ``make_dataset`` then turns into a union axis.
-    print(f"[load] {args.excel}")
-    sheet_dict = pd.read_excel(args.excel, sheet_name=list(args.sheets))
-    if not isinstance(sheet_dict, dict):
-        sheet_dict = {args.sheets[0]: sheet_dict}
-
+    # ---- Build experiments from the hardcoded LowData4 cut ----------------- #
+    # Each entry in ``EXPERIMENTS_DATA`` is converted into one
+    # ``hybridmodels.Experiment`` carrying two channels with their own ``ts``
+    # axes — the d43 channel has a single terminal observation, so
+    # ``make_dataset`` will form per-experiment union axes and bucket on
+    # length parity. ``CONC_VAR`` is broadcast to a per-row variance vector;
+    # the d43 variance is scalar (one observation per experiment).
     experiments: list[Experiment] = []
-    for sheet_name, df in sheet_dict.items():
-        d43_col = "d43" if "d43" in df.columns else ("PS" if "PS" in df.columns else None)
-        d43_var_col = (
-            "d43_var" if "d43_var" in df.columns else ("PS_var" if "PS_var" in df.columns else None)
-        )
-        for exp_id, df_exp in df.groupby("Exp_ID"):
-            time_min = jnp.asarray(df_exp["Time"].to_numpy(dtype=float))
-            conc = jnp.asarray(df_exp["Concentration"].to_numpy(dtype=float))
+    for data in EXPERIMENTS_DATA:
+        time_min = jnp.asarray(data["time_min"], dtype=float)
+        conc = jnp.asarray(data["conc"], dtype=float)
+        d43_ts = jnp.asarray((data["d43_time_min"],), dtype=float)
+        d43_vals = jnp.asarray((data["d43"],), dtype=float)
+        d43_var = jnp.asarray((data["d43_var"],), dtype=float)
 
-            if "Concentration_var" in df_exp.columns:
-                cv_raw = jnp.asarray(df_exp["Concentration_var"].to_numpy(dtype=float))
-                conc_var = jnp.where(jnp.isfinite(cv_raw) & (cv_raw > 0.0), cv_raw, 1e-4)
-            else:
-                conc_var = jnp.full_like(conc, 1e-4)
-
-            channels: dict[str, ChannelObs] = {
-                "conc": ChannelObs(ts=time_min, values=conc, variance=conc_var),
-            }
-
-            if d43_col is not None:
-                d43_arr = jnp.asarray(df_exp[d43_col].to_numpy(dtype=float))
-                valid_mask = (d43_arr > 0.0) & jnp.isfinite(d43_arr)
-                if bool(jnp.any(valid_mask)):
-                    valid_idx = jnp.where(valid_mask)[0]
-                    d43_ts = time_min[valid_idx]
-                    d43_vals = d43_arr[valid_idx]
-                    if d43_var_col is not None:
-                        var_raw = jnp.asarray(df_exp[d43_var_col].to_numpy(dtype=float))[valid_idx]
-                        d43_var = jnp.where(jnp.isfinite(var_raw) & (var_raw > 0.0), var_raw, 1e-2)
-                    else:
-                        d43_var = jnp.full(d43_vals.shape, 1e-2)
-                    channels["d43"] = ChannelObs(ts=d43_ts, values=d43_vals, variance=d43_var)
-
-            # ``make_dataset`` requires every experiment to define every
-            # channel listed in ``OUTPUT_CHANNELS``; skip experiments with no
-            # particle-size data rather than fabricate empty channels.
-            if "d43" not in channels:
-                continue
-
-            experiments.append(
-                make_experiment(
-                    covariates={
-                        "temperature_C": float(df_exp["Temperature"].iloc[0]),
-                        "loading": float(df_exp["Loading"].iloc[0]),
-                    },
-                    channels=channels,
-                    y0_fn=y0_fn,
-                    exp_id=f"{sheet_name}_{int(exp_id)}",
-                )
+        experiments.append(
+            make_experiment(
+                covariates={"temperature_C": float(data["temperature_C"])},  # type: ignore[arg-type]
+                channels={
+                    "conc": ChannelObs(
+                        ts=time_min,
+                        values=conc,
+                        variance=jnp.full_like(conc, CONC_VAR),
+                    ),
+                    "d43": ChannelObs(ts=d43_ts, values=d43_vals, variance=d43_var),
+                },
+                y0_fn=y0_fn,
+                exp_id=str(data["exp_id"]),
             )
-
-    if not experiments:
-        raise RuntimeError(
-            f"no experiments loaded from {args.excel} (sheets={args.sheets}); "
-            "check the file path and that PS/d43 observations exist."
         )
 
-    print(f"  {len(experiments)} experiments loaded from {args.sheets}")
-    for exp in experiments[:3]:
+    print(f"[load] {len(experiments)} hardcoded experiments")
+    for exp in experiments:
         print(
             f"    {exp.exp_id}: T={float(exp.covariates['temperature_C']):.1f}°C, "
-            f"L={float(exp.covariates['loading']):.2f}, "
             f"conc obs={exp.channels['conc'].values.shape[0]}, "
             f"d43 obs={exp.channels['d43'].values.shape[0]}"
         )
-    if len(experiments) > 3:
-        print(f"    ... and {len(experiments) - 3} more")
 
     # ---- Build dataset (bucket + union-axis logic) ------------------------ #
     print("\n[build] dataset")

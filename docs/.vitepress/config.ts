@@ -36,7 +36,8 @@ export default defineConfig({
         { text: 'Recommendations', link: '/guide/recommendations' },
       ],
       '/examples/': [
-        { text: 'Crystallisation (featured)', link: '/examples/crystallisation' },
+        { text: 'Crystallisation (hybrid MLP)', link: '/examples/crystallisation' },
+        { text: 'Crystallisation (mechanistic)', link: '/examples/crystallisation-mechanistic' },
         { text: 'Harmonic Oscillator', link: '/examples/pendulum' },
       ],
       '/api/': [

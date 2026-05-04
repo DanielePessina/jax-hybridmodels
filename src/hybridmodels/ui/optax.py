@@ -175,11 +175,17 @@ class RichTrainingUI:
         # phase. Reusing one Progress across phases would either show
         # cumulative step counts or require manual reset gymnastics; a
         # new Progress per phase is cheaper and cleaner.
+        #
+        # The trailing ``loss`` column is fed through ``task.fields`` and
+        # updated from ``on_step_end``; before the first step of a phase
+        # there is no loss yet, so the field starts as a placeholder
+        # rather than a synthetic zero (which would mislead readers).
         self._phase_progress_bar = Progress(
             TextColumn("[bold]phase {task.fields[phase_idx]}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total} steps"),
             TimeElapsedColumn(),
+            TextColumn("loss [bold]{task.fields[loss]}"),
             console=self._console,
             transient=False,
             auto_refresh=False,
@@ -188,6 +194,7 @@ class RichTrainingUI:
             description="phase",
             total=max(self._phase_steps, 1),
             phase_idx=self._phase_idx,
+            loss="-",
         )
         self._refresh()
 
@@ -197,11 +204,18 @@ class RichTrainingUI:
         self._refresh()
 
     def on_step_end(self, *, step_idx: int, phase_idx: int, loss: float) -> None:
-        # Advance the phase progress bar (guarded — out-of-order events
-        # might call on_step_end without a preceding on_phase_start).
+        # Advance the phase progress bar and push the latest loss into the
+        # bar's ``loss`` field so the trailing column renders a live value
+        # alongside step / elapsed columns. Both calls are guarded — out-of-
+        # order events might call on_step_end without a preceding
+        # on_phase_start, in which case there is nothing to update.
         if self._phase_progress_bar is not None and self._phase_task_id is not None:
             try:
-                self._phase_progress_bar.advance(self._phase_task_id, advance=1)
+                self._phase_progress_bar.update(
+                    self._phase_task_id,
+                    advance=1,
+                    loss=_format_loss(loss),
+                )
             except Exception:
                 pass
         self._refresh()
