@@ -33,6 +33,7 @@ import time
 from collections import deque
 from typing import Any
 
+from rich.align import Align
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
@@ -274,7 +275,16 @@ class RichTrainingUI:
         # on this ordering).
         if self._final_loss is not None:
             children.append(self._render_footer())
-        return Group(*children)
+        # Constrain to half the current terminal width. Rich panels default
+        # to ``expand=True`` and the dashboard otherwise sprawls across the
+        # full terminal, which both wastes horizontal space and overflows
+        # the buffer when the terminal is resized narrower mid-run. Wrapping
+        # in ``Align.left`` with an explicit width pins the dashboard to
+        # half-width regardless of terminal size; the value is recomputed on
+        # each refresh so it tracks live resizes. ``max(40, …)`` keeps
+        # contents legible on very narrow terminals.
+        target_width = max(40, self._console.width // 2)
+        return Align.left(Group(*children), width=target_width)
 
     def _render_header(self) -> Panel:
         elapsed = 0.0

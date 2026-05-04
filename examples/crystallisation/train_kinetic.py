@@ -145,13 +145,13 @@ no particle-size channel could be built."""
 
 COVARIATE_BOUNDS: dict[str, tuple[float, float]] = {
     "temperature_C": (13.0, 27.0),
-    "loading": (0.0, 30.0),
+    # "loading": (0.0, 30.0),
 }
 """``(low, high)`` pairs for input covariates; consumed by ``in_scaler``.
 Slightly wider than the data's actual span so sigmoid saturation is rare."""
 
 # Direct-rate path (1) — bounds on predictor inputs and outputs.
-SUPERSATURATION_BOUNDS: tuple[float, float] = (1.0, 3.0)
+SUPERSATURATION_BOUNDS: tuple[float, float] = (0.0, 12.0)
 """Physical bounds on supersaturation ``S = conc / conc_sat`` fed as the
 third input key to each direct-rate predictor. The lower bound is at the
 nucleation/growth threshold (``S = 1``); the upper end is generous for the
@@ -166,7 +166,7 @@ to the source-package's power-law growth-rate range. Earlier draft used
 random-init weights produced ODE rates the moment-balance solver could not
 track within ``max_steps``."""
 
-LOG10_NUCLEATION_BOUNDS: tuple[float, float] = (-6.5, 13.0)
+LOG10_NUCLEATION_BOUNDS: tuple[float, float] = (-6.5, 20.0)
 """Bounds on ``log10(J)`` where ``J`` is nucleation rate in #/(m^3·s).
 Centred at ``+3.25`` so a random-init predictor produces ``J ≈ 1800``
 #/(m³·s) — equivalent to the source-package's ``J = exp(log_rate)`` with
@@ -199,12 +199,12 @@ OUTPUT_CHANNELS: tuple[str, ...] = ("conc", "d43")
 """Channel order on the trailing ``D`` axis of every ``BucketPayload``."""
 
 # Direct-rate path (1) — three-key input dict: two covariates + state-derived S.
-INPUT_KEYS_DIRECT: tuple[str, ...] = ("temperature_C", "loading", "supersaturation")
+INPUT_KEYS_DIRECT: tuple[str, ...] = ("temperature_C", "supersaturation")
 
 # Kinetic-parameter path (2) — two covariates only (S is reconstructed in
 # the vector field from the predicted gamma / Ag / g but is not a predictor
 # input in this path).
-INPUT_KEYS_KINETIC: tuple[str, ...] = ("temperature_C", "loading")
+INPUT_KEYS_KINETIC: tuple[str, ...] = ("temperature_C", )
 
 
 # --------------------------------------------------------------------------- #
@@ -462,7 +462,7 @@ def _simulate_fn(
         # three keys in its declared order via its ``input_keys`` field.
         inputs = {
             "temperature_C": covariates["temperature_C"],
-            "loading": covariates["loading"],
+            # "loading": covariates["loading"],
             "supersaturation": S,
         }
 
@@ -646,7 +646,7 @@ def _build_direct_rate_predictors(
     in_scaler = BoundScaler(
         bounds=(
             COVARIATE_BOUNDS["temperature_C"],
-            COVARIATE_BOUNDS["loading"],
+            # COVARIATE_BOUNDS["loading"],
             SUPERSATURATION_BOUNDS,
         ),
         transform="sigmoid",
@@ -659,7 +659,7 @@ def _build_direct_rate_predictors(
         depth=1,
         activation_name="relu",
         key=k_growth,
-    ).with_zero_final_head()
+    )#.with_zero_final_head()
     growth_out_scaler = BoundScaler(
         bounds=(LOG10_GROWTH_BOUNDS,),
         transform="sigmoid",
@@ -678,7 +678,7 @@ def _build_direct_rate_predictors(
         depth=1,
         activation_name="relu",
         key=k_nucleation,
-    ).with_zero_final_head()
+    )#.with_zero_final_head()
     nucleation_out_scaler = BoundScaler(
         bounds=(LOG10_NUCLEATION_BOUNDS,),
         transform="sigmoid",
@@ -756,7 +756,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--excel", type=Path, default=EXCEL_PATH_DEFAULT)
     parser.add_argument("--sheets", nargs="+", default=list(DEFAULT_SHEETS))
-    parser.add_argument("--steps", type=int, default=200)
+    parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
