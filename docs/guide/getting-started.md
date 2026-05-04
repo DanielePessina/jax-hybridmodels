@@ -177,6 +177,7 @@ The same surface scales up. Replacing `OmegaPredictor` with an `MLPPredictor` or
 ## Next steps
 
 - [Crystallisation walkthrough](/examples/crystallisation) — a full end-to-end example on a real dataset, with two `BoundedPredictor` branches predicting growth and nucleation rates inside a method-of-moments ODE. Read this first; the rest of the documentation is easier with it as context.
+- [Batch reactor (notebook)](/examples/batch-reactor) — a self-contained two-phase pipeline: CMA-ES fits a deliberately too-simple Arrhenius trunk, then Adam fits a small neural residual on top. Demonstrates trainability-mask flips between phases and the log-additive composition of a parametric trunk with a learned correction.
 - [Concepts](/guide/concepts) — the package's vocabulary: `Predictor`, `BoundScaler`, `BoundedPredictor`, `Experiment`, `Dataset`, `BucketPayload`, `simulate_fn`, `state_to_output`, predictor inputs versus covariates.
 - [Training](/guide/training) — multi-phase Optax schedules, the shared-tournament restart loop, when to reach for `train_with_evosax`, and the named-fold RNG discipline that keeps runs reproducible.
 - [Recommendations](/guide/recommendations) — choosing bounds, solver tolerances, freezing patterns, and the autodiff-safe guards needed to keep gradients finite under JAX tracing.

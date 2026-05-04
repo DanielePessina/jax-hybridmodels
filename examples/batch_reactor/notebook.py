@@ -227,25 +227,31 @@ def _doe_md(mo):
     ## Experimental design
 
     Nine training experiments are produced by Latin hypercube sampling
-    over the box $T \in [15, 35]\,°\mathrm{C}$ and
-    $\mathrm{pH} \in [4.5, 7.5]$. LHS gives near-uniform marginal
-    coverage in both axes from only nine points, which is what allows
-    the residual MLP to interpolate cleanly between the sampled
+    over the box $T \in [15, 35]\,°\mathrm{C}$,
+    $\mathrm{pH} \in [4.5, 7.5]$, and
+    $C_{A,0} \in [0.75, 1.5]$. LHS gives near-uniform marginal
+    coverage in all three axes from only nine points, which is what
+    lets the residual MLP interpolate cleanly between the sampled
     operating points. Two further experiments are placed off the LHS
-    grid as a held-out validation set:
-    $(T,\mathrm{pH}) = (20\,°\mathrm{C}, 5.3)$ and
-    $(30\,°\mathrm{C}, 6.8)$. They sit deliberately near the
-    saturation knee at $\mathrm{pH}_{50} = 5.85$, the region in which
-    the parametric trunk's pH-blindness is most visibly wrong.
+    grid as a held-out validation set at
+    $(T,\mathrm{pH},C_{A,0}) = (20\,°\mathrm{C}, 5.3, 0.85)$ and
+    $(30\,°\mathrm{C}, 6.8, 1.30)$. They sit near the saturation knee
+    at $\mathrm{pH}_{50} = 5.85$, the region in which the parametric
+    trunk's pH-blindness is most visibly wrong.
+
+    The initial concentration $C_{A,0}$ is treated as a *covariate*
+    that the residual MLP receives as one of its three named inputs.
+    Because the kinetics are first-order, the rate constant
+    $k(T,\mathrm{pH})$ does not actually depend on $C_{A,0}$ — only
+    the trajectory amplitude does, through the IC. This makes
+    $C_{A,0}$ a *red-herring* covariate: the MLP sees it but should
+    learn to assign it negligible influence on $\Delta\log_{10}k$.
 
     Each experiment runs for $t \in [0, 5]$ (dimensionless time units;
     one e-folding occurs around $t \approx 1/k$, so the trajectory is
     visibly decayed but not exhausted) with twelve evenly-spaced
     observations of $C_A$ only. $C_B = C_{A,0} - C_A$ for first-order
-    $A \to B$, so observing $C_B$ would add no information. The
-    initial concentration is fixed at $C_{A,0} = 1.0$ across every
-    experiment, since varying it would add a state-IC dimension that
-    the rate does not depend on.
+    $A \to B$, so observing $C_B$ would add no information.
 
     Heteroscedastic Gaussian noise with $\sigma = 0.03 \cdot
     \max(|C_A|, 0.02)$ is added to each observation, mirroring the
@@ -254,13 +260,17 @@ def _doe_md(mo):
     later if desired.
 
     ```python
-    sampler = qmc.LatinHypercube(d=2, seed=DOE_SEED)
-    unit = sampler.random(n=N_TRAIN_EXPERIMENTS)              # [9, 2] in [0, 1]
-    lo = np.array([T_C_RANGE[0], PH_RANGE[0]])
-    hi = np.array([T_C_RANGE[1], PH_RANGE[1]])
-    train_design = [(float(t), float(ph)) for t, ph in lo + (hi - lo) * unit]
+    # 3-D LHS over (T, pH, Ca0). Ca0 is a covariate the truth doesn't depend on
+    # (first-order kinetics); the residual MLP must learn to ignore it.
+    sampler = qmc.LatinHypercube(d=3, seed=DOE_SEED)
+    unit = sampler.random(n=N_TRAIN_EXPERIMENTS)              # [9, 3] in [0, 1]
+    lo = np.array([T_C_RANGE[0], PH_RANGE[0], CA0_RANGE[0]])
+    hi = np.array([T_C_RANGE[1], PH_RANGE[1], CA0_RANGE[1]])
+    train_design = [
+        (float(t), float(ph), float(ca0)) for t, ph, ca0 in lo + (hi - lo) * unit
+    ]
 
-    VALIDATION_POINTS = ((20.0, 5.3), (30.0, 6.8))            # held-out, off-grid
+    VALIDATION_POINTS = ((20.0, 5.3, 0.85), (30.0, 6.8, 1.30))   # held-out
 
     def add_heteroscedastic_noise(values, key):
         scale = 0.03 * jnp.maximum(jnp.abs(values), 0.02)
@@ -274,35 +284,41 @@ def _doe_md(mo):
 def _doe(jnp, jr, np, qmc):
     T_C_RANGE = (15.0, 35.0)
     PH_RANGE = (4.5, 7.5)
+    CA0_RANGE = (0.75, 1.5)
     N_TRAIN_EXPERIMENTS = 9
-    VALIDATION_POINTS = ((20.0, 5.3), (30.0, 6.8))
+    # Validation samples extend the off-grid (T, pH) points with an off-grid Ca0.
+    VALIDATION_POINTS = (
+        (20.0, 5.3, 0.85),
+        (30.0, 6.8, 1.30),
+    )
 
     T_MAX = 5.0
     N_TIMESTEPS = 12
-    CA0 = 1.0
     NOISE_REL = 0.03
     NOISE_FLOOR = 0.02
 
     DOE_SEED = 0
     NOISE_SEED = 1
 
-    sampler = qmc.LatinHypercube(d=2, seed=DOE_SEED)
+    # 3-D LHS over (T, pH, Ca0). Ca0 has no rate effect — first-order kinetics
+    # depend only on T and pH — so it acts as a "red-herring" covariate the
+    # residual MLP must learn to ignore.
+    sampler = qmc.LatinHypercube(d=3, seed=DOE_SEED)
     unit = sampler.random(n=N_TRAIN_EXPERIMENTS)
-    lo = np.array([T_C_RANGE[0], PH_RANGE[0]])
-    hi = np.array([T_C_RANGE[1], PH_RANGE[1]])
-    train_design = [(float(t), float(ph)) for t, ph in lo + (hi - lo) * unit]
+    lo = np.array([T_C_RANGE[0], PH_RANGE[0], CA0_RANGE[0]])
+    hi = np.array([T_C_RANGE[1], PH_RANGE[1], CA0_RANGE[1]])
+    train_design = [(float(t), float(ph), float(ca0)) for t, ph, ca0 in lo + (hi - lo) * unit]
 
     print("LHS training samples:")
-    for _i, (_T, _ph) in enumerate(train_design):
-        print(f"  [{_i}] T = {_T:5.2f} °C, pH = {_ph:.3f}")
+    for _i, (_T, _ph, _ca0) in enumerate(train_design):
+        print(f"  [{_i}] T = {_T:5.2f} °C, pH = {_ph:.3f}, Ca0 = {_ca0:.3f}")
     print("Validation samples (off-grid):")
-    for _i, (_T, _ph) in enumerate(VALIDATION_POINTS):
-        print(f"  [{_i}] T = {_T:5.2f} °C, pH = {_ph:.3f}")
+    for _i, (_T, _ph, _ca0) in enumerate(VALIDATION_POINTS):
+        print(f"  [{_i}] T = {_T:5.2f} °C, pH = {_ph:.3f}, Ca0 = {_ca0:.3f}")
 
     noise_root = jr.PRNGKey(NOISE_SEED)
     ts_global = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
     return (
-        CA0,
         NOISE_FLOOR,
         NOISE_REL,
         T_MAX,
@@ -325,11 +341,15 @@ def _add_noise(NOISE_FLOOR, NOISE_REL, jnp, jr):
 
 
 @app.cell
-def _true_trajectory(CA0, jnp, k_true):
-    def true_ca_trajectory(ts, temperature_C, pH):
-        """Closed-form Ca(t) = Ca0 · exp(-k_true · t)."""
+def _true_trajectory(jnp, k_true):
+    def true_ca_trajectory(ts, temperature_C, pH, ca0):
+        """Closed-form Ca(t) = ca0 · exp(-k_true(T, pH) · t).
+
+        Ca0 enters as the initial condition only; the rate constant
+        depends only on (T, pH).
+        """
         k = float(k_true(temperature_C, pH))
-        return CA0 * jnp.exp(-k * jnp.asarray(ts))
+        return float(ca0) * jnp.exp(-k * jnp.asarray(ts))
 
     return (true_ca_trajectory,)
 
@@ -362,12 +382,16 @@ def _experiment_md(mo):
 
     OUTPUT_CHANNELS = ("Ca",)
 
-    # Build one experiment per (T, pH) sample.
+    # Build one experiment per (T, pH, Ca0) sample.
     make_experiment(
-        covariates={"temperature_C": float(T_C), "pH": float(pH)},
+        covariates={
+            "temperature_C": float(T_C),
+            "pH": float(pH),
+            "Ca0": float(ca0),
+        },
         channels={"Ca": ChannelObs(ts=ts, values=noisy, variance=sigma**2)},
         y0_fn=y0_fn,
-        exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}",
+        exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}_Ca0{ca0:.2f}",
     )
 
     # Stack experiments into buckets by len(union_ts); compute masks.
@@ -418,27 +442,47 @@ def _build_experiments(
     ts_global,
     y0_fn,
 ):
-    def _build_one(temperature_C, pH, key, exp_id):
-        clean = true_ca_trajectory(ts_global, temperature_C, pH)
+    def _build_one(temperature_C, pH, ca0, key, exp_id):
+        clean = true_ca_trajectory(ts_global, temperature_C, pH, ca0)
         noisy = add_heteroscedastic_noise(clean, key)
         sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
         variance = sigma**2
         return make_experiment(
-            covariates={"temperature_C": float(temperature_C), "pH": float(pH)},
+            covariates={
+                "temperature_C": float(temperature_C),
+                "pH": float(pH),
+                "Ca0": float(ca0),
+            },
             channels={"Ca": ChannelObs(ts=ts_global, values=noisy, variance=variance)},
             y0_fn=y0_fn,
             exp_id=exp_id,
         )
 
     train_experiments: list[Experiment] = []
-    for _i, (_T, _ph) in enumerate(train_design):
+    for _i, (_T, _ph, _ca0) in enumerate(train_design):
         _k = jr.fold_in(noise_root, _i)
-        train_experiments.append(_build_one(_T, _ph, _k, f"train_{_i:02d}_T{_T:.1f}_pH{_ph:.2f}"))
+        train_experiments.append(
+            _build_one(
+                _T,
+                _ph,
+                _ca0,
+                _k,
+                f"train_{_i:02d}_T{_T:.1f}_pH{_ph:.2f}_Ca0{_ca0:.2f}",
+            )
+        )
 
     val_experiments: list[Experiment] = []
-    for _j, (_T, _ph) in enumerate(VALIDATION_POINTS):
+    for _j, (_T, _ph, _ca0) in enumerate(VALIDATION_POINTS):
         _k = jr.fold_in(noise_root, 1000 + _j)
-        val_experiments.append(_build_one(_T, _ph, _k, f"val_{_j:02d}_T{_T:.1f}_pH{_ph:.2f}"))
+        val_experiments.append(
+            _build_one(
+                _T,
+                _ph,
+                _ca0,
+                _k,
+                f"val_{_j:02d}_T{_T:.1f}_pH{_ph:.2f}_Ca0{_ca0:.2f}",
+            )
+        )
 
     print(
         f"built {len(train_experiments)} training experiments + {len(val_experiments)} validation"
@@ -605,13 +649,21 @@ def _predictor_md(mo):
     ### `residual_bp` — the residual MLP
 
     A 16-neuron one-hidden-layer MLP with ReLU activation, taking
-    $(T,\mathrm{pH})$ as named inputs and emitting a scalar
-    $\Delta\log_{10} k$. Wrapped in a `BoundedPredictor` whose output
-    bounds are *symmetric around zero*, $[-2, +2]$ decades. This
-    matters: a freshly-initialised MLP sits near the sigmoid
+    $(T, \mathrm{pH}, C_{A,0})$ as three named inputs and emitting a
+    scalar $\Delta\log_{10} k$. Wrapped in a `BoundedPredictor` whose
+    output bounds are *symmetric around zero*, $[-2, +2]$ decades.
+    This matters: a freshly-initialised MLP sits near the sigmoid
     midpoint, which under symmetric output bounds is exactly $0$
     decades — i.e. the residual contributes nothing at init. Phase 2
     therefore starts at the phase-1 fit without any explicit zeroing.
+
+    The third input slot is the red-herring axis: $C_{A,0}$ has no
+    rate effect in first-order kinetics, so a well-trained residual
+    will end phase 2 with a near-flat dependence on the $C_{A,0}$
+    axis. The MLP's input scaler bounds it to $[0.75, 1.5]$ — the
+    same range the LHS samples it over — so the network sees the
+    full physical range mapped through a sigmoid into its latent
+    feature space.
 
     ```python
     LOG_KREF_BOUNDS = (-3.0, 2.0)
@@ -632,19 +684,21 @@ def _predictor_md(mo):
             return self.out_scaler.from_latent(self.latent)
 
 
-    INPUT_KEYS = ("temperature_C", "pH")
+    INPUT_KEYS = ("temperature_C", "pH", "Ca0")
     TEMPERATURE_BOUNDS = (0.0, 50.0)
     PH_BOUNDS = (3.0, 9.0)
+    CA0_INPUT_BOUNDS = (0.75, 1.5)             # Ca0 is fed but doesn't affect the truth
     RES_LOG10_BOUNDS = (-2.0, 2.0)
 
     parametric_trunk = ArrheniusKinetics(key=k_param)
     residual_bp = BoundedPredictor(
         input_keys=INPUT_KEYS,
         in_scaler=BoundScaler(
-            bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS), transform="sigmoid",
+            bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS, CA0_INPUT_BOUNDS),
+            transform="sigmoid",
         ),
         inner=MLPPredictor(
-            in_size=2, out_size=1, width_size=16, depth=1,
+            in_size=3, out_size=1, width_size=16, depth=1,
             activation_name="relu", key=k_residual,
         ),
         out_scaler=BoundScaler(bounds=(RES_LOG10_BOUNDS,), transform="sigmoid"),
@@ -688,9 +742,10 @@ def _build_predictors(
     MLPPredictor,
     jr,
 ):
-    INPUT_KEYS = ("temperature_C", "pH")
+    INPUT_KEYS = ("temperature_C", "pH", "Ca0")
     TEMPERATURE_BOUNDS = (0.0, 50.0)
     PH_BOUNDS = (3.0, 9.0)
+    CA0_INPUT_BOUNDS = (0.75, 1.5)
     RES_LOG10_BOUNDS = (-2.0, 2.0)
 
     _root = jr.PRNGKey(0)
@@ -700,11 +755,11 @@ def _build_predictors(
     residual_bp = BoundedPredictor(
         input_keys=INPUT_KEYS,
         in_scaler=BoundScaler(
-            bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS),
+            bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS, CA0_INPUT_BOUNDS),
             transform="sigmoid",
         ),
         inner=MLPPredictor(
-            in_size=2,
+            in_size=3,
             out_size=1,
             width_size=16,
             depth=1,
@@ -760,7 +815,8 @@ def _simulate_md(mo):
 
         delta_log10_k = jnp.squeeze(
             residual({"temperature_C": covariates["temperature_C"],
-                      "pH":            covariates["pH"]})
+                      "pH":            covariates["pH"],
+                      "Ca0":           covariates["Ca0"]})
         )
         k = jnp.power(10.0, log10_k_param + delta_log10_k)   # log-additive combo
 
@@ -808,11 +864,12 @@ def _simulate_fn(
 
         T_C = covariates["temperature_C"]
         pH = covariates["pH"]
+        Ca0 = covariates["Ca0"]
         T_K = T_C + 273.15
 
         log10_k_param = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
 
-        inputs = {"temperature_C": T_C, "pH": pH}
+        inputs = {"temperature_C": T_C, "pH": pH, "Ca0": Ca0}
         delta_log10_k = jnp.squeeze(residual(inputs))
 
         log10_k = log10_k_param + delta_log10_k
@@ -1069,7 +1126,8 @@ def _trajectory_grid_helper(T_MAX, jnp, np, plt, true_ca_trajectory):
         for _ax, _exp, _pred in zip(axes.flatten(), experiments, predictions_per_exp, strict=True):
             _T = float(_exp.covariates["temperature_C"])
             _ph = float(_exp.covariates["pH"])
-            _clean = np.asarray(true_ca_trajectory(jnp.asarray(ts_dense), _T, _ph))
+            _ca0 = float(_exp.covariates["Ca0"])
+            _clean = np.asarray(true_ca_trajectory(jnp.asarray(ts_dense), _T, _ph, _ca0))
             _ts_obs = np.asarray(_exp.channels["Ca"].ts)
             _ca_obs = np.asarray(_exp.channels["Ca"].values)
             _ax.plot(ts_dense, _clean, color="black", linewidth=1.4, label="truth")
@@ -1086,8 +1144,8 @@ def _trajectory_grid_helper(T_MAX, jnp, np, plt, true_ca_trajectory):
             _ax.plot(
                 _ts_obs, _pred[:, 0], color="C3", linestyle="--", linewidth=1.4, label="predicted"
             )
-            _ax.set_title(f"T={_T:.1f}°C, pH={_ph:.2f}", fontsize=9)
-            _ax.set_ylim(-0.05, 1.1)
+            _ax.set_title(f"T={_T:.1f}°C, pH={_ph:.2f}, Ca0={_ca0:.2f}", fontsize=9)
+            _ax.set_ylim(-0.05, 1.6)
             _ax.grid(alpha=0.3)
         for _ax in axes[-1]:
             _ax.set_xlabel("t")
@@ -1214,6 +1272,9 @@ def _kreveal_helper(R_GAS, T_REF, jnp, k_true, np, plt):
         pH_grid = jnp.linspace(4.0, 8.0, 200)
         T_C_lines = (15.0, 25.0, 35.0)
         colors = ("C0", "C1", "C2")
+        # The residual MLP takes Ca0 as a third input; the truth is independent of it,
+        # so we evaluate the hybrid at the midpoint of the Ca0 input box for the reveal.
+        ca0_eval = jnp.asarray(1.125)
 
         fig, ax = plt.subplots(figsize=(8.5, 5.5))
         parametric_p1, _ = predictors_p1
@@ -1249,7 +1310,11 @@ def _kreveal_helper(R_GAS, T_REF, jnp, k_true, np, plt):
                         float(
                             jnp.squeeze(
                                 residual_p2(
-                                    {"temperature_C": jnp.asarray(_T_C), "pH": jnp.asarray(_ph)}
+                                    {
+                                        "temperature_C": jnp.asarray(_T_C),
+                                        "pH": jnp.asarray(_ph),
+                                        "Ca0": ca0_eval,
+                                    }
                                 )
                             )
                         )
