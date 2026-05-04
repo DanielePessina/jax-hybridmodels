@@ -167,11 +167,10 @@ class BoundedPredictor(eqx.Module):
 class RatePair(eqx.Module):
     """Stack two ``BoundedPredictor``s' outputs into a ``[2]`` array.
 
-    Used by the crystallisation example to produce a ``(nucleation_rate,
-    growth_rate)`` pair from one covariate dict — a domain-specific shape
-    convenient enough that we promote it here, but not a framework concept
-    (R-A1: no ``Model`` wrapper). Other domains compose their own pair/tuple
-    structures the same way.
+    Convenient when one ODE consumes two related rates from a single
+    covariate dict (a ``(rate_a, rate_b)`` pair) — a shape we promote here
+    but not a framework concept (R-A1: no ``Model`` wrapper). Other
+    arrangements compose their own pair/tuple structures the same way.
 
     The squeeze on each branch is defensive: ``inner`` networks are typically
     configured with ``out_size=1`` (e.g. ``MLPPredictor(out_size=1)`` returns

@@ -215,8 +215,8 @@ def make_experiment(
     channels dict and returns the full state at ``t=0`` as ``Float[Array, "S"]``.
     For systems where the observed channels *are* the state, a typical hook is
     ``lambda c, ch: jnp.array([ch["x"].values[0], ch["v"].values[0]])``. For
-    systems with hidden state (e.g. crystallisation moments), the hook
-    constructs the latent components from covariates: see CONTEXT.md ``y0_fn``.
+    systems with hidden latent components, the hook constructs them from
+    covariates and/or initial channel values: see CONTEXT.md ``y0_fn``.
 
     Parameters
     ----------
@@ -261,26 +261,28 @@ def _per_experiment_arrays(
     mask : Bool[Array, "T D"]
         ``True`` iff cell ``[t, d]`` came from a real ``ChannelObs`` entry.
     """
-    ordered_ts: list[float] = []
-    seen: dict[float, int] = {}
+    # One pass: cache each channel's host-side arrays, accumulate dtypes, and
+    # collect the union timestamp set. The scatter loop below then reuses the
+    # cached arrays without re-running np.asarray on the eqx-leaf data.
+    channel_arrays: list[
+        tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any]]
+    ] = []
+    union_ts: set[float] = set()
     val_dtypes: list[np.dtype[Any]] = []
     var_dtypes: list[np.dtype[Any]] = []
     ts_dtypes: list[np.dtype[Any]] = []
     for ch_name in output_channel_names:
         ch = experiment.channels[ch_name]
-        ch_ts_np = np.asarray(ch.ts)
-        ch_values_np = np.asarray(ch.values)
-        ch_variance_np = np.asarray(ch.variance)
-        ts_dtypes.append(ch_ts_np.dtype)
-        val_dtypes.append(ch_values_np.dtype)
-        var_dtypes.append(ch_variance_np.dtype)
-        for t in ch_ts_np.tolist():
-            tf = float(t)
-            if tf not in seen:
-                seen[tf] = len(ordered_ts)
-                ordered_ts.append(tf)
+        ts_np = np.asarray(ch.ts)
+        values_np = np.asarray(ch.values)
+        variance_np = np.asarray(ch.variance)
+        channel_arrays.append((ts_np, values_np, variance_np))
+        ts_dtypes.append(ts_np.dtype)
+        val_dtypes.append(values_np.dtype)
+        var_dtypes.append(variance_np.dtype)
+        union_ts.update(float(t) for t in ts_np.tolist())
 
-    sorted_ts = sorted(ordered_ts)
+    sorted_ts = sorted(union_ts)
     ts_to_idx = {t: i for i, t in enumerate(sorted_ts)}
 
     T = len(sorted_ts)
@@ -293,12 +295,10 @@ def _per_experiment_arrays(
     yvar = np.ones((T, D), dtype=var_dtype)
     mask = np.zeros((T, D), dtype=bool)
 
-    for d, ch_name in enumerate(output_channel_names):
-        ch = experiment.channels[ch_name]
-        ts_np = np.asarray(ch.ts).tolist()
-        vals_np = np.asarray(ch.values).tolist()
-        var_np = np.asarray(ch.variance).tolist()
-        for t, v, var in zip(ts_np, vals_np, var_np, strict=True):
+    for d, (ts_np, values_np, variance_np) in enumerate(channel_arrays):
+        for t, v, var in zip(
+            ts_np.tolist(), values_np.tolist(), variance_np.tolist(), strict=True
+        ):
             idx = ts_to_idx[float(t)]
             y_observed[idx, d] = v
             yvar[idx, d] = var
@@ -457,6 +457,23 @@ def split_dataset(
     n_train = int(np.floor(train * n))
     n_val = int(np.floor(val * n))
     n_test = n - n_train - n_val
+
+    # A positive fraction that floors to zero would silently return an empty
+    # split — a sharp edge: downstream code would treat it as "no validation
+    # needed" rather than "validation set was lost to rounding". Refuse the
+    # split and let the caller pick a larger n or set the fraction to exactly
+    # 0.0 if they truly want the split skipped.
+    for name, frac, count in (
+        ("train", train, n_train),
+        ("val", val, n_val),
+        ("test", test, n_test),
+    ):
+        if frac > 0.0 and count == 0:
+            raise ValueError(
+                f"split_dataset: {name} fraction {frac} produced 0 experiments out of "
+                f"n={n} after floor rounding. Either increase n, raise the {name} "
+                f"fraction, or set {name}=0.0 explicitly to skip this split."
+            )
 
     splits_idx = (
         perm[:n_train],
