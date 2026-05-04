@@ -6,7 +6,6 @@ def test_package_imports() -> None:
         "BoundScaler",
         "BucketPayload",
         "ChannelObs",
-        "CovariateSelector",
         "Dataset",
         "EvosaxTrainingConfig",
         "EvosaxUI",

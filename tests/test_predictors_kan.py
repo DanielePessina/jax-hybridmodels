@@ -11,7 +11,6 @@ import pytest
 from hybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
-    CovariateSelector,
     KANPredictor,
 )
 
@@ -110,8 +109,7 @@ class TestInitializedWithKey:
         leaves_new = _array_leaves(fresh)
         assert len(leaves_old) == len(leaves_new)
         assert any(
-            not jnp.array_equal(lo, ln)
-            for lo, ln in zip(leaves_old, leaves_new, strict=True)
+            not jnp.array_equal(lo, ln) for lo, ln in zip(leaves_old, leaves_new, strict=True)
         )
 
     def test_deterministic_for_same_key(self):
@@ -126,7 +124,7 @@ class TestBoundedPredictorComposition:
     def test_kan_drops_in_as_bounded_inner(self):
         kan = _kan(in_size=2, out_size=1, hidden_widths=(6,))
         bounded = BoundedPredictor(
-            selector=CovariateSelector(keys=("a", "b")),
+            input_keys=("a", "b"),
             in_scaler=BoundScaler(
                 bounds=((0.0, 1.0), (-1.0, 1.0)),
                 transform="sigmoid",
