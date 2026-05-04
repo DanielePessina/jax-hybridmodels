@@ -27,7 +27,7 @@ from jaxtyping import Array
 
 from hybridmodels.data import BucketPayload, Dataset
 from hybridmodels.losses import LOSS_REGISTRY
-from hybridmodels.predictors.base import Predictor, reinitialize_with_key
+from hybridmodels.predictors.base import reinitialize_pytree_with_key
 from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
@@ -87,8 +87,7 @@ def _build_optimizer(name: str, lr: float) -> optax.GradientTransformation:
     if norm == "adabelief":
         return optax.inject_hyperparams(optax.adabelief)(learning_rate=lr)
     raise ValueError(
-        f"OptaxTrainingConfig.optimizer={name!r} is not supported; expected "
-        "'adamw' or 'adabelief'."
+        f"OptaxTrainingConfig.optimizer={name!r} is not supported; expected 'adamw' or 'adabelief'."
     )
 
 
@@ -100,9 +99,7 @@ def _resolve_loss_fn(
     if isinstance(loss, str):
         key = loss.lower().strip()
         if key not in LOSS_REGISTRY:
-            raise ValueError(
-                f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}")
         base = LOSS_REGISTRY[key]
     else:
         base = loss
@@ -110,9 +107,7 @@ def _resolve_loss_fn(
         return base
 
     def loss_fn(pred_obs: Array, bp: BucketPayload) -> Array:
-        return base(
-            pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights
-        )
+        return base(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
 
     return loss_fn
 
@@ -124,18 +119,19 @@ def _build_make_step(
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
     trainable: Any,
-) -> Callable[[Predictor, BucketPayload, Array], tuple[Array, Any]]:
+) -> Callable[[Any, BucketPayload, Array], tuple[Array, Any]]:
     def loss_eval(
-        diff_predictor: Predictor,
-        static_predictor: Predictor,
+        diff_predictors: Any,
+        static_predictors: Any,
         bp_masked: BucketPayload,
     ) -> Array:
-        predictor = eqx.combine(diff_predictor, static_predictor)
+        # ``predictors`` here is whatever pytree the user passed in (R-A2,
+        # ADR-0006): typically a tuple of BoundedPredictor leaves. ``eqx.combine``
+        # walks any pytree shape; we don't inspect the container.
+        predictors = eqx.combine(diff_predictors, static_predictors)
 
-        def per_experiment(
-            ts: Array, covariates: dict[str, Array], y0: Array
-        ) -> Array:
-            full_state = simulate_fn(predictor, ts, covariates, y0, solver)
+        def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
+            full_state = simulate_fn(predictors, ts, covariates, y0, solver)
             return state_to_output(full_state)
 
         pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
@@ -147,7 +143,7 @@ def _build_make_step(
 
     @eqx.filter_jit
     def make_step(
-        predictor: Predictor, bp: BucketPayload, length_mask_fraction: Array
+        predictors: Any, bp: BucketPayload, length_mask_fraction: Array
     ) -> tuple[Array, Any]:
         T = bp.ts.shape[1]
         cutoff = jnp.maximum(
@@ -156,7 +152,7 @@ def _build_make_step(
         )
         sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
         bp_masked = bp._replace(mask=bp.mask & sched_mask)
-        diff_part, static_part = eqx.partition(predictor, trainable)
+        diff_part, static_part = eqx.partition(predictors, trainable)
         loss, grads = grad_fn(diff_part, static_part, bp_masked)
         return loss, grads
 
@@ -165,32 +161,30 @@ def _build_make_step(
 
 def _build_apply_update(
     optimizer: optax.GradientTransformation, trainable: Any
-) -> Callable[[Predictor, Any, Any], tuple[Predictor, Any]]:
+) -> Callable[[Any, Any, Any], tuple[Any, Any]]:
     @eqx.filter_jit
-    def apply_update(
-        predictor: Predictor, grads: Any, opt_state: Any
-    ) -> tuple[Predictor, Any]:
-        params = eqx.filter(predictor, trainable)
+    def apply_update(predictors: Any, grads: Any, opt_state: Any) -> tuple[Any, Any]:
+        params = eqx.filter(predictors, trainable)
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
-        new_predictor = eqx.apply_updates(predictor, updates)
-        return new_predictor, new_opt_state
+        new_predictors = eqx.apply_updates(predictors, updates)
+        return new_predictors, new_opt_state
 
     return apply_update
 
 
 def _accumulate_step(
-    predictor: Predictor,
+    predictors: Any,
     dataset: Dataset,
     make_step: Callable[..., tuple[Array, Any]],
     length_mask_fraction: Array,
     trainable: Any,
 ) -> tuple[Array, Any]:
-    zero_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictor, trainable))
+    zero_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, trainable))
     acc_grads = zero_grads
     total_loss = jnp.asarray(0.0)
     n_batches = 0
     for bp in dataset.bucket_payloads:
-        loss, grads = make_step(predictor, bp, length_mask_fraction)
+        loss, grads = make_step(predictors, bp, length_mask_fraction)
         acc_grads = jax.tree.map(jnp.add, acc_grads, grads)
         total_loss = total_loss + loss
         n_batches += 1
@@ -201,11 +195,11 @@ def _accumulate_step(
 
 
 def _shared_tournament(
-    predictor: Predictor,
+    predictors: Any,
     dataset: Dataset,
     *,
     make_step: Callable[..., tuple[Array, Any]],
-    apply_update: Callable[..., tuple[Predictor, Any]],
+    apply_update: Callable[..., tuple[Any, Any]],
     optimizer: optax.GradientTransformation,
     trainable: Any,
     tournament_attempts: int,
@@ -213,11 +207,14 @@ def _shared_tournament(
     tournament_lr: float,
     key: Array,
     length_mask_fraction: Array,
-) -> Predictor:
+) -> Any:
     for attempt in range(tournament_attempts):
         attempt_key = fold(key, f"tournament_attempt_{attempt}")
         try:
-            candidate: Predictor = reinitialize_with_key(predictor, attempt_key)  # type: ignore[assignment]
+            # Per-eqx.Module-leaf re-init across the predictors pytree (R-T8,
+            # ADR-0006): identical-shape sibling predictors get *different* fresh
+            # weights via the (β) split-by-traversal scheme.
+            candidate: Any = reinitialize_pytree_with_key(predictors, attempt_key)
             opt_state = optimizer.init(eqx.filter(candidate, trainable))
             opt_state.hyperparams["learning_rate"] = jnp.asarray(tournament_lr)
 
@@ -239,11 +236,11 @@ def _shared_tournament(
             continue
 
     warnings.warn(
-        "tournament: all attempts failed; falling back to initial predictor",
+        "tournament: all attempts failed; falling back to initial predictors",
         RuntimeWarning,
         stacklevel=2,
     )
-    return predictor
+    return predictors
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
@@ -257,7 +254,7 @@ def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
 
 
 def train_with_optax(
-    predictor: Predictor,
+    predictors: Any,
     dataset: Dataset,
     config: OptaxTrainingConfig,
     *,
@@ -266,15 +263,19 @@ def train_with_optax(
     trainable: Any = None,
     key: Array,
     ui: TrainingUI | None = None,
-) -> tuple[list[float], Predictor]:
-    """Train ``predictor`` against ``dataset`` with Optax (SPEC §5.7).
+) -> tuple[list[float], Any]:
+    """Train ``predictors`` against ``dataset`` with Optax (SPEC §5.7).
 
-    ``key`` is required keyword-only (R-R1); calling without it raises
-    ``TypeError`` before any compilation. ``trainable`` defaults to
-    :func:`hybridmodels.trainable.trainable_mask` (every inexact-array leaf).
+    ``predictors`` is a ``PyTree[eqx.Module]`` (R-A2 / ADR-0006); the canonical
+    convention is a tuple of ``BoundedPredictor`` leaves, but any pytree shape
+    is accepted (dict, NamedTuple, single Module — eqx.partition walks them
+    uniformly). ``key`` is required keyword-only (R-R1); calling without it
+    raises ``TypeError`` before any compilation. ``trainable`` defaults to
+    :func:`hybridmodels.trainable.trainable_mask` over the supplied pytree
+    (every inexact-array leaf trainable).
     """
     if trainable is None:
-        trainable = trainable_mask(predictor)
+        trainable = trainable_mask(predictors)
 
     bucket_payloads = dataset.bucket_payloads
     if not bucket_payloads:
@@ -301,7 +302,7 @@ def train_with_optax(
     for idx, bp in enumerate(bucket_payloads):
         bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
         ui_.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
-        warm_loss, _ = make_step(predictor, bp, full_mask)
+        warm_loss, _ = make_step(predictors, bp, full_mask)
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
         ui_.on_compile_done(bucket_idx=idx)
         ui_.on_compile_progress(bucket_idx=idx, total_buckets=len(bucket_payloads))
@@ -311,8 +312,8 @@ def train_with_optax(
 
     if config.tournament_attempts > 1 and config.tournament_steps > 0:
         tournament_root = fold(key, "tournament")
-        predictor = _shared_tournament(
-            predictor,
+        predictors = _shared_tournament(
+            predictors,
             dataset,
             make_step=make_step,
             apply_update=apply_update,
@@ -325,25 +326,21 @@ def train_with_optax(
             length_mask_fraction=full_mask,
         )
 
-    opt_state = optimizer.init(eqx.filter(predictor, trainable))
+    opt_state = optimizer.init(eqx.filter(predictors, trainable))
 
     losses_history: list[float] = []
     best_loss = float("inf")
-    best_predictor = predictor
+    best_predictors = predictors
     steps_since_improvement = 0
 
     for phase_idx, n_steps in enumerate(config.steps):
         if phase_idx > 0:
             if config.reset_optimiser_state[phase_idx]:
-                optimizer = _build_optimizer(
-                    config.optimizer[phase_idx], config.lr[phase_idx]
-                )
+                optimizer = _build_optimizer(config.optimizer[phase_idx], config.lr[phase_idx])
                 apply_update = _build_apply_update(optimizer, trainable)
-                opt_state = optimizer.init(eqx.filter(predictor, trainable))
+                opt_state = optimizer.init(eqx.filter(predictors, trainable))
             else:
-                opt_state.hyperparams["learning_rate"] = jnp.asarray(
-                    config.lr[phase_idx]
-                )
+                opt_state.hyperparams["learning_rate"] = jnp.asarray(config.lr[phase_idx])
 
         length_mask_fraction = jnp.asarray(config.length_schedule[phase_idx])
 
@@ -356,19 +353,19 @@ def train_with_optax(
 
         for step in range(int(n_steps)):
             avg_loss, avg_grads = _accumulate_step(
-                predictor, dataset, make_step, length_mask_fraction, trainable
+                predictors, dataset, make_step, length_mask_fraction, trainable
             )
             loss_value = float(avg_loss)
             losses_history.append(loss_value)
 
             if loss_value < best_loss:
                 best_loss = loss_value
-                best_predictor = predictor
+                best_predictors = predictors
                 steps_since_improvement = 0
             else:
                 steps_since_improvement += 1
 
-            predictor, opt_state = apply_update(predictor, avg_grads, opt_state)
+            predictors, opt_state = apply_update(predictors, avg_grads, opt_state)
 
             ui_.on_step_end(step_idx=step, phase_idx=phase_idx, loss=loss_value)
 
@@ -377,7 +374,7 @@ def train_with_optax(
 
         ui_.on_phase_end(phase_idx=phase_idx)
 
-    final_predictor = best_predictor if config.restore_best else predictor
+    final_predictors = best_predictors if config.restore_best else predictors
     final_loss = losses_history[-1] if losses_history else float("nan")
     ui_.on_run_end(final_loss=final_loss)
-    return losses_history, final_predictor
+    return losses_history, final_predictors

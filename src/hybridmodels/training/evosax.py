@@ -58,7 +58,6 @@ from scipy.stats import qmc
 
 from hybridmodels.data import BucketPayload, Dataset
 from hybridmodels.losses import LOSS_REGISTRY
-from hybridmodels.predictors.base import Predictor
 from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
@@ -152,9 +151,7 @@ def _resolve_loss_fn(
     if isinstance(loss, str):
         key = loss.lower().strip()
         if key not in LOSS_REGISTRY:
-            raise ValueError(
-                f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}")
         base = LOSS_REGISTRY[key]
     else:
         base = loss
@@ -162,9 +159,7 @@ def _resolve_loss_fn(
         return base
 
     def loss_fn(pred_obs: Array, bp: BucketPayload) -> Array:
-        return base(
-            pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights
-        )
+        return base(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
 
     return loss_fn
 
@@ -199,17 +194,13 @@ def _build_single_eval(
         params = unflatten(flat)
         predictor = eqx.combine(params, static_predictor)
 
-        def per_experiment(
-            ts: Array, covariates: dict[str, Array], y0: Array
-        ) -> Array:
+        def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
             full_state = simulate_fn(predictor, ts, covariates, y0, solver)
             return state_to_output(full_state)
 
         total = jnp.asarray(0.0)
         for bp in bucket_payloads:
-            pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
-                bp.ts, bp.covariates, bp.y0
-            )
+            pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(bp.ts, bp.covariates, bp.y0)
             total = total + loss_fn(pred_obs, bp)
         return total
 
@@ -315,7 +306,7 @@ def _select_ui(ui: EvosaxUI | None, verbose: bool) -> EvosaxUI:
 
 
 def train_with_evosax(
-    predictor: Predictor,
+    predictors: Any,
     dataset: Dataset,
     config: EvosaxTrainingConfig,
     *,
@@ -324,23 +315,26 @@ def train_with_evosax(
     trainable: Any = None,
     key: Array,
     ui: EvosaxUI | None = None,
-) -> tuple[list[float], Predictor]:
-    """Train ``predictor`` against ``dataset`` with an evolutionary strategy (SPEC §5.8).
+) -> tuple[list[float], Any]:
+    """Train ``predictors`` against ``dataset`` with an evolutionary strategy (SPEC §5.8).
 
-    Required keyword-only ``key`` (R-R1); calling without it raises
-    ``TypeError`` before any work happens. ``trainable`` defaults to
-    :func:`hybridmodels.trainable.trainable_mask` (every inexact-array leaf).
+    ``predictors`` is a ``PyTree[eqx.Module]`` (R-A2 / ADR-0006); the canonical
+    convention is a tuple of ``BoundedPredictor`` leaves. Required keyword-only
+    ``key`` (R-R1); calling without it raises ``TypeError`` before any work
+    happens. ``trainable`` defaults to :func:`hybridmodels.trainable.trainable_mask`
+    (every inexact-array leaf).
 
     Returns
     -------
     history : list[float]
         Best-loss-so-far per generation (length ``config.num_generations``).
-    best_predictor : Predictor
-        The reconstructed predictor whose flat-parameter vector minimised the
-        loss across every generation (R-E6).
+    best_predictors : Any
+        The reconstructed predictors pytree whose flat-parameter vector
+        minimised the loss across every generation (R-E6). Same container
+        shape as the input ``predictors``.
     """
     if trainable is None:
-        trainable = trainable_mask(predictor)
+        trainable = trainable_mask(predictors)
 
     bucket_payloads = dataset.bucket_payloads
     if not bucket_payloads:
@@ -349,7 +343,7 @@ def train_with_evosax(
     loss_fn = _resolve_loss_fn(config.loss, config.channel_idx, config.channel_weights)
     state_to_output = dataset.state_to_output
 
-    params_pytree, static_predictor = eqx.partition(predictor, trainable)
+    params_pytree, static_predictors = eqx.partition(predictors, trainable)
     flat0, unflatten = jfu.ravel_pytree(params_pytree)
     if flat0.size == 0:
         raise ValueError(
@@ -364,7 +358,7 @@ def train_with_evosax(
     )
 
     single_eval = _build_single_eval(
-        static_predictor=static_predictor,
+        static_predictor=static_predictors,
         unflatten=unflatten,
         bucket_payloads=bucket_payloads,
         simulate_fn=simulate_fn,
@@ -407,9 +401,7 @@ def train_with_evosax(
             # CMA-ES's first ask is skipped; the strategy's tell still consumes
             # the same population, so its mean and covariance update from the
             # prescribed sample rather than from a Gaussian draw.
-            population = _box_population(
-                flat=flat0, config=config, key=fold(key, "evosax_init")
-            )
+            population = _box_population(flat=flat0, config=config, key=fold(key, "evosax_init"))
         else:
             population, state = strategy.ask(ask_key, state, strat_params)
 
@@ -434,8 +426,6 @@ def train_with_evosax(
             mean_fitness=gen_mean_loss,
         )
 
-    best_predictor = cast(
-        Predictor, eqx.combine(unflatten(best_flat), static_predictor)
-    )
+    best_predictors = eqx.combine(unflatten(best_flat), static_predictors)
     ui_.on_run_end(best_fitness=best_loss)
-    return history, best_predictor
+    return history, best_predictors

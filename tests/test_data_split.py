@@ -43,7 +43,7 @@ class TestSplitDataset:
     def test_key_required(self):
         ds = _dataset(10)
         with pytest.raises(TypeError):
-            split_dataset(ds, train=0.8, val=0.1, test=0.1)  # type: ignore[call-arg]
+            split_dataset(ds, train=0.8, val=0.1, test=0.1)  # ty: ignore[missing-argument]
 
     def test_fractions_must_sum_to_one(self):
         ds = _dataset(10)
@@ -66,9 +66,7 @@ class TestSplitDataset:
 
     def test_partition_sizes_match_fractions(self):
         ds = _dataset(100)
-        train, val, test = split_dataset(
-            ds, train=0.8, val=0.1, test=0.1, key=jr.key(0)
-        )
+        train, val, test = split_dataset(ds, train=0.8, val=0.1, test=0.1, key=jr.key(0))
         n_train = len(train._experiments)
         n_val = len(val._experiments)
         n_test = len(test._experiments)
@@ -144,9 +142,7 @@ class TestSplitFloorPolicy:
     def test_n13_uneven_fractions_remainder_goes_to_test(self):
         # n=13, 0.7/0.2/0.1 -> floor(9.1)=9, floor(2.6)=2, remainder=2.
         ds = _dataset(13)
-        train, val, test = split_dataset(
-            ds, train=0.7, val=0.2, test=0.1, key=jr.key(0)
-        )
+        train, val, test = split_dataset(ds, train=0.7, val=0.2, test=0.1, key=jr.key(0))
         assert len(train._experiments) == 9
         assert len(val._experiments) == 2
         assert len(test._experiments) == 2
@@ -158,12 +154,7 @@ class TestSplitFloorPolicy:
         for n in (11, 13, 17, 23, 29):
             ds = _dataset(n)
             train, val, test = split_dataset(ds, key=jr.key(n))
-            assert (
-                len(train._experiments)
-                + len(val._experiments)
-                + len(test._experiments)
-                == n
-            )
+            assert len(train._experiments) + len(val._experiments) + len(test._experiments) == n
 
 
 class TestSplitWithoutExperiments:
@@ -199,9 +190,7 @@ class TestPositiveFractionMustNotRoundToZero:
     def test_explicit_zero_fraction_returns_empty_split(self):
         # The user explicitly asked for no validation/test data — that's allowed.
         ds = _dataset(10)
-        train, val, test = split_dataset(
-            ds, train=1.0, val=0.0, test=0.0, key=jr.key(0)
-        )
+        train, val, test = split_dataset(ds, train=1.0, val=0.0, test=0.0, key=jr.key(0))
         assert len(train._experiments) == 10
         assert val.bucket_payloads == ()
         assert test.bucket_payloads == ()

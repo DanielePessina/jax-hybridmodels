@@ -14,9 +14,14 @@ from hybridmodels.predictors import (
     BoundScaler,
     CovariateSelector,
     MLPPredictor,
-    NeuralNPolynomial,
     Predictor,
 )
+
+# NeuralNPolynomial is deferred to post-v1 (SPEC §2.3) — no longer in the
+# public ``hybridmodels.predictors`` surface. The implementation file is
+# kept in-tree for the eventual re-introduction; we import it directly
+# from the submodule so this test file continues to pin the contract.
+from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
 
 
 class _ConstantPredictor(Predictor):
@@ -187,8 +192,7 @@ class TestInitializedWithKey:
         leaves_new = _array_leaves(fresh)
         assert len(leaves_old) == len(leaves_new)
         assert any(
-            not jnp.array_equal(lo, ln)
-            for lo, ln in zip(leaves_old, leaves_new, strict=True)
+            not jnp.array_equal(lo, ln) for lo, ln in zip(leaves_old, leaves_new, strict=True)
         )
 
 
@@ -203,7 +207,11 @@ class TestZeroExponentNonNaN:
         assert jnp.all(jnp.isfinite(out))
 
 
-def test_top_level_export() -> None:
+def test_not_in_public_export() -> None:
+    """``NeuralNPolynomial`` is deferred to post-v1 (SPEC §2.3) and intentionally
+    absent from the top-level ``hybridmodels`` namespace. Pin that absence so
+    a future re-introduction is a deliberate edit, not an accidental leak.
+    """
     import hybridmodels
 
-    assert hybridmodels.NeuralNPolynomial is NeuralNPolynomial
+    assert not hasattr(hybridmodels, "NeuralNPolynomial")

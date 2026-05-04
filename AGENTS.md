@@ -33,7 +33,7 @@ This project is uv-managed. Do not invoke `pip`, `python`, or `pytest` directly.
 | Run one test file | `uv run pytest tests/test_data_buckets.py` |
 | Run an example | `uv run python examples/crystallisation/train_optax.py` |
 | Lint | `uv run ruff check src tests` |
-| Typecheck | `uv run mypy src` |
+| Typecheck | `uv run ty check src` |
 
 If you need a one-off Python invocation, use `uv run python -c '...'`.
 

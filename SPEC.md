@@ -22,11 +22,12 @@ This section is the contract. Implementation is judged against these line by lin
 
 #### Architecture
 
-- **R-A1** — There is **no `Model` wrapper class**. A "model" is the loose triple `(predictor, simulate_fn, solver_config)`. See [ADR-0001](./docs/adr/0001-no-model-wrapper-class.md).
-- **R-A2** — `simulate_fn` is a **pure user-written function** with the mandatory signature in §4.2. The framework supplies vmap, jit, and gradient flow; the user supplies physics. The function is passed into training/prediction routines.
+- **R-A1** — There is **no `Model` wrapper class**. A "model" is the loose triple `(predictors, simulate_fn, solver_config)` where `predictors` is a `PyTree[eqx.Module]`. See [ADR-0001](./docs/adr/0001-no-model-wrapper-class.md), [ADR-0006](./docs/adr/0006-predictors-as-pytree.md).
+- **R-A2** — `simulate_fn` is a **pure user-written function** with the mandatory signature in §4.2. Its first argument is **`predictors: PyTree[eqx.Module]`** — runtime-permissive (any pytree shape: tuple, list, dict, NamedTuple, single Module). The canonical convention shown in CONTEXT.md and `examples/crystallisation/train_kinetic.py` is **a tuple**, single-predictor case = `(BP,)`. The framework supplies vmap, jit, and gradient flow; the user supplies physics. The function is passed into training/prediction routines.
 - **R-A3** — Composition over inheritance everywhere. Predictors follow Equinox's abstract/final pattern. No method overriding.
 - **R-A4** — Bound-scaling is **decoupled from `Predictor`**. Implemented as composition (`BoundedPredictor` wraps a `Predictor` with input/output `BoundScaler`s).
-- **R-A5** — Predictors must round-trip through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` cleanly. This constraint applies *now*, regardless of when the save/load helpers are implemented.
+- **R-A5** — Predictors must round-trip through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` cleanly. The constraint extends to the full `predictors` pytree (eqx walks any pytree of leaves). This applies *now*, regardless of when the save/load helpers are implemented.
+- **R-A6** — There is no framework wrapper for "a pair of rate predictors". The source package's `RatePair` is dropped; multi-rate models compose by unpacking the `predictors` tuple at the top of the user's vector field.
 
 #### Data
 
@@ -45,10 +46,10 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-T2** — All phase-keyed config fields are **required tuples of equal length** (no scalar broadcast). Fields: `steps, lr, optimizer, reset_optimiser_state, length_schedule`.
 - **R-T3** — `length_schedule` (per-phase fraction in `(0, 1]`) is implemented as a **runtime mask cutoff** to avoid JIT recompile across phase boundaries.
 - **R-T4** — `reset_optimiser_state` per phase rebuilds the optimiser at that phase boundary. Default `(False,) * n_phases`.
-- **R-T5** — `make_step(predictor, opt_state, bucket_payload)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. Optimiser update is in a **separate** jitted `apply_update`.
+- **R-T5** — `make_step(predictors, opt_state, bucket_payload)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. Optimiser update is in a **separate** jitted `apply_update`.
 - **R-T6** — **Shared tournament only** ([ADR-0002](./docs/adr/0002-shared-tournament-only.md)). Implicitly enabled when `tournament_steps > 0 AND tournament_attempts > 1`. Reuses the main loop's compiled `make_step` and `apply_update`.
-- **R-T7** — Tournament failure handling: on per-attempt failure (diffrax error, non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original predictor with a `RuntimeWarning`.
-- **R-T8** — `Predictor.initialized_with_key(key)` is a documented protocol used by the tournament, with a default free-function implementation `reinitialize_with_key`.
+- **R-T7** — Tournament failure handling: on per-attempt failure (diffrax error, non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original `predictors` pytree with a `RuntimeWarning`.
+- **R-T8** — `Predictor.initialized_with_key(key)` is a documented per-leaf protocol used by the tournament; default free-function implementation is `reinitialize_with_key(predictor, key)` for one Module. Across the `predictors` pytree, the tournament splits the per-attempt key by **traversal order** (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently. Identical-shape sibling predictors get *different* re-init weights.
 
 #### Training (Evosax)
 
@@ -61,7 +62,7 @@ This section is the contract. Implementation is judged against these line by lin
 
 #### Trainability filter
 
-- **R-F1** — A **boolean PyTree mask** matching predictor structure is the canonical filter. Same shape consumed by both Optax (`eqx.filter_value_and_grad(..., filter_spec=mask)`) and Evosax (`eqx.partition(predictor, mask)`). See [ADR-0003](./docs/adr/0003-trainability-filter-as-pytree.md).
+- **R-F1** — A **boolean PyTree mask** matching the `predictors` pytree structure is the canonical filter. Same shape consumed by both Optax (`eqx.filter_value_and_grad(..., filter_spec=mask)`) and Evosax (`eqx.partition(predictors, mask)`). See [ADR-0003](./docs/adr/0003-trainability-filter-as-pytree.md).
 - **R-F2** — Default predicate: `eqx.is_inexact_array` (all float arrays trainable).
 - **R-F3** — Freezers are **free functions** that return a new mask: `freeze_paths`, `freeze_modules_of_type`, `freeze_where`. No `Predictor.set_trainable(...)` method.
 - **R-F4** — Adding new trainability behaviour = adding a function, never a class.
@@ -100,7 +101,7 @@ This section is the contract. Implementation is judged against these line by lin
 - Gaussian process regressors; entire Bayesian / variational-inference (`bayes/`) submodule.
 - System embeddings (`EmbeddedMLP*`, `SystemConditionedRatePredictor`).
 - Padded batched-experiments data interface.
-- Time-varying covariates; ODE-internal NN inputs (state-derived inputs to the predictor).
+- Time-varying *covariates* at the data layer (`Experiment.covariates` stays constant in time). State-derived and exogenous time-dependent *predictor inputs* are **not** out of scope — they're first-class via dict-mixing inside the user's vector field; see CONTEXT.md "Predictor inputs".
 - A `Model` wrapper class.
 - Temperature annealing of any kind.
 - `_build_filter_spec` per-class registry; bound-excursion penalty machinery; per-step bucket shuffling.
@@ -119,6 +120,7 @@ This section is the contract. Implementation is judged against these line by lin
 - `tanh` bound-scaling option.
 - Non-crystallisation example (pendulum) — **last deliverable** of v1, gating "domain-agnostic" claim.
 - Builder/loader registries for `state_to_output` / `simulate_fn` to enable Dataset round-trip.
+- **`NeuralNPolynomial` framework class.** The supersaturation-polynomial form (`sum_i c_i(T) · (S − 1)^p_i`) is implemented in user vector-field code in `examples/crystallisation/train_kinetic.py` (the `coeffs` come from a `BoundedPredictor`; the polynomial expansion is three lines in `vector_field`). Re-evaluate framework-class status when the form needs framework support beyond a user-side three-line expansion. Latent-vs-physical evaluation (Q4 of the 2026-05 grilling) is the design call to revisit.
 
 ---
 
@@ -152,10 +154,9 @@ jax-hybridmodels/                      (repo)
 │       ├── serialise.py                (save/load — last-shipped)
 │       ├── predictors/
 │       │   ├── __init__.py
-│       │   ├── base.py                 (Predictor, CovariateSelector, BoundScaler, BoundedPredictor, RatePair, reinitialize_with_key)
+│       │   ├── base.py                 (Predictor, CovariateSelector, BoundScaler, BoundedPredictor, reinitialize_with_key, reinitialize_pytree_with_key)
 │       │   ├── mlp.py                  (MLPPredictor)
-│       │   ├── kan.py                  (KANPredictor — uses jaxkan)
-│       │   └── neural_npoly.py         (NeuralNPolynomial)
+│       │   └── kan.py                  (KANPredictor — uses jaxkan)
 │       ├── training/
 │       │   ├── __init__.py
 │       │   ├── optax.py                (train_with_optax, OptaxTrainingConfig, _shared_tournament)
@@ -178,9 +179,9 @@ jax-hybridmodels/                      (repo)
 └── examples/
     ├── crystallisation/
     │   ├── loader_excel.py             (depends on openpyxl, isolated)
-    │   ├── ode.py                      (the simulate_fn — moments + concentration)
-    │   ├── kinetic_predictor.py        (CNT nucleation + power-law growth as BoundedPredictors)
-    │   ├── mlp_predictor.py            (MLP-based RatePair)
+    │   ├── ode.py                      (the simulate_fn — moments + concentration; supersaturation polynomial expansion lives here)
+    │   ├── kinetic_predictor.py        (CNT nucleation + power-law growth — predictors tuple of BoundedPredictors)
+    │   ├── mlp_predictor.py            (MLP-based predictors tuple — `(growth_BP, nucleation_BP)`)
     │   ├── train_optax.py              (end-to-end script — verification target)
     │   └── train_evosax_kinetic.py
     └── pendulum/                        (last deliverable — proves domain-agnostic)
@@ -209,7 +210,7 @@ dependencies = [
 
 [project.optional-dependencies]
 examples = ["openpyxl", "matplotlib"]
-dev = ["pytest", "pytest-cov", "ruff", "mypy"]
+dev = ["pytest", "pytest-cov", "ruff", "ty"]
 
 [build-system]
 requires = ["hatchling"]
@@ -229,7 +230,7 @@ The project is **uv-managed**. All commands use uv:
 | Run an example | `uv run python examples/crystallisation/train_optax.py` |
 | Run a one-off Python | `uv run python -c '...'` |
 | Lint | `uv run ruff check src tests` |
-| Typecheck | `uv run mypy src` |
+| Typecheck | `uv run ty check src` |
 
 **Do not** invoke `pip`, `python`, or `pytest` directly without `uv run` — the lockfile and environment are uv-owned.
 
@@ -260,16 +261,18 @@ from jax import Array
 from jaxtyping import Float
 
 def simulate_fn(
-    predictor,                                         # trainable eqx.Module (BoundedPredictor / RatePair / ...)
+    predictors,                                         # PyTree[eqx.Module] — convention: tuple of BoundedPredictor leaves
     ts: Float[Array, "T"],                              # observation times, this experiment
-    covariates: dict[str, Array],                       # named, constant-in-time scalars
+    covariates: dict[str, Array],                       # named, constant-in-time scalars (per-experiment data)
     y0: Float[Array, "S"],                              # full initial state
     solver,                                             # SolverConfig instance
 ) -> Float[Array, "T S"]:                                # full state at each ts
     ...
 ```
 
-The framework imposes **no** other constraints inside this function. The user calls `predictor(...)` to evaluate the trainable component, constructs a `diffrax.ODETerm`, and calls `diffrax.diffeqsolve` with `solver.solver`, `solver.rtol`, etc. Returning shape `[T, S]` is mandatory.
+The first argument is a **pytree of `eqx.Module` leaves** — runtime-permissive (any pytree shape works for autodiff). The fixed convention shown in CONTEXT.md and `examples/crystallisation/train_kinetic.py` is **a tuple**, with the single-predictor case written `(BP,)`. Examples may also use `dict[str, BoundedPredictor]` or a user-defined NamedTuple subclass; the framework never inspects the container type — only the leaves.
+
+Inside the function, the user typically unpacks the tuple (`growth, nucleation = predictors`) and constructs per-call **predictor input dicts** (covariates ∪ state-derived ∪ exogenous time-dependent values; see CONTEXT.md "Predictor inputs"). The framework imposes **no** other constraints. The user constructs a `diffrax.ODETerm` and calls `diffrax.diffeqsolve` with `solver.solver`, `solver.rtol`, etc. Returning shape `[T, S]` is mandatory.
 
 ### 4.3 Solver
 
@@ -293,11 +296,10 @@ from hybridmodels.predictors import (
     CovariateSelector,
     BoundScaler,
     BoundedPredictor,
-    RatePair,
     MLPPredictor,
     KANPredictor,
-    NeuralNPolynomial,
-    reinitialize_with_key,
+    reinitialize_with_key,           # per-Module re-init
+    reinitialize_pytree_with_key,    # per-leaf re-init across the predictors pytree (tournament uses this)
 )
 ```
 
@@ -306,10 +308,10 @@ from hybridmodels.predictors import (
 ```python
 from hybridmodels.trainable import (
     default_trainable,           # leaf -> bool predicate (eqx.is_inexact_array)
-    trainable_mask,              # (predictor, predicate=default_trainable) -> PyTree[bool]
-    freeze_paths,                # (mask, paths: tuple[str, ...]) -> mask
-    freeze_modules_of_type,      # (mask, predictor, cls) -> mask
-    freeze_where,                # (mask, predictor, fn) -> mask
+    trainable_mask,              # (predictors, predicate=default_trainable) -> PyTree[bool]
+    freeze_paths,                # (mask, paths: tuple[str | int, ...]) -> mask  (int for tuple positions, str for dict keys / attr names)
+    freeze_modules_of_type,      # (mask, predictors, cls) -> mask
+    freeze_where,                # (mask, predictors, fn) -> mask
 )
 ```
 
@@ -334,19 +336,19 @@ Function signatures:
 
 ```python
 def train_with_optax(
-    predictor,
+    predictors,                      # PyTree[eqx.Module] — convention: tuple
     dataset,
     config: OptaxTrainingConfig,
     *,
     simulate_fn,
-    trainable=None,                  # PyTree[bool] | None — None uses default_trainable
+    trainable=None,                  # PyTree[bool] | None — same shape as predictors; None uses default_trainable
     key,                             # required
     ui=None,                         # TrainingUI | None — None picks Rich/Silent from config.verbose
-) -> tuple[list[float], Predictor]:
+) -> tuple[list[float], "PyTree[eqx.Module]"]:
     ...
 
 def train_with_evosax(
-    predictor,
+    predictors,                      # PyTree[eqx.Module]
     dataset,
     config: EvosaxTrainingConfig,
     *,
@@ -354,7 +356,7 @@ def train_with_evosax(
     trainable=None,
     key,
     ui=None,
-) -> tuple[list[float], Predictor]:
+) -> tuple[list[float], "PyTree[eqx.Module]"]:
     ...
 ```
 
@@ -468,22 +470,24 @@ class BoundedPredictor(eqx.Module):
     in_scaler: BoundScaler
     inner: Predictor
     out_scaler: BoundScaler
-    def __call__(self, covariates: dict[str, Array]) -> Array: ...
-
-class RatePair(eqx.Module):
-    nucleation: BoundedPredictor
-    growth: BoundedPredictor
-    def __call__(self, covariates) -> Array: ...    # stacked [J, G]
+    def __call__(self, inputs: dict[str, Array]) -> Array: ...   # inputs may include state-derived / time-dependent keys
 
 def reinitialize_with_key(predictor, key) -> Predictor:
-    """Default: re-init every inexact-float leaf to a fresh value matching its shape."""
+    """Per-Module: re-init every inexact-float leaf to a fresh value matching its shape."""
+
+def reinitialize_pytree_with_key(predictors, key) -> "PyTree[eqx.Module]":
+    """Per-leaf across the predictors pytree.
+
+    Splits ``key`` by traversal order over ``eqx.Module`` leaves
+    (``jr.split(key, n_module_leaves)``) and applies ``reinitialize_with_key``
+    independently to each leaf. Identical-shape sibling predictors get
+    different re-init weights. R-T8 contract.
+    """
 ```
 
 **`mlp.py`** — `MLPPredictor` wrapping `eqx.nn.MLP`. Static fields: `width`, `depth`, `activation_name`. Trainable: weights/biases.
 
 **`kan.py`** — `KANPredictor` wrapping a `jaxkan` model. Static fields: grid size, layer widths, basis kind. Trainable: spline coefficients.
-
-**`neural_npoly.py`** — `NeuralNPolynomial(coeff_net: Predictor, exponents: tuple[float, ...])`. Composition only.
 
 ### 5.3 `solver.py`
 
@@ -527,10 +531,10 @@ LOSS_REGISTRY: dict[str, Callable] = {"mse": masked_mse, "mle": masked_mle, "bal
 def default_trainable(leaf) -> bool:
     return eqx.is_inexact_array(leaf)
 
-def trainable_mask(predictor, predicate=default_trainable) -> PyTree[bool]: ...
-def freeze_paths(mask, paths: tuple[str, ...]) -> PyTree[bool]: ...
-def freeze_modules_of_type(mask, predictor, cls) -> PyTree[bool]: ...
-def freeze_where(mask, predictor, fn: Callable[[eqx.Module], bool]) -> PyTree[bool]: ...
+def trainable_mask(predictors, predicate=default_trainable) -> PyTree[bool]: ...
+def freeze_paths(mask, paths: tuple[str | int, ...]) -> PyTree[bool]: ...   # int for tuple-position, str for dict-key / attr
+def freeze_modules_of_type(mask, predictors, cls) -> PyTree[bool]: ...
+def freeze_where(mask, predictors, fn: Callable[[eqx.Module], bool]) -> PyTree[bool]: ...
 ```
 
 ### 5.6 `rng.py`
@@ -561,7 +565,7 @@ class OptaxTrainingConfig:
     restore_best: bool = True
     verbose: bool = True
 
-def train_with_optax(predictor, dataset, config, *, simulate_fn, trainable=None, key, ui=None) -> tuple[list[float], Predictor]: ...
+def train_with_optax(predictors, dataset, config, *, simulate_fn, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
 ```
 
 ### 5.8 `training/evosax.py`
@@ -581,7 +585,7 @@ class EvosaxTrainingConfig:
     log_every: int = 1
     verbose: bool = True
 
-def train_with_evosax(predictor, dataset, config, *, simulate_fn, trainable=None, key, ui=None) -> tuple[list[float], Predictor]: ...
+def train_with_evosax(predictors, dataset, config, *, simulate_fn, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
 ```
 
 ### 5.9 `ui/`
@@ -592,19 +596,19 @@ def train_with_evosax(predictor, dataset, config, *, simulate_fn, trainable=None
 
 ```python
 @eqx.filter_jit
-def predict_bucket(predictor, bp, *, simulate_fn, state_to_output, solver) -> Float[Array, "N T D"]: ...
+def predict_bucket(predictors, bp, *, simulate_fn, state_to_output, solver) -> Float[Array, "N T D"]: ...
 
-def predict_dataset(predictor, dataset, *, simulate_fn, solver) -> tuple[Float[Array, "N T D"], ...]:
+def predict_dataset(predictors, dataset, *, simulate_fn, solver) -> tuple[Float[Array, "N T D"], ...]:
     """One stacked array per bucket; user concatenates if they want a flat list."""
 ```
 
 ### 5.11 `serialise.py`
 
 ```python
-def save_predictor(path: str | Path, predictor: Predictor) -> None: ...
-def load_predictor(path: str | Path, template: Predictor) -> Predictor: ...
-def save_run(directory: str | Path, *, predictor, solver, optax_config=None, evosax_config=None, loss_history=None, extras: dict | None = None) -> None: ...
-def load_run(directory: str | Path, *, predictor_template, optax_cls=None, evosax_cls=None) -> dict: ...
+def save_predictor(path: str | Path, predictors) -> None: ...
+def load_predictor(path: str | Path, template) -> "PyTree[eqx.Module]": ...
+def save_run(directory: str | Path, *, predictors, solver, optax_config=None, evosax_config=None, loss_history=None, extras: dict | None = None) -> None: ...
+def load_run(directory: str | Path, *, predictors_template, optax_cls=None, evosax_cls=None) -> dict: ...
 ```
 
 ---
@@ -617,7 +621,7 @@ Tests are the executable spec. Each module gets a test file written **before** t
 |---|---|
 | `test_data_buckets.py` | bucketing groups by `len(union_ts)`; mask True iff channel observed at that timestamp; `make_dataset` is idempotent; `split_dataset` produces non-overlapping splits with valid buckets in each |
 | `test_predictors_serialise.py` | **R-A5 enforcement.** Every concrete predictor round-trips through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` with bit-exact recovery |
-| `test_trainable_filters.py` | default mask trains all float arrays; `freeze_modules_of_type(mask, predictor, BoundScaler)` zeros the right leaves; mask shape matches predictor structure |
+| `test_trainable_filters.py` | default mask trains all float arrays; `freeze_modules_of_type(mask, predictors, BoundScaler)` zeros the right leaves; mask shape matches the `predictors` pytree structure (tuple/dict/Module) |
 | `test_solver.py` | `SolverConfig.to_dict`/`from_dict` round-trip via `SOLVER_REGISTRY` |
 | `test_loss_functions.py` | masked losses respect mask; channel_weights apply correctly; balanced variants normalise per-experiment |
 | `test_train_optax.py` | trains a synthetic harmonic-oscillator ODE to known parameters within tolerance; multi-phase config with `reset_optimiser_state=(False, True)` doesn't crash; tournament reduces variance across seeds |
@@ -637,10 +641,10 @@ The source package's verification artifacts live in `hybridcrystals/thesis_train
 |---|---|---|
 | `hybridcrystals/data/irregular.py::IrregularDataset/Batch/_prestack_buckets` | `src/hybridmodels/data.py` | Restructured: per-channel sparse Experiment, Dataset owns `state_to_output` |
 | `hybridcrystals/regressor_models.py::BoundedRegressor` | `src/hybridmodels/predictors/base.py::BoundedPredictor` | Composition, no inheritance hierarchy |
-| `hybridcrystals/regressor_models.py::RateRegressorPair` | `src/hybridmodels/predictors/base.py::RatePair` | Pure composition |
+| `hybridcrystals/regressor_models.py::RateRegressorPair` | (deleted) | Multi-rate models compose by unpacking the `predictors` tuple in user vector field. R-A6 |
 | `hybridcrystals/regressors/mlp.py` | `src/hybridmodels/predictors/mlp.py` | Strip embedding-related code |
 | `hybridcrystals/regressors/kan.py` + `regressor_kanx.py` | `src/hybridmodels/predictors/kan.py` | Use `jaxkan` |
-| `hybridcrystals/regressors/polynomial.py::NeuralNPolynomialRegressor` | `src/hybridmodels/predictors/neural_npoly.py` | Composition `(coeff_net, exponents)` |
+| `hybridcrystals/regressors/polynomial.py::NeuralNPolynomialRegressor` | (deferred to post-v1) | Polynomial form lives in `examples/crystallisation/train_kinetic.py` user vector field; framework class deferred per §2.3 |
 | `hybridcrystals/mechanistic.py::vector_ode + simulate_ode + ODESimulationOptions` | `examples/crystallisation/ode.py` + `src/hybridmodels/solver.py::SolverConfig` | The `vector_ode` is **example code**, not framework |
 | `hybridcrystals/losses.py::irregular_*_from_batch` | `src/hybridmodels/losses.py` | Adapt to `(pred_obs, bp)` signature |
 | `hybridcrystals/training/irregular.py` | `src/hybridmodels/training/optax.py` | Drop tournament modes "vmapped"/"serial"/"shared" → keep only shared semantics |
@@ -673,7 +677,6 @@ Implement in this order; each step ships green tests before the next begins.
 12. **`training/evosax.py`** — single-eval, population vmap, init modes.
 13. **`ui/evosax.py`** — `RichEvosaxUI`.
 14. **`predictors/kan.py`** — KAN via `jaxkan`. Serialisation test extended.
-15. **`predictors/neural_npoly.py`** — composition example.
-16. **`examples/crystallisation/`** — port one thesis script end-to-end. **This is the verification gate.**
-17. **`serialise.py`** — `save_predictor` / `load_predictor` / `save_run` / `load_run`. Last shipped per R-A5.
-18. **`examples/pendulum/`** — final deliverable proving domain-agnostic.
+15. **`examples/crystallisation/`** — port one thesis script end-to-end. **This is the verification gate.** The supersaturation-polynomial form is implemented as user vector-field code here (per §2.3), not as a framework class.
+16. **`serialise.py`** — `save_predictor` / `load_predictor` / `save_run` / `load_run`. Last shipped per R-A5.
+17. **`examples/pendulum/`** — final deliverable proving domain-agnostic.

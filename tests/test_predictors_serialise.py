@@ -18,10 +18,14 @@ from hybridmodels.predictors import (
     CovariateSelector,
     KANPredictor,
     MLPPredictor,
-    NeuralNPolynomial,
     Predictor,
-    RatePair,
 )
+
+# RatePair was deleted (R-A6); the predictors-tuple convention replaces it.
+# NeuralNPolynomial is deferred (SPEC §2.3) but its in-tree implementation is
+# kept exercised here via the submodule import so a future re-introduction
+# starts from a green test.
+from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
 
 
 class _LinearPredictor(Predictor):
@@ -51,8 +55,15 @@ def _bounded_predictor_with_key(key: Array) -> BoundedPredictor:
     )
 
 
-def _rate_pair() -> RatePair:
-    return RatePair(nucleation=_bounded_predictor(), growth=_bounded_predictor())
+def _predictors_tuple() -> tuple[BoundedPredictor, BoundedPredictor]:
+    """Replacement for the deleted ``_rate_pair`` factory (R-A6).
+
+    Mirrors the canonical predictors-tuple convention: two BoundedPredictors
+    composed by the user at the simulate_fn boundary, no framework wrapper.
+    The serialisation test treats the tuple as an arbitrary pytree — exactly
+    what eqx.tree_serialise_leaves expects.
+    """
+    return (_bounded_predictor(), _bounded_predictor())
 
 
 def _mlp_predictor() -> MLPPredictor:
@@ -98,11 +109,12 @@ def _neural_npoly_with_key(key: Array) -> NeuralNPolynomial:
     )
 
 
-def _different_template(predictor: eqx.Module) -> eqx.Module:
-    if isinstance(predictor, RatePair):
-        return RatePair(
-            nucleation=_bounded_predictor_with_key(jr.PRNGKey(1)),
-            growth=_bounded_predictor_with_key(jr.PRNGKey(2)),
+def _different_template(predictor: eqx.Module | tuple) -> eqx.Module | tuple:
+    if isinstance(predictor, tuple):
+        # Mirrors _predictors_tuple's shape with fresh keys.
+        return (
+            _bounded_predictor_with_key(jr.PRNGKey(1)),
+            _bounded_predictor_with_key(jr.PRNGKey(2)),
         )
     if isinstance(predictor, MLPPredictor):
         return MLPPredictor(
@@ -127,12 +139,12 @@ def _different_template(predictor: eqx.Module) -> eqx.Module:
     return _bounded_predictor_with_key(jr.PRNGKey(1))
 
 
-PREDICTOR_FACTORIES: list[tuple[str, Callable[[], eqx.Module]]] = [
+PREDICTOR_FACTORIES: list[tuple[str, Callable[[], eqx.Module | tuple]]] = [
     ("bounded_predictor", _bounded_predictor),
-    ("rate_pair", _rate_pair),
+    ("predictors_tuple", _predictors_tuple),  # replaces rate_pair (R-A6)
     ("mlp_predictor", _mlp_predictor),
     ("kan_predictor", _kan_predictor),
-    ("neural_npoly", _neural_npoly),
+    ("neural_npoly", _neural_npoly),  # deferred (SPEC §2.3) but tested via submodule import
 ]
 
 

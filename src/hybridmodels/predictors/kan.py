@@ -112,8 +112,8 @@ class KANPredictor(Predictor):
     seed: int = eqx.field(static=True)
     # ``nnx.State`` is generic over ``MutableMapping[K, V]``; the concrete
     # parameterisation is internal to flax-nnx and not part of our public
-    # surface, so the annotation here uses ``Any, Any`` to keep mypy quiet
-    # without leaking flax internals.
+    # surface, so the annotation here uses ``Any, Any`` to keep the type
+    # checker quiet without leaking flax internals.
     params: nnx.State[Any, Any]
 
     def __init__(
@@ -135,9 +135,7 @@ class KANPredictor(Predictor):
         float Param leaves are kept as the dynamic ``params`` field.
         """
         if basis not in _SUPPORTED_BASES:
-            raise ValueError(
-                f"Basis {basis!r} not supported. Available: {list(_SUPPORTED_BASES)}"
-            )
+            raise ValueError(f"Basis {basis!r} not supported. Available: {list(_SUPPORTED_BASES)}")
         self.in_size = int(in_size)
         self.out_size = int(out_size)
         self.hidden_widths = tuple(int(w) for w in hidden_widths)

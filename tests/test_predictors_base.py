@@ -13,7 +13,6 @@ from hybridmodels.predictors import (
     BoundScaler,
     CovariateSelector,
     Predictor,
-    RatePair,
     reinitialize_with_key,
 )
 
@@ -170,7 +169,15 @@ class TestBoundedPredictor:
         assert -50.0 <= float(out[1]) <= 50.0
 
 
-class TestRatePair:
+class TestPredictorsTuple:
+    """Multi-rate composition replaces ``RatePair`` (deleted per R-A6).
+
+    The convention is now a tuple of ``BoundedPredictor``s consumed at the
+    ``simulate_fn`` boundary; the user unpacks at the top of the vector
+    field. These tests pin the behaviour the deleted ``RatePair`` provided
+    via direct tuple operations on the framework's primitives.
+    """
+
     def _bp(self, out_low: float, out_high: float) -> BoundedPredictor:
         return BoundedPredictor(
             selector=CovariateSelector(keys=("T",)),
@@ -179,40 +186,32 @@ class TestRatePair:
             out_scaler=BoundScaler(bounds=((out_low, out_high),), transform="sigmoid"),
         )
 
-    def test_stacks_outputs(self):
-        pair = RatePair(nucleation=self._bp(10.0, 20.0), growth=self._bp(1.0, 2.0))
-        out = pair({"T": jnp.array(0.5)})
-        assert out.shape == (2,)
-        assert 10.0 <= float(out[0]) <= 20.0
-        assert 1.0 <= float(out[1]) <= 2.0
+    def test_two_predictor_tuple_yields_two_rates(self):
+        # Convention: predictors = (growth_BP, nucleation_BP). Each call
+        # produces one bounded scalar; user stacks at vector-field call site.
+        predictors = (self._bp(10.0, 20.0), self._bp(1.0, 2.0))
+        nucleation_bp, growth_bp = predictors
+        inputs = {"T": jnp.array(0.5)}
+        n_out = nucleation_bp(inputs)
+        g_out = growth_bp(inputs)
+        assert n_out.shape == (1,)
+        assert g_out.shape == (1,)
+        assert 10.0 <= float(n_out[0]) <= 20.0
+        assert 1.0 <= float(g_out[0]) <= 2.0
 
-    def test_preserves_leading_dimensions(self):
-        selector = CovariateSelector(keys=("T",))
-        in_scaler = BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid")
-        pair = RatePair(
-            nucleation=BoundedPredictor(
-                selector=selector,
-                in_scaler=in_scaler,
-                inner=_ConstantPredictor(value=jnp.zeros((3,))),
-                out_scaler=BoundScaler(
-                    bounds=((1.0, 1.0), (2.0, 2.0), (3.0, 3.0)),
-                    transform="sigmoid",
-                ),
-            ),
-            growth=BoundedPredictor(
-                selector=selector,
-                in_scaler=in_scaler,
-                inner=_ConstantPredictor(value=jnp.zeros((3,))),
-                out_scaler=BoundScaler(
-                    bounds=((4.0, 4.0), (5.0, 5.0), (6.0, 6.0)),
-                    transform="sigmoid",
-                ),
-            ),
-        )
-        out = pair({"T": jnp.array(0.5)})
-        assert out.shape == (3, 2)
-        assert jnp.array_equal(out[:, 0], jnp.array([1.0, 2.0, 3.0]))
-        assert jnp.array_equal(out[:, 1], jnp.array([4.0, 5.0, 6.0]))
+    def test_tuple_partition_walks_into_branches(self):
+        # eqx.partition + the default trainable mask should walk into both
+        # tuple branches uniformly — no special tuple-aware code needed.
+        import equinox as eqx
+
+        from hybridmodels.trainable import trainable_mask
+
+        predictors = (self._bp(10.0, 20.0), self._bp(1.0, 2.0))
+        mask = trainable_mask(predictors)
+        params, static = eqx.partition(predictors, mask)
+        # Both branches contribute params; static side preserves shape.
+        assert isinstance(params, tuple) and len(params) == 2
+        assert isinstance(static, tuple) and len(static) == 2
 
 
 class TestReinitializeWithKey:

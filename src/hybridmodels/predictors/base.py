@@ -1,9 +1,19 @@
 """Predictor primitives and composition wrappers.
 
-Per SPEC §5.2 and ADR-0001/ADR-0003: `Predictor` is an abstract marker; concrete
-predictors are final per Equinox's pattern. Bound-scaling, covariate selection,
-and rate pairing are decoupled into composition wrappers (`BoundedPredictor`,
-`RatePair`) rather than baked into a class hierarchy.
+Per SPEC §5.2 and ADR-0001 / ADR-0003 / ADR-0006: `Predictor` is an abstract
+marker; concrete predictors are final per Equinox's pattern. Bound-scaling
+and covariate selection are decoupled into composition wrappers
+(`BoundedPredictor`) rather than baked into a class hierarchy. Multi-rate
+models (e.g. nucleation + growth) compose as a tuple of predictors at the
+``simulate_fn`` boundary — there is no framework `RatePair` wrapper (R-A6).
+
+The pytree contract for the trainable component (R-A2) lives at the
+``simulate_fn`` boundary: the first argument is a `PyTree[eqx.Module]` —
+runtime-permissive, with ``tuple`` as the canonical convention shown in
+examples. ``reinitialize_pytree_with_key`` (R-T8) is the per-leaf
+re-initialiser used by the tournament; it splits the per-attempt key by
+traversal order across `eqx.Module` leaves so identical-shape sibling
+predictors get *different* re-init weights.
 """
 
 # ruff: noqa: F722
@@ -17,7 +27,17 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
-from jaxtyping import Array, Float
+from jaxtyping import Array
+
+# Public re-export surface from this module.
+__all__ = (
+    "Predictor",
+    "CovariateSelector",
+    "BoundScaler",
+    "BoundedPredictor",
+    "reinitialize_with_key",
+    "reinitialize_pytree_with_key",
+)
 
 _SUPPORTED_TRANSFORMS: tuple[str, ...] = ("sigmoid",)
 
@@ -26,15 +46,18 @@ class Predictor(eqx.Module):
     """Abstract marker for trainable Array -> Array modules.
 
     Concrete subclasses (MLPPredictor, KANPredictor, ...) implement `__call__`
-    with signature ``Float[Array, "in"] -> Float[Array, "out"]``. Composition
-    wrappers (`BoundedPredictor`, `RatePair`) hold a `Predictor` as a field and
-    expose richer call signatures without subclassing it.
+    with signature ``Float[Array, "in"] -> Float[Array, "out"]``. The
+    composition wrapper (`BoundedPredictor`) holds a `Predictor` as a field
+    and exposes a richer call signature (`dict[str, Array] -> Array`) without
+    subclassing it.
+
+    Multi-rate models do not need a framework wrapper (no `RatePair`):
+    multiple predictors compose as a tuple at the ``simulate_fn`` boundary
+    and the user unpacks them at the top of the vector field. See R-A6.
     """
 
     def __call__(self, x: Array) -> Array:
-        raise NotImplementedError(
-            "Predictor is abstract; concrete subclasses implement __call__"
-        )
+        raise NotImplementedError("Predictor is abstract; concrete subclasses implement __call__")
 
 
 class CovariateSelector(eqx.Module):
@@ -139,14 +162,19 @@ class BoundedPredictor(eqx.Module):
     """Composition wrapper: ``selector -> in_scaler.to_latent -> inner -> out_scaler.from_latent``.
 
     The full physical-units forward pass for a covariate-conditioned predictor
-    with bounded inputs and outputs. Inputs are pulled from a covariates dict
-    by name, mapped to the inner network's latent input space, run through
-    the trainable ``Predictor``, then mapped back into the physical output
-    box. ``inner`` sees no bound information and never has to clamp itself.
+    with bounded inputs and outputs. Inputs are pulled from a *predictor input
+    dict* by name (which the user composes inside the vector field — covariates
+    plus state-derived plus exogenous time-dependent values; see CONTEXT.md
+    "Predictor inputs"), mapped to the inner network's latent input space,
+    run through the trainable ``Predictor``, then mapped back into the physical
+    output box. ``inner`` sees no bound information and never has to clamp
+    itself.
 
     Calling contract
     ----------------
-    Input  : ``dict[str, Array]`` — covariates dict.
+    Input  : ``dict[str, Array]`` — predictor input dict (any keyed scalars,
+             not necessarily covariates; provenance is intentionally invisible
+             to this wrapper).
     Output : ``Float[Array, "out"]`` — physical-units prediction; ``out`` is
              determined by ``out_scaler.bounds`` (and the ``inner`` network's
              configured output dimension).
@@ -157,54 +185,25 @@ class BoundedPredictor(eqx.Module):
     inner: Predictor
     out_scaler: BoundScaler
 
-    def __call__(self, covariates: dict[str, Array]) -> Array:
-        x = self.selector(covariates)
+    def __call__(self, inputs: dict[str, Array]) -> Array:
+        x = self.selector(inputs)
         z_in = self.in_scaler.to_latent(x)
         z_out = self.inner(z_in)
         return self.out_scaler.from_latent(z_out)
 
 
-class RatePair(eqx.Module):
-    """Stack two ``BoundedPredictor``s' outputs into a ``[2]`` array.
-
-    Convenient when one ODE consumes two related rates from a single
-    covariate dict (a ``(rate_a, rate_b)`` pair) — a shape we promote here
-    but not a framework concept (R-A1: no ``Model`` wrapper). Other
-    arrangements compose their own pair/tuple structures the same way.
-
-    The squeeze on each branch is defensive: ``inner`` networks are typically
-    configured with ``out_size=1`` (e.g. ``MLPPredictor(out_size=1)`` returns
-    ``[1]``), and ``stack`` along the last axis would otherwise produce ``[2, 1]``
-    instead of ``[2]``. Removing the trailing singleton makes the output
-    shape ``[2]`` regardless of whether the branch returned a scalar or a
-    length-1 vector.
-
-    Calling contract
-    ----------------
-    Input  : ``dict[str, Array]``.
-    Output : ``Float[Array, "2"]`` — ``[nucleation, growth]``.
-    """
-
-    nucleation: BoundedPredictor
-    growth: BoundedPredictor
-
-    def __call__(self, covariates: dict[str, Array]) -> Float[Array, " 2"]:
-        n = self.nucleation(covariates)
-        g = self.growth(covariates)
-        if n.ndim > 0 and n.shape[-1] == 1:
-            n = jnp.squeeze(n, axis=-1)
-        if g.ndim > 0 and g.shape[-1] == 1:
-            g = jnp.squeeze(g, axis=-1)
-        return jnp.stack((n, g), axis=-1)
-
-
 def reinitialize_with_key(predictor: eqx.Module, key: Array) -> eqx.Module:
     """Return a fresh copy of `predictor` with inexact-float leaves re-initialised.
 
-    If the predictor implements the `initialized_with_key` protocol (R-T8), it is
-    delegated to. Otherwise every inexact-array leaf in the PyTree is replaced
-    with a standard-normal sample of matching shape and dtype; non-inexact
-    leaves and static fields are left untouched.
+    Single-Module helper. If `predictor` implements the `initialized_with_key`
+    protocol (R-T8), it is delegated to. Otherwise every inexact-array leaf
+    in the PyTree is replaced with a standard-normal sample of matching shape
+    and dtype; non-inexact leaves and static fields are left untouched.
+
+    For re-initialising a *pytree* of predictors (the convention at the
+    `simulate_fn` boundary — typically a tuple of `BoundedPredictor`s), use
+    :func:`reinitialize_pytree_with_key` so each `eqx.Module` leaf gets its
+    own independently-derived key.
     """
     if hasattr(predictor, "initialized_with_key"):
         return cast(eqx.Module, predictor.initialized_with_key(key))
@@ -219,3 +218,43 @@ def reinitialize_with_key(predictor: eqx.Module, key: Array) -> eqx.Module:
         leaf = leaves[idx]
         new_leaves[idx] = jr.normal(k, leaf.shape, dtype=leaf.dtype)
     return cast(eqx.Module, jtu.tree_unflatten(treedef, new_leaves))
+
+
+def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
+    """Per-`eqx.Module`-leaf re-init across a `predictors` pytree (R-T8).
+
+    Used by the tournament loop to escape bad initial weights. Splits ``key``
+    by **traversal order** (``jr.split(key, n_module_leaves)``) into one key
+    per `eqx.Module` leaf, then calls :func:`reinitialize_with_key` on each
+    leaf with its dedicated subkey. Identical-shape sibling predictors get
+    *different* re-init weights — this is the (β) split-by-traversal design
+    locked during the 2026-05-04 grilling.
+
+    Accepts any pytree shape: the canonical ``tuple[BoundedPredictor, ...]``
+    convention, a bare `eqx.Module` (one-leaf pytree, equivalent to calling
+    `reinitialize_with_key` directly), `dict[str, ...]`, NamedTuple subclasses,
+    nested combinations — anything ``jax.tree_util`` can walk.
+
+    Returns a structurally-identical pytree with fresh weights on every
+    `eqx.Module` leaf.
+    """
+
+    def _is_module(node: Any) -> bool:
+        return isinstance(node, eqx.Module)
+
+    module_leaves = [
+        leaf for leaf in jtu.tree_leaves(predictors, is_leaf=_is_module) if _is_module(leaf)
+    ]
+    n_modules = len(module_leaves)
+    if n_modules == 0:
+        return predictors
+
+    subkeys = jr.split(key, n_modules)
+    keys_iter = iter(subkeys)
+
+    def _per_leaf(node: Any) -> Any:
+        if _is_module(node):
+            return reinitialize_with_key(node, next(keys_iter))
+        return node
+
+    return jtu.tree_map(_per_leaf, predictors, is_leaf=_is_module)

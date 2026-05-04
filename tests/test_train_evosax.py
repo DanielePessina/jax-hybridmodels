@@ -72,9 +72,7 @@ class _QuadraticPredictor(Predictor):
 def _quadratic_dataset() -> Dataset:
     """One bucket containing one experiment, T=1, D=4, mask all True."""
     ts = jnp.array([0.0], dtype=jnp.float32)
-    channels = {
-        f"c{i}": ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(N_DIM)
-    }
+    channels = {f"c{i}": ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(N_DIM)}
     exp = make_experiment(
         covariates={"id": 0.0},
         channels=channels,
@@ -164,9 +162,7 @@ def test_best_ever_tracking() -> None:
     # The host-side best (R-E6) must be no worse than the final generation's
     # population mean — otherwise we returned a regression rather than a record.
     final_mean_fitness = next(
-        kw["mean_fitness"]
-        for name, kw in reversed(ui.events)
-        if name == "on_generation_end"
+        kw["mean_fitness"] for name, kw in reversed(ui.events) if name == "on_generation_end"
     )
     returned_loss = _eval_loss(trained, ds)
     assert returned_loss <= final_mean_fitness + 1e-7
@@ -211,9 +207,7 @@ def test_flatten_unflatten_round_trip() -> None:
     # R-E4: the partition + ravel_pytree contract must invert exactly so that
     # CMA-ES proposals in flat space map back to a structurally-identical
     # predictor pytree.
-    inner = MLPPredictor(
-        in_size=2, out_size=1, width_size=8, depth=2, key=jr.PRNGKey(0)
-    )
+    inner = MLPPredictor(in_size=2, out_size=1, width_size=8, depth=2, key=jr.PRNGKey(0))
     pred = BoundedPredictor(
         selector=CovariateSelector(keys=("a", "b")),
         in_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0))),
@@ -245,7 +239,7 @@ def test_missing_key_raises() -> None:
         verbose=False,
     )
     with pytest.raises(TypeError):
-        train_with_evosax(  # type: ignore[call-arg]
+        train_with_evosax(  # ty: ignore[missing-argument]
             pred,
             ds,
             config,

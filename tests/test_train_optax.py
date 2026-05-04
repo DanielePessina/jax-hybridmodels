@@ -229,7 +229,7 @@ def test_missing_key_raises():
         verbose=False,
     )
     with pytest.raises(TypeError):
-        train_with_optax(  # type: ignore[call-arg]
+        train_with_optax(  # ty: ignore[missing-argument]
             pred,
             ds,
             config,

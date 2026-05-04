@@ -5,7 +5,7 @@ A JAX/Equinox library for **hybrid models** — composing trainable function app
 ## Language
 
 **Predictor**:
-A narrow trainable `eqx.Module` whose `__call__` is `Array → Array`. Knows nothing about covariate names, bounds, or experiments. Concrete examples: `MLPPredictor`, `KANPredictor`, `NeuralNPolynomial` (the last composes another `Predictor` for coefficients).
+A narrow trainable `eqx.Module` whose `__call__` is `Array → Array`. Knows nothing about covariate names, bounds, or experiments. Concrete examples in v1: `MLPPredictor`, `KANPredictor`. (`NeuralNPolynomial` is deferred to post-v1; its supersaturation-polynomial form is an example pattern in user code, not a framework class — see "Out of scope".)
 _Avoid_: Regressor (the previous package's overloaded term — bundled bound-scaling, rate-pair semantics, and trainable weights together).
 
 **CovariateSelector**:
@@ -17,24 +17,23 @@ An `eqx.Module` providing bidirectional sigmoid scaling between physical `[low, 
 **BoundedPredictor**:
 A composition wrapper: `selector → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). **No penalty term in v1** — the bound-excursion penalty machinery from the source package was never properly wired and is dropped.
 
-**RatePair**:
-Composition of two `BoundedPredictor`s (`nucleation`, `growth`). Stacks their outputs. Used by the crystallisation example; not built into the framework.
-
 **simulate_fn**:
-A pure user-written function with a mandatory signature that, for one experiment, integrates the dynamics and returns the **full state trajectory**. The framework owns vmapping, jitting, and gradient flow; the user owns physics.
+A pure user-written function with a mandatory signature that, for one experiment, integrates the dynamics and returns the **full state trajectory**. The framework owns vmapping, jitting, and gradient flow; the user owns physics. Inside the user's vector field, multi-rate models compose their predictors directly (`growth, nucleation = predictors`) — there is no framework wrapper for "the pair of rate predictors"; the source package's `RatePair` is dropped.
 _Avoid_: "ODE function" (ambiguous — could mean the vector field), "solve" (overlap with diffrax).
 
 Mandatory signature:
 ```python
 def simulate_fn(
-    predictor,                    # trainable eqx.Module
-    ts: Float[Array, "T"],         # observation times for this experiment
-    covariates: dict[str, Array],  # named, constant-in-time scalars
-    y0: Float[Array, "S"],         # full initial state
-    solver: SolverConfig,          # static; diffrax bits
-) -> Float[Array, "T S"]:           # full state at each ts
+    predictors,                       # PyTree[eqx.Module] — convention: tuple of BoundedPredictor leaves
+    ts: Float[Array, "T"],            # observation times for this experiment
+    covariates: dict[str, Array],     # named, constant-in-time scalars (per-experiment data)
+    y0: Float[Array, "S"],            # full initial state
+    solver: SolverConfig,             # static; diffrax bits
+) -> Float[Array, "T S"]:              # full state at each ts
     ...
 ```
+
+The first argument is a **pytree of `eqx.Module` leaves** — runtime-permissive (any pytree works for autodiff: tuple, list, dict, NamedTuple, custom Module), with a fixed convention: **always wrap in a tuple**, single-predictor case = `(BP,)`. This gives examples a uniform shape and lets `eqx.partition` / `eqx.filter_value_and_grad` / `eqx.tree_serialise_leaves` walk the leaves uniformly. Dict and NamedTuple are valid alternatives demonstrated in secondary examples; the framework never inspects the container type.
 
 **state_to_output**:
 A pure callable mapping a full-state trajectory `[T, S]` to the observed output channels `[T, D]` (e.g. crystallisation: `[mu0..mu4, conc] → [conc, d43]`). Applied externally to `simulate_fn`'s output, before loss computation.
@@ -46,7 +45,24 @@ A user-supplied hook invoked at **data-import time** to construct the per-experi
 A frozen `eqx.Module` whose fields are all `eqx.field(static=True)` — diffrax solver instance, rtol, atol (scalar or per-state tuple), max_steps, dt0. Static so it doesn't enter the pytree leaves. JSON-serialisable via a small solver class-name registry.
 
 **Covariates**:
-Named scalars that are **constant in time** for an experiment (e.g. `temperature_C`, `loading`). Always passed as `dict[str, Array]` — no canonical-order array. Time-varying covariates are out of scope for v1.
+Named scalars that are **constant in time** for an experiment (e.g. `temperature_C`, `loading`, `c_sat`). Stored on `Experiment.covariates` and passed into `simulate_fn` unchanged. Always passed as `dict[str, Array]` — no canonical-order array. Time-varying *covariates* are out of scope for v1; time-varying *predictor inputs* are not (see "Predictor inputs" below).
+
+**Predictor inputs**:
+The dict that the user's vector field actually feeds into a `BoundedPredictor` at call time. A *superset* of `covariates` — the user constructs it inside the vector field by mixing constant covariates with time-varying values:
+- **state-derived** values (`y[CONC_IDX]`, supersaturation `S = c / c_sat`, etc.),
+- **exogenous time-dependent** values (e.g. a temperature ramp `T_now = T0 + r·t`).
+
+```python
+def vector_field(t, y, args):
+    predictors, covariates = args
+    inputs = {
+        "temperature_C": covariates["temperature_C"],     # constant covariate
+        "supersaturation": y[CONC_IDX] / covariates["c_sat"],  # state-derived, time-varying
+    }
+    G = predictors[0](inputs)
+```
+
+Key collision is intentional: the dict can override a covariate's name with a time-varying value (e.g. `T(t)`). The `CovariateSelector` keys, the `BoundScaler` bounds, and the dict mixing are *unaware* of provenance — every key is treated as a named scalar regardless of whether it came from `covariates`, `y`, or `t`. This collapses "state-derived inputs to the predictor", "exogenous time-dependent inputs", and "covariate inputs" into one mechanism.
 
 **Bucket**:
 A group of experiments sharing the same `len(union_ts)`. Within a bucket, individual experiments may have different `ts` values and different masks (mask is a per-experiment array). Not promoted to a class — `BucketPayload` is just a `NamedTuple` of stacked `[N, T, ...]` arrays produced once by `make_dataset`.
@@ -68,19 +84,19 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 
 ## Relationships
 
-- A **simulate_fn** consumes a **Predictor**, a **SolverConfig**, and one **Experiment**'s `(ts, covariates, y0)`; returns a full state trajectory.
-- **state_to_output** is composed externally: `loss(state_to_output(simulate_fn(predictor, ...)), y_observed, mask)`.
+- A **simulate_fn** consumes a **predictors pytree** (typically a tuple of `BoundedPredictor`s), a **SolverConfig**, and one **Experiment**'s `(ts, covariates, y0)`; returns a full state trajectory.
+- **state_to_output** is composed externally: `loss(state_to_output(simulate_fn(predictors, ...)), y_observed, mask)`.
 - A **Bucket** holds N **Experiments** with identical `len(ts)`; the training loop vmaps `simulate_fn` over the bucket.
-- The **Predictor** is the *only* component that is binary-serialised (eqx.tree_serialise_leaves). **simulate_fn** and **state_to_output** are code (re-imported); **SolverConfig** is JSON.
+- The **predictors pytree** is the *only* component that is binary-serialised (eqx.tree_serialise_leaves walks any pytree of leaves). **simulate_fn** and **state_to_output** are code (re-imported); **SolverConfig** is JSON.
 
 ## Optax training
 
 - **Phases** are tuples; **all phase-keyed fields are required tuples of equal length** (no scalar broadcast). Fields: `steps, lr, optimizer, reset_optimiser_state, length_schedule`.
 - **`length_schedule`** is a per-phase fraction in `(0, 1]`, applied as a **runtime mask cutoff** — no JIT recompile across phase boundaries (default `(1.0,)` for one phase = no scheduling).
 - **`reset_optimiser_state`** is per-phase (tuple of bool); a True entry rebuilds the optimiser at that phase boundary (used when switching optimiser type or when length-schedule changes invalidate momentum).
-- **`make_step(predictor, opt_state, bucket_payload)` is jitted** and returns `(loss, grads)`. Optimiser update happens in a separate jitted `apply_update(predictor, accumulated_grads, opt_state)` *after* the Python for-loop over buckets has accumulated.
-- **Shared tournament only.** Enabled implicitly when `tournament_steps > 0 AND tournament_attempts > 1`. Serial candidate evaluation that *reuses the main loop's compiled `make_step` and `apply_update`* (no extra JIT compile cost). On per-attempt failure (diffrax error / non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original predictor with a `RuntimeWarning`.
-- **`Predictor.initialized_with_key(key)`** is a documented protocol used by the tournament. Default implementation is a free function `reinitialize_with_key(predictor, key)` that re-inits inexact-float leaves only.
+- **`make_step(predictors, opt_state, bucket_payload)` is jitted** and returns `(loss, grads)`. Optimiser update happens in a separate jitted `apply_update(predictors, accumulated_grads, opt_state)` *after* the Python for-loop over buckets has accumulated.
+- **Shared tournament only.** Enabled implicitly when `tournament_steps > 0 AND tournament_attempts > 1`. Serial candidate evaluation that *reuses the main loop's compiled `make_step` and `apply_update`* (no extra JIT compile cost). On per-attempt failure (diffrax error / non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original predictors with a `RuntimeWarning`.
+- **`Predictor.initialized_with_key(key)`** is a documented per-leaf protocol used by the tournament. Default implementation is a free function `reinitialize_with_key(predictor, key)` that re-inits inexact-float leaves only. Across the predictors pytree, the tournament splits the attempt key by traversal order (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently — identical-shape sibling predictors get *different* re-init weights, not the same ones.
 
 ## Loss interface
 
@@ -99,11 +115,11 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 
 ## Serialisation
 
-- **Hard design constraint** (applies *now* to every Predictor we design): every `Predictor` / `BoundedPredictor` must round-trip through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` with zero JAX/Equinox conflicts. Concretely: all dynamic leaves are JAX arrays; all static fields are JSON-encodable primitives or tuples thereof; no closures in non-static positions.
+- **Hard design constraint** (applies *now* to every Predictor we design): every `Predictor` / `BoundedPredictor` must round-trip through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` with zero JAX/Equinox conflicts. The constraint extends naturally from a single Predictor to the full `predictors` pytree — `eqx.tree_serialise_leaves` walks any pytree of leaves. Concretely: all dynamic leaves are JAX arrays; all static fields are JSON-encodable primitives or tuples thereof; no closures in non-static positions.
 - **Implementation is the last shipped feature.** The save/load helpers (`save_predictor`, `load_predictor`, optional `save_run`/`load_run`) are written after the rest of the framework is verified.
-- **Save format (when implemented)**: a directory containing `predictor.eqx` + `metadata.json` (timestamp, version, predictor class path, simulate_fn module hint, user `extras`).
+- **Save format (when implemented)**: a directory containing `predictors.eqx` + `metadata.json` (timestamp, version, container shape hint, simulate_fn module hint, user `extras`).
 - **Not serialised by the framework**: `simulate_fn` and `state_to_output` (pure functions, re-imported), `Dataset`, the trainable mask (rebuild from user code), training configs (user owns).
-- **No builder registry in v1.** Loading requires a user-supplied `template` predictor, per `eqx.tree_deserialise_leaves`. Builder registry is deferred until friction proves real.
+- **No builder registry in v1.** Loading requires a user-supplied `template` predictors pytree (same container shape and Module types), per `eqx.tree_deserialise_leaves`. Builder registry is deferred until friction proves real.
 
 ## RNG discipline
 
@@ -117,7 +133,7 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 - **Separate top-level entry point** from Optax — no polishing field on `OptaxTrainingConfig`. User composes by calling them in sequence with the same trainable mask.
 - **Targeted at small-parameter (kinetic) predictors** (~4–10 dims). Not optimised for NN-sized search in v1.
 - **Single-eval JIT boundary**: `population_eval = eqx.filter_jit(jax.vmap(single_eval))`. `single_eval` closes over `static`, `dataset`, `simulate_fn`, `state_to_output`, `solver`, `loss_fn`; the bucket dispatch loop unrolls inside the trace.
-- **Flatten contract**: `eqx.partition(predictor, trainable_mask) → (params, static); jax.flatten_util.ravel_pytree(params) → (flat, unflatten)`. `static` is closed over (callables can't pass through `vmap`).
+- **Flatten contract**: `eqx.partition(predictors, trainable_mask) → (params, static); jax.flatten_util.ravel_pytree(params) → (flat, unflatten)`. The pytree shape of `predictors` is irrelevant here — `eqx.partition` walks leaves uniformly. `static` is closed over (callables can't pass through `vmap`).
 - **Init modes**: `"warm"` (mean = current params, default — covers user-supplied kinetic init and midpoint-init via instantiating predictor at zero latent), `"uniform_box"` (latent ±extent uniform), `"lhs_box"` (Latin Hypercube via `scipy.qmc`, host-side).
 - **Bounds during search**: not enforced. CMA_ES wanders latent space; `BoundedPredictor`'s sigmoid keeps physical outputs in range.
 - **Best-ever tracked host-side** (`jnp.argmin(fitnesses)` per generation), not via strategy-specific best-member fields.
@@ -125,14 +141,14 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 
 ## JIT boundaries (training and prediction kept separate)
 
-- `loss_and_grad(predictor, bucket_payload)` — **jitted, one trace per bucket shape**. Vmaps `simulate_fn` across the bucket; applies `state_to_output`; computes masked loss; returns `(loss, grads)`.
-- `apply_update(predictor, accumulated_grads, opt_state)` — jitted; one shape (no bucket dependence).
-- `predict_bucket(predictor, bucket_payload)` — jitted **separately** from training, one trace per bucket shape. No backward pass.
+- `loss_and_grad(predictors, bucket_payload)` — **jitted, one trace per bucket shape**. Vmaps `simulate_fn` across the bucket; applies `state_to_output`; computes masked loss; returns `(loss, grads)`.
+- `apply_update(predictors, accumulated_grads, opt_state)` — jitted; one shape (no bucket dependence).
+- `predict_bucket(predictors, bucket_payload)` — jitted **separately** from training, one trace per bucket shape. No backward pass.
 - The Python `for` loop over buckets is the dispatch driver, *not* part of the jitted region.
 
 ## Trainability filter
 
-- A **trainable mask** is a PyTree of booleans matching the predictor's tree structure. Same shape used for both Optax (passed to `eqx.filter_value_and_grad(..., filter_spec=mask)`) and Evosax (passed to `eqx.partition(predictor, mask)` to derive the flat parameter vector).
+- A **trainable mask** is a PyTree of booleans matching the `predictors` pytree structure (any container — tuple, dict, NamedTuple, single Module). Same shape used for both Optax (passed to `eqx.filter_value_and_grad(..., filter_spec=mask)`) and Evosax (passed to `eqx.partition(predictors, mask)` to derive the flat parameter vector).
 - Default predicate: `eqx.is_inexact_array` — every float array is trainable; ints/bools/static fields stay frozen.
 - **Freezers are free functions** that return a new mask: `freeze_paths`, `freeze_modules_of_type`, `freeze_where`. Replaces the source package's per-class `_build_filter_spec` case statement. Adding behaviour = adding a function, never a class.
 - `BoundScaler.temperature` is a leaf but **frozen by convention** via `freeze_modules_of_type(mask, predictor, BoundScaler)` recommended in every example.
@@ -143,13 +159,16 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 - Gaussian process regressors and the entire `bayes/` (variational inference) submodule.
 - System embeddings (`EmbeddedMLP*`) and the `SystemConditionedRatePredictor` protocol.
 - Padded-batched-experiments interface (`UnscaledBatchedExperiments`).
-- Time-varying covariates and ODE-internal NN inputs (state-derived inputs to the predictor) — deferred.
-- A `Model` wrapper class. The "model" is the loose triple `(predictor, simulate_fn, solver_config)`; serialisation handles each piece appropriately.
+- Time-varying *covariates* at the data layer — `Experiment.covariates` stays constant in time. (State-derived and exogenous time-dependent *predictor inputs* are first-class — see "Predictor inputs" above; the user mixes them into the per-call dict inside the vector field.)
+- A `Model` wrapper class. The "model" is the loose triple `(predictors, simulate_fn, solver_config)`; serialisation handles each piece appropriately.
 - **Temperature annealing** of any kind: `cosine_temperature_annealing`, `use_temp_annealing`, `initial_temperature`, `temp_cosine_fraction`, `temp_indices`. The bound-scaler's `temperature` is just a (typically frozen) parameter.
 - The `_build_filter_spec` per-class registry from the source package — replaced by composable freezer functions.
 - Bound-excursion penalty machinery (`bound_penalty_weight`, `_penalty()`, `call_with_penalty`) — never properly wired in source.
+- `RatePair` framework class (deleted in this round of design). Multi-rate models compose by unpacking the predictors tuple at the top of the user's vector field.
+- `NeuralNPolynomial` framework class (**deferred to post-v1**, not deleted from intent — re-evaluate when the polynomial form needs framework support beyond a user-side three-line expansion).
 
 ## Flagged ambiguities
 
-- "Model" was used in the source package both for the trainable Equinox module and for the simulate-able physics object. Resolved: the trainable thing is a **Predictor**; the integrable physics is **simulate_fn**; nothing is called "Model".
-- "Regressor" in the source was overloaded with bound-scaling. Resolved: scaling is decoupled from **Predictor** (interface for that branch is still being grilled).
+- "Model" was used in the source package both for the trainable Equinox module and for the simulate-able physics object. Resolved: the trainable thing is a **predictors pytree** (typically a tuple of `BoundedPredictor`s); the integrable physics is **simulate_fn**; nothing is called "Model".
+- "Regressor" in the source was overloaded with bound-scaling. Resolved: scaling is decoupled from **Predictor** via `BoundedPredictor` composition (`selector → in_scaler → inner → out_scaler`).
+- "Covariate" vs "predictor input" was historically conflated. Resolved: **covariate** is a constant-in-time per-experiment scalar at the data layer (`Experiment.covariates`); **predictor input** is the per-call dict the vector field hands to a predictor (covariates ∪ state-derived ∪ exogenous-time-dependent). Same shape (`dict[str, Array]`), different lifetime.

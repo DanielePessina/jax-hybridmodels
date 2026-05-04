@@ -1,4 +1,4 @@
-"""Save / load helpers for trained predictors and runs (SPEC §5.11 / R-A5 / R-S2).
+"""Save / load helpers for the trained ``predictors`` pytree (SPEC §5.11 / R-A5 / R-S2).
 
 Phase 16 of the build plan — the *last shipped* module per CONTEXT.md
 "Serialisation". The R-A5 round-trip cleanliness has been a hard design
@@ -7,20 +7,36 @@ leaves are JAX arrays and its static fields are JSON-encodable. This module
 ships the user-facing helpers that compose those guarantees into a
 directory-shaped artifact.
 
+Pytree contract
+---------------
+Per R-A2 / ADR-0006 the trainable component is a ``PyTree[eqx.Module]`` —
+runtime-permissive (any pytree shape: tuple, list, dict, NamedTuple, single
+``eqx.Module``), with the canonical convention shown in CONTEXT.md being
+**a tuple**, single-predictor case = ``(BP,)``. The save/load helpers
+operate on that pytree as a whole: ``eqx.tree_serialise_leaves`` already
+walks any pytree of leaves, so a single binary file
+(``predictors.eqx``) captures every shape uniformly. The metadata records
+one entry per ``eqx.Module`` leaf so a user comparing
+``metadata.json`` against their reconstructed template at load time can
+spot a structural mismatch by eye before deserialisation blows up with a
+less helpful error.
+
 Public surface
 --------------
-``save_predictor`` / ``load_predictor``
+``save_predictors`` / ``load_predictors``
     Single-file binary round-trip via ``eqx.tree_serialise_leaves`` /
     ``eqx.tree_deserialise_leaves``. The caller picks the file extension
-    (we conventionally use ``.eqx``) and supplies a *template* predictor
-    matching the original's class plus static configuration on load.
+    (the project convention is ``.eqx``) and supplies a *template* pytree
+    matching the original's container shape and per-leaf static
+    configuration on load.
 
 ``save_run`` / ``load_run``
-    Directory-shaped artifact — ``predictor.eqx`` plus a JSON
-    ``metadata.json`` carrying timestamp, package version, the predictor's
-    fully-qualified class path, the solver dict, optional optax / evosax
-    training configs (as ``dataclasses.asdict``), an optional loss history,
-    and a free-form ``extras`` dict the user owns. The JSON is written with
+    Directory-shaped artifact — ``predictors.eqx`` plus a JSON
+    ``metadata.json`` carrying timestamp, package version, the predictors
+    pytree's structure (treedef repr + per-leaf path / class), the solver
+    dict, optional optax / evosax training configs (as
+    ``dataclasses.asdict``), an optional loss history, and a free-form
+    ``extras`` dict the user owns. The JSON is written with
     ``indent=2, sort_keys=True`` so diffs are stable.
 
 What is *not* serialised
@@ -28,8 +44,8 @@ What is *not* serialised
 ``simulate_fn``, ``state_to_output``, the ``Dataset``, and the trainable
 mask. CONTEXT.md spells this out: the framework re-imports user code, and
 no builder registry is wired in v1 (deferred until friction proves real;
-see SPEC §2.3). Loading a predictor therefore requires the caller to
-reconstruct a same-architecture template — exactly the contract of
+see SPEC §2.3). Loading therefore requires the caller to reconstruct a
+same-architecture template — exactly the contract of
 ``eqx.tree_deserialise_leaves`` — and re-import their own physics code.
 
 Loss-callable handling
@@ -52,45 +68,48 @@ import datetime as dt
 import importlib.metadata as ilm
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import equinox as eqx
+import jax.tree_util as jtu
 
-from hybridmodels.predictors.base import Predictor
 from hybridmodels.solver import SolverConfig
 from hybridmodels.training.evosax import EvosaxTrainingConfig
 from hybridmodels.training.optax import OptaxTrainingConfig
 
-_PREDICTOR_FILENAME = "predictor.eqx"
+_PREDICTORS_FILENAME = "predictors.eqx"
 _METADATA_FILENAME = "metadata.json"
 
 
-def save_predictor(path: str | Path, predictor: Predictor) -> None:
-    """Write ``predictor`` to ``path`` via ``eqx.tree_serialise_leaves``.
+def save_predictors(path: str | Path, predictors: Any) -> None:
+    """Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 
-    The file format is whatever ``eqx.tree_serialise_leaves`` writes — a
-    binary stream of ``np.save``-encoded leaves driven by the predictor's
-    pytree structure. The caller chooses the extension; ``.eqx`` is the
-    project convention (see ``save_run``).
+    ``predictors`` is the user-facing ``PyTree[eqx.Module]`` (any shape:
+    tuple / dict / NamedTuple / bare Module — see ADR-0006). The helper
+    delegates to ``eqx.tree_serialise_leaves``, which walks the pytree's
+    leaves uniformly regardless of container type, producing a flat binary
+    stream of ``np.save``-encoded leaves. The caller picks the extension;
+    ``.eqx`` is the project convention (see ``save_run``).
     """
     path = Path(path)
-    eqx.tree_serialise_leaves(path, predictor)
+    eqx.tree_serialise_leaves(path, predictors)
 
 
-def load_predictor(path: str | Path, template: Predictor) -> Predictor:
-    """Restore a predictor from ``path`` using ``template`` as the pytree skeleton.
+def load_predictors(path: str | Path, predictors_template: Any) -> Any:
+    """Restore a ``predictors`` pytree from ``path`` using ``predictors_template`` as the skeleton.
 
-    ``template`` must be an instance of the same concrete predictor class
-    as the saved one, with matching static configuration (e.g. matching
-    ``MLPPredictor`` ``in_size`` / ``out_size`` / ``width_size`` / ``depth``).
-    Its dynamic leaves are overwritten by the values stored in the file;
-    its static fields are kept and provide the structure ``equinox`` needs
-    to reconstruct the tree.
+    ``predictors_template`` must share the saved pytree's container shape
+    and per-leaf static configuration (e.g. matching ``MLPPredictor``
+    ``in_size`` / ``out_size`` / ``width_size`` / ``depth`` for every
+    predictor leaf). Its dynamic leaves are overwritten by the values
+    stored in the file; its static fields are kept and provide the
+    structure ``equinox`` needs to reconstruct the tree.
 
-    Returns the restored predictor — does **not** mutate ``template``.
+    Returns the restored pytree — does **not** mutate
+    ``predictors_template``.
     """
     path = Path(path)
-    return cast(Predictor, eqx.tree_deserialise_leaves(path, template))
+    return eqx.tree_deserialise_leaves(path, predictors_template)
 
 
 def _stringify_loss_field(value: Any) -> Any:
@@ -144,10 +163,69 @@ def _resolve_version() -> str:
         return "unknown"
 
 
+def _is_module(node: Any) -> bool:
+    """Predicate used as ``is_leaf`` to stop pytree traversal at ``eqx.Module`` boundaries.
+
+    ``equinox`` does not ship an ``is_module`` helper (the public ``is_…``
+    family covers arrays only), so we define a tiny named predicate
+    instead of inlining ``isinstance`` everywhere — calling sites read more
+    naturally and the intent ("treat each Module as a leaf") stays
+    explicit at the call site.
+    """
+    return isinstance(node, eqx.Module)
+
+
+def _describe_predictors(predictors: Any) -> dict[str, Any]:
+    """Walk ``predictors`` once, returning a JSON-friendly structural hint.
+
+    The hint records two complementary views of the pytree:
+
+    - ``tree_structure``: the ``repr`` of ``jax.tree_util.tree_structure``
+      (with the Module-stopped traversal) — a single string capturing the
+      container shape (PyTreeDef notation: ``[*, *]`` for a 2-tuple,
+      ``{'growth': *, 'nucleation': *}`` for a dict, ``*`` for a bare
+      Module).
+    - ``leaves``: one ``{path, class}`` entry per ``eqx.Module`` leaf, in
+      ``jax.tree_util.tree_flatten_with_path`` traversal order. ``path``
+      is the human-readable ``jax.tree_util.keystr`` form (``[0]``,
+      ``['growth']``, ``.field``, or ``""`` for a single-Module pytree);
+      ``class`` is ``"{module}.{qualname}"`` of the leaf's runtime type.
+
+    Two views because each is useful in a different debugging scenario:
+    the structure repr lets a user eyeball the *shape* mismatch
+    (tuple-vs-dict, wrong arity); the per-leaf list lets them eyeball the
+    *type* mismatch (``MLPPredictor`` saved, ``KANPredictor`` in the
+    template). Together they fill the gap left by
+    ``eqx.tree_deserialise_leaves`` failing with a generic shape error.
+    """
+    leaves_with_paths, treedef = jtu.tree_flatten_with_path(predictors, is_leaf=_is_module)
+    leaves: list[dict[str, str]] = []
+    for path, leaf in leaves_with_paths:
+        if not _is_module(leaf):
+            # Skip non-Module leaves at the top — typically static
+            # passengers if the user nests modules under a static field.
+            # The Module-stopped traversal already keeps us at Module
+            # boundaries for everything reachable; this guard exists only
+            # so a stray scalar in the pytree doesn't crash metadata
+            # writing.
+            continue
+        cls = type(leaf)
+        leaves.append(
+            {
+                "path": jtu.keystr(path),
+                "class": f"{cls.__module__}.{cls.__qualname__}",
+            }
+        )
+    return {
+        "tree_structure": repr(treedef),
+        "leaves": leaves,
+    }
+
+
 def save_run(
     directory: str | Path,
     *,
-    predictor: Predictor,
+    predictors: Any,
     solver: SolverConfig,
     optax_config: OptaxTrainingConfig | None = None,
     evosax_config: EvosaxTrainingConfig | None = None,
@@ -158,15 +236,16 @@ def save_run(
 
     Layout written
     --------------
-    ``directory/predictor.eqx``
-        Binary predictor leaves (``save_predictor`` output).
+    ``directory/predictors.eqx``
+        Binary leaves of the predictors pytree (``save_predictors`` output).
     ``directory/metadata.json``
         JSON dict with ``timestamp`` (UTC, ISO 8601, microsecond
         precision), ``version`` (``importlib.metadata.version``-resolved),
-        ``predictor_class_path`` (``"{module}.{qualname}"``), ``solver``
-        (``solver.to_dict()``), ``optax_config`` /
-        ``evosax_config`` (``dataclasses.asdict`` with stringified ``loss``
-        — see module docstring), ``loss_history``, and ``extras``.
+        ``predictors`` (``{tree_structure, leaves: [{path, class}, ...]}``
+        per ``_describe_predictors``), ``solver`` (``solver.to_dict()``),
+        ``optax_config`` / ``evosax_config`` (``dataclasses.asdict`` with
+        stringified ``loss`` — see module docstring), ``loss_history``,
+        and ``extras``.
 
     The directory is created (parents included) if missing. Pre-existing
     files are overwritten — this is a save, not an append.
@@ -174,17 +253,14 @@ def save_run(
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
 
-    save_predictor(directory / _PREDICTOR_FILENAME, predictor)
+    save_predictors(directory / _PREDICTORS_FILENAME, predictors)
 
-    predictor_cls = type(predictor)
     metadata: dict[str, Any] = {
         # ``dt.UTC`` keeps the timestamp explicitly tz-aware; the
         # microsecond-precision suffix lands in the ISO string by default.
         "timestamp": dt.datetime.now(dt.UTC).isoformat(),
         "version": _resolve_version(),
-        "predictor_class_path": (
-            f"{predictor_cls.__module__}.{predictor_cls.__qualname__}"
-        ),
+        "predictors": _describe_predictors(predictors),
         "solver": solver.to_dict(),
         "optax_config": (
             _serialise_training_config(optax_config) if optax_config is not None else None
@@ -235,9 +311,7 @@ def _coerce_tuple_fields(cls: type, kwargs: dict[str, Any]) -> dict[str, Any]:
     return coerced
 
 
-def _build_training_config(
-    cls: type | None, raw: dict[str, Any] | None
-) -> Any:
+def _build_training_config(cls: type | None, raw: dict[str, Any] | None) -> Any:
     """Reconstruct a training config from its dict, or pass through if no class given.
 
     Returns ``None`` when ``raw`` is ``None`` (no config was saved). When
@@ -257,17 +331,19 @@ def _build_training_config(
 def load_run(
     directory: str | Path,
     *,
-    predictor_template: Predictor,
+    predictors_template: Any,
     optax_cls: type[OptaxTrainingConfig] | None = None,
     evosax_cls: type[EvosaxTrainingConfig] | None = None,
 ) -> dict[str, Any]:
     """Reconstruct a run from ``directory``.
 
-    Inverse of :func:`save_run`. ``predictor_template`` is required (per the
-    no-builder-registry policy in CONTEXT.md "Serialisation"); ``optax_cls``
-    and ``evosax_cls`` are optional — pass them only when you want the
-    metadata's ``optax_config`` / ``evosax_config`` dicts reconstituted into
-    typed dataclass instances. When omitted, the raw dicts flow through.
+    Inverse of :func:`save_run`. ``predictors_template`` is required (per
+    the no-builder-registry policy in CONTEXT.md "Serialisation"), and
+    must share the saved pytree's container shape and per-leaf static
+    configuration. ``optax_cls`` and ``evosax_cls`` are optional — pass
+    them only when you want the metadata's ``optax_config`` /
+    ``evosax_config`` dicts reconstituted into typed dataclass instances.
+    When omitted, the raw dicts flow through.
 
     Loss-field policy
     -----------------
@@ -282,10 +358,11 @@ def load_run(
     Returns
     -------
     dict
-        Keys: ``predictor`` (``Predictor``), ``solver`` (``SolverConfig``),
-        ``optax_config`` (``OptaxTrainingConfig`` | dict | None),
-        ``evosax_config`` (``EvosaxTrainingConfig`` | dict | None),
-        ``loss_history`` (``list[float] | None``), ``extras`` (``dict``).
+        Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver``
+        (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` |
+        dict | None), ``evosax_config`` (``EvosaxTrainingConfig`` | dict |
+        None), ``loss_history`` (``list[float] | None``), ``extras``
+        (``dict``).
     """
     directory = Path(directory)
     with (directory / _METADATA_FILENAME).open() as f:
@@ -294,10 +371,10 @@ def load_run(
     solver = SolverConfig.from_dict(metadata["solver"])
     optax_config = _build_training_config(optax_cls, metadata.get("optax_config"))
     evosax_config = _build_training_config(evosax_cls, metadata.get("evosax_config"))
-    predictor = load_predictor(directory / _PREDICTOR_FILENAME, predictor_template)
+    predictors = load_predictors(directory / _PREDICTORS_FILENAME, predictors_template)
 
     return {
-        "predictor": predictor,
+        "predictors": predictors,
         "solver": solver,
         "optax_config": optax_config,
         "evosax_config": evosax_config,
@@ -307,8 +384,8 @@ def load_run(
 
 
 __all__ = [
-    "load_predictor",
+    "load_predictors",
     "load_run",
-    "save_predictor",
+    "save_predictors",
     "save_run",
 ]
