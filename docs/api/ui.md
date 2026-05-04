@@ -45,6 +45,102 @@ fallback warnings).
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L30)</small>
 
+#### `TrainingUI.on_compile_done()`
+
+```python
+on_compile_done(self, *, bucket_idx: int) -> None
+```
+
+The bucket at ``bucket_idx`` finished compiling.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L66)</small>
+
+#### `TrainingUI.on_compile_progress()`
+
+```python
+on_compile_progress(self, *, bucket_idx: int, total_buckets: int) -> None
+```
+
+Periodic heartbeat during long compiles (best-effort, may not fire).
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L62)</small>
+
+#### `TrainingUI.on_compile_start()`
+
+```python
+on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> None
+```
+
+A bucket of shape ``bucket_shape`` is about to be JIT-compiled for the first time.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L58)</small>
+
+#### `TrainingUI.on_message()`
+
+```python
+on_message(self, *, level: str, text: str) -> None
+```
+
+Free-form log line. ``level`` is one of ``"info"``, ``"warning"``, ``"error"``.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L88)</small>
+
+#### `TrainingUI.on_phase_end()`
+
+```python
+on_phase_end(self, *, phase_idx: int) -> None
+```
+
+Fires after the last step of a phase, before any optimiser reset.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L76)</small>
+
+#### `TrainingUI.on_phase_start()`
+
+```python
+on_phase_start(
+    self,
+    phase_idx: int,
+    phase_steps: int,
+    lr: float,
+    optimizer: str,
+) -> None
+```
+
+Fires at the start of each phase; ``phase_steps`` is the per-phase step budget.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L70)</small>
+
+#### `TrainingUI.on_run_end()`
+
+```python
+on_run_end(self, *, final_loss: float) -> None
+```
+
+Fires once after every phase has completed (or training was aborted gracefully).
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L84)</small>
+
+#### `TrainingUI.on_run_start()`
+
+```python
+on_run_start(self, *, total_steps: int, num_phases: int) -> None
+```
+
+Fires once before the first phase. ``total_steps`` is the sum across phases.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L54)</small>
+
+#### `TrainingUI.on_step_end()`
+
+```python
+on_step_end(self, *, step_idx: int, phase_idx: int, loss: float) -> None
+```
+
+Fires after each training step. ``step_idx`` is global; ``phase_idx`` localises it.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L80)</small>
+
 ---
 
 <a id="evosaxui"></a>
@@ -64,6 +160,81 @@ per-step gradient losses; instead each generation reports best/mean
 fitness across the population.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L93)</small>
+
+#### `EvosaxUI.on_compile_done()`
+
+```python
+on_compile_done(self, *, bucket_idx: int) -> None
+```
+
+The bucket finished compiling.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L114)</small>
+
+#### `EvosaxUI.on_compile_progress()`
+
+```python
+on_compile_progress(self, *, bucket_idx: int, total_buckets: int) -> None
+```
+
+Periodic compile-time heartbeat (best-effort).
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L110)</small>
+
+#### `EvosaxUI.on_compile_start()`
+
+```python
+on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> None
+```
+
+A bucket of shape ``bucket_shape`` is about to be JIT-compiled.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L106)</small>
+
+#### `EvosaxUI.on_generation_end()`
+
+```python
+on_generation_end(
+    self,
+    gen_idx: int,
+    best_fitness: float,
+    mean_fitness: float,
+) -> None
+```
+
+Fires once per generation with population statistics.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L118)</small>
+
+#### `EvosaxUI.on_message()`
+
+```python
+on_message(self, *, level: str, text: str) -> None
+```
+
+Free-form log line; same level set as ``TrainingUI.on_message``.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L126)</small>
+
+#### `EvosaxUI.on_run_end()`
+
+```python
+on_run_end(self, *, best_fitness: float) -> None
+```
+
+Fires once after the last generation.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L122)</small>
+
+#### `EvosaxUI.on_run_start()`
+
+```python
+on_run_start(self, *, num_generations: int, population_size: int) -> None
+```
+
+Fires once before the first generation.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L102)</small>
 
 ---
 
@@ -121,7 +292,7 @@ window updates the model only; the next ``on_run_start`` rebuilds Live
 afresh, so a single ``RichTrainingUI`` instance can be reused for
 sequential runs (used in tests).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/optax.py#L55)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/optax.py#L56)</small>
 
 ---
 
@@ -158,4 +329,4 @@ The instance carries one :class:`rich.live.Live` between
 ``on_run_start`` so a single instance can be reused across sequential
 runs (used in tests).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/evosax.py#L67)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/evosax.py#L68)</small>

@@ -22,9 +22,11 @@ $$
 \end{aligned}
 $$
 
-where $G$ (growth velocity, m/s) and $J$ (nucleation rate, #/m³·s) are the *unknown* rate functions. The hybrid part is: instead of committing to a CNT or power-law form, we let two MLPs learn $\log_{10} G$ and $\log_{10} J$ from `(temperature_C, loading, supersaturation)`. The vector field exponentiates back to physical rates inside the integrator.
+where $G$ (growth velocity, m/s) and $J$ (nucleation rate, #/m³·s) are the *unknown* rate functions. The hybrid part is: instead of committing to a CNT or power-law form, we let two MLPs learn $\log_{10} G$ and $\log_{10} J$ from `(temperature_C, supersaturation)`. The vector field exponentiates back to physical rates inside the integrator.
 
 The two observed channels are concentration (dense) and the volume-weighted mean diameter $d_{43} = \mu_4 / \mu_3 \cdot 10^6$ µm (sparser).
+
+`loading` is also stored on `Experiment.covariates` (the dataset records it for every experiment) but the *direct-rate* predictors don't condition on it — both MLPs see only temperature and supersaturation. This is a deliberate scope choice; loading-dependent kinetics is a follow-on extension.
 
 ## Step 1 — load and wrap as `Experiment`
 
@@ -98,43 +100,33 @@ Experiments with the same union timestamp count are stacked into one [`BucketPay
 
 ## Step 4 — predictors: two `BoundedPredictor`s
 
-The `predictors` pytree convention is a **tuple of predictors** — `(growth_bp, nucleation_bp)`. Both consume the same 3-key dict; the `BoundedPredictor` subsets by its `input_keys` field.
+The `predictors` pytree convention is a **tuple of predictors** — `(growth_bp, nucleation_bp)`. Both consume the same 2-key dict; the `BoundedPredictor` subsets by its `input_keys` field.
 
 ```python
 from hybridmodels import BoundedPredictor, BoundScaler, MLPPredictor
 
-INPUT_KEYS = ("temperature_C", "loading", "supersaturation")
+INPUT_KEYS = ("temperature_C", "supersaturation")
 
 in_scaler = BoundScaler(
-    bounds=((13.0, 27.0), (0.0, 30.0), (1.0, 3.0)),  # (T_C, loading, S)
+    bounds=((13.0, 27.0), (0.0, 12.0)),  # (T_C, S)
     transform="sigmoid",
 )
-
-def _zero_final_head(predictor):
-    """Zero the final readout layer so initial output sits at the bound midpoint."""
-    last = predictor.mlp.layers[-1]
-    zeroed = eqx.tree_at(
-        lambda l: (l.weight, l.bias),
-        last,
-        replace=(jnp.zeros_like(last.weight), jnp.zeros_like(last.bias)),
-    )
-    return eqx.tree_at(lambda p: p.mlp.layers[-1], predictor, replace=zeroed)
 
 k_growth, k_nucleation = jr.split(key, 2)
 
 growth = BoundedPredictor(
     input_keys=INPUT_KEYS,
     in_scaler=in_scaler,
-    inner=_zero_final_head(MLPPredictor(in_size=3, out_size=1, width_size=16,
-                                         depth=2, activation_name="tanh", key=k_growth)),
-    out_scaler=BoundScaler(bounds=((-15.0, -5.0),), transform="sigmoid"),  # log10(G), m/s
+    inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
+                       depth=1, activation_name="relu", key=k_growth),
+    out_scaler=BoundScaler(bounds=((-15.0, -5.0),), transform="sigmoid"),   # log10(G), m/s
 )
 nucleation = BoundedPredictor(
     input_keys=INPUT_KEYS,
     in_scaler=in_scaler,
-    inner=_zero_final_head(MLPPredictor(in_size=3, out_size=1, width_size=16,
-                                         depth=2, activation_name="tanh", key=k_nucleation)),
-    out_scaler=BoundScaler(bounds=((-6.5, 13.0),), transform="sigmoid"),  # log10(J), #/(m^3*s)
+    inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
+                       depth=1, activation_name="relu", key=k_nucleation),
+    out_scaler=BoundScaler(bounds=((-6.5, 20.0),), transform="sigmoid"),    # log10(J), #/(m^3*s)
 )
 
 predictors = (growth, nucleation)
@@ -142,7 +134,16 @@ predictors = (growth, nucleation)
 
 The bound choice matters. `LOG10_GROWTH_BOUNDS = (-15, -5)` puts the sigmoid midpoint at $G \approx 10^{-10}$ m/s — physically reasonable for early-time growth. An earlier `(-12, -3)` draft put the midpoint at $G \approx 3 \cdot 10^{-8}$ m/s, large enough that random-init weights produced ODE rates the moment-balance solver could not track within `max_steps`. See [Recommendations → Bounds](/guide/recommendations#bounds).
 
-`_zero_final_head` is the second piece of robustness: with the readout zeroed, the predictor's initial output sits exactly at the physical bound midpoint *regardless* of the random key. The hidden layers keep their LeCun-uniform weights so the input gradient still flows through.
+::: tip Optional: pin the readout to the bound midpoint
+For very wide rate bounds — like the nucleation `(-6.5, 20.0)` decade range here — an unlucky standard-normal readout draw can still place the initial output far enough off midpoint that the moment ODE is intractably stiff. [`MLPPredictor.with_zero_final_head()`](/api/predictors#mlppredictor) (and its KAN counterpart) returns a copy of the predictor whose final readout layer is zeroed, so the initial output sits at the *exact* physical midpoint regardless of the random key. The hidden layers keep their default init, so the input feature transformation is non-degenerate. Drop in by chaining onto the constructor:
+
+```python
+inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
+                   depth=1, activation_name="relu", key=k_growth).with_zero_final_head()
+```
+
+The shipped script runs without it for the default seed; turn it on if you see `max_steps` exceeded on a different seed.
+:::
 
 ## Step 5 — the vector field
 
@@ -158,14 +159,10 @@ def _simulate_fn(predictors, ts, covariates, y0, solver):
         mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
         S = conc / conc_sat
 
-        # Predictor inputs: covariates ∪ state-derived. "supersaturation"
-        # overrides any same-named covariate; the framework treats every key
+        # Predictor inputs: temperature is a covariate (constant in time),
+        # supersaturation is state-derived. The framework treats every key
         # as a named scalar regardless of provenance.
-        inputs = {
-            "temperature_C": covariates["temperature_C"],
-            "loading": covariates["loading"],
-            "supersaturation": S,
-        }
+        inputs = {"temperature_C": temperature_C, "supersaturation": S}
 
         meta_mask = (S > 1.0 + 1e-5).astype(y.dtype)
         log10_G = jnp.squeeze(growth_bp(inputs))
@@ -213,18 +210,18 @@ solver = SolverConfig(
 )
 
 config = OptaxTrainingConfig(
-    steps=(200,),
+    steps=(600,),
     lr=(1e-3,),
     optimizer=("adamw",),
     reset_optimiser_state=(False,),
     length_schedule=(1.0,),
     loss="mse",
-    log_every=20,
-    verbose=False,
+    log_every=60,
+    verbose=True,
 )
 ```
 
-Single-phase to start. Once the loss flattens, add a second phase with a lower LR and `length_schedule=1.0` again for fine-tuning.
+Single-phase to start. Once the loss flattens, add a second phase with a lower LR for fine-tuning.
 
 ## Step 7 — train
 
@@ -236,7 +233,7 @@ history, trained_predictors = train_with_optax(
 print(f"final loss: {history[-1]:.6f}")
 ```
 
-200 steps × N buckets is what compiles. The first step pays the JIT cost (one trace per bucket shape); subsequent steps are at full JAX speed.
+600 steps × N buckets is what compiles. The first step pays the JIT cost (one trace per bucket shape); subsequent steps are at full JAX speed.
 
 ## Step 8 — predict and diagnose
 
@@ -248,33 +245,18 @@ predictions = predict_dataset(
 )
 # predictions is a tuple — one [N, T, D] array per bucket, parallel to dataset.bucket_payloads.
 
-# Read the trained log-rates at any (T, L, S) point you like.
+# Read the trained log-rates at any (T, S) point you like.
 sample_inputs = {
     "temperature_C": jnp.asarray(20.0),
-    "loading": jnp.asarray(15.0),
     "supersaturation": jnp.asarray(1.5),
 }
 trained_growth, trained_nucleation = trained_predictors
 log10_G = float(jnp.squeeze(trained_growth(sample_inputs)))
 log10_J = float(jnp.squeeze(trained_nucleation(sample_inputs)))
-print(f"G(20°C, L=15, S=1.5) = {10**log10_G:.2e} m/s, J = {10**log10_J:.2e} #/(m³·s)")
+print(f"G(20°C, S=1.5) = {10**log10_G:.2e} m/s, J = {10**log10_J:.2e} #/(m³·s)")
 ```
 
 The shipped script also writes parity and trajectory plots under `examples/crystallisation/figures/` via the helpers in `examples/_shared/`.
-
-## Two predictor parameterisations, one example
-
-The script ships **two** parameterisations of the same hybrid model. Only the *direct-rate* path is wired into `main()`; the *kinetic-parameter* path is preserved as commented-out reference code so the comparison stays explicit.
-
-| | Direct-rate (active) | Kinetic-parameter (reference) |
-| --- | --- | --- |
-| Predictors pytree | `(growth_bp, nucleation_bp)` | `(predictor,)` |
-| Input keys | `(T, L, S)` | `(T, L)` |
-| Output | bounded `log10_G`, `log10_J` | bounded `(logA, gamma, Ag, g)` |
-| Vector-field role | exponentiate `10**log_rate` | plug into CNT and power-law forms |
-| Search space | unconstrained rate maps | classical surrogate, ~4 dims |
-
-Switching between them is a single edit in `main()`. See the script's docstring for the exact toggle.
 
 ## What's next
 

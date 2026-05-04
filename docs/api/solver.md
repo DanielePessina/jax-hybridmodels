@@ -46,6 +46,20 @@ changes (changes do trigger a recompile, which is what we want).
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L40)</small>
 
+#### `SolverConfig.to_dict()`
+
+```python
+to_dict(self) -> 'dict[str, Any]'
+```
+
+Serialise to a JSON-compatible dict via ``SOLVER_REGISTRY``.
+
+The solver instance is replaced by its registered name; tuple ``atol``
+becomes a list (JSON has no tuple). Unknown solver classes raise so
+users register custom solvers explicitly via ``register_solver``.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L69)</small>
+
 ---
 
 <a id="solver_registry"></a>

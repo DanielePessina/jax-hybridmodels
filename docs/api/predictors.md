@@ -93,6 +93,36 @@ the scaler and the inner predictor and tends to slow convergence.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L85)</small>
 
+#### `BoundScaler.from_latent()`
+
+```python
+from_latent(self, z: 'Array') -> 'Array'
+```
+
+Map a latent value back into the physical box ``[low, high]``.
+
+Apply ``sigmoid(z / temperature)`` to land in ``(0, 1)``, then affine
+rescale to ``[low, high]``. The output is finite for any finite ``z``
+(no clipping required on the inverse direction).
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L164)</small>
+
+#### `BoundScaler.to_latent()`
+
+```python
+to_latent(self, x: 'Array') -> 'Array'
+```
+
+Map a physical-space value to its latent representative.
+
+Steps: normalise to ``[0, 1]`` against ``bounds``, clip to
+``[1e-6, 1 - 1e-6]`` (so ``logit`` does not produce ``±inf`` at the
+closed endpoints), apply ``logit``, scale by ``temperature``. The
+clip is the only source of round-trip error; for inputs strictly
+inside the box it is a no-op.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L150)</small>
+
 ---
 
 <a id="boundedpredictor"></a>
@@ -188,6 +218,48 @@ Only the inner ``mlp`` field carries trainable weights; the rest is metadata.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L45)</small>
 
+#### `MLPPredictor.initialized_with_key()`
+
+```python
+initialized_with_key(self, key: 'Array') -> 'MLPPredictor'
+```
+
+Return a fresh ``MLPPredictor`` with the same architecture, new weights.
+
+Implements the re-init protocol consumed by
+:func:`reinitialize_with_key` and by the training tournament loop
+when it restarts a stalled attempt. Re-instantiating the whole
+module is cleaner than reinitialising leaves in place because
+``eqx.nn.MLP`` owns its own per-layer init logic (Glorot/normal
+scaling, zero biases); leaf-level standard-normal sampling would
+skew the distribution and break that scheme.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L115)</small>
+
+#### `MLPPredictor.with_zero_final_head()`
+
+```python
+with_zero_final_head(self) -> 'MLPPredictor'
+```
+
+Return a copy whose final ``Linear`` layer's weight and bias are zero.
+
+Hidden layers retain their LeCun-uniform random init, so the input
+feature transformation is non-degenerate; only the readout layer is
+forced to zero. Composed inside a ``BoundedPredictor``, the latent
+zero produced for any input maps via ``out_scaler.from_latent(0)``
+to the *exact midpoint* of the physical bound box — a known-good
+starting output that is independent of the random key. This makes
+training reproducible across seeds when the rate bounds span many
+decades and an unlucky standard-normal readout draw could otherwise
+place the initial output too far off midpoint for the downstream
+ODE solver to handle.
+
+Returns a structurally identical predictor; only the trailing
+``eqx.nn.Linear``'s ``weight`` and ``bias`` arrays change.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L135)</small>
+
 ---
 
 <a id="kanpredictor"></a>
@@ -226,7 +298,49 @@ static.
 | `seed` | `int` | Integer seed used to build the underlying jaxkan model and to recreate its rng-state on demand inside ``__call__``. Derived from the user-supplied ``key`` at construction; static thereafter. |
 | `params` | `nnx.State` | Dynamic field — the ``nnx.Param`` slice of the KAN's state, all float arrays. Trainable; serialised round-trip via ``eqx.tree_serialise_leaves``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L75)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L76)</small>
+
+#### `KANPredictor.initialized_with_key()`
+
+```python
+initialized_with_key(self, key: 'Array') -> 'KANPredictor'
+```
+
+Return a same-architecture KANPredictor with freshly initialised parameters.
+
+Implements the re-init protocol used by the training tournament
+loop. Building a whole new ``KANPredictor`` (rather than
+tweaking ``self.params`` in place) lets jaxkan's per-layer init
+logic — truncated-normal spline weights, ones bias, identity
+residual — drive the initialisation instead of replacing it with
+leaf-level standard-normal samples that would skew the
+distribution.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L192)</small>
+
+#### `KANPredictor.with_zero_final_head()`
+
+```python
+with_zero_final_head(self) -> 'KANPredictor'
+```
+
+Return a copy whose final KAN layer's parameters are all zero.
+
+For a KAN, the "final head" is the readout layer at index
+``len(hidden_widths)`` in the underlying ``layer_dims`` list. Each
+layer carries four trainable arrays (``c_basis``, ``c_spl``,
+``c_res``, ``bias``); zeroing all of them makes the layer produce
+``zeros(out_size)`` regardless of input, which composed inside a
+``BoundedPredictor`` maps via ``out_scaler.from_latent(0)`` to the
+midpoint of the physical bound box.
+
+The earlier KAN layers keep their jaxkan-default init, so the
+input feature transformation is non-degenerate; only the readout
+is locked. Mirrors :meth:`MLPPredictor.with_zero_final_head` —
+same intent (seed-independent initial physical output), different
+parameterisation.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L212)</small>
 
 ---
 

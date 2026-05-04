@@ -417,6 +417,75 @@ def render_entry(name: str, module_name: str) -> str:
     if link is not None:
         parts.append(f"<small>[Source]({link})</small>")
 
+    # For classes, emit a sub-entry per public method defined on the class
+    # itself (not inherited). Keeps method docstrings — like
+    # ``MLPPredictor.with_zero_final_head`` — inside the API page rather
+    # than buried in source.
+    if inspect.isclass(obj):
+        for method_name, method_obj in _public_methods(obj):
+            parts.append(_render_method_entry(name, method_name, method_obj))
+
+    return "\n\n".join(parts)
+
+
+def _public_methods(cls: type) -> list[tuple[str, Any]]:
+    """Return ``(name, fn)`` pairs for documentable methods defined on ``cls``.
+
+    A method is documentable when it satisfies all of:
+
+    - public name (no leading underscore — dunder methods are noisy and
+      typically restate framework conventions)
+    - has a docstring (no point emitting a heading with nothing under it)
+    - is defined on this class, not inherited (``__qualname__`` starts
+      with the class name)
+    """
+    out: list[tuple[str, Any]] = []
+    for name, member in inspect.getmembers(cls, predicate=inspect.isfunction):
+        if name.startswith("_"):
+            continue
+        if not inspect.getdoc(member):
+            continue
+        qualname = getattr(member, "__qualname__", "")
+        if not qualname.startswith(cls.__name__ + "."):
+            continue
+        out.append((name, member))
+    return out
+
+
+def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> str:
+    """Render one ``#### ClassName.method()`` sub-entry inside a class entry."""
+    parsed = parse_docstring(inspect.getdoc(method_obj))
+    parts: list[str] = []
+    parts.append(f"#### `{class_name}.{method_name}()`")
+
+    sig = render_signature(method_name, method_obj)
+    if sig is not None:
+        parts.append(f"```python\n{sig}\n```")
+
+    if parsed.summary:
+        parts.append(parsed.summary)
+    if parsed.body:
+        parts.append(parsed.body)
+
+    for title, body in parsed.sections:
+        if title in _PARAM_SECTIONS:
+            rows = parse_param_section(body)
+            header = (
+                "Parameter"
+                if title == "Parameters"
+                else "Field"
+                if title == "Attributes"
+                else "Item"
+            )
+            table = render_param_table(rows, header=header)
+            parts.append(f"**{title}**\n\n{table}" if table else f"**{title}**\n\n{body}")
+        else:
+            parts.append(f"**{title}**\n\n{body}")
+
+    link = get_source_link(method_obj)
+    if link is not None:
+        parts.append(f"<small>[Source]({link})</small>")
+
     return "\n\n".join(parts)
 
 

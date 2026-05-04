@@ -18,6 +18,17 @@ A common failure mode: bounds that are too wide push the centre into a stiff reg
 
 For input bounds (e.g. `temperature_C: (13.0, 27.0)` when the data spans 14-26°C), give yourself a margin of 1-2 units on each side. Sigmoid saturates at the boundary; even a small margin keeps the gradient well-conditioned across the whole observed range.
 
+### When the bounds span many decades, pin the readout
+
+Wide rate bounds (e.g. `LOG10_NUCLEATION_BOUNDS = (-6.5, 20.0)` — a 26-decade range) are vulnerable to bad random readouts even after the bounds are well-centred: an unlucky standard-normal final-layer draw can place the initial output far enough off midpoint that the moment ODE is intractably stiff. [`MLPPredictor.with_zero_final_head()`](/api/predictors#mlppredictor) (and the matching `KANPredictor.with_zero_final_head()`) returns a copy with the trailing readout layer's weights zeroed, so the initial output sits at the *exact* physical midpoint regardless of the random key. The hidden layers keep their default init, so the input feature transformation is non-degenerate. Compose by chaining onto the constructor:
+
+```python
+inner = MLPPredictor(in_size=2, out_size=1, width_size=64, depth=1,
+                     activation_name="relu", key=k_growth).with_zero_final_head()
+```
+
+Reach for it when you see `RuntimeWarning: max_steps exceeded` from `diffrax` only on certain seeds.
+
 ## Solver tolerances
 
 ### Per-state `atol` for stiff systems
