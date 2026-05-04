@@ -55,7 +55,7 @@ The script exercises the framework end-to-end:
 - ``hybridmodels.data`` — ``ChannelObs``, ``Experiment``, ``make_dataset``
 - ``hybridmodels.solver`` — ``SolverConfig``
 - ``hybridmodels.predictors`` — ``BoundedPredictor``, ``BoundScaler``,
-  ``CovariateSelector``, ``MLPPredictor``
+  ``MLPPredictor``
 - ``hybridmodels.losses`` (``masked_mse``) and ``hybridmodels.prediction``
 - ``hybridmodels.trainable`` (default mask via ``train_with_optax``)
 - ``hybridmodels.rng`` (consumed inside training internals)
@@ -75,6 +75,7 @@ script needs no external path. Override with ``--excel /path/to/file.xlsx``.
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -90,14 +91,26 @@ from hybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
-    CovariateSelector,
     Experiment,
     MLPPredictor,
     SolverConfig,
     make_dataset,
     make_experiment,
+    predict_dataset,
 )
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+
+# ``examples/_shared`` is a sibling of this scenario directory; add the
+# parent of this file to sys.path so the helpers import as a top-level
+# package without requiring any install step.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _shared import (  # noqa: E402
+    apply_default_style,
+    compute_diagnostics,
+    parity_plot,
+    print_diagnostics,
+    trajectory_plot,
+)
 
 # --------------------------------------------------------------------------- #
 # Constants                                                                   #
@@ -111,10 +124,17 @@ EXCEL_PATH_DEFAULT: Path = (
 Bundled into the repo at ``examples/crystallisation/data/`` so the script
 runs out-of-the-box; the path is resolved relative to this file."""
 
-DEFAULT_SHEETS: tuple[str, ...] = ("Unseeded",)
+DEFAULT_SHEETS: tuple[str, ...] = ("Unseeded_thesis",)
 """Excel sheets to load. Restricted to a single system so the example
 trains in a few minutes and avoids the multi-system conditioning
-problem, which is out of scope for this example."""
+problem, which is out of scope for this example.
+
+The ``Unseeded_thesis`` sheet is the full thesis-cut record: it carries
+the per-row variance columns and the particle-size column (named
+``d43`` in newer cuts, ``PS`` in the legacy thesis cut) with ``-1`` as
+the missing-row sentinel. The bare ``Unseeded`` sheet only has
+concentration; choosing it would silently skip every experiment because
+no particle-size channel could be built."""
 
 COVARIATE_BOUNDS: dict[str, tuple[float, float]] = {
     "temperature_C": (13.0, 27.0),
@@ -191,14 +211,18 @@ def _load_experiments(
     - ``Concentration_var`` (float) — per-row variance (optional; defaults to ``1e-4``)
     - ``Temperature`` (°C)          — per-experiment scalar (constant within ``Exp_ID``)
     - ``Loading`` (float)           — per-experiment scalar
-    - ``PS`` (float, optional)      — particle size (d43, ``[um]``); ``-1`` marks missing
-    - ``PS_var`` (float, optional)  — per-row variance for ``PS``
+    - ``d43`` or ``PS`` (float, optional) — volume-weighted mean diameter [um];
+      ``-1`` (and any non-finite value) marks "no observation at this row".
+      ``d43`` is the canonical column name in newer dataset cuts; ``PS`` is
+      the legacy thesis-cut alias. Whichever is present is used.
+    - ``d43_var`` or ``PS_var`` (float, optional) — per-row variance for the
+      particle-size column above (same naming rule).
 
-    Per-channel sparsity is recovered by filtering rows where ``PS == -1`` or
-    ``PS`` is non-finite; those timestamps are dropped from the d43 channel's
-    ``ts`` axis but still appear on the dense concentration channel. The
-    framework's union-axis logic in ``make_dataset`` builds the per-experiment
-    ``[T, D]`` mask without any user mask code.
+    Per-channel sparsity is recovered by filtering rows where the d43/PS
+    value is ``-1`` or non-finite; those timestamps are dropped from the
+    d43 channel's ``ts`` axis but still appear on the dense concentration
+    channel. The framework's union-axis logic in ``make_dataset`` builds
+    the per-experiment ``[T, D]`` mask without any user mask code.
 
     Time stays in **minutes** in the dataset; ``simulate_fn`` converts to seconds
     before integration so the rate constants (CNT exponent uses K and seconds,
@@ -210,6 +234,15 @@ def _load_experiments(
 
     experiments: list[Experiment] = []
     for sheet_name, df in sheet_dict.items():
+        # Resolve the particle-size value/variance column names once per
+        # sheet — accept the canonical ``d43`` first, fall back to the
+        # legacy ``PS`` alias. ``None`` means the sheet has no
+        # particle-size column at all (every experiment will be skipped
+        # below because OUTPUT_CHANNELS requires "d43").
+        d43_col = "d43" if "d43" in df.columns else ("PS" if "PS" in df.columns else None)
+        d43_var_col = (
+            "d43_var" if "d43_var" in df.columns else ("PS_var" if "PS_var" in df.columns else None)
+        )
         for exp_id, df_exp in df.groupby("Exp_ID"):
             time_min = jnp.asarray(df_exp["Time"].to_numpy(dtype=float))
             conc = jnp.asarray(df_exp["Concentration"].to_numpy(dtype=float))
@@ -224,19 +257,22 @@ def _load_experiments(
                 "conc": ChannelObs(ts=time_min, values=conc, variance=conc_var),
             }
 
-            if "PS" in df_exp.columns:
-                ps_raw = df_exp["PS"].to_numpy(dtype=float)
-                # -1 sentinel and NaN both mean "no PS at this row"; drop them
-                # so the d43 channel's ts axis is sparse.
-                ps_arr = jnp.asarray(ps_raw)
-                valid_mask = (ps_arr > 0.0) & jnp.isfinite(ps_arr)
+            if d43_col is not None:
+                d43_raw = df_exp[d43_col].to_numpy(dtype=float)
+                # ``-1`` sentinel and NaN/inf both mean "no d43 at this row";
+                # filter so the d43 channel's ts axis is sparse.
+                d43_arr = jnp.asarray(d43_raw)
+                valid_mask = (d43_arr > 0.0) & jnp.isfinite(d43_arr)
                 if bool(jnp.any(valid_mask)):
                     valid_idx = jnp.where(valid_mask)[0]
                     d43_ts = time_min[valid_idx]
-                    d43_vals = ps_arr[valid_idx]
-                    if "PS_var" in df_exp.columns:
-                        psv_raw = jnp.asarray(df_exp["PS_var"].to_numpy(dtype=float))[valid_idx]
-                        d43_var = jnp.where(jnp.isfinite(psv_raw) & (psv_raw > 0.0), psv_raw, 1e-2)
+                    d43_vals = d43_arr[valid_idx]
+                    if d43_var_col is not None:
+                        var_raw = jnp.asarray(df_exp[d43_var_col].to_numpy(dtype=float))[valid_idx]
+                        # The legacy ``PS_var`` column also uses ``-1`` as
+                        # a missing sentinel — guard the same way the
+                        # values column does.
+                        d43_var = jnp.where(jnp.isfinite(var_raw) & (var_raw > 0.0), var_raw, 1e-2)
                     else:
                         d43_var = jnp.full(d43_vals.shape, 1e-2)
                     channels["d43"] = ChannelObs(ts=d43_ts, values=d43_vals, variance=d43_var)
@@ -564,17 +600,16 @@ def _build_direct_rate_predictors(
 
     Pipeline per branch::
 
-        CovariateSelector  : dict -> [3] in declared INPUT_KEYS_DIRECT order
-        in_scaler          : [3] physical -> [3] latent (logit-of-normalised)
-        MLPPredictor       : [3] -> [1]   (tanh, depth=2, width=16)
-        out_scaler         : [1] latent -> [1] physical (sigmoid into log-bounds)
+        BoundedPredictor.input_keys : dict -> [3] in declared INPUT_KEYS_DIRECT order
+        in_scaler                   : [3] physical -> [3] latent (logit-of-normalised)
+        MLPPredictor                : [3] -> [1]   (tanh, depth=2, width=16)
+        out_scaler                  : [1] latent -> [1] physical (sigmoid into log-bounds)
 
     The two branches receive *independent* MLP weights via key splitting so
     the network architecture is identical but the initial parameters differ.
     """
     k_growth, k_nucleation = jr.split(key, 2)
 
-    selector = CovariateSelector(keys=INPUT_KEYS_DIRECT)
     in_scaler = BoundScaler(
         bounds=(
             COVARIATE_BOUNDS["temperature_C"],
@@ -597,7 +632,7 @@ def _build_direct_rate_predictors(
         transform="sigmoid",
     )
     growth_bp = BoundedPredictor(
-        selector=selector,
+        input_keys=INPUT_KEYS_DIRECT,
         in_scaler=in_scaler,
         inner=growth_inner,
         out_scaler=growth_out_scaler,
@@ -616,7 +651,7 @@ def _build_direct_rate_predictors(
         transform="sigmoid",
     )
     nucleation_bp = BoundedPredictor(
-        selector=selector,
+        input_keys=INPUT_KEYS_DIRECT,
         in_scaler=in_scaler,
         inner=nucleation_inner,
         out_scaler=nucleation_out_scaler,
@@ -638,10 +673,10 @@ def _build_direct_rate_predictors(
 #
 #     Pipeline ``(temperature_C, loading) -> [logA, gamma, Ag, g]``::
 #
-#         CovariateSelector  : dict -> [2] in declared INPUT_KEYS_KINETIC order
-#         in_scaler          : [2] physical -> [2] latent (logit-of-normalised)
-#         MLPPredictor       : [2] -> [4]   (tanh, depth=2, width=16)
-#         out_scaler         : [4] latent -> [4] physical (sigmoid into bounds)
+#         BoundedPredictor.input_keys : dict -> [2] in declared INPUT_KEYS_KINETIC order
+#         in_scaler                   : [2] physical -> [2] latent (logit-of-normalised)
+#         MLPPredictor                : [2] -> [4]   (tanh, depth=2, width=16)
+#         out_scaler                  : [4] latent -> [4] physical (sigmoid into bounds)
 #
 #     Output is in physical units; the matching
 #     ``_simulate_fn_kinetic_params`` consumes it directly. Returned as
@@ -649,7 +684,6 @@ def _build_direct_rate_predictors(
 #     so the same training entry-point handles single-rate and
 #     multi-rate cases uniformly.
 #     """
-#     selector = CovariateSelector(keys=INPUT_KEYS_KINETIC)
 #     in_scaler = BoundScaler(
 #         bounds=tuple(COVARIATE_BOUNDS[k] for k in INPUT_KEYS_KINETIC),
 #         transform="sigmoid",
@@ -672,7 +706,7 @@ def _build_direct_rate_predictors(
 #         transform="sigmoid",
 #     )
 #     bp = BoundedPredictor(
-#         selector=selector,
+#         input_keys=INPUT_KEYS_KINETIC,
 #         in_scaler=in_scaler,
 #         inner=inner,
 #         out_scaler=out_scaler,
@@ -692,7 +726,20 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "figures",
+        help="Directory to write parity + trajectory PNGs into.",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip plotting (still prints diagnostics).",
+    )
     args = parser.parse_args()
+
+    apply_default_style()
 
     # Enable float64 to match source-package thesis runs; mass-balance in the
     # moment ODE is stiff enough that float32 sometimes drifts.
@@ -791,6 +838,31 @@ def main() -> None:
         f"log10_G={final_log10_G:.2f} (G={10.0**final_log10_G:.2e} m/s), "
         f"log10_J={final_log10_J:.2f} (J={10.0**final_log10_J:.2e} #/(m^3·s))"
     )
+
+    # Diagnostics + default plots: predict_dataset returns one [N, T, D]
+    # array per bucket; the helpers walk it in lockstep with the dataset.
+    print("\n[diagnostics] per-channel parity stats over the training set")
+    predictions = predict_dataset(
+        trained_predictors, dataset, simulate_fn=_simulate_fn, solver=solver
+    )
+    diag = compute_diagnostics(predictions, dataset)
+    print_diagnostics(diag)
+
+    if not args.no_plot:
+        args.plot_dir.mkdir(parents=True, exist_ok=True)
+        parity_plot(
+            diag,
+            title="Crystallisation parity (trained model)",
+            save_path=args.plot_dir / "parity.png",
+        )
+        trajectory_plot(
+            predictions,
+            dataset,
+            max_experiments=6,
+            title="Crystallisation trajectories (first 6 experiments)",
+            save_path=args.plot_dir / "trajectories.png",
+        )
+        print(f"\n[plot] figures written to {args.plot_dir}")
 
 
 if __name__ == "__main__":

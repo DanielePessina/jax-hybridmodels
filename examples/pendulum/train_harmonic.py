@@ -45,6 +45,8 @@ form ``x(t) = x0 cos(omega t) + (v0 / omega) sin(omega t)``.
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
 import diffrax
 import jax.numpy as jnp
@@ -56,14 +58,26 @@ from hybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
-    CovariateSelector,
     Experiment,
     SolverConfig,
     make_dataset,
     make_experiment,
+    predict_dataset,
 )
 from hybridmodels.predictors.base import Predictor
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+
+# ``examples/_shared`` is a sibling of this scenario directory; add the
+# parent of this file to sys.path so the helpers import as a top-level
+# package without requiring any install step.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _shared import (  # noqa: E402
+    apply_default_style,
+    compute_diagnostics,
+    parity_plot,
+    print_diagnostics,
+    trajectory_plot,
+)
 
 # --------------------------------------------------------------------------- #
 # Constants                                                                   #
@@ -138,22 +152,22 @@ def _build_predictor(key: Array) -> BoundedPredictor:
 
     Pipeline ``dict[str, Array] -> [omega]``::
 
-        CovariateSelector  : ("dummy",) -> [1]
-        in_scaler          : [1] physical -> [1] latent (no-op in practice
-                             because the inner predictor ignores its input)
-        OmegaPredictor     : Array -> [1]   (returns the bounded latent omega)
-        out_scaler         : [1] latent -> [1] physical (sigmoid into OMEGA_BOUNDS)
+        BoundedPredictor.input_keys : ("dummy",) -> [1]
+        in_scaler                   : [1] physical -> [1] latent (no-op in practice
+                                      because the inner predictor ignores its input)
+        OmegaPredictor              : Array -> [1]   (returns the bounded latent omega)
+        out_scaler                  : [1] latent -> [1] physical (sigmoid into OMEGA_BOUNDS)
 
-    The ``CovariateSelector`` needs at least one key; we use a constant
-    ``"dummy"`` covariate to satisfy the framework's named-covariate
-    contract without leaking experiment-specific information.
+    ``BoundedPredictor`` needs at least one input slot (cardinality of
+    ``in_scaler.bounds``); we use a constant ``"dummy"`` covariate to
+    satisfy the framework's named-input contract without leaking
+    experiment-specific information.
     """
-    selector = CovariateSelector(keys=("dummy",))
     in_scaler = BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid")
     inner = OmegaPredictor(jr.normal(key))
     out_scaler = BoundScaler(bounds=(OMEGA_BOUNDS,), transform="sigmoid")
     return BoundedPredictor(
-        selector=selector,
+        input_keys=("dummy",),
         in_scaler=in_scaler,
         inner=inner,
         out_scaler=out_scaler,
@@ -261,7 +275,7 @@ def _build_experiments(noise_key: Array) -> list[Experiment]:
     ``Experiment`` whose ``y0_fn`` returns the ground-truth initial state.
 
     A single trivial covariate ``"dummy"`` is added so the predictor's
-    ``CovariateSelector`` has a key to pull on.
+    ``input_keys`` tuple has a slot to pull on.
     """
     ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
     experiments: list[Experiment] = []
@@ -305,7 +319,20 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--lr", type=float, default=5e-2)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "figures",
+        help="Directory to write parity + trajectory PNGs into.",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip plotting (still prints diagnostics).",
+    )
     args = parser.parse_args()
+
+    apply_default_style()
 
     root_key = jr.PRNGKey(args.seed)
     k_data, k_init, k_train = jr.split(root_key, 3)
@@ -362,6 +389,29 @@ def main() -> None:
     final_omega = _read_omega(trained)
     print(f"\n  recovered omega = {final_omega:.4f} (target {OMEGA_TRUE})")
     print(f"  absolute error  = {abs(final_omega - OMEGA_TRUE):.4f}")
+
+    # Diagnostics + default plots: predict_dataset returns one [N, T, D]
+    # array per bucket; the helpers walk it in lockstep with the dataset.
+    print("\n[diagnostics] per-channel parity stats over the training set")
+    predictions = predict_dataset(trained, dataset, simulate_fn=_simulate_fn, solver=solver)
+    diag = compute_diagnostics(predictions, dataset)
+    print_diagnostics(diag)
+
+    if not args.no_plot:
+        args.plot_dir.mkdir(parents=True, exist_ok=True)
+        parity_plot(
+            diag,
+            title="Pendulum parity (trained model)",
+            save_path=args.plot_dir / "parity.png",
+        )
+        trajectory_plot(
+            predictions,
+            dataset,
+            max_experiments=len(experiments),
+            title="Pendulum trajectories (trained model)",
+            save_path=args.plot_dir / "trajectories.png",
+        )
+        print(f"\n[plot] figures written to {args.plot_dir}")
 
 
 if __name__ == "__main__":

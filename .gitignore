@@ -217,3 +217,6 @@ __marimo__/
 
 # Source-package data copies (not for distribution)
 examples/crystallisation/data/
+
+# Figures written by the example scripts' default plotting
+examples/*/figures/
