@@ -1,9 +1,10 @@
-"""Optax training tests (SPEC §5.7 / R-T1..R-T8 / R-J1..R-J3 / R-R1..R-R3 / R-A2 / R-L1).
+"""Optax training tests.
 
-Synthetic harmonic-oscillator setup: state = [position, velocity], dy/dt = [v, -omega^2 x].
-Four experiments share ten timestamps; only position is observed. The trainable
-predictor holds a single scalar ``omega`` JAX leaf so convergence and tournament
-behaviour can be checked against the ground-truth ``omega = 1.0``.
+Synthetic harmonic-oscillator setup: state ``[position, velocity]``,
+``dy/dt = [v, -omega^2 * x]``. Four experiments share ten timestamps;
+only position is observed. The trainable predictor holds a single
+scalar ``omega`` JAX leaf so convergence and tournament behaviour can
+be checked against the ground-truth ``omega = 1.0``.
 """
 
 from __future__ import annotations

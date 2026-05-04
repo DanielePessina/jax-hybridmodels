@@ -1,10 +1,23 @@
-"""Public predictor surface for v1 (SPEC §4.4 / §5.2).
+"""Public predictor surface.
 
-`RatePair` was removed in this round (R-A6: multi-rate models compose by
-unpacking the predictors tuple at the simulate_fn boundary, no framework
-wrapper). `NeuralNPolynomial` is deferred to post-v1 per SPEC §2.3 — the
-implementation file ``neural_npoly.py`` is retained in-tree as a future
-re-introduction candidate but is **not** part of the v1 public API.
+A *predictor* is an ``eqx.Module`` mapping a covariate vector to a real
+or vector output that the user's ``simulate_fn`` consumes (typically as
+a coefficient or rate inside a differential equation). The
+``BoundedPredictor`` wrapper composes any inner predictor with a
+``BoundScaler`` to constrain the output to a physically meaningful
+range; ``MLPPredictor`` and ``KANPredictor`` are the two concrete
+inner-predictor families shipped here.
+
+Multi-rate hybrid models compose by passing a *tuple* of predictors to
+training and unpacking that tuple inside ``simulate_fn`` — the framework
+deliberately does not provide a single wrapper class for "two rates" or
+"a list of rates", because the JIT-friendly thing is for the user's
+simulator to know exactly what each predictor is for.
+
+The file ``neural_npoly.py`` ships an experimental
+``NeuralNPolynomial`` that is **not** re-exported here; it is held
+in-tree as a future candidate but is not yet part of the supported
+public API.
 """
 
 from hybridmodels.predictors.base import (

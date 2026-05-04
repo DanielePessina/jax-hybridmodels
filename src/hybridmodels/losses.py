@@ -1,10 +1,15 @@
-"""Loss functions for hybrid mechanistic training (SPEC §5.4 / R-L1 / R-L2).
+"""Loss functions for hybrid mechanistic training.
 
-Each loss is a pure function ``loss(pred_obs, bp) -> scalar``. The framework
-wraps it with simulate + state_to_output + jit; the losses themselves are
-unjitted. NaN-safety: contributions at masked-out positions are multiplied
-by zero (never divided by the mask), so ``pred_obs`` may carry NaNs in
-masked-out cells without poisoning the result.
+Each loss is a pure function ``loss(pred_obs, bp) -> scalar``. The
+framework composes it with the simulator and ``state_to_output`` and
+wraps the whole pipeline in JIT; the losses themselves are unjitted, so
+they can be developed and tested without a tracing harness.
+
+NaN safety: contributions at masked-out positions are multiplied by zero
+(never divided by the mask), so ``pred_obs`` may carry NaNs in
+masked-out cells without poisoning the result. Per-experiment
+denominators are clamped at ``1`` so an experiment with zero observations
+on a channel does not divide by zero.
 
 Variants in this module
 -----------------------
@@ -65,9 +70,7 @@ def _select(
     return p, y, m
 
 
-def _gaussian_nll_terms(
-    p: Array, y: Array, var: Array, m: Array
-) -> Array:
+def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
     """Pointwise Gaussian NLL ``0.5 * (log(2*pi*var) + (p-y)**2/var)`` with mask gating.
 
     NaN-safety strategy: every input that could be NaN at masked-out cells is

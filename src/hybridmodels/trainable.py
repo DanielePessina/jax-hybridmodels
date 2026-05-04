@@ -1,10 +1,22 @@
 """Composable trainability filters.
 
-Per SPEC §5.5 / §4.5 and ADR-0003 / ADR-0006: trainability is a boolean PyTree
-mask matching the ``predictors`` pytree structure (any container — tuple,
-dict, NamedTuple, single Module). The default predicate marks every
-inexact-array leaf as trainable; freezers are free functions that consume a
-mask + predictors pytree and return a new mask, never mutating the input.
+Trainability is represented as a boolean PyTree *mask* whose structure
+mirrors the ``predictors`` pytree (any container shape: tuple, dict,
+NamedTuple, single Module). Optimisers consume the mask alongside the
+parameters: Optax via ``eqx.filter_value_and_grad(..., filter_spec=mask)``,
+Evosax via ``eqx.partition(predictors, mask)``. ``True`` marks a leaf as
+trainable, ``False`` freezes it.
+
+The default predicate marks every inexact-array leaf as trainable; the
+freezers in this module are free functions ``(mask, predictors) -> mask``
+— they never mutate their inputs, so masks compose by chaining. A
+typical pipeline reads:
+
+    mask = trainable_mask(predictors)
+    mask = freeze_modules_of_type(mask, predictors, BoundScaler)
+    mask = freeze_paths(mask, ("inner.bias",))
+
+Each step returns a fresh mask of the same pytree shape.
 """
 
 from __future__ import annotations
@@ -17,7 +29,7 @@ import jax.tree_util as jtu
 
 
 def default_trainable(leaf: Any) -> bool:
-    """Default leaf-trainability predicate (R-F2): ``True`` for inexact-array leaves only.
+    """Default leaf-trainability predicate: ``True`` for inexact-array leaves only.
 
     "Inexact" means JAX arrays with float (or complex) dtype — every other
     leaf (ints, bools, Python scalars, static fields' frozen values) is
@@ -31,13 +43,14 @@ def trainable_mask(
     predictors: Any,
     predicate: Callable[[Any], bool] = default_trainable,
 ) -> Any:
-    """Build a boolean PyTree mask matching ``predictors``'s structure (R-F1 / ADR-0006).
+    """Build a boolean PyTree mask matching ``predictors``'s structure.
 
     Maps ``predicate`` over every leaf of the ``predictors`` pytree to produce
-    a mask of the same tree shape with ``bool`` leaves. Accepts any container
-    shape (tuple, dict, NamedTuple, single ``eqx.Module``). The result is
-    consumed unchanged by both Optax (``eqx.filter_value_and_grad(..., filter_spec=mask)``)
-    and Evosax (``eqx.partition(predictors, mask)``).
+    a mask of the same tree shape with ``bool`` leaves. Accepts any
+    container shape (tuple, dict, NamedTuple, single ``eqx.Module``). The
+    result is consumed unchanged by both Optax
+    (``eqx.filter_value_and_grad(..., filter_spec=mask)``) and Evosax
+    (``eqx.partition(predictors, mask)``).
     """
     return jtu.tree_map(predicate, predictors)
 
@@ -86,9 +99,10 @@ def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
     Walks ``mask`` and ``predictors`` in lockstep; when a node in
     ``predictors`` is an instance of ``cls``, the corresponding sub-mask is
     replaced wholesale by an all-``False`` subtree. Typical use:
-    ``freeze_modules_of_type(mask, predictors, BoundScaler)`` to freeze every
-    bound scaler's ``temperature`` leaf — the recommended convention shipped
-    in every example (CONTEXT.md "Trainability filter").
+    ``freeze_modules_of_type(mask, predictors, BoundScaler)`` to freeze
+    every bound scaler's ``temperature`` leaf — the convention recommended
+    for hybrid models where the scaler defines the activation shape and
+    is not meant to drift during training.
     """
 
     def _is_target(node: Any) -> bool:

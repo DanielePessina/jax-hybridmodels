@@ -1,19 +1,28 @@
 """Predictor primitives and composition wrappers.
 
-Per SPEC §5.2 and ADR-0001 / ADR-0003 / ADR-0006: `Predictor` is an abstract
-marker; concrete predictors are final per Equinox's pattern. Bound-scaling
-and covariate selection are decoupled into composition wrappers
-(`BoundedPredictor`) rather than baked into a class hierarchy. Multi-rate
-models (e.g. nucleation + growth) compose as a tuple of predictors at the
-``simulate_fn`` boundary — there is no framework `RatePair` wrapper (R-A6).
+The framework prefers composition over inheritance: ``Predictor`` is an
+abstract marker for trainable ``Array -> Array`` modules, concrete
+predictors (``MLPPredictor``, ``KANPredictor``, ...) are final, and
+shared concerns — bound-aware input/output scaling, covariate selection
+— live in standalone wrappers (``BoundScaler``, ``CovariateSelector``,
+``BoundedPredictor``) that hold a ``Predictor`` as a field. Adding a
+new predictor family is therefore "subclass ``Predictor`` and implement
+``__call__``"; the wrapping pieces stay reusable.
 
-The pytree contract for the trainable component (R-A2) lives at the
-``simulate_fn`` boundary: the first argument is a `PyTree[eqx.Module]` —
-runtime-permissive, with ``tuple`` as the canonical convention shown in
-examples. ``reinitialize_pytree_with_key`` (R-T8) is the per-leaf
-re-initialiser used by the tournament; it splits the per-attempt key by
-traversal order across `eqx.Module` leaves so identical-shape sibling
-predictors get *different* re-init weights.
+Multi-rate models (e.g. simultaneous nucleation and growth rates)
+compose as a *tuple* of predictors that the user unpacks at the top of
+their ``simulate_fn``. There is deliberately no framework "rate-pair"
+wrapper class — keeping the unpacking explicit at the simulator
+boundary means each predictor's role is named in user code, and adding
+a third rate is just appending to the tuple.
+
+The trainable component handed to training kernels is therefore a
+``PyTree[eqx.Module]``: a tuple by convention, but any pytree shape
+(list, dict, NamedTuple, single Module) works. The re-initialisation
+helper :func:`reinitialize_pytree_with_key` walks that pytree and
+gives each ``eqx.Module`` leaf an independent subkey, so identical-shape
+sibling predictors get genuinely different fresh weights when the
+training tournament restarts a run.
 """
 
 # ruff: noqa: F722
@@ -51,9 +60,10 @@ class Predictor(eqx.Module):
     and exposes a richer call signature (`dict[str, Array] -> Array`) without
     subclassing it.
 
-    Multi-rate models do not need a framework wrapper (no `RatePair`):
-    multiple predictors compose as a tuple at the ``simulate_fn`` boundary
-    and the user unpacks them at the top of the vector field. See R-A6.
+    Multi-rate models do not need a framework wrapper: multiple
+    predictors compose as a tuple at the ``simulate_fn`` boundary and
+    the user unpacks them at the top of the vector field, naming each
+    one in their own code (``rate_growth, rate_nucleation = predictors``).
     """
 
     def __call__(self, x: Array) -> Array:
@@ -84,17 +94,29 @@ class CovariateSelector(eqx.Module):
 class BoundScaler(eqx.Module):
     """Bidirectional sigmoid scaler between physical ``[low, high]`` and an unbounded latent.
 
-    Sigmoid is the only transform supported in v1 (R-A4 / CONTEXT.md). The
-    forward map is ``physical -> latent = logit((x - low) / (high - low)) * T``;
-    the inverse is ``latent -> physical = low + (high - low) * sigmoid(z / T)``.
-    Composing inverse with forward is the identity strictly inside the open
-    box ``(low, high)``; values at or near the closed endpoints are clipped
-    by ``to_latent`` (see method doc) so the round-trip can deviate by up to
-    one clip width at the extremes.
+    The trainable inner predictor sees no bounds and outputs an
+    unbounded latent value; this scaler translates between that latent
+    and the physical box the simulator actually needs.
 
-    The temperature ``T`` is a leaf, not a static field, so it can in
-    principle be trained — but every example freezes it via
-    ``freeze_modules_of_type(mask, predictor, BoundScaler)``.
+    The forward map is
+    ``physical -> latent = logit((x - low) / (high - low)) * T``; the
+    inverse is
+    ``latent -> physical = low + (high - low) * sigmoid(z / T)``.
+    Composing inverse with forward is the identity strictly inside the
+    open box ``(low, high)``; values at or near the closed endpoints
+    are clipped inside ``to_latent`` (see method doc) so the round trip
+    can deviate by up to one clip width at the extremes.
+
+    Sigmoid is the only transform supported here; alternative transforms
+    can be introduced by extending ``_SUPPORTED_TRANSFORMS`` and adding
+    matching forward/inverse maps.
+
+    The temperature ``T`` is a leaf, not a static field, so it could in
+    principle be trained. The recommended convention is to freeze it
+    (e.g. via ``freeze_modules_of_type(mask, predictor, BoundScaler)``)
+    because the scaler is meant to define the activation shape, not
+    learn it; leaving it trainable shifts the gradient signal between
+    the scaler and the inner predictor and tends to slow convergence.
 
     Attributes
     ----------
@@ -102,7 +124,8 @@ class BoundScaler(eqx.Module):
         Per-component ``(low, high)`` pairs. Length sets the I/O dimension;
         applies elementwise to the last axis of inputs.
     transform : str
-        Name of the scaling transform; ``"sigmoid"`` only in v1.
+        Name of the scaling transform; ``"sigmoid"`` is currently the
+        only supported value.
     temperature : Array
         Scalar (or per-component) sharpness multiplier in latent space.
         ``T = 1.0`` recovers the standard logit/sigmoid pair.
@@ -121,7 +144,7 @@ class BoundScaler(eqx.Module):
         if transform not in _SUPPORTED_TRANSFORMS:
             raise ValueError(
                 f"Unsupported transform {transform!r}; "
-                f"supported in v1: {list(_SUPPORTED_TRANSFORMS)}"
+                f"supported transforms: {list(_SUPPORTED_TRANSFORMS)}"
             )
         self.bounds = tuple((float(low), float(high)) for low, high in bounds)
         self.transform = transform
@@ -161,14 +184,17 @@ class BoundScaler(eqx.Module):
 class BoundedPredictor(eqx.Module):
     """Composition wrapper: ``selector -> in_scaler.to_latent -> inner -> out_scaler.from_latent``.
 
-    The full physical-units forward pass for a covariate-conditioned predictor
-    with bounded inputs and outputs. Inputs are pulled from a *predictor input
-    dict* by name (which the user composes inside the vector field — covariates
-    plus state-derived plus exogenous time-dependent values; see CONTEXT.md
-    "Predictor inputs"), mapped to the inner network's latent input space,
-    run through the trainable ``Predictor``, then mapped back into the physical
-    output box. ``inner`` sees no bound information and never has to clamp
-    itself.
+    The full physical-units forward pass for a covariate-conditioned
+    predictor with bounded inputs and outputs. Inputs are pulled from a
+    *predictor input dict* by name — typically the experiment's
+    covariates, but the user is free to pass any keyed scalars
+    (state-derived values, exogenous time-dependent forcing, etc.)
+    composed inside the vector field. The selector pulls the named
+    subset, ``in_scaler`` maps each value into the inner network's
+    latent input space, the trainable ``Predictor`` runs in unbounded
+    latent space, and ``out_scaler`` maps its output back into the
+    physical output box. ``inner`` therefore sees no bound information
+    and never has to clamp itself.
 
     Calling contract
     ----------------
@@ -195,15 +221,18 @@ class BoundedPredictor(eqx.Module):
 def reinitialize_with_key(predictor: eqx.Module, key: Array) -> eqx.Module:
     """Return a fresh copy of `predictor` with inexact-float leaves re-initialised.
 
-    Single-Module helper. If `predictor` implements the `initialized_with_key`
-    protocol (R-T8), it is delegated to. Otherwise every inexact-array leaf
-    in the PyTree is replaced with a standard-normal sample of matching shape
-    and dtype; non-inexact leaves and static fields are left untouched.
+    Single-Module helper. If `predictor` implements the
+    ``initialized_with_key`` protocol (a method ``self -> key -> self``
+    used by predictor classes that want a custom re-init scheme — for
+    example a KAN that needs to rebuild its grid), it is delegated to.
+    Otherwise every inexact-array leaf in the pytree is replaced with a
+    standard-normal sample of matching shape and dtype; non-inexact
+    leaves and static fields are left untouched.
 
     For re-initialising a *pytree* of predictors (the convention at the
-    `simulate_fn` boundary — typically a tuple of `BoundedPredictor`s), use
-    :func:`reinitialize_pytree_with_key` so each `eqx.Module` leaf gets its
-    own independently-derived key.
+    ``simulate_fn`` boundary — typically a tuple of ``BoundedPredictor``s),
+    use :func:`reinitialize_pytree_with_key` so each ``eqx.Module`` leaf
+    gets its own independently-derived key.
     """
     if hasattr(predictor, "initialized_with_key"):
         return cast(eqx.Module, predictor.initialized_with_key(key))
@@ -221,22 +250,34 @@ def reinitialize_with_key(predictor: eqx.Module, key: Array) -> eqx.Module:
 
 
 def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
-    """Per-`eqx.Module`-leaf re-init across a `predictors` pytree (R-T8).
+    """Per-``eqx.Module``-leaf re-initialisation across a ``predictors`` pytree.
 
-    Used by the tournament loop to escape bad initial weights. Splits ``key``
-    by **traversal order** (``jr.split(key, n_module_leaves)``) into one key
-    per `eqx.Module` leaf, then calls :func:`reinitialize_with_key` on each
-    leaf with its dedicated subkey. Identical-shape sibling predictors get
-    *different* re-init weights — this is the (β) split-by-traversal design
-    locked during the 2026-05-04 grilling.
+    Used by the training tournament to escape bad initial weights:
+    when an attempt diverges or stalls, the loop draws a fresh
+    per-attempt key, calls this function, and restarts. Each
+    ``eqx.Module`` leaf gets its *own* independent subkey, so two
+    sibling predictors with identical shapes still re-init to
+    different random weights.
 
-    Accepts any pytree shape: the canonical ``tuple[BoundedPredictor, ...]``
-    convention, a bare `eqx.Module` (one-leaf pytree, equivalent to calling
-    `reinitialize_with_key` directly), `dict[str, ...]`, NamedTuple subclasses,
-    nested combinations — anything ``jax.tree_util`` can walk.
+    The split is done by **traversal order**: we count the
+    ``eqx.Module`` leaves with a Module-stopped traversal, call
+    ``jr.split(key, n_module_leaves)`` once, and hand out subkeys in
+    that order. The alternative — folding the per-leaf path string —
+    would give path-stable subkeys but cost a hash per leaf and
+    produce a less obvious correspondence between subkeys and
+    pytree positions; traversal-order splitting is simpler and
+    sufficient because the pytree shape is fixed across re-inits
+    within a single training run.
 
-    Returns a structurally-identical pytree with fresh weights on every
-    `eqx.Module` leaf.
+    Accepts any pytree shape: the conventional
+    ``tuple[BoundedPredictor, ...]``, a bare ``eqx.Module`` (a
+    one-leaf pytree, equivalent to calling
+    :func:`reinitialize_with_key` directly), ``dict[str, ...]``,
+    ``NamedTuple`` subclasses, and any nested combinations
+    ``jax.tree_util`` can walk.
+
+    Returns a structurally identical pytree with fresh weights on every
+    ``eqx.Module`` leaf.
     """
 
     def _is_module(node: Any) -> bool:

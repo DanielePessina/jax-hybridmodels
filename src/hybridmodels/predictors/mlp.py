@@ -1,9 +1,12 @@
-"""Concrete ``MLPPredictor`` wrapping ``eqx.nn.MLP`` (SPEC §5.2).
+"""Concrete ``MLPPredictor`` wrapping ``eqx.nn.MLP``.
 
-All hyperparameters are static fields so the module pickles to a JSON-friendly
-shape and round-trips through ``eqx.tree_serialise_leaves`` (R-A5). Only the
-inner ``mlp`` carries dynamic float leaves; ``activation_name`` is a string
-key into ``_ACTIVATION_MAP`` rather than a callable so it serialises cleanly.
+All hyperparameters are stored as static ``eqx.field``s so the module
+serialises cleanly: the structural metadata travels with the JSON
+sidecar, only the inner ``mlp``'s weights and biases are dynamic leaves
+written into the binary checkpoint, and the activation function is
+referenced by *name* (a string key into ``_ACTIVATION_MAP``) rather than
+by its callable identity, so loading does not require re-importing or
+guessing at the activation.
 """
 
 # ruff: noqa: F722
@@ -36,9 +39,7 @@ def _resolve_activation(name: str) -> Callable[[Array], Array]:
         return _ACTIVATION_MAP[name]
     except KeyError as exc:
         available = sorted(_ACTIVATION_MAP)
-        raise ValueError(
-            f"Activation {name!r} not supported. Available: {available}"
-        ) from exc
+        raise ValueError(f"Activation {name!r} not supported. Available: {available}") from exc
 
 
 class MLPPredictor(Predictor):
@@ -81,9 +82,11 @@ class MLPPredictor(Predictor):
     ) -> None:
         """Build the MLP, materialising the activation callable from its name.
 
-        ``key`` is required (R-R1) and threaded into ``eqx.nn.MLP`` for layer
-        weight initialisation. ``activation_name`` must be a key of
-        ``_ACTIVATION_MAP``; an unknown name raises with the supported set.
+        ``key`` is required and threaded into ``eqx.nn.MLP`` for layer
+        weight initialisation — the framework refuses silent default keys
+        so reproducibility never relies on a hidden global RNG.
+        ``activation_name`` must be a key of ``_ACTIVATION_MAP``; an
+        unknown name raises with the supported set.
         """
         activation = _resolve_activation(activation_name)
         self.in_size = int(in_size)
@@ -112,12 +115,13 @@ class MLPPredictor(Predictor):
     def initialized_with_key(self, key: Array) -> MLPPredictor:
         """Return a fresh ``MLPPredictor`` with the same architecture, new weights.
 
-        Implements the R-T8 protocol consumed by ``reinitialize_with_key``
-        and the optax tournament. Re-instantiating the whole module is
-        cleaner than reinitialising leaves in place because ``eqx.nn.MLP``
-        owns its own per-layer init logic (Glorot/normal scaling, bias zero
-        init); leaf-level standard-normal sampling would skew the
-        distribution.
+        Implements the re-init protocol consumed by
+        :func:`reinitialize_with_key` and by the training tournament loop
+        when it restarts a stalled attempt. Re-instantiating the whole
+        module is cleaner than reinitialising leaves in place because
+        ``eqx.nn.MLP`` owns its own per-layer init logic (Glorot/normal
+        scaling, zero biases); leaf-level standard-normal sampling would
+        skew the distribution and break that scheme.
         """
         return MLPPredictor(
             in_size=self.in_size,

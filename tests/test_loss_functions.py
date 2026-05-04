@@ -1,6 +1,7 @@
-"""Loss-function behaviour tests (SPEC §5.4 / R-L1 / R-L2).
+"""Loss-function behaviour tests.
 
 Pin the four built-in losses' contract:
+
 - pure ``loss(pred_obs, bp) -> scalar`` (no jit, no simulation)
 - masks contribute identically zero (multiply, not divide)
 - ``channel_idx`` restricts and ``channel_weights`` re-weights

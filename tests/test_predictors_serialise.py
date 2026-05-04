@@ -21,10 +21,10 @@ from hybridmodels.predictors import (
     Predictor,
 )
 
-# RatePair was deleted (R-A6); the predictors-tuple convention replaces it.
-# NeuralNPolynomial is deferred (SPEC §2.3) but its in-tree implementation is
-# kept exercised here via the submodule import so a future re-introduction
-# starts from a green test.
+# ``NeuralNPolynomial`` is in-tree as a future-candidate predictor and is
+# not part of the public surface (see ``hybridmodels/predictors/__init__.py``).
+# Importing it directly from the submodule keeps these serialisation tests
+# green so a future re-introduction starts from a known-working baseline.
 from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
 
 
@@ -56,12 +56,14 @@ def _bounded_predictor_with_key(key: Array) -> BoundedPredictor:
 
 
 def _predictors_tuple() -> tuple[BoundedPredictor, BoundedPredictor]:
-    """Replacement for the deleted ``_rate_pair`` factory (R-A6).
+    """Two-predictor tuple — the framework's multi-rate convention.
 
-    Mirrors the canonical predictors-tuple convention: two BoundedPredictors
-    composed by the user at the simulate_fn boundary, no framework wrapper.
-    The serialisation test treats the tuple as an arbitrary pytree — exactly
-    what eqx.tree_serialise_leaves expects.
+    Hybrid models with multiple rates (e.g. nucleation + growth)
+    compose by passing a tuple of ``BoundedPredictor``s to training and
+    unpacking it inside the user's ``simulate_fn``; there is no
+    framework wrapper class. The serialisation tests treat that tuple
+    as an arbitrary pytree — exactly what
+    ``eqx.tree_serialise_leaves`` expects.
     """
     return (_bounded_predictor(), _bounded_predictor())
 
@@ -141,10 +143,10 @@ def _different_template(predictor: eqx.Module | tuple) -> eqx.Module | tuple:
 
 PREDICTOR_FACTORIES: list[tuple[str, Callable[[], eqx.Module | tuple]]] = [
     ("bounded_predictor", _bounded_predictor),
-    ("predictors_tuple", _predictors_tuple),  # replaces rate_pair (R-A6)
+    ("predictors_tuple", _predictors_tuple),  # multi-rate convention
     ("mlp_predictor", _mlp_predictor),
     ("kan_predictor", _kan_predictor),
-    ("neural_npoly", _neural_npoly),  # deferred (SPEC §2.3) but tested via submodule import
+    ("neural_npoly", _neural_npoly),  # future-candidate, imported from submodule
 ]
 
 

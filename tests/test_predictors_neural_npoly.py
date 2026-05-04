@@ -17,10 +17,11 @@ from hybridmodels.predictors import (
     Predictor,
 )
 
-# NeuralNPolynomial is deferred to post-v1 (SPEC §2.3) — no longer in the
-# public ``hybridmodels.predictors`` surface. The implementation file is
-# kept in-tree for the eventual re-introduction; we import it directly
-# from the submodule so this test file continues to pin the contract.
+# ``NeuralNPolynomial`` is not part of the public predictor surface yet
+# (the file is kept in-tree as a future candidate; see
+# ``hybridmodels/predictors/__init__.py``). We import it directly from
+# the submodule so these tests can still pin the implementation's
+# contract while it lives outside the public API.
 from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
 
 
@@ -208,9 +209,10 @@ class TestZeroExponentNonNaN:
 
 
 def test_not_in_public_export() -> None:
-    """``NeuralNPolynomial`` is deferred to post-v1 (SPEC §2.3) and intentionally
-    absent from the top-level ``hybridmodels`` namespace. Pin that absence so
-    a future re-introduction is a deliberate edit, not an accidental leak.
+    """``NeuralNPolynomial`` is intentionally absent from the top-level
+    ``hybridmodels`` namespace — it lives in-tree as a future candidate
+    but is not yet supported public API. Pin that absence so a future
+    re-introduction is a deliberate edit, not an accidental leak.
     """
     import hybridmodels
 

@@ -1,8 +1,13 @@
 """SolverConfig and a name-keyed solver registry for JSON-serialisable configs.
 
-Per SPEC §5.3 / R-S1 / R-S2: every field on SolverConfig is static so the
-config carries no JAX-array leaves. Round-trip serialisation goes through
-SOLVER_REGISTRY, which users extend via register_solver(name, cls).
+Every field on ``SolverConfig`` is declared ``eqx.field(static=True)`` so
+the config carries no JAX-array leaves: it is closed over by jitted
+training and prediction kernels, contributing only to their static
+signature, and so it can round-trip through plain JSON. The price of
+that JSON round-trip is that the concrete diffrax solver class must be
+discoverable by name; ``SOLVER_REGISTRY`` is that name table, and users
+extend it with :func:`register_solver` before serialising a config that
+references a custom solver.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ def register_solver(name: str, cls: type[diffrax.AbstractSolver[Any]]) -> None:
 
 
 class SolverConfig(eqx.Module):
-    """Static-only ``diffrax`` solver configuration (R-S1).
+    """Static-only ``diffrax`` solver configuration.
 
     Every field is ``eqx.field(static=True)`` so the config carries no JAX
     array leaves — it is closed over by jitted training/prediction functions
@@ -47,7 +52,8 @@ class SolverConfig(eqx.Module):
         appear in ``SOLVER_REGISTRY`` for ``to_dict`` to round-trip.
     rtol, atol : float | tuple[float, ...]
         Diffrax tolerances. ``atol`` may be per-state-component — a tuple
-        whose length matches ``S`` from ``simulate_fn``.
+        whose length matches ``S`` (the full state dimension consumed by
+        the user's ``simulate_fn``).
     max_steps : int
         Diffrax ``max_steps`` budget.
     dt0 : float | None
@@ -61,7 +67,7 @@ class SolverConfig(eqx.Module):
     dt0: float | None = eqx.field(static=True)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise to a JSON-compatible dict via ``SOLVER_REGISTRY`` (R-S2).
+        """Serialise to a JSON-compatible dict via ``SOLVER_REGISTRY``.
 
         The solver instance is replaced by its registered name; tuple ``atol``
         becomes a list (JSON has no tuple). Unknown solver classes raise so
@@ -102,8 +108,7 @@ class SolverConfig(eqx.Module):
         name = d["solver"]
         if name not in SOLVER_REGISTRY:
             raise ValueError(
-                f"Unknown solver name {name!r}; "
-                f"available: {sorted(SOLVER_REGISTRY.keys())}"
+                f"Unknown solver name {name!r}; available: {sorted(SOLVER_REGISTRY.keys())}"
             )
         solver_cls = SOLVER_REGISTRY[name]
         atol_in = d["atol"]

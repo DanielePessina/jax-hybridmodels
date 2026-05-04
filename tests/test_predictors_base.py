@@ -170,12 +170,14 @@ class TestBoundedPredictor:
 
 
 class TestPredictorsTuple:
-    """Multi-rate composition replaces ``RatePair`` (deleted per R-A6).
+    """Multi-rate composition via a tuple of predictors.
 
-    The convention is now a tuple of ``BoundedPredictor``s consumed at the
-    ``simulate_fn`` boundary; the user unpacks at the top of the vector
-    field. These tests pin the behaviour the deleted ``RatePair`` provided
-    via direct tuple operations on the framework's primitives.
+    The framework's convention for multi-rate hybrid models is to pass a
+    tuple of ``BoundedPredictor``s to training and unpack it at the top
+    of the user's vector field — there is no framework wrapper class for
+    "two rates" or "a list of rates". These tests pin the behaviour the
+    user gets from operating directly on those tuple primitives:
+    composition, indexing, partial freezing, and so on.
     """
 
     def _bp(self, out_low: float, out_high: float) -> BoundedPredictor:

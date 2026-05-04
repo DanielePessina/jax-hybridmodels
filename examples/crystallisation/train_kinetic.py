@@ -48,19 +48,19 @@ Initial state convention
 ``mu0..mu4`` start at zero, and the dissolved-solute concentration starts at
 the experiment's first observed concentration value.
 
-Phase status
-------------
-Uses every module shipped through Phase 9 (optax training):
+Modules exercised by this example
+---------------------------------
+The script exercises the framework end-to-end:
 
-- Phase 1 ``data`` — ``ChannelObs``, ``Experiment``, ``make_dataset``
-- Phase 2 ``solver`` — ``SolverConfig``
-- Phase 3/4 ``predictors`` — ``BoundedPredictor``, ``BoundScaler``,
+- ``hybridmodels.data`` — ``ChannelObs``, ``Experiment``, ``make_dataset``
+- ``hybridmodels.solver`` — ``SolverConfig``
+- ``hybridmodels.predictors`` — ``BoundedPredictor``, ``BoundScaler``,
   ``CovariateSelector``, ``MLPPredictor``
-- Phase 5 ``losses`` (``masked_mse``) / ``prediction``
-- Phase 6 ``trainable`` (default mask via ``train_with_optax``)
-- Phase 7 ``rng`` (consumed inside training internals)
-- Phase 8 ``ui`` (``SilentUI`` selected via ``verbose=False``)
-- Phase 9 ``training/optax`` — ``train_with_optax``
+- ``hybridmodels.losses`` (``masked_mse``) and ``hybridmodels.prediction``
+- ``hybridmodels.trainable`` (default mask via ``train_with_optax``)
+- ``hybridmodels.rng`` (consumed inside training internals)
+- ``hybridmodels.ui`` (``SilentUI`` selected via ``verbose=False``)
+- ``hybridmodels.training.optax`` — ``train_with_optax``
 
 How to run
 ----------
@@ -112,8 +112,9 @@ Bundled into the repo at ``examples/crystallisation/data/`` so the script
 runs out-of-the-box; the path is resolved relative to this file."""
 
 DEFAULT_SHEETS: tuple[str, ...] = ("Unseeded",)
-"""Excel sheets to load. Restricted to a single system to keep training short
-and to dodge multi-system conditioning (out of scope per SPEC §2.2)."""
+"""Excel sheets to load. Restricted to a single system so the example
+trains in a few minutes and avoids the multi-system conditioning
+problem, which is out of scope for this example."""
 
 COVARIATE_BOUNDS: dict[str, tuple[float, float]] = {
     "temperature_C": (13.0, 27.0),
@@ -345,19 +346,23 @@ def _simulate_fn(
 ) -> Float[Array, "T 6"]:
     """Integrate the method-of-moments ODE using two direct-rate predictors.
 
-    Mandatory ``simulate_fn`` shape per SPEC §4.2 / R-A2: returns the full
-    state at every timestamp in ``ts``. The user supplies physics; the
-    framework owns vmap, jit, and gradient flow.
+    Conforms to the framework's ``simulate_fn`` signature
+    ``(predictors, ts, covariates, y0, solver) -> [T, S]`` — i.e. it
+    returns the full simulator state at every timestamp in ``ts``. The
+    user supplies the physics here; the framework owns the surrounding
+    ``vmap``, ``jit``, and gradient plumbing.
 
-    Predictor pytree convention (R-A6 / ADR-0006)
-    --------------------------------------------
+    Predictor pytree
+    ----------------
     ``predictors = (growth_BP, nucleation_BP)`` — a tuple of two
-    ``BoundedPredictor``s. Each consumes a 3-key dict
-    ``(temperature_C, loading, supersaturation)`` and emits a single
-    bounded log-rate (``log10(G)`` or ``log10(J)``). ``supersaturation`` is
-    *time-varying* (state-derived per-timestep) and is mixed into the input
-    dict alongside the constant covariates inside ``vector_field`` — the
-    canonical "dict-mixing" pattern from CONTEXT.md "Predictor inputs".
+    ``BoundedPredictor``s, the convention this framework uses for
+    multi-rate hybrid models. Each consumes a 3-key input dict
+    ``(temperature_C, loading, supersaturation)`` and emits one
+    bounded log-rate (``log10(G)`` or ``log10(J)``). Two of those
+    inputs are constant covariates supplied by the experiment;
+    ``supersaturation`` is *time-varying* — derived from the simulator
+    state at each integrator step — and is mixed into the input dict
+    alongside the covariates inside ``vector_field`` below.
 
     Pipeline
     --------
@@ -472,11 +477,13 @@ def _simulate_fn(
 # ) -> Float[Array, "T 6"]:
 #     """Integrate the method-of-moments ODE using a single kinetic-parameter predictor.
 #
-#     Single-element tuple convention per ADR-0006 (1-tuple ``(BP,)`` is the
-#     canonical form for a single predictor). The predictor maps
-#     ``(temperature_C, loading) -> [logA, gamma, Ag, g]`` and the vector
-#     field plugs the four scalars into CNT (nucleation) and power-law
-#     (growth) forms with ``exp(logA)`` / ``10**Ag / 60`` scalings done here.
+#     The single predictor is wrapped in a one-tuple ``(BP,)`` to keep
+#     the ``predictors`` argument shape consistent with the multi-rate
+#     case. The predictor maps
+#     ``(temperature_C, loading) -> [logA, gamma, Ag, g]`` and the
+#     vector field plugs the four scalars into a CNT (nucleation) and
+#     power-law (growth) form, applying the ``exp(logA)`` /
+#     ``10**Ag / 60`` scalings here.
 #     """
 #     (predictor,) = predictors
 #     temperature_C = covariates["temperature_C"]
@@ -636,8 +643,11 @@ def _build_direct_rate_predictors(
 #         MLPPredictor       : [2] -> [4]   (tanh, depth=2, width=16)
 #         out_scaler         : [4] latent -> [4] physical (sigmoid into bounds)
 #
-#     Output is in physical units; the matching ``_simulate_fn_kinetic_params``
-#     consumes it directly. Returned as a 1-tuple per ADR-0006 convention.
+#     Output is in physical units; the matching
+#     ``_simulate_fn_kinetic_params`` consumes it directly. Returned as
+#     a one-tuple to match the framework's ``predictors`` convention,
+#     so the same training entry-point handles single-rate and
+#     multi-rate cases uniformly.
 #     """
 #     selector = CovariateSelector(keys=INPUT_KEYS_KINETIC)
 #     in_scaler = BoundScaler(

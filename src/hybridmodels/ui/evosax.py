@@ -1,33 +1,37 @@
-"""Rich-based ``EvosaxUI`` for ``train_with_evosax`` (SPEC §5.9, R-U1..R-U4).
+"""Rich-based ``EvosaxUI`` for ``train_with_evosax``.
 
-Mirrors :class:`hybridmodels.ui.optax.RichTrainingUI` but with the panel set
-adjusted for an evolutionary outer loop: phases / per-step losses are
-replaced by generations / population statistics. A single
-:class:`rich.live.Live` is started in :meth:`RichEvosaxUI.on_run_start` and
-stopped in :meth:`RichEvosaxUI.on_run_end` (R-U4). The renderable is a
-:class:`rich.console.Group` that swaps panels as the run progresses:
+Mirrors :class:`hybridmodels.ui.optax.RichTrainingUI` but with the panel
+set adjusted for an evolutionary outer loop: phases and per-step
+losses are replaced by generations and population statistics. A single
+:class:`rich.live.Live` is started in :meth:`RichEvosaxUI.on_run_start`
+and stopped in :meth:`RichEvosaxUI.on_run_end`. The live renderable is
+a :class:`rich.console.Group` that swaps panels as the run progresses:
 
 * a header :class:`rich.panel.Panel` with run-level info (generations,
-  population size, elapsed wall-clock, and — post-run — the final best
-  fitness so the rendered-output test can pin the word "final" near the
-  end of the buffer);
-* a compile-progress panel shown only between ``on_compile_start`` and the
-  matching ``on_compile_done``; once any bucket has finished compiling that
-  slot is replaced by a :class:`rich.progress.Progress` bar tracking
-  generations completed / total (R-U3);
-* a small :class:`rich.table.Table` of the most recent ``recent_generations``
-  generations with columns ``gen | best_fitness | mean_fitness | best-so-far``,
-  throttled by ``log_every``;
-* a message log panel with the most recent ``recent_messages`` lines.
+  population size, elapsed wall-clock, and post-run final best
+  fitness);
+* a compile-progress panel shown only between ``on_compile_start`` and
+  the matching ``on_compile_done``; once any bucket has finished
+  compiling that slot is replaced by a
+  :class:`rich.progress.Progress` bar tracking generations completed /
+  total;
+* a small :class:`rich.table.Table` of the most recent
+  ``recent_generations`` generations with columns
+  ``gen | best_fitness | mean_fitness | best-so-far``, throttled by
+  ``log_every``;
+* a message-log panel with the most recent ``recent_messages`` lines.
 
-The class is defensive about event ordering: events that arrive before the
-state they reference (e.g. ``on_run_end`` with no generations seen) become
-no-ops rather than assertions, because abort paths and recording-UI tests
-can fire events in unexpected orders.
+The class is defensive about event ordering: events that arrive before
+the state they reference (e.g. ``on_run_end`` with no generations
+seen) become no-ops rather than assertions, because graceful abort
+paths and recording-UI tests can legitimately fire events out of
+order.
 
-Composition over inheritance: this class deliberately does **not** subclass
-``RichTrainingUI``. The two surfaces share rendering helpers that are short
-enough to duplicate (Karpathy: three lines are not yet a helper).
+This class deliberately does **not** subclass ``RichTrainingUI``. The
+two share a handful of small rendering helpers, but the bodies are
+short enough that duplication is cheaper than introducing a shared
+base — extracting one would force both UIs to negotiate every future
+panel change through a single supertype.
 """
 
 from __future__ import annotations
@@ -101,9 +105,7 @@ class RichEvosaxUI:
         self._log_every: int = int(log_every)
         # Each row is (gen_idx, best_fitness, mean_fitness, best_so_far).
         # The deque maxlen pins visible history without unbounded growth.
-        self._generations: deque[tuple[int, float, float, float]] = deque(
-            maxlen=recent_generations
-        )
+        self._generations: deque[tuple[int, float, float, float]] = deque(maxlen=recent_generations)
         self._messages: deque[tuple[str, str]] = deque(maxlen=recent_messages)
 
         # Run-level state (set in on_run_start, read by _render).
@@ -122,10 +124,10 @@ class RichEvosaxUI:
         # and in the header summary.
         self._best_so_far: float | None = None
 
-        # Compile-panel state (R-U3). Same slot semantics as RichTrainingUI:
+        # Compile-panel state. Same slot semantics as ``RichTrainingUI``:
         # the compile panel and the generation-progress bar share the
-        # vertical position; once any bucket finishes compiling we leave
-        # that slot to the progress bar for the rest of the run.
+        # vertical position; once any bucket finishes compiling we
+        # leave that slot to the progress bar for the rest of the run.
         self._compile_active: bool = False
         self._compile_bucket_idx: int | None = None
         self._compile_bucket_shape: tuple[int, ...] | None = None
@@ -155,8 +157,10 @@ class RichEvosaxUI:
         self._compile_bucket_shape = None
         self._compile_total_buckets = None
 
-        # Build a fresh Progress so the bar starts from zero on every run
-        # (R-U4: panels swap as the run progresses).
+        # Build a fresh Progress so the bar starts from zero on every
+        # run. Reusing one Progress across runs would either show a
+        # stale total or require manual reset gymnastics; a new
+        # Progress per run is cheaper and cleaner.
         self._gen_progress_bar = Progress(
             TextColumn("[bold]generation"),
             BarColumn(),
@@ -181,9 +185,7 @@ class RichEvosaxUI:
         )
         self._live.start()
 
-    def on_compile_start(
-        self, *, bucket_idx: int, bucket_shape: tuple[int, ...]
-    ) -> None:
+    def on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> None:
         self._compile_active = True
         self._compile_bucket_idx = int(bucket_idx)
         self._compile_bucket_shape = tuple(int(d) for d in bucket_shape)
@@ -199,15 +201,15 @@ class RichEvosaxUI:
         self._compile_first_done = True
         self._refresh()
 
-    def on_generation_end(
-        self, *, gen_idx: int, best_fitness: float, mean_fitness: float
-    ) -> None:
+    def on_generation_end(self, *, gen_idx: int, best_fitness: float, mean_fitness: float) -> None:
         idx = int(gen_idx)
         best = float(best_fitness)
         mean = float(mean_fitness)
 
-        # Best-so-far is monotone non-increasing — update before recording the
-        # row so the table reflects the post-update value (R-E6 mirror in UI).
+        # Best-so-far is monotone non-increasing — update before
+        # recording the row so the table reflects the post-update
+        # value (the same best-ever bookkeeping the training loop
+        # itself maintains).
         if self._best_so_far is None or best < self._best_so_far:
             self._best_so_far = best
 
@@ -364,11 +366,7 @@ class RichEvosaxUI:
 
     def _render_footer(self) -> Panel:
         # Final-fitness summary at the bottom of the dashboard.
-        final = (
-            _format_fitness(self._final_fitness)
-            if self._final_fitness is not None
-            else "-"
-        )
+        final = _format_fitness(self._final_fitness) if self._final_fitness is not None else "-"
         body = Text.assemble(("final fitness ", "bold"), final)
         return Panel(body, title="run summary", border_style="cyan")
 

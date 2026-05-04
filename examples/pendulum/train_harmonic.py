@@ -201,9 +201,12 @@ def _simulate_fn(
 ) -> Float[Array, "T 2"]:
     """Integrate the harmonic oscillator for one experiment.
 
-    Mandatory ``simulate_fn`` shape per SPEC §4.2 / R-A2: returns the full
-    state ``[T, 2]`` at every timestamp in ``ts``. The user owns the physics
-    (vector field), the framework owns vmap/jit/grad.
+    Conforms to the framework's ``simulate_fn`` signature
+    ``(predictor, ts, covariates, y0, solver) -> [T, S]`` — i.e. it
+    returns the full simulator state for every timestamp in ``ts``.
+    The user owns the physics (the vector field built below); the
+    framework owns the surrounding ``vmap`` / ``jit`` / ``grad``
+    plumbing.
 
     Pipeline
     --------

@@ -1,8 +1,9 @@
-"""Tests for ``RichTrainingUI`` (SPEC §5.9 / R-U1, R-U2, R-U3, R-U4).
+"""Tests for ``RichTrainingUI``.
 
-Rendered output is verified via ``Console(record=True, force_terminal=False)``
-so the dashboard can be exercised in CI without an interactive terminal.
-``Live`` in non-terminal mode flushes its final renderable once on ``stop()``,
+Rendered output is verified via
+``Console(record=True, force_terminal=False)`` so the dashboard can be
+exercised in CI without an interactive terminal. In non-terminal mode
+``rich.live.Live`` flushes its final renderable once on ``stop()``,
 which is exactly what we want for assertion-friendly captures.
 """
 
@@ -46,7 +47,7 @@ def test_rich_training_ui_satisfies_protocol() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: rendered-output content (R-U1, R-U3, R-U4).
+# Test 2: rendered-output content.
 # ---------------------------------------------------------------------------
 
 
@@ -140,18 +141,17 @@ def test_log_every_throttles_loss_table_rows() -> None:
     # are not part of the run header / final-loss summary. We restrict to the
     # block that contains "Recent losses" if our render labels the panel that
     # way; otherwise count all >=4-sig-fig occurrences of the throttled losses.
-    visible_step_losses = [
-        m for m in _SIG4.findall(output) if m.startswith("0.7771")
-    ]
+    visible_step_losses = [m for m in _SIG4.findall(output) if m.startswith("0.7771")]
     assert len(visible_step_losses) == expected_rows
 
 
 # ---------------------------------------------------------------------------
-# Tests 5 & 6: integration with train_with_optax (R-U2).
+# Tests 5 & 6: integration with ``train_with_optax``.
 #
-# A minimal harmonic-oscillator fixture, mirroring tests/test_train_optax.py
-# but trimmed to the bare minimum needed to exercise the verbose=True /
-# verbose=False branches of UI selection.
+# A minimal harmonic-oscillator fixture, mirroring
+# ``tests/test_train_optax.py`` but trimmed to the bare minimum needed
+# to exercise the ``verbose=True`` / ``verbose=False`` branches of UI
+# selection.
 # ---------------------------------------------------------------------------
 
 

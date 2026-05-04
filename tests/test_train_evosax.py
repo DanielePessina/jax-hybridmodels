@@ -1,20 +1,25 @@
-"""Evosax training tests (SPEC §5.8 / R-E1..R-E6 / R-J1..R-J3 / R-R1..R-R3 / R-A2 / R-L1).
+"""Evosax training tests.
 
-Synthetic 4-D quadratic problem: a single trainable ``theta: [4]`` whose loss
-against the constant target ``theta_star = [1, -2, 3, -4]`` is just the
-elementwise MSE. The "simulator" is identity-of-the-predictor, so the entire
-test file runs in well under a minute and isolates the evosax loop from any
-real ODE numerics.
+Synthetic 4-D quadratic problem: a single trainable ``theta: [4]``
+whose loss against the constant target ``theta_star = [1, -2, 3, -4]``
+is the elementwise MSE. The "simulator" is the identity-of-the-predictor,
+so the entire test file runs in well under a minute and isolates the
+evosax loop from any real ODE numerics.
 
-Each test pins one R-E* requirement:
+Each test pins one piece of the contract:
 
-* ``test_convergence_to_known_minimum``         — R-E1/E2 + end-to-end correctness
-* ``test_best_ever_tracking``                    — R-E6 (host-side argmin)
-* ``test_init_modes_change_population_spread``   — R-E5 (warm vs lhs_box)
-* ``test_flatten_unflatten_round_trip``          — R-E4 (partition + ravel_pytree)
-* ``test_missing_key_raises``                    — R-R1 (no silent default)
-* ``test_recording_ui_lifecycle_events_fire``    — UI Protocol contract
-* ``test_silent_default_when_no_ui_and_verbose_false`` — R-U2 silent default
+* ``test_convergence_to_known_minimum`` — end-to-end correctness on
+  the convex target.
+* ``test_best_ever_tracking`` — host-side argmin bookkeeping must not
+  regress between generations.
+* ``test_init_modes_change_population_spread`` — ``"warm"`` vs
+  ``"lhs_box"`` must produce visibly different gen-0 populations.
+* ``test_flatten_unflatten_round_trip`` — ``eqx.partition`` and
+  ``ravel_pytree`` must invert exactly.
+* ``test_missing_key_raises`` — no silent default key.
+* ``test_recording_ui_lifecycle_events_fire`` — UI protocol contract.
+* ``test_silent_default_when_no_ui_and_verbose_false`` — UI selection
+  fallback.
 """
 
 from __future__ import annotations
@@ -159,8 +164,11 @@ def test_best_ever_tracking() -> None:
         key=jr.PRNGKey(1),
         ui=ui,
     )
-    # The host-side best (R-E6) must be no worse than the final generation's
-    # population mean — otherwise we returned a regression rather than a record.
+    # The host-side best-ever bookkeeping must not regress: the
+    # returned loss must be no worse than the final generation's
+    # population mean. Otherwise the loop would have handed back a
+    # candidate that was beaten by an earlier generation, defeating
+    # the whole point of tracking the best ever.
     final_mean_fitness = next(
         kw["mean_fitness"] for name, kw in reversed(ui.events) if name == "on_generation_end"
     )
@@ -169,8 +177,10 @@ def test_best_ever_tracking() -> None:
 
 
 def test_init_modes_change_population_spread() -> None:
-    # The LHS box covers a [-2, 2]^4 hypercube while warm draws from a tight
-    # N(0, 0.5*I) ball — the LHS spread must be visibly wider, locking R-E5.
+    # The LHS box covers a [-2, 2]^4 hypercube while ``"warm"`` draws
+    # from a tight N(0, 0.5*I) ball — the LHS spread must be visibly
+    # wider, which is the whole reason a user would pick ``"lhs_box"``
+    # over ``"warm"`` in the first place.
     pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
     mask = trainable_mask(pred)
     key = jr.PRNGKey(7)
@@ -204,9 +214,11 @@ def test_init_modes_change_population_spread() -> None:
 
 
 def test_flatten_unflatten_round_trip() -> None:
-    # R-E4: the partition + ravel_pytree contract must invert exactly so that
-    # CMA-ES proposals in flat space map back to a structurally-identical
-    # predictor pytree.
+    # ``eqx.partition`` + ``ravel_pytree`` is the round-trip CMA-ES
+    # uses to operate in flat parameter space and then reassemble the
+    # predictor pytree. This must invert exactly: any divergence would
+    # mean the strategy is optimising over a different parameterisation
+    # than the one we evaluate.
     inner = MLPPredictor(in_size=2, out_size=1, width_size=8, depth=2, key=jr.PRNGKey(0))
     pred = BoundedPredictor(
         selector=CovariateSelector(keys=("a", "b")),

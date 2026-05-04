@@ -6,36 +6,36 @@ expansions) rather than as fixed activations on the *nodes*. The trainable
 content per layer is the set of basis-function coefficients (``c_basis``,
 ``c_spl``, ``c_res``, ``bias``), not weight matrices.
 
-Static-vs-dynamic split (R-A5)
-------------------------------
-``jaxkan.models.KAN`` is a Flax NNX ``Module``: when flattened as a JAX pytree
-its leaves include ``PRNGKeyArray`` and ``uint32`` rng-counter scalars in
-addition to the float ``nnx.Param`` arrays. ``eqx.tree_serialise_leaves``
-refuses to ``np.save`` the typed PRNG-key leaves (see
-``equinox._serialisation.default_serialise_filter_spec``), so we cannot expose
-the raw KAN model as a dynamic field.
+Static-vs-dynamic split
+-----------------------
+``jaxkan.models.KAN`` is a Flax NNX ``Module``: when flattened as a JAX
+pytree its leaves include ``PRNGKeyArray`` and ``uint32`` rng-counter
+scalars alongside the float ``nnx.Param`` arrays.
+``eqx.tree_serialise_leaves`` refuses to ``np.save`` the typed PRNG-key
+leaves, so the raw KAN model cannot be exposed as a dynamic field on
+this predictor — the binary checkpoint must contain only float arrays.
 
-Workaround:
+The workaround:
 
 * Static fields hold the architecture (``in_size``, ``out_size``,
-  ``hidden_widths``, ``grid_size``, ``basis``) and the integer ``seed`` used to
-  build the model.
+  ``hidden_widths``, ``grid_size``, ``basis``) and the integer ``seed``
+  used to build the underlying jaxkan model.
 * The single dynamic field ``params`` is the ``nnx.State`` returned by
-  ``nnx.split(model, nnx.Param, ...)``; this state contains *only* float
-  Param leaves with shapes determined by the static config (and so is
-  identical-structured across different seeds — see the round-trip test in
-  ``tests/test_predictors_serialise.py``).
+  ``nnx.split(model, nnx.Param, ...)``: it contains *only* float Param
+  leaves with shapes determined by the static config, so it is
+  identical-structured across different seeds and round-trips
+  cleanly through Equinox's leaf serialisation.
 * The forward pass rebuilds the rng-bearing rest-state of the KAN from
-  ``seed`` (deterministic) and merges in ``self.params`` via ``nnx.merge``.
-  Because every per-call construction is driven by static values plus the
-  dynamic ``params`` state, the merged model is JIT-traceable.
+  ``seed`` (deterministic) and merges in ``self.params`` via
+  ``nnx.merge``. Every per-call construction is driven by static
+  values plus the dynamic ``params`` state, so the merged model is
+  JIT-traceable.
 
-Workaround note for orchestrator: this couples us to ``flax.nnx`` pytree
-internals via ``jaxkan``. If a future jaxkan release stops exposing
-``Param``-based filtering, the wrapper would need to reach into individual
-layers. A leaner alternative would be to drop ``jaxkan`` and re-implement KAN
-on top of ``equinox`` (the source-package ``regressor_kanx.py`` is a working
-template). See SPEC §5.2 for which path the project commits to.
+This couples us to ``flax.nnx`` pytree internals via ``jaxkan``. A
+future jaxkan release that stops exposing ``Param``-based filtering
+would force the wrapper to reach into individual layers; a leaner
+alternative path is to re-implement KAN directly on top of
+``equinox``, which would remove the static/dynamic split entirely.
 """
 
 # ruff: noqa: F722
@@ -53,9 +53,10 @@ from jaxtyping import Array, Float
 
 from hybridmodels.predictors.base import Predictor
 
-# v1 supports the spline-style bases that share the ``{k, G}`` parameter shape
-# in jaxkan's ``required_parameters`` dict. Other bases (rbf, chebyshev, ...)
-# use different parameter sets and are deferred until a concrete need arises.
+# Currently supported bases share the ``{k, G}`` parameter shape that
+# jaxkan threads through its ``required_parameters`` dict. Other bases
+# (rbf, chebyshev, ...) need a different parameter set and would require
+# extending the wrapper to know which parameters each basis demands.
 _SUPPORTED_BASES: tuple[str, ...] = ("spline", "base")
 _SPLINE_ORDER_K: int = 3
 
@@ -128,11 +129,12 @@ class KANPredictor(Predictor):
     ) -> None:
         """Build the KAN, split off its Param state, and pin the rest as static config.
 
-        ``key`` is required (R-R1) and used to derive the integer ``seed``
-        threaded into ``jaxkan.models.KAN``. The constructed KAN is split
-        immediately via ``nnx.split(model, nnx.Param, ...)`` so the
-        non-serialisable rng-state never lands on this module — only the
-        float Param leaves are kept as the dynamic ``params`` field.
+        ``key`` is required (the framework refuses silent default keys
+        for reproducibility) and used to derive the integer ``seed``
+        threaded into ``jaxkan.models.KAN``. The constructed KAN is
+        split immediately via ``nnx.split(model, nnx.Param, ...)`` so
+        the non-serialisable rng-state never lands on this module — only
+        the float Param leaves are kept as the dynamic ``params`` field.
         """
         if basis not in _SUPPORTED_BASES:
             raise ValueError(f"Basis {basis!r} not supported. Available: {list(_SUPPORTED_BASES)}")
@@ -189,11 +191,13 @@ class KANPredictor(Predictor):
     def initialized_with_key(self, key: Array) -> KANPredictor:
         """Return a same-architecture KANPredictor with freshly initialised parameters.
 
-        Implements the R-T8 protocol used by the optax tournament. Building a
-        whole new ``KANPredictor`` (rather than tweaking ``self.params`` in
-        place) lets jaxkan's per-layer init logic (truncated-normal spline
-        weights, ones bias, identity residual) drive the initialisation
-        instead of replacing it with leaf-level standard-normal samples.
+        Implements the re-init protocol used by the training tournament
+        loop. Building a whole new ``KANPredictor`` (rather than
+        tweaking ``self.params`` in place) lets jaxkan's per-layer init
+        logic — truncated-normal spline weights, ones bias, identity
+        residual — drive the initialisation instead of replacing it with
+        leaf-level standard-normal samples that would skew the
+        distribution.
         """
         return KANPredictor(
             in_size=self.in_size,

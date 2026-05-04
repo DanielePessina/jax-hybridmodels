@@ -1,12 +1,22 @@
 """Optax-driven training loop for hybrid mechanistic models.
 
-Implements SPEC §5.7 / R-T1..R-T8 / R-J1..R-J3 / R-R1..R-R3 / R-A2 / R-L1.
-A training step is one full pass over every bucket, accumulating gradients,
-followed by a single ``optimizer.update``. Per-phase learning rate, optimizer
-type, length-schedule mask and optimiser-state reset are configured via
-``OptaxTrainingConfig`` (every phase-keyed field is a same-length tuple). The
-shared tournament reuses the main loop's compiled ``make_step`` and
-``apply_update`` (ADR-0002).
+A training *step* here is one full pass over every bucket: the loop
+computes per-bucket gradients via ``make_step`` (jitted, one trace per
+bucket shape), accumulates and averages them across the dataset, and
+applies a single ``optimizer.update`` via ``apply_update``. The
+training run is divided into one or more *phases*; each phase has its
+own learning rate, optimizer type, length-schedule mask, and optional
+optimiser-state reset, all carried in ``OptaxTrainingConfig`` as
+same-length tuples (one entry per phase).
+
+Optionally the loop runs a *tournament* before the main phases: it
+re-initialises the predictors several times under the same fresh key
+discipline, takes a few short training steps with each candidate, and
+keeps the candidate with the lowest training loss. The tournament is
+intentionally implemented on top of the same compiled ``make_step`` and
+``apply_update`` rather than as a parallel kernel — that way the
+short-burst attempts share JIT cache entries with the main loop and pay
+no extra compilation cost.
 """
 
 # ruff: noqa: F722
@@ -125,9 +135,11 @@ def _build_make_step(
         static_predictors: Any,
         bp_masked: BucketPayload,
     ) -> Array:
-        # ``predictors`` here is whatever pytree the user passed in (R-A2,
-        # ADR-0006): typically a tuple of BoundedPredictor leaves. ``eqx.combine``
-        # walks any pytree shape; we don't inspect the container.
+        # ``predictors`` here is whatever pytree the user passed in
+        # (typically a tuple of BoundedPredictor leaves; could also be a
+        # dict, NamedTuple, single Module, ...). ``eqx.combine`` walks
+        # any pytree shape, so we never need to inspect the container —
+        # we just hand the recombined pytree to the user's simulate_fn.
         predictors = eqx.combine(diff_predictors, static_predictors)
 
         def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
@@ -211,9 +223,11 @@ def _shared_tournament(
     for attempt in range(tournament_attempts):
         attempt_key = fold(key, f"tournament_attempt_{attempt}")
         try:
-            # Per-eqx.Module-leaf re-init across the predictors pytree (R-T8,
-            # ADR-0006): identical-shape sibling predictors get *different* fresh
-            # weights via the (β) split-by-traversal scheme.
+            # Per-eqx.Module-leaf re-init across the predictors pytree:
+            # ``reinitialize_pytree_with_key`` splits ``attempt_key``
+            # into one subkey per Module leaf so that even
+            # identical-shape sibling predictors get genuinely
+            # different fresh weights for this attempt.
             candidate: Any = reinitialize_pytree_with_key(predictors, attempt_key)
             opt_state = optimizer.init(eqx.filter(candidate, trainable))
             opt_state.hyperparams["learning_rate"] = jnp.asarray(tournament_lr)
@@ -244,8 +258,11 @@ def _shared_tournament(
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
-    # R-U2: explicit ui= wins; otherwise verbose=True picks the Rich live
-    # dashboard and verbose=False silences output entirely.
+    # An explicit ``ui=`` argument always wins. Otherwise ``verbose=True``
+    # picks the Rich live dashboard and ``verbose=False`` silences output
+    # entirely. This keeps the common case ergonomic ("just print stuff")
+    # while still letting callers swap in a custom UI implementation
+    # (e.g. a TensorBoard logger) without changing the loop.
     if ui is not None:
         return ui
     if verbose:
@@ -264,15 +281,31 @@ def train_with_optax(
     key: Array,
     ui: TrainingUI | None = None,
 ) -> tuple[list[float], Any]:
-    """Train ``predictors`` against ``dataset`` with Optax (SPEC §5.7).
+    """Train ``predictors`` against ``dataset`` with Optax.
 
-    ``predictors`` is a ``PyTree[eqx.Module]`` (R-A2 / ADR-0006); the canonical
-    convention is a tuple of ``BoundedPredictor`` leaves, but any pytree shape
-    is accepted (dict, NamedTuple, single Module — eqx.partition walks them
-    uniformly). ``key`` is required keyword-only (R-R1); calling without it
-    raises ``TypeError`` before any compilation. ``trainable`` defaults to
-    :func:`hybridmodels.trainable.trainable_mask` over the supplied pytree
-    (every inexact-array leaf trainable).
+    ``predictors`` is a ``PyTree[eqx.Module]``: by convention a tuple of
+    ``BoundedPredictor`` leaves, but any pytree shape is accepted (dict,
+    NamedTuple, single Module — ``eqx.partition`` walks them uniformly).
+    ``key`` is required keyword-only — calling without it raises
+    ``TypeError`` before any compilation, so reproducibility never
+    relies on an implicit default.
+
+    The ``trainable`` argument is a boolean PyTree mask matching
+    ``predictors``'s structure. When omitted, it defaults to
+    :func:`hybridmodels.trainable.trainable_mask` over the supplied
+    pytree, which marks every inexact-array leaf as trainable; pass a
+    custom mask (typically built with the freezers in
+    ``hybridmodels.trainable``) to hold specific leaves fixed during
+    training.
+
+    Returns
+    -------
+    tuple[list[float], PyTree[eqx.Module]]
+        ``(loss_history, trained_predictors)``. ``loss_history`` is the
+        training loss recorded once per step across every phase;
+        ``trained_predictors`` is the predictors corresponding to the
+        best-loss step seen so far when ``config.restore_best=True``,
+        or to the final step otherwise.
     """
     if trainable is None:
         trainable = trainable_mask(predictors)

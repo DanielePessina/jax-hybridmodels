@@ -1,18 +1,27 @@
-"""UI lifecycle protocols and the no-op ``SilentUI`` (SPEC §5.9 / R-U1 / R-U3).
+"""UI lifecycle protocols and the no-op ``SilentUI``.
 
-The training loops drive a UI by calling lifecycle methods at well-defined
-points. Two protocols (``TrainingUI`` for optax, ``EvosaxUI`` for evosax)
-keep the surfaces decoupled — they share several event names but the
-arguments differ enough that a merged supertype would just be confusing.
+The training loops drive a UI by calling lifecycle methods at
+well-defined points. Two protocols are defined here — ``TrainingUI``
+(consumed by the Optax loop) and ``EvosaxUI`` (consumed by the Evosax
+loop). They share several event names but the arguments differ enough
+that a merged supertype would just be confusing, so the two are kept
+separate and a UI implementation that wants to support both training
+loops simply implements both protocols.
 
-UI selection (R-U2): each training config has ``verbose: bool`` defaulting
-to ``True`` (Rich UI); ``False`` selects ``SilentUI``. An explicit ``ui=...``
-parameter to ``train_with_optax`` / ``train_with_evosax`` overrides both.
+UI selection
+------------
+Each training config has a ``verbose: bool`` field defaulting to
+``True`` (the Rich live-dashboard UI); ``False`` selects ``SilentUI``.
+An explicit ``ui=...`` argument to ``train_with_optax`` /
+``train_with_evosax`` always overrides both.
 
-Compile events (R-U3): the per-bucket-shape JIT compile is the slow part of
-the first epoch. ``on_compile_start`` / ``on_compile_progress`` /
-``on_compile_done`` make that latency visible; otherwise users see a
-multi-second pause with no feedback.
+Compile events
+--------------
+Per-bucket-shape JIT compilation is the dominant cost of the first
+epoch. ``on_compile_start`` / ``on_compile_progress`` /
+``on_compile_done`` exist so users have visible feedback during that
+latency; without them, a Rich progress bar would hang on the first
+bucket while the kernel compiles and look like an apparent hang.
 """
 
 from typing import Any, Protocol, runtime_checkable
@@ -20,7 +29,7 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class TrainingUI(Protocol):
-    """Callback protocol for ``train_with_optax`` (R-U1).
+    """Callback protocol for ``train_with_optax``.
 
     Implementations are duck-typed (``@runtime_checkable``) so users can
     define their own UI without inheriting from this class. The default
@@ -83,7 +92,7 @@ class TrainingUI(Protocol):
 
 @runtime_checkable
 class EvosaxUI(Protocol):
-    """Callback protocol for ``train_with_evosax`` (R-U1).
+    """Callback protocol for ``train_with_evosax``.
 
     Differs from ``TrainingUI`` because evosax does not have phases or
     per-step gradient losses; instead each generation reports best/mean
@@ -106,9 +115,7 @@ class EvosaxUI(Protocol):
         """The bucket finished compiling."""
         ...
 
-    def on_generation_end(
-        self, *, gen_idx: int, best_fitness: float, mean_fitness: float
-    ) -> None:
+    def on_generation_end(self, *, gen_idx: int, best_fitness: float, mean_fitness: float) -> None:
         """Fires once per generation with population statistics."""
         ...
 

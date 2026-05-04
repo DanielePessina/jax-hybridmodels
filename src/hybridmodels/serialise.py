@@ -1,64 +1,58 @@
-"""Save / load helpers for the trained ``predictors`` pytree (SPEC §5.11 / R-A5 / R-S2).
+"""Save and load helpers for a trained ``predictors`` pytree.
 
-Phase 16 of the build plan — the *last shipped* module per CONTEXT.md
-"Serialisation". The R-A5 round-trip cleanliness has been a hard design
-constraint since day one; every ``Predictor`` was built so its dynamic
-leaves are JAX arrays and its static fields are JSON-encodable. This module
-ships the user-facing helpers that compose those guarantees into a
-directory-shaped artifact.
+The framework's trainable component is a ``PyTree[eqx.Module]`` — by
+convention a tuple of ``BoundedPredictor`` leaves, but any pytree shape is
+accepted (tuple, list, dict, NamedTuple, or a bare ``eqx.Module``). This
+module persists that pytree to disk together with the static configuration
+needed to reconstruct it later, and exposes the inverse load operation.
 
-Pytree contract
----------------
-Per R-A2 / ADR-0006 the trainable component is a ``PyTree[eqx.Module]`` —
-runtime-permissive (any pytree shape: tuple, list, dict, NamedTuple, single
-``eqx.Module``), with the canonical convention shown in CONTEXT.md being
-**a tuple**, single-predictor case = ``(BP,)``. The save/load helpers
-operate on that pytree as a whole: ``eqx.tree_serialise_leaves`` already
-walks any pytree of leaves, so a single binary file
-(``predictors.eqx``) captures every shape uniformly. The metadata records
-one entry per ``eqx.Module`` leaf so a user comparing
-``metadata.json`` against their reconstructed template at load time can
-spot a structural mismatch by eye before deserialisation blows up with a
-less helpful error.
+Two save/load pairs are provided:
 
-Public surface
---------------
 ``save_predictors`` / ``load_predictors``
-    Single-file binary round-trip via ``eqx.tree_serialise_leaves`` /
-    ``eqx.tree_deserialise_leaves``. The caller picks the file extension
-    (the project convention is ``.eqx``) and supplies a *template* pytree
-    matching the original's container shape and per-leaf static
-    configuration on load.
+    Single-file binary round-trip via ``eqx.tree_serialise_leaves`` and
+    its inverse. The caller picks the file extension (``.eqx`` is the
+    convention used by ``save_run``) and, on load, supplies a *template*
+    pytree whose container shape and per-leaf static configuration match
+    the original; the dynamic JAX-array leaves are then overwritten from
+    the file.
 
 ``save_run`` / ``load_run``
-    Directory-shaped artifact — ``predictors.eqx`` plus a JSON
-    ``metadata.json`` carrying timestamp, package version, the predictors
-    pytree's structure (treedef repr + per-leaf path / class), the solver
-    dict, optional optax / evosax training configs (as
-    ``dataclasses.asdict``), an optional loss history, and a free-form
-    ``extras`` dict the user owns. The JSON is written with
-    ``indent=2, sort_keys=True`` so diffs are stable.
+    Directory-shaped artifact: a ``predictors.eqx`` binary plus a
+    ``metadata.json`` describing the run. The JSON carries a UTC ISO-8601
+    timestamp, the package version, a structural fingerprint of the
+    predictors pytree (treedef repr + one ``{path, class}`` entry per
+    ``eqx.Module`` leaf), the solver config dict, optional Optax / Evosax
+    training configs, an optional loss history, and a free-form
+    user-owned ``extras`` dict. The JSON is written with stable
+    formatting (``indent=2, sort_keys=True``) so diffs are reviewable.
 
-What is *not* serialised
-------------------------
+Why a structural fingerprint? ``eqx.tree_deserialise_leaves`` raises a
+generic shape error when the template does not match the saved tree. The
+metadata's ``predictors`` block lets a user eyeball the mismatch directly
+— wrong container shape (tuple-vs-dict, wrong arity) shows in
+``tree_structure``; wrong leaf type (``MLPPredictor`` saved,
+``KANPredictor`` in the template) shows in the per-leaf list.
+
+What is **not** serialised
+--------------------------
 ``simulate_fn``, ``state_to_output``, the ``Dataset``, and the trainable
-mask. CONTEXT.md spells this out: the framework re-imports user code, and
-no builder registry is wired in v1 (deferred until friction proves real;
-see SPEC §2.3). Loading therefore requires the caller to reconstruct a
-same-architecture template — exactly the contract of
-``eqx.tree_deserialise_leaves`` — and re-import their own physics code.
+mask. The framework does not own a builder registry that could re-import
+user code by name; loading therefore requires the caller to reconstruct
+a same-architecture template (so ``eqx.tree_deserialise_leaves`` can fill
+its dynamic leaves) and to re-import their own physics functions. This is
+a deliberate boundary — dynamic imports inside a load helper invite
+silent failures.
 
-Loss-callable handling
-----------------------
-``OptaxTrainingConfig.loss`` and ``EvosaxTrainingConfig.loss`` accept either
-a callable or a string. JSON cannot encode a callable directly; instead of
-attempting an importlib-based round-trip, ``save_run`` stringifies a
-callable to ``"{module}.{qualname}"``. ``load_run`` returns that string
-verbatim — the field type ``Callable | str`` already accepts it, and the
-caller is expected to re-resolve the callable themselves if they need one
-(typically by importing the module and looking up the attribute, or by
-threading a builder dict). This avoids the security and brittleness costs
-of dynamic imports inside a load helper.
+Loss-field handling
+-------------------
+``OptaxTrainingConfig.loss`` and ``EvosaxTrainingConfig.loss`` accept
+either a callable or a string. JSON cannot encode a callable directly,
+so ``save_run`` stringifies a callable to ``"{module}.{qualname}"`` and
+``load_run`` returns that string verbatim — the field's
+``Callable | str`` annotation accepts it, and re-resolution is the
+caller's responsibility (typically ``importlib.import_module(module)``
+followed by attribute lookup). Keeping that boundary explicit avoids the
+security and brittleness costs of dynamic imports inside this module.
 """
 
 from __future__ import annotations
@@ -84,12 +78,12 @@ _METADATA_FILENAME = "metadata.json"
 def save_predictors(path: str | Path, predictors: Any) -> None:
     """Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 
-    ``predictors`` is the user-facing ``PyTree[eqx.Module]`` (any shape:
-    tuple / dict / NamedTuple / bare Module — see ADR-0006). The helper
+    ``predictors`` is a ``PyTree[eqx.Module]`` of any container shape
+    (tuple / list / dict / NamedTuple / bare Module). The helper
     delegates to ``eqx.tree_serialise_leaves``, which walks the pytree's
-    leaves uniformly regardless of container type, producing a flat binary
-    stream of ``np.save``-encoded leaves. The caller picks the extension;
-    ``.eqx`` is the project convention (see ``save_run``).
+    leaves uniformly regardless of container type, producing a flat
+    binary stream of ``np.save``-encoded leaves. The caller picks the
+    file extension; ``.eqx`` is the convention used by ``save_run``.
     """
     path = Path(path)
     eqx.tree_serialise_leaves(path, predictors)
@@ -116,10 +110,10 @@ def _stringify_loss_field(value: Any) -> Any:
     """Replace a callable with ``"{module}.{qualname}"``; pass-through otherwise.
 
     Used inside ``_serialise_training_config`` to keep ``loss`` JSON-friendly.
-    Strings flow through unchanged; everything else (the spec-allowed
-    ``Callable | str`` union) gets stringified. We deliberately do **not**
-    attempt to re-import on load — that decision is the caller's per the
-    module docstring rationale.
+    Strings flow through unchanged; callables (the other half of the
+    ``Callable | str`` field annotation) are stringified. Re-import on
+    load is the caller's responsibility — see the module docstring's
+    rationale for keeping that boundary explicit.
     """
     if isinstance(value, str):
         return value
@@ -337,13 +331,13 @@ def load_run(
 ) -> dict[str, Any]:
     """Reconstruct a run from ``directory``.
 
-    Inverse of :func:`save_run`. ``predictors_template`` is required (per
-    the no-builder-registry policy in CONTEXT.md "Serialisation"), and
-    must share the saved pytree's container shape and per-leaf static
-    configuration. ``optax_cls`` and ``evosax_cls`` are optional — pass
-    them only when you want the metadata's ``optax_config`` /
-    ``evosax_config`` dicts reconstituted into typed dataclass instances.
-    When omitted, the raw dicts flow through.
+    Inverse of :func:`save_run`. ``predictors_template`` is required (the
+    framework deliberately does not own a builder registry — see the
+    module docstring) and must share the saved pytree's container shape
+    and per-leaf static configuration. ``optax_cls`` and ``evosax_cls``
+    are optional — pass them only when you want the metadata's
+    ``optax_config`` / ``evosax_config`` dicts reconstituted into typed
+    dataclass instances. When omitted, the raw dicts flow through.
 
     Loss-field policy
     -----------------

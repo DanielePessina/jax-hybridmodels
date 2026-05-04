@@ -1,11 +1,12 @@
 """``NeuralNPolynomial``: composition of a coefficient network and exponents.
 
-This file owns the ``NeuralNPolynomial`` predictor (SPEC §5.2; build-plan
-Phase 14). It is the canonical example of *composition* over inheritance for
-a Predictor: the trainable component is a wrapped inner ``Predictor`` (any
-concrete one — MLP, KAN, ...) whose output is reshaped into a
-``[out_size, len(exponents)]`` coefficient matrix and contracted with
-powers of a single scalar basis derived from the input.
+A ``NeuralNPolynomial`` predictor implements one scalar polynomial per
+output channel whose *coefficients* are produced by a trainable inner
+``Predictor`` (an MLP, a KAN, anything). It is the canonical example of
+*composition over inheritance* in this package: the trainable component
+is held as a field, not subclassed, and any concrete ``Predictor`` can
+serve as the coefficient network as long as its output dimensionality
+matches the polynomial's coefficient layout.
 
 Mathematical contract
 ---------------------
@@ -17,21 +18,24 @@ For ``x: [in_size]``::
     out    = einsum("od,d->o", coeffs, powers)                  # [O]
 
 Per output channel ``o`` this reads as a scalar polynomial in ``basis``
-whose ``D`` coefficients are nonlinear functions of the full ``x`` vector
-produced by the inner network.
+whose ``D`` coefficients are nonlinear functions of the full ``x``
+vector produced by the inner network.
 
-Design choices (Option A from the build-plan brief):
-  - ``input_to_basis = sum(x)`` collapses the input to one scalar that
-    drives every polynomial. Mirrors the source-package
-    ``NeuralNPolynomialRegressor`` conception of "one scalar polynomial
-    per output, coefficients are functions of x". Option B
-    (``norm(x)`` for rotation invariance) was considered and rejected
-    for v1; revisit if a domain calls for it.
-  - ``coeff_net`` is consumed as-is; the constructor does **not** key-init
-    it. The user builds whichever inner predictor they want and passes
-    it in. This keeps the class agnostic to the inner predictor's
-    construction conventions and makes the trainable-leaves story
-    completely owned by the inner network.
+Design choices
+--------------
+* ``input_to_basis = sum(x)`` collapses the input to a single scalar
+  that drives every per-channel polynomial. This is the simplest
+  meaningful choice and matches a "one scalar polynomial per output,
+  coefficients are functions of x" reading of the model. A
+  rotation-invariant alternative such as ``norm(x)`` would be a
+  drop-in replacement if a domain demands it; we only commit to one
+  here to keep the contract simple.
+* ``coeff_net`` is consumed as-is; the constructor does **not** key-init
+  it. The user builds whichever inner predictor they want, with
+  whatever construction convention they prefer, and passes it in. The
+  class therefore stays agnostic to the inner predictor's
+  construction details and the trainable-leaves story is completely
+  owned by the inner network.
 """
 
 # ruff: noqa: F722
@@ -50,9 +54,11 @@ from hybridmodels.predictors.base import Predictor, reinitialize_with_key
 class NeuralNPolynomial(Predictor):
     """Polynomial-in-``sum(x)`` whose coefficients come from ``coeff_net``.
 
-    Pure composition wrapper. The trainable piece is the inner ``coeff_net``
-    Predictor; ``exponents``, ``in_size``, and ``out_size`` are static
-    metadata that survive serialisation and reconstruction (R-A5).
+    Pure composition wrapper. The trainable piece is the inner
+    ``coeff_net`` Predictor; ``exponents``, ``in_size``, and ``out_size``
+    are static metadata that survive serialisation and reconstruction
+    (only the inner network's float leaves are written to the binary
+    checkpoint).
 
     Static vs dynamic split
     -----------------------
@@ -133,9 +139,7 @@ class NeuralNPolynomial(Predictor):
         call but, since it is a static tuple, JAX folds the conversion at
         trace time and the array becomes a constant in the compiled program.
         """
-        coeffs = jnp.asarray(self.coeff_net(x)).reshape(
-            (self.out_size, len(self.exponents))
-        )
+        coeffs = jnp.asarray(self.coeff_net(x)).reshape((self.out_size, len(self.exponents)))
         basis = jnp.sum(x)
         powers = basis ** jnp.asarray(self.exponents)
         return jnp.einsum("od,d->o", coeffs, powers)
@@ -143,14 +147,15 @@ class NeuralNPolynomial(Predictor):
     def initialized_with_key(self, key: Array) -> NeuralNPolynomial:
         """Re-initialise the inner ``coeff_net``; keep the polynomial structure.
 
-        Implements the R-T8 protocol consumed by the optax tournament.
-        Delegation order matches what the prompt pins: prefer the inner
-        predictor's own ``initialized_with_key`` (so e.g. ``MLPPredictor``
-        re-runs Equinox's Glorot init), and otherwise fall back to
-        ``reinitialize_with_key`` which samples replacement leaves
-        elementwise. The free function ``reinitialize_with_key`` already
-        encodes this delegation, so we just call through. ``exponents``,
-        ``in_size`` and ``out_size`` are static and unchanged.
+        Implements the re-init protocol consumed by the training
+        tournament. The delegation order is intentional: prefer the
+        inner predictor's own ``initialized_with_key`` (so e.g.
+        ``MLPPredictor`` re-runs Equinox's Glorot init), and otherwise
+        fall back to ``reinitialize_with_key``, which samples
+        replacement leaves elementwise. The free function
+        :func:`reinitialize_with_key` already encodes that delegation,
+        so we simply call through. ``exponents``, ``in_size`` and
+        ``out_size`` are static and unchanged.
         """
         new_coeff_net = cast(Predictor, reinitialize_with_key(self.coeff_net, key))
         return NeuralNPolynomial(

@@ -1,9 +1,10 @@
-"""Tests for ``RichEvosaxUI`` (SPEC §5.9 / R-U1, R-U2, R-U3, R-U4).
+"""Tests for ``RichEvosaxUI``.
 
-Mirrors ``tests/test_ui_rich.py`` but targets the evosax surface: instead of
-phases / per-step losses there are generations with best/mean fitness. The
-test discipline is otherwise identical — a non-TTY recording console captures
-the dashboard so assertions can be written against ``console.export_text()``.
+Mirrors ``tests/test_ui_rich.py`` but targets the evosax UI surface:
+instead of phases and per-step losses there are generations with
+best/mean fitness. The test discipline is otherwise identical — a
+non-TTY recording console captures the dashboard so assertions can be
+written against ``console.export_text()``.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ def test_rich_evosax_ui_satisfies_protocol() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: rendered-output content (R-U1, R-U3, R-U4).
+# Test 2: rendered-output content.
 # ---------------------------------------------------------------------------
 
 
@@ -129,10 +130,11 @@ def test_log_every_throttles_generation_table_rows() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests 5 & 6: integration with train_with_evosax (R-U2).
+# Tests 5 & 6: integration with ``train_with_evosax``.
 #
-# A 4-D quadratic problem (mirrors tests/test_train_evosax.py) trimmed to the
-# minimum needed to exercise verbose=True / verbose=False UI selection.
+# A 4-D quadratic problem (mirrors ``tests/test_train_evosax.py``) trimmed
+# to the minimum needed to exercise ``verbose=True`` / ``verbose=False``
+# UI selection.
 # ---------------------------------------------------------------------------
 
 
@@ -154,9 +156,7 @@ class _QuadraticPredictor(Predictor):
 
 def _quadratic_dataset() -> Dataset:
     ts = jnp.array([0.0], dtype=jnp.float32)
-    channels = {
-        f"c{i}": ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(N_DIM)
-    }
+    channels = {f"c{i}": ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(N_DIM)}
     exp = make_experiment(
         covariates={"id": 0.0},
         channels=channels,

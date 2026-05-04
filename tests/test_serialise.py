@@ -1,27 +1,29 @@
-"""Tests for ``hybridmodels.serialise`` (SPEC §5.11 / R-A5 / R-S2 / ADR-0006).
+"""Tests for ``hybridmodels.serialise``.
 
-Phase 16 of the build plan. Pins the four public helpers
-(``save_predictors`` / ``load_predictors`` / ``save_run`` / ``load_run``)
-and the on-disk metadata contract documented in CONTEXT.md "Serialisation".
+Pins the four public helpers (``save_predictors``,
+``load_predictors``, ``save_run``, ``load_run``) and the on-disk
+metadata contract.
 
 Coverage strategy
 -----------------
 - Round-trip is parametrised over the four pytree shapes the runtime
-  contract permits (per ADR-0006): a bare ``BoundedPredictor`` (one-leaf
-  pytree), the canonical ``(BP,)`` 1-tuple convention, a multi-rate
-  ``(growth_BP, nucleation_BP)`` 2-tuple, and a ``dict[str, BP]`` mapping
-  to lock the runtime-permissive claim. Each shape goes through the
-  public ``save_predictors`` / ``load_predictors`` entry points so the
-  helper plumbing (path coercion, file mode) is covered alongside
+  contract permits: a bare ``BoundedPredictor`` (one-leaf pytree), the
+  conventional ``(BP,)`` one-tuple, a multi-rate
+  ``(growth_BP, nucleation_BP)`` two-tuple, and a ``dict[str, BP]``
+  mapping. Each shape goes through the public ``save_predictors`` /
+  ``load_predictors`` entry points so the helper plumbing (path
+  coercion, file mode) is covered alongside
   ``eqx.tree_serialise_leaves`` itself.
 - ``save_run`` / ``load_run`` get one minimal happy path plus targeted
-  variants for each load-bearing branch: optax+evosax both populated,
-  optional ``loss_history`` / ``extras`` propagation, missing builder
-  classes, directory creation, overwrite semantics, loss-callable
-  stringification, and the per-leaf ``predictors`` description fields.
-- The KAN-specific forward-pass equality check guards the static/dynamic
-  split documented in ``predictors/kan.py`` — the highest-risk predictor
-  for round-trip drift because of the jaxkan / Param wiring.
+  variants for each load-bearing branch: Optax + Evosax both
+  populated, optional ``loss_history`` / ``extras`` propagation,
+  missing builder classes, directory creation, overwrite semantics,
+  loss-callable stringification, and the per-leaf ``predictors``
+  description fields.
+- The KAN-specific forward-pass equality check guards the
+  static/dynamic split documented in ``predictors/kan.py`` — the
+  highest-risk predictor for round-trip drift because of the
+  ``jaxkan`` / ``nnx.Param`` wiring.
 """
 
 # ruff: noqa: F722

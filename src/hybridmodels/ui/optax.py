@@ -1,26 +1,30 @@
-"""Rich-based ``TrainingUI`` for ``train_with_optax`` (SPEC §5.9, R-U1..R-U4).
+"""Rich-based ``TrainingUI`` for ``train_with_optax``.
 
-A single :class:`rich.live.Live` is started in :meth:`RichTrainingUI.on_run_start`
-and stopped in :meth:`RichTrainingUI.on_run_end`. The renderable is a
-:class:`rich.console.Group` that swaps panels as the run progresses (R-U4):
+A single :class:`rich.live.Live` is started in
+:meth:`RichTrainingUI.on_run_start` and stopped in
+:meth:`RichTrainingUI.on_run_end`. The live renderable is a
+:class:`rich.console.Group` that swaps panels as the run progresses:
 
 * a header :class:`rich.panel.Panel` with run-level info (total steps,
   number of phases, elapsed wall-clock);
-* a per-phase :class:`rich.progress.Progress` showing per-step advancement
-  inside the active phase (rebuilt on every ``on_phase_start`` so the bar
-  resets cleanly when a new phase begins);
-* a compile-progress panel shown only between ``on_compile_start`` and the
-  matching ``on_compile_done``; once the *first* bucket finishes compiling
-  this slot is replaced by the phase progress bar (R-U3);
-* a small :class:`rich.table.Table` of the most recent ``recent_losses``
-  losses, throttled to every ``log_every`` steps (default 1);
-* a message log panel showing the most recent ``recent_messages`` lines
-  fired through :meth:`RichTrainingUI.on_message`.
+* a per-phase :class:`rich.progress.Progress` bar showing per-step
+  advancement inside the active phase (rebuilt on every
+  ``on_phase_start`` so the bar resets cleanly between phases);
+* a compile-progress panel shown only between ``on_compile_start`` and
+  the matching ``on_compile_done``; once the *first* bucket finishes
+  compiling this slot is replaced by the phase progress bar
+  permanently;
+* a small :class:`rich.table.Table` of the most recent
+  ``recent_losses`` losses, throttled to every ``log_every`` steps
+  (default 1);
+* a message-log panel showing the most recent ``recent_messages``
+  lines fired through :meth:`RichTrainingUI.on_message`.
 
-The class is defensive about event ordering: events that arrive before the
-state they reference (e.g. ``on_phase_end`` with no active phase) are
-turned into no-ops rather than assertions, because tournament restarts and
-abort paths can fire events in unexpected orders.
+The class is intentionally defensive about event ordering: events
+that arrive before the state they reference (e.g. ``on_phase_end``
+with no active phase) become no-ops rather than assertions, because
+tournament restarts and graceful-abort paths can legitimately fire
+events out of order.
 """
 
 from __future__ import annotations
@@ -111,7 +115,7 @@ class RichTrainingUI:
         # phase run finishes.
         self._phase_history: list[tuple[int, str, float]] = []
 
-        # Compile-panel state (R-U3). The compile panel occupies the same
+        # Compile-panel state. The compile panel occupies the same
         # vertical slot as the phase-progress bar; once any bucket has
         # finished compiling we leave that slot to the phase-progress
         # rendering for the rest of the run.
@@ -154,9 +158,7 @@ class RichTrainingUI:
         )
         self._live.start()
 
-    def on_compile_start(
-        self, *, bucket_idx: int, bucket_shape: tuple[int, ...]
-    ) -> None:
+    def on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> None:
         self._compile_active = True
         self._compile_bucket_idx = int(bucket_idx)
         self._compile_bucket_shape = tuple(int(d) for d in bucket_shape)
@@ -183,8 +185,10 @@ class RichTrainingUI:
         self._phase_optimizer = str(optimizer)
         self._phase_history.append((self._phase_idx, self._phase_optimizer, self._phase_lr))
 
-        # Build a fresh Progress so the bar starts from zero on every phase
-        # (R-U4: panels swap as the run progresses).
+        # Build a fresh Progress so the bar starts from zero on every
+        # phase. Reusing one Progress across phases would either show
+        # cumulative step counts or require manual reset gymnastics; a
+        # new Progress per phase is cheaper and cleaner.
         self._phase_progress_bar = Progress(
             TextColumn("[bold]phase {task.fields[phase_idx]}"),
             BarColumn(),
@@ -331,9 +335,7 @@ class RichTrainingUI:
         meta.add_column(style="bold")
         meta.add_column()
         meta.add_row("optimizer", str(self._phase_optimizer))
-        meta.add_row(
-            "lr", f"{self._phase_lr:.2e}" if self._phase_lr is not None else "-"
-        )
+        meta.add_row("lr", f"{self._phase_lr:.2e}" if self._phase_lr is not None else "-")
 
         return Panel(
             Group(self._phase_progress_bar, meta),
@@ -354,11 +356,7 @@ class RichTrainingUI:
 
     def _render_footer(self) -> Panel:
         # Final-loss summary at the bottom of the dashboard.
-        final = (
-            _format_loss(self._final_loss)
-            if self._final_loss is not None
-            else "-"
-        )
+        final = _format_loss(self._final_loss) if self._final_loss is not None else "-"
         body = Text.assemble(("final loss ", "bold"), final)
         return Panel(body, title="run summary", border_style="cyan")
 

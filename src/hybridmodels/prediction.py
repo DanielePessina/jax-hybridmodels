@@ -1,15 +1,27 @@
-"""Prediction entry points (SPEC §5.10 / R-J1 / R-J2 / R-J3 / R-A2).
+"""Prediction entry points.
 
-``predict_bucket`` vmaps the user's ``simulate_fn`` across a bucket's N axis
-and applies ``state_to_output`` per experiment. It is jitted independently
-from training (R-J1). ``predict_dataset`` is the bucket-dispatch driver: a
-plain Python ``for`` loop over ``dataset.bucket_payloads`` (R-J2), so each
-bucket shape compiles once (R-J3).
+Two layers, separated so the JIT cache stays predictable:
 
-Both entry points take ``predictors`` as a ``PyTree[eqx.Module]`` (the
-canonical convention is a tuple of ``BoundedPredictor`` leaves; see
-ADR-0006). The pytree shape is irrelevant inside this module — it is just
-forwarded to the user's ``simulate_fn`` unchanged.
+``predict_bucket``
+    The jitted kernel. Vmaps the user's ``simulate_fn`` across a
+    bucket's ``N`` axis, then applies ``state_to_output`` per experiment
+    to project the full simulator state ``[T, S]`` onto the observed
+    channels ``[T, D]``. It is jitted independently from any training
+    kernel so prediction-time graphs do not collide with training-time
+    graphs in the cache.
+
+``predict_dataset``
+    A plain Python ``for`` loop over ``dataset.bucket_payloads`` that
+    dispatches to ``predict_bucket`` once per bucket. The dispatch loop
+    lives outside the jitted region, so each *bucket shape* compiles
+    exactly once and re-using the same shape (e.g. across epochs) is
+    free.
+
+Both entry points take ``predictors`` as a ``PyTree[eqx.Module]`` of any
+container shape (the convention is a tuple of ``BoundedPredictor``
+leaves, but a dict, NamedTuple, or bare Module is equally valid). This
+module never inspects the pytree structure — it is forwarded to the
+user's ``simulate_fn`` unchanged.
 """
 
 # ruff: noqa: F722
@@ -39,30 +51,33 @@ def predict_bucket(
     """Vmap ``simulate_fn`` over the bucket's ``N`` axis and project to observed channels.
 
     The inner ``_per_experiment`` runs the user's ``simulate_fn`` once for
-    one experiment to produce ``[T, S]`` and then projects to ``[T, D]`` via
-    ``state_to_output``. ``jax.vmap`` lifts this over ``(ts, covariates, y0)``
-    along the ``N`` axis to produce ``[N, T, D]``. ``predictors`` and
-    ``solver`` are closed over (no vmap axis) — they are constant across
-    experiments in the bucket.
+    one experiment to produce a full state trajectory ``[T, S]`` and then
+    projects to the observed channels ``[T, D]`` via ``state_to_output``.
+    ``jax.vmap`` lifts this over ``(ts, covariates, y0)`` along the ``N``
+    axis to produce ``[N, T, D]``. ``predictors`` and ``solver`` are
+    closed over (no vmap axis) — they are constant across the bucket.
 
-    Jit caching: one trace per bucket *shape* (R-J3). The Python dispatch
-    over ``dataset.bucket_payloads`` lives in ``predict_dataset``, never
-    inside the jitted region (R-J2).
+    JIT caching: one compiled trace per bucket *shape*. The Python
+    dispatch over ``dataset.bucket_payloads`` lives in
+    ``predict_dataset``, never inside the jitted region — that boundary
+    is what keeps the cache predictable.
 
     Parameters
     ----------
     predictors : PyTree[eqx.Module]
-        Trainable component, typically a tuple of ``BoundedPredictor`` leaves
-        (R-A2 / ADR-0006). Forwarded to ``simulate_fn`` as-is; this module
-        does not inspect the container shape.
+        Trainable component, typically a tuple of ``BoundedPredictor``
+        leaves but accepted as any pytree shape. Forwarded to
+        ``simulate_fn`` as-is; this module does not inspect the
+        container.
     bp : BucketPayload
         One bucket; ``ts``, ``covariates``, ``y0`` are vmapped along ``N``.
     simulate_fn
-        User-supplied ``(predictors, ts, cov, y0, solver) -> [T, S]`` per R-A2.
+        User-supplied integrator with signature
+        ``(predictors, ts, covariates, y0, solver) -> [T, S]``.
     state_to_output
         Pure ``[T, S] -> [T, D]`` projector held on ``Dataset``.
     solver
-        Static ``SolverConfig`` (R-S1).
+        Static ``SolverConfig``.
 
     Returns
     -------
@@ -87,10 +102,11 @@ def predict_dataset(
     """Run ``predict_bucket`` over every bucket in ``dataset`` and return the stack tuple.
 
     The Python ``for`` loop over ``dataset.bucket_payloads`` is the dispatch
-    driver (R-J2); each bucket shape compiles ``predict_bucket`` exactly once.
-    Returns a tuple aligned with ``dataset.bucket_payloads`` order, *not* a
-    flat concatenation — each entry has its own ``[N_b, T_b, D]`` shape and
-    cannot be stacked into a single tensor (different ``T``).
+    driver: each bucket shape compiles ``predict_bucket`` exactly once.
+    Returns a tuple aligned with ``dataset.bucket_payloads`` order, *not*
+    a flat concatenation — each entry has its own ``[N_b, T_b, D]``
+    shape and cannot be stacked into a single tensor (the buckets differ
+    precisely in ``T``).
 
     Returns
     -------

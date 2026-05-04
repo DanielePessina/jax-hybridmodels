@@ -141,9 +141,7 @@ class TestMakeDatasetUnion:
         )
         bp = ds.bucket_payloads[0]
         assert jnp.allclose(bp.ts[0], jnp.array([0.0, 1.0, 2.0]))
-        expected_mask = jnp.array(
-            [[True, False], [False, True], [True, False]]
-        )
+        expected_mask = jnp.array([[True, False], [False, True], [True, False]])
         assert jnp.array_equal(bp.mask[0], expected_mask)
         assert float(bp.y_observed[0, 0, 0]) == 10.0
         assert float(bp.y_observed[0, 1, 1]) == 99.0
@@ -408,9 +406,7 @@ class TestErrors:
 
     def test_empty_experiments_raises(self):
         with pytest.raises(ValueError):
-            make_dataset(
-                [], state_to_output=_identity_state_to_output, output_channel_names=("x",)
-            )
+            make_dataset([], state_to_output=_identity_state_to_output, output_channel_names=("x",))
 
 
 class TestNObsCount:
@@ -528,8 +524,11 @@ class TestNoWarnings:
 
 class TestManualConstruction:
     def test_construct_with_only_public_spec_fields(self):
-        # SPEC §5.1 lists bucket_payloads/state_to_output/output_channel_names/covariate_names.
-        # _experiments is internal and must not be required for manual construction.
+        # The four user-facing fields of ``Dataset`` are
+        # ``bucket_payloads``, ``state_to_output``, ``output_channel_names``,
+        # and ``covariate_names``. ``_experiments`` is internal — kept so
+        # ``split_dataset`` can re-bucket subsets — and must not be
+        # required when the user constructs a Dataset manually.
         ds = Dataset(
             bucket_payloads=(),
             state_to_output=_identity_state_to_output,
