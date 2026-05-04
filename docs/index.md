@@ -11,7 +11,7 @@ hero:
       link: /guide/getting-started
     - theme: alt
       text: Crystallisation Walkthrough
-      link: /examples/crystallisation
+      link: /examples/crystallisation-notebook
     - theme: alt
       text: API Reference
       link: /api/

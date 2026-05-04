@@ -35,12 +35,14 @@ export default defineConfig({
         { text: 'Training', link: '/guide/training' },
         { text: 'Recommendations', link: '/guide/recommendations' },
       ],
+      // The two embedded marimo notebooks are the canonical example docs.
+      // The earlier hybrid-MLP and mechanistic crystallisation walk-throughs
+      // and the harmonic-oscillator page are intentionally not listed here —
+      // their content has been folded into the combined crystallisation
+      // notebook. The pages still exist on disk; they're just unlinked.
       '/examples/': [
-        { text: 'Crystallisation (notebook)', link: '/examples/crystallisation-notebook' },
-        { text: 'Batch reactor (notebook)', link: '/examples/batch-reactor' },
-        { text: 'Crystallisation (hybrid MLP)', link: '/examples/crystallisation' },
-        { text: 'Crystallisation (mechanistic)', link: '/examples/crystallisation-mechanistic' },
-        { text: 'Harmonic Oscillator', link: '/examples/pendulum' },
+        { text: 'Crystallisation', link: '/examples/crystallisation-notebook' },
+        { text: 'Batch reactor', link: '/examples/batch-reactor' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },
