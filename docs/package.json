@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:gen": "uv run python ../scripts/gen_api_docs.py",
+    "docs:check:api": "uv run python ../scripts/gen_api_docs.py --check",
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview",
+    "docs:check": "npm run docs:check:api && npm run docs:build"
+  },
+  "devDependencies": {
+    "markdown-it-mathjax3": "^4.3.2",
+    "vitepress": "^1.6.3"
+  }
+}
