@@ -24,7 +24,7 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
-      { text: 'Examples', link: '/examples/crystallisation' },
+      { text: 'Examples', link: '/examples/crystallisation-notebook' },
       { text: 'API', link: '/api/' },
     ],
 
@@ -36,6 +36,8 @@ export default defineConfig({
         { text: 'Recommendations', link: '/guide/recommendations' },
       ],
       '/examples/': [
+        { text: 'Crystallisation (notebook)', link: '/examples/crystallisation-notebook' },
+        { text: 'Batch reactor (notebook)', link: '/examples/batch-reactor' },
         { text: 'Crystallisation (hybrid MLP)', link: '/examples/crystallisation' },
         { text: 'Crystallisation (mechanistic)', link: '/examples/crystallisation-mechanistic' },
         { text: 'Harmonic Oscillator', link: '/examples/pendulum' },

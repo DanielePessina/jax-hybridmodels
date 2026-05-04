@@ -301,7 +301,7 @@ sequential runs (used in tests).
 ```python
 RichEvosaxUI(
     console: 'Console | None' = None,
-    log_every: 'int' = 1,
+    log_every: 'int | None' = None,
     recent_generations: 'int' = 5,
     recent_messages: 'int' = 5,
 ) -> None
@@ -314,7 +314,7 @@ Live Rich dashboard satisfying ``hybridmodels.ui.base.EvosaxUI``.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `console:` |  | Optional :class:`rich.console.Console`. ``None`` constructs a default ``Console()``. Tests typically pass a recording console (``Console(record=True, force_terminal=False, ...)``) so the rendered final state can be asserted on. |
-| `log_every:` |  | Throttle for the recent-generation table. ``log_every=1`` records every generation, ``log_every=k`` records generations where ``gen_idx % k == 0``. |
+| `log_every:` |  | Throttle for the recent-generation table. ``log_every=k`` records generations where ``gen_idx % k == 0``. ``None`` (the default) defers the choice to :meth:`on_run_start`, which sets it to ``max(1, num_generations // 5)`` so the table accumulates to exactly five rows over the run instead of sliding past a constantly-changing last-five window. An explicit integer always overrides the auto-scale. |
 | `recent_generations:` |  | Maximum number of rows the recent-generation table holds. |
 | `recent_messages:` |  | Maximum number of lines the message-log panel holds. |
 

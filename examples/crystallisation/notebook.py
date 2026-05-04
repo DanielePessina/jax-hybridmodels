@@ -270,6 +270,31 @@ def _y0_md(mo):
     contains no crystals at the start of the run; the concentration
     state is initialised from the first observed value of the `conc`
     channel. Temperature is the only experimental covariate.
+
+    ```python
+    def y0_fn(covariates, channels):
+        # [mu0..mu4, conc]: moments at zero, conc at first observation.
+        init_conc = jnp.asarray(channels["conc"].values[0])
+        return jnp.concatenate([jnp.zeros(5, dtype=init_conc.dtype), init_conc[None]])
+
+    experiments = []
+    for data in EXPERIMENTS_DATA:
+        time_min = jnp.asarray(data["time_min"], dtype=float)
+        conc     = jnp.asarray(data["conc"], dtype=float)
+        d43_ts   = jnp.asarray((data["d43_time_min"],), dtype=float)
+        d43_vals = jnp.asarray((data["d43"],), dtype=float)
+        d43_var  = jnp.asarray((data["d43_var"],), dtype=float)
+        experiments.append(make_experiment(
+            covariates={"temperature_C": float(data["temperature_C"])},
+            channels={
+                "conc": ChannelObs(ts=time_min, values=conc,
+                                   variance=jnp.full_like(conc, CONC_VAR)),
+                "d43":  ChannelObs(ts=d43_ts,   values=d43_vals, variance=d43_var),
+            },
+            y0_fn=y0_fn,
+            exp_id=str(data["exp_id"]),
+        ))
+    ```
     """)
     return
 
@@ -352,6 +377,25 @@ def _projector_md(mo):
     a second `where` then selects between the safe ratio and a zero
     output. This ensures that both the value and its gradient are
     well-defined everywhere.
+
+    ```python
+    D43_MU3_EPS = 1e-6
+    D43_MAX = 55.0
+
+    def state_to_output(state):
+        # Maps [T, 6] -> [T, 2] in OUTPUT_CHANNELS = ('conc', 'd43') order.
+        mu3 = state[..., 3]
+        mu4 = state[..., 4]
+        conc = state[..., 5]
+        safe_mu3 = jnp.where(mu3 > D43_MU3_EPS, mu3, 1.0)
+        ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
+        d43 = jnp.clip(
+            jnp.where(jnp.isfinite(ratio) & (ratio > 0.0), ratio, 0.0),
+            0.0,
+            D43_MAX,
+        )
+        return jnp.stack([conc, d43], axis=-1)
+    ```
     """)
     return
 
@@ -398,6 +442,16 @@ def _dataset_step_md(mo):
     the training step is compiled once per bucket and then reused
     across every gradient update, which amortises the compilation cost
     across the optimisation loop.
+
+    ```python
+    OUTPUT_CHANNELS = ("conc", "d43")
+
+    dataset = make_dataset(
+        experiments,
+        state_to_output=state_to_output,
+        output_channel_names=OUTPUT_CHANNELS,
+    )
+    ```
     """)
     return
 
@@ -446,6 +500,17 @@ def _solver_md(mo):
     `Tsit5` is suitable for both models in this notebook. If the CNT
     exponent stiffens the system substantially during training, an
     implicit method such as `Kvaerno3` may be used instead.
+
+    ```python
+    solver = SolverConfig(
+        solver=diffrax.Tsit5(),
+        rtol=1e-4,
+        # per-state floor at ~9 decades below natural magnitude
+        atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),
+        max_steps=500_000,
+        dt0=None,
+    )
+    ```
     """)
     return
 
@@ -497,6 +562,36 @@ def _mlp_section_md(mo):
     from random initial weights. Looser bounds that place the midpoint
     several orders of magnitude higher tend to produce stiff ODEs at
     initialisation and prevent training from making progress.
+
+    ```python
+    INPUT_KEYS              = ("temperature_C", "supersaturation")
+    TEMPERATURE_BOUNDS      = (13.0, 27.0)        # °C, slightly wider than data span
+    SUPERSATURATION_BOUNDS  = (0.0, 12.0)         # S = conc / conc_sat
+    LOG10_GROWTH_BOUNDS     = (-15.0, -5.0)       # log10(G [m/s])
+    LOG10_NUCLEATION_BOUNDS = (-6.5, 20.0)        # log10(J [#/(m^3·s)])
+
+    in_scaler = BoundScaler(
+        bounds=(TEMPERATURE_BOUNDS, SUPERSATURATION_BOUNDS),
+        transform="sigmoid",
+    )
+    k_growth, k_nucleation = jr.split(jr.PRNGKey(0), 2)
+
+    growth_bp = BoundedPredictor(
+        input_keys=INPUT_KEYS,
+        in_scaler=in_scaler,
+        inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
+                           depth=1, activation_name="relu", key=k_growth),
+        out_scaler=BoundScaler(bounds=(LOG10_GROWTH_BOUNDS,), transform="sigmoid"),
+    )
+    nucleation_bp = BoundedPredictor(
+        input_keys=INPUT_KEYS,
+        in_scaler=in_scaler,
+        inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
+                           depth=1, activation_name="relu", key=k_nucleation),
+        out_scaler=BoundScaler(bounds=(LOG10_NUCLEATION_BOUNDS,), transform="sigmoid"),
+    )
+    mlp_predictors = (growth_bp, nucleation_bp)
+    ```
     """)
     return
 
@@ -576,6 +671,53 @@ def _mlp_vector_field_md(mo):
     at the boundary of the simulator by multiplying the time vector by
     sixty before passing it to the integrator, keeping the vector
     field itself free of unit conversions.
+
+    ```python
+    RHO_C    = 1370.0  # crystal density [kg/m^3]
+    K_V      = 0.81    # volumetric shape factor
+    META_EPS = 1e-5    # supersaturation must exceed 1 + eps for nucleation/growth
+
+    def simulate_fn_mlp(predictors, ts, covariates, y0, solver):
+        growth_bp, nucleation_bp = predictors
+        temperature_C = covariates["temperature_C"]
+        # Empirical solubility polynomial in °C.
+        conc_sat = (0.3705
+                    + 7.171e-2 * temperature_C
+                    - 1.924e-3 * temperature_C**2
+                    + 17.97e-5 * temperature_C**3)
+
+        def vector_field(t, y, args):
+            mu0, mu1, mu2, mu3, _mu4, conc = y
+            S = conc / conc_sat
+            meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
+
+            inputs = {"temperature_C": temperature_C, "supersaturation": S}
+            log10_G = jnp.squeeze(growth_bp(inputs))
+            log10_J = jnp.squeeze(nucleation_bp(inputs))
+            G = meta_mask * jnp.power(10.0, log10_G)
+            J = meta_mask * jnp.power(10.0, log10_J)
+
+            return jnp.stack([
+                J,
+                G * mu0,
+                2.0 * G * mu1,
+                3.0 * G * mu2,
+                4.0 * G * mu3,
+                -3.0 * K_V * RHO_C * G * mu2,
+            ])
+
+        times_sec = ts * 60.0  # dataset stores minutes; rate constants are in seconds
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vector_field),
+            solver.solver,
+            t0=times_sec[0], t1=times_sec[-1], dt0=solver.dt0, y0=y0,
+            saveat=diffrax.SaveAt(ts=times_sec),
+            stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+            max_steps=solver.max_steps,
+            adjoint=diffrax.DirectAdjoint(),
+        )
+        return sol.ys
+    ```
     """)
     return
 
@@ -671,6 +813,25 @@ def _mlp_train_md(mo):
     through the `train_with_optax` driver. The first iteration incurs
     a one-time just-in-time compilation cost per bucket shape;
     subsequent iterations run at the full speed of compiled JAX code.
+
+    ```python
+    config_mlp = OptaxTrainingConfig(
+        steps=(300,),
+        lr=(1e-3,),
+        optimizer=("adamw",),
+        reset_optimiser_state=(False,),
+        length_schedule=(1.0,),
+        loss="mse",
+    )
+    history_mlp, trained_mlp = train_with_optax(
+        mlp_predictors,
+        dataset,
+        config_mlp,
+        simulate_fn=simulate_fn_mlp,
+        solver=solver,
+        key=jr.PRNGKey(0),
+    )
+    ```
     """)
     return
 
@@ -788,6 +949,31 @@ def _mech_section_md(mo):
     employed by the hybrid model ensures that the optimiser operates
     in an unbounded latent space while the simulator receives
     parameters in physical units.
+
+    ```python
+    LOGA_BOUNDS  = (20.0, 65.0)
+    GAMMA_BOUNDS = (0.15, 1.0)
+    AG_BOUNDS    = (-20.0, -5.0)
+    G_BOUNDS     = (1.0, 3.5)
+
+    class KineticParameters(eqx.Module):
+        # Four global mechanistic kinetic constants [logA, gamma, Ag, g].
+
+        latent: Float[Array, " 4"]
+        out_scaler: BoundScaler
+
+        def __init__(self, *, key):
+            self.latent = jr.normal(key, (4,)) * 0.1
+            self.out_scaler = BoundScaler(
+                bounds=(LOGA_BOUNDS, GAMMA_BOUNDS, AG_BOUNDS, G_BOUNDS),
+                transform="sigmoid",
+            )
+
+        def __call__(self):
+            return self.out_scaler.from_latent(self.latent)
+
+    mech_predictor = KineticParameters(key=jr.PRNGKey(0))
+    ```
     """)
     return
 
@@ -854,6 +1040,45 @@ def _mech_vector_field_md(mo):
     gradient descent. The same clipping practice is recommended
     whenever the same simulator is reused with a gradient-based
     optimiser.
+
+    ```python
+    M_V = 2.97e-26          # molecular volume [m^3]
+    K_B = 1.38064852e-23    # Boltzmann constant [J/K]
+
+    def simulate_fn_mech(predictor, ts, covariates, y0, solver):
+        params = predictor()                   # [4] in physical units
+        logA       = params[0]
+        gamma_J_m2 = params[1] * 1e-3          # bounds [mJ/m^2]; CNT in [J/m^2]
+        Ag         = params[2]
+        g_exp      = params[3]
+
+        T_K = covariates["temperature_C"] + 273.15
+        # ... conc_sat polynomial as in the hybrid simulator ...
+
+        def vector_field(t, y, args):
+            mu0, mu1, mu2, mu3, _mu4, conc = y
+            S = conc / conc_sat
+            meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
+
+            # Clip S inside log so the gradient stays finite when meta_mask
+            # is zero. log(S) for S <= 1 still produces a NaN gradient
+            # otherwise, which propagates regardless of the mask.
+            S_safe = jnp.clip(S, min=1.0 + 1e-12)
+            logS   = jnp.log(S_safe)
+            cnt_exp = (-16.0 * jnp.pi * gamma_J_m2**3 * M_V**2
+                       / (3.0 * (K_B * T_K)**3 * logS**2))
+            J = meta_mask * jnp.exp(logA) * S_safe * jnp.exp(cnt_exp)
+
+            growth_drive = jnp.maximum(S - 1.0, 0.0)
+            G = (meta_mask * jnp.power(10.0, Ag) / 60.0
+                 * jnp.power(growth_drive, g_exp))
+
+            return jnp.stack([
+                J, G * mu0, 2.0 * G * mu1, 3.0 * G * mu2, 4.0 * G * mu3,
+                -3.0 * K_V * RHO_C * G * mu2,
+            ])
+        # ... diffeqsolve call identical to the hybrid simulator ...
+    ```
     """)
     return
 
@@ -967,6 +1192,26 @@ def _mech_train_md(mo):
     `sigma_init=0.5` in the latent space. Population evaluation is
     vectorised through `jax.vmap` so that every individual is
     simulated against every bucket within a single compiled kernel.
+
+    ```python
+    config_mech = EvosaxTrainingConfig(
+        algorithm="CMA_ES",
+        population_size=32,
+        num_generations=30,
+        init="lhs_box",          # space-filling Latin-hypercube init
+        init_box_extent=2.0,
+        sigma_init=0.5,
+        loss="mse",
+    )
+    history_mech, trained_mech = train_with_evosax(
+        mech_predictor,
+        dataset,
+        config_mech,
+        simulate_fn=simulate_fn_mech,
+        solver=solver,
+        key=jr.PRNGKey(0),
+    )
+    ```
     """)
     return
 
@@ -1313,6 +1558,21 @@ def _outro(mo):
     representative operating point is a useful sanity check on the
     learned rate laws and provides a starting point for any subsequent
     physical interpretation or extrapolation.
+
+    ```python
+    # Hybrid MLP: query at any (T, S) operating point.
+    trained_growth, trained_nucleation = trained_mlp
+    sample_inputs = {
+        "temperature_C": jnp.asarray(20.0),
+        "supersaturation": jnp.asarray(1.5),
+    }
+    log10_G = float(jnp.squeeze(trained_growth(sample_inputs)))
+    log10_J = float(jnp.squeeze(trained_nucleation(sample_inputs)))
+
+    # Mechanistic: predictor takes no arguments.
+    final_params = trained_mech()
+    logA, gamma, Ag, g = final_params
+    ```
     """)
     return
 

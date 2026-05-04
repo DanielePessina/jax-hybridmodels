@@ -68,6 +68,13 @@ def _intro(mo):
     The dynamics are first-order: $dC_A/dt = -k\,C_A$, so each experiment
     is a single exponential decay whose rate constant depends on its
     fixed $(T,\mathrm{pH})$ pair.
+
+    A note on framework conventions used throughout. The trainable
+    component of any model in `hybridmodels` is a *pytree of
+    `eqx.Module` leaves*; the convention is to wrap it in a tuple
+    even for the single-leaf case. The integrator is a user-supplied
+    `simulate_fn` with a fixed signature; the framework owns vmap,
+    jit, and autodiff, the user owns the physics.
     """)
     return
 
@@ -161,6 +168,20 @@ def _truth_md(mo):
     which is mild enough to let CMA-ES locate the basin from a wide LHS
     prior but strong enough to be visibly distinct from a flat-rate
     model in the post-fit plots.
+
+    ```python
+    T_REF = 298.15        # K (centring temperature)
+    R_GAS = 8.314e-3      # kJ/(mol·K)
+    EA_TRUE = 30.0        # kJ/mol
+
+    def _k_sat_from_ph(pH):
+        return 0.14 + 1.05 / (1.0 + jnp.maximum(pH / 5.85, 0.0) ** 5.0)
+
+    def k_true(temperature_C, pH):
+        T_K = jnp.asarray(temperature_C) + 273.15
+        arrhenius = jnp.exp(-EA_TRUE / R_GAS * (1.0 / T_K - 1.0 / T_REF))
+        return _k_sat_from_ph(pH) * arrhenius
+    ```
     """)
     return
 
@@ -231,6 +252,20 @@ def _doe_md(mo):
     slides' noise model. The variance is recorded on the
     `ChannelObs` so the framework's MLE-style losses could use it
     later if desired.
+
+    ```python
+    sampler = qmc.LatinHypercube(d=2, seed=DOE_SEED)
+    unit = sampler.random(n=N_TRAIN_EXPERIMENTS)              # [9, 2] in [0, 1]
+    lo = np.array([T_C_RANGE[0], PH_RANGE[0]])
+    hi = np.array([T_C_RANGE[1], PH_RANGE[1]])
+    train_design = [(float(t), float(ph)) for t, ph in lo + (hi - lo) * unit]
+
+    VALIDATION_POINTS = ((20.0, 5.3), (30.0, 6.8))            # held-out, off-grid
+
+    def add_heteroscedastic_noise(values, key):
+        scale = 0.03 * jnp.maximum(jnp.abs(values), 0.02)
+        return jnp.clip(values + scale * jr.normal(key, values.shape), 0.0, None)
+    ```
     """)
     return
 
@@ -316,6 +351,32 @@ def _experiment_md(mo):
 
     The state-to-output projector simply selects $C_A$ from the full
     state, since that is the only observed channel.
+
+    ```python
+    def y0_fn(covariates, channels):
+        ca0 = jnp.asarray(channels["Ca"].values[0])
+        return jnp.stack([ca0, jnp.zeros_like(ca0)])
+
+    def state_to_output(state):
+        return state[..., :1]                    # select Ca
+
+    OUTPUT_CHANNELS = ("Ca",)
+
+    # Build one experiment per (T, pH) sample.
+    make_experiment(
+        covariates={"temperature_C": float(T_C), "pH": float(pH)},
+        channels={"Ca": ChannelObs(ts=ts, values=noisy, variance=sigma**2)},
+        y0_fn=y0_fn,
+        exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}",
+    )
+
+    # Stack experiments into buckets by len(union_ts); compute masks.
+    train_dataset = make_dataset(
+        train_experiments,
+        state_to_output=state_to_output,
+        output_channel_names=OUTPUT_CHANNELS,
+    )
+    ```
     """)
     return
 
@@ -487,6 +548,16 @@ def _solver_md(mo):
     the same defaults are used in the harmonic-oscillator pendulum
     example. `dt0 = 0.05` gives the integrator a sensible first step
     on the unit-scale time axis.
+
+    ```python
+    solver = SolverConfig(
+        solver=diffrax.Tsit5(),
+        rtol=1e-5,
+        atol=1e-7,
+        max_steps=10_000,
+        dt0=0.05,
+    )
+    ```
     """)
     return
 
@@ -541,6 +612,45 @@ def _predictor_md(mo):
     midpoint, which under symmetric output bounds is exactly $0$
     decades — i.e. the residual contributes nothing at init. Phase 2
     therefore starts at the phase-1 fit without any explicit zeroing.
+
+    ```python
+    LOG_KREF_BOUNDS = (-3.0, 2.0)
+    EA_BOUNDS = (0.0, 80.0)
+
+    class ArrheniusKinetics(eqx.Module):
+        latent: Float[Array, " 2"]
+        out_scaler: BoundScaler
+
+        def __init__(self, *, key):
+            self.latent = jr.normal(key, (2,)) * 0.1
+            self.out_scaler = BoundScaler(
+                bounds=(LOG_KREF_BOUNDS, EA_BOUNDS),
+                transform="sigmoid",
+            )
+
+        def __call__(self):
+            return self.out_scaler.from_latent(self.latent)
+
+
+    INPUT_KEYS = ("temperature_C", "pH")
+    TEMPERATURE_BOUNDS = (0.0, 50.0)
+    PH_BOUNDS = (3.0, 9.0)
+    RES_LOG10_BOUNDS = (-2.0, 2.0)
+
+    parametric_trunk = ArrheniusKinetics(key=k_param)
+    residual_bp = BoundedPredictor(
+        input_keys=INPUT_KEYS,
+        in_scaler=BoundScaler(
+            bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS), transform="sigmoid",
+        ),
+        inner=MLPPredictor(
+            in_size=2, out_size=1, width_size=16, depth=1,
+            activation_name="relu", key=k_residual,
+        ),
+        out_scaler=BoundScaler(bounds=(RES_LOG10_BOUNDS,), transform="sigmoid"),
+    )
+    predictors_init = (parametric_trunk, residual_bp)
+    ```
     """)
     return
 
@@ -636,6 +746,40 @@ def _simulate_md(mo):
     negative excursions of the integrator near the asymptote; mass
     conservation is exact analytically, so this is purely numerical
     hygiene.
+
+    ```python
+    def simulate_fn(predictors, ts, covariates, y0, solver):
+        parametric, residual = predictors
+        log_k_ref, Ea = parametric()                         # [2] in physical units
+
+        T_K = covariates["temperature_C"] + 273.15
+        log10_k_param = (
+            (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF))
+            / jnp.log(10.0)
+        )
+
+        delta_log10_k = jnp.squeeze(
+            residual({"temperature_C": covariates["temperature_C"],
+                      "pH":            covariates["pH"]})
+        )
+        k = jnp.power(10.0, log10_k_param + delta_log10_k)   # log-additive combo
+
+        def vector_field(t, y, args):
+            Ca = jnp.maximum(y[0], 0.0)
+            rate = k * Ca
+            return jnp.stack([-rate, rate])
+
+        return diffrax.diffeqsolve(
+            diffrax.ODETerm(vector_field), solver.solver,
+            t0=ts[0], t1=ts[-1], dt0=solver.dt0, y0=y0,
+            saveat=diffrax.SaveAt(ts=ts),
+            stepsize_controller=diffrax.PIDController(
+                rtol=solver.rtol, atol=solver.atol,
+            ),
+            max_steps=solver.max_steps,
+            adjoint=diffrax.DirectAdjoint(),
+        ).ys
+    ```
     """)
     return
 
@@ -721,6 +865,31 @@ def _phase1_md(mo):
     latent box, with `init_box_extent=2.0` giving the population
     space-filling coverage and `sigma_init=0.5` setting the initial
     spread of the CMA-ES sampling distribution.
+
+    ```python
+    # Build the mask: trainable everywhere -> freeze the residual subtree
+    # -> freeze every BoundScaler (the standard convention).
+    mask_p1 = trainable_mask(predictors_init)
+    mask_p1 = freeze_modules_of_type(mask_p1, predictors_init, BoundedPredictor)
+    mask_p1 = freeze_modules_of_type(mask_p1, predictors_init, BoundScaler)
+    # Result: only ArrheniusKinetics.latent is True (2 trainable scalars).
+
+    config_p1 = EvosaxTrainingConfig(
+        algorithm="CMA_ES",
+        population_size=32,
+        num_generations=30,
+        init="lhs_box",
+        init_box_extent=2.0,
+        sigma_init=0.5,
+        loss="mse",
+        verbose=False,
+    )
+    history_p1, predictors_p1 = train_with_evosax(
+        predictors_init, train_dataset, config_p1,
+        simulate_fn=simulate_fn, solver=solver,
+        trainable=mask_p1, key=jr.PRNGKey(0),
+    )
+    ```
     """)
     return
 
@@ -1176,6 +1345,29 @@ def _phase2_md(mo):
     steps. Training one step here means one full pass over every
     bucket (there is only one bucket of size 9), accumulating
     gradients and applying a single optimiser update.
+
+    ```python
+    # The mask flips: freeze ArrheniusKinetics, leave the residual MLP trainable.
+    mask_p2 = trainable_mask(predictors_p1)
+    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, ArrheniusKinetics)
+    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, BoundScaler)
+    # Result: 65 True leaves (the 16-neuron MLP weights and biases).
+
+    config_p2 = OptaxTrainingConfig(
+        steps=(200,),
+        lr=(3e-3,),
+        optimizer=("adamw",),
+        reset_optimiser_state=(False,),
+        length_schedule=(1.0,),
+        loss="mse",
+        verbose=False,
+    )
+    history_p2, predictors_p2 = train_with_optax(
+        predictors_p1, train_dataset, config_p2,
+        simulate_fn=simulate_fn, solver=solver,
+        trainable=mask_p2, key=jr.PRNGKey(1),
+    )
+    ```
     """)
     return
 
