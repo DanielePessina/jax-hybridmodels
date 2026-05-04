@@ -35,14 +35,13 @@ OptaxTrainingConfig(
     tournament_attempts: 'int' = 1,
     tournament_steps: 'int' = 0,
     tournament_lr: 'float' = 0.0001,
-    log_every: 'int' = 10,
     patience: 'int' = 0,
     restore_best: 'bool' = True,
     verbose: 'bool' = True,
 ) -> None
 ```
 
-OptaxTrainingConfig(steps: 'tuple[int, ...]', lr: 'tuple[float, ...]', optimizer: 'tuple[str, ...]', reset_optimiser_state: 'tuple[bool, ...]', length_schedule: 'tuple[float, ...]' = (1.0,), loss: 'Callable[..., Array] | str' = 'mse', channel_idx: 'tuple[int, ...] | None' = None, channel_weights: 'tuple[float, ...] | None' = None, tournament_attempts: 'int' = 1, tournament_steps: 'int' = 0, tournament_lr: 'float' = 0.0001, log_every: 'int' = 10, patience: 'int' = 0, restore_best: 'bool' = True, verbose: 'bool' = True)
+OptaxTrainingConfig(steps: 'tuple[int, ...]', lr: 'tuple[float, ...]', optimizer: 'tuple[str, ...]', reset_optimiser_state: 'tuple[bool, ...]', length_schedule: 'tuple[float, ...]' = (1.0,), loss: 'Callable[..., Array] | str' = 'mse', channel_idx: 'tuple[int, ...] | None' = None, channel_weights: 'tuple[float, ...] | None' = None, tournament_attempts: 'int' = 1, tournament_steps: 'int' = 0, tournament_lr: 'float' = 0.0001, patience: 'int' = 0, restore_best: 'bool' = True, verbose: 'bool' = True)
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L55)</small>
 
@@ -90,7 +89,7 @@ training.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``. ``loss_history`` is the training loss recorded once per step across every phase; ``trained_predictors`` is the predictors corresponding to the best-loss step seen so far when ``config.restore_best=True``, or to the final step otherwise. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L273)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L272)</small>
 
 ---
 

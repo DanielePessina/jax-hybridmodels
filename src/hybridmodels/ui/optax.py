@@ -14,9 +14,6 @@ A single :class:`rich.live.Live` is started in
   the matching ``on_compile_done``; once the *first* bucket finishes
   compiling this slot is replaced by the phase progress bar
   permanently;
-* a small :class:`rich.table.Table` of the most recent
-  ``recent_losses`` losses, throttled to every ``log_every`` steps
-  (default 1);
 * a message-log panel showing the most recent ``recent_messages``
   lines fired through :meth:`RichTrainingUI.on_message`.
 
@@ -63,11 +60,6 @@ class RichTrainingUI:
         ``Console()``. Tests typically pass a recording console
         (``Console(record=True, force_terminal=False, ...)``) so the
         rendered final state can be asserted on.
-    log_every:
-        Step throttle for the recent-loss table. ``log_every=1`` records
-        every step, ``log_every=k`` records steps where ``step_idx % k == 0``.
-    recent_losses:
-        Maximum number of rows the recent-loss table holds.
     recent_messages:
         Maximum number of lines the message-log panel holds.
 
@@ -84,16 +76,10 @@ class RichTrainingUI:
         self,
         *,
         console: Console | None = None,
-        log_every: int = 1,
-        recent_losses: int = 5,
         recent_messages: int = 5,
     ) -> None:
-        if log_every < 1:
-            raise ValueError(f"log_every must be >= 1, got {log_every}")
         self._console: Console = console if console is not None else Console()
-        self._log_every: int = int(log_every)
         # The deque maxlen pins the visible history without unbounded growth.
-        self._losses: deque[tuple[int, int, float]] = deque(maxlen=recent_losses)
         self._messages: deque[tuple[str, str]] = deque(maxlen=recent_messages)
 
         # Run-level state (set in on_run_start, read by _render).
@@ -146,7 +132,6 @@ class RichTrainingUI:
         self._phase_history = []
         self._compile_active = False
         self._compile_first_done = False
-        self._losses.clear()
         self._messages.clear()
 
         # Stop any stale Live (defensive: shouldn't happen but cheap to guard).
@@ -219,9 +204,6 @@ class RichTrainingUI:
                 self._phase_progress_bar.advance(self._phase_task_id, advance=1)
             except Exception:
                 pass
-
-        if int(step_idx) % self._log_every == 0:
-            self._losses.append((int(step_idx), int(phase_idx), float(loss)))
         self._refresh()
 
     def on_run_end(self, *, final_loss: float) -> None:
@@ -267,7 +249,6 @@ class RichTrainingUI:
         children: list[RenderableType] = [
             self._render_header(),
             self._render_compile_or_progress(),
-            self._render_loss_table(),
             self._render_message_log(),
         ]
         # The footer is only emitted post-run so the word "final" lands in
@@ -352,17 +333,6 @@ class RichTrainingUI:
             title=f"phase {self._phase_idx} progress",
             border_style="green",
         )
-
-    def _render_loss_table(self) -> Panel:
-        table = Table(show_header=True, expand=True)
-        table.add_column("step", justify="right", no_wrap=True)
-        table.add_column("phase", justify="right", no_wrap=True)
-        table.add_column("loss", justify="right", no_wrap=True)
-        for step_idx, phase_idx, loss in self._losses:
-            table.add_row(str(step_idx), str(phase_idx), _format_loss(loss))
-        if not self._losses:
-            table.add_row("-", "-", "-")
-        return Panel(table, title="recent losses", border_style="yellow")
 
     def _render_footer(self) -> Panel:
         # Final-loss summary at the bottom of the dashboard.

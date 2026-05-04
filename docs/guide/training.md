@@ -27,7 +27,6 @@ config = OptaxTrainingConfig(
     reset_optimiser_state=(False, True),
     length_schedule=(0.5, 1.0),
     loss="mse",
-    log_every=50,
     verbose=True,
 )
 ```

@@ -105,48 +105,7 @@ def test_out_of_order_events_do_not_crash() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 4: log_every throttling of the loss table.
-# ---------------------------------------------------------------------------
-
-
-def test_log_every_throttles_loss_table_rows() -> None:
-    console = _make_console()
-    ui = RichTrainingUI(console=console, log_every=3, recent_losses=10)
-
-    ui.on_run_start(total_steps=3, num_phases=1)
-    ui.on_phase_start(phase_idx=0, phase_steps=3, lr=0.01, optimizer="adamw")
-
-    # Three distinct loss values that won't collide with the final-loss summary
-    # when later rendered to four-significant-figure precision.
-    losses = [0.7771, 0.6661, 0.5551]
-    for i, loss in enumerate(losses):
-        ui.on_step_end(step_idx=i, phase_idx=0, loss=loss)
-    ui.on_phase_end(phase_idx=0)
-
-    # Final loss is set to a unique value so we can distinguish summary text
-    # from logged step rows.
-    ui.on_run_end(final_loss=0.4441)
-
-    output = console.export_text()
-
-    expected_rows = len([i for i in range(len(losses)) if i % 3 == 0])
-    assert expected_rows == 1
-
-    # Every loss in the throttled set should appear; the others must not show
-    # up as table rows. The final-loss summary value is excluded by design.
-    appearance = {round(loss, 4): f"{loss:.4f}" in output for loss in losses}
-    assert appearance == {0.7771: True, 0.6661: False, 0.5551: False}
-
-    # Cross-check by counting per-line matches of the four-sig-fig pattern that
-    # are not part of the run header / final-loss summary. We restrict to the
-    # block that contains "Recent losses" if our render labels the panel that
-    # way; otherwise count all >=4-sig-fig occurrences of the throttled losses.
-    visible_step_losses = [m for m in _SIG4.findall(output) if m.startswith("0.7771")]
-    assert len(visible_step_losses) == expected_rows
-
-
-# ---------------------------------------------------------------------------
-# Tests 5 & 6: integration with ``train_with_optax``.
+# Tests 4 & 5: integration with ``train_with_optax``.
 #
 # A minimal harmonic-oscillator fixture, mirroring
 # ``tests/test_train_optax.py`` but trimmed to the bare minimum needed

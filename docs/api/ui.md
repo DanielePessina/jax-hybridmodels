@@ -267,8 +267,6 @@ and returns ``None``, so it tolerates protocol drift without raising.
 ```python
 RichTrainingUI(
     console: 'Console | None' = None,
-    log_every: 'int' = 1,
-    recent_losses: 'int' = 5,
     recent_messages: 'int' = 5,
 ) -> None
 ```
@@ -280,8 +278,6 @@ Live Rich dashboard satisfying ``hybridmodels.ui.base.TrainingUI``.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `console:` |  | Optional :class:`rich.console.Console`. ``None`` constructs a default ``Console()``. Tests typically pass a recording console (``Console(record=True, force_terminal=False, ...)``) so the rendered final state can be asserted on. |
-| `log_every:` |  | Step throttle for the recent-loss table. ``log_every=1`` records every step, ``log_every=k`` records steps where ``step_idx % k == 0``. |
-| `recent_losses:` |  | Maximum number of rows the recent-loss table holds. |
 | `recent_messages:` |  | Maximum number of lines the message-log panel holds. |
 
 **Notes**
@@ -292,7 +288,7 @@ window updates the model only; the next ``on_run_start`` rebuilds Live
 afresh, so a single ``RichTrainingUI`` instance can be reused for
 sequential runs (used in tests).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/optax.py#L56)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/optax.py#L53)</small>
 
 ---
 

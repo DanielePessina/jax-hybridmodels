@@ -567,7 +567,6 @@ class OptaxTrainingConfig:
     tournament_attempts: int = 1                     # tournament implicit when > 1
     tournament_steps: int = 0                        # AND > 0
     tournament_lr: float = 1e-4
-    log_every: int = 10
     patience: int = 0                                # 0 disables
     restore_best: bool = True
     verbose: bool = True

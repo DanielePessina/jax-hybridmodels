@@ -407,7 +407,6 @@ def main() -> None:
         reset_optimiser_state=(False,),
         length_schedule=(1.0,),
         loss="mse",
-        log_every=max(1, args.steps // 10),
         verbose=True,
     )
     history, trained_predictors = train_with_optax(
