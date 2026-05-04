@@ -1,0 +1,75 @@
+name: docs
+
+# The docs site is only rebuilt when the head commit message contains
+# the literal trigger ``[build docs]``. Routine code pushes — even ones
+# that touch ``docs/`` or ``src/`` — do not redeploy the site, so we
+# never pay CI minutes or surface a half-finished docs change in
+# production. ``workflow_dispatch`` keeps a manual escape hatch for
+# re-deploys without touching git.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# GitHub Pages deployment requires write access to pages + id-token.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one in-flight Pages deploy at a time; cancel any stale one when a
+# new ``[build docs]`` push lands.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build docs]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install hybridmodels (editable, for docstring introspection)
+        run: uv sync --frozen
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Install VitePress
+        run: npm ci --prefix docs
+
+      - name: Verify generated API docs are up to date
+        run: npm --prefix docs run docs:check:api
+
+      - name: Build VitePress site
+        run: npm --prefix docs run docs:build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build docs]') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
