@@ -456,6 +456,9 @@ def main() -> None:
         trajectory_plot(
             predictions,
             dataset,
+            predictors=trained_predictors,
+            simulate_fn=simulate_fn,
+            solver=solver,
             max_experiments=6,
             title="Crystallisation trajectories (first 6 experiments)",
             save_path=args.plot_dir / "trajectories.png",

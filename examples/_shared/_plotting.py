@@ -23,9 +23,11 @@ copy a function and tweak — composition over a config-bag.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
@@ -105,6 +107,10 @@ def trajectory_plot(
     predictions: tuple[Any, ...],
     dataset: Any,
     *,
+    predictors: Any | None = None,
+    simulate_fn: Callable[..., Any] | None = None,
+    solver: Any | None = None,
+    n_dense_points: int = 200,
     max_experiments: int = 6,
     title: str | None = "Trajectories",
     save_path: str | Path | None = None,
@@ -112,19 +118,48 @@ def trajectory_plot(
     """Per-experiment predicted-vs-observed time series, one row per experiment.
 
     Layout: ``rows = min(max_experiments, total_experiments)``,
-    ``cols = D`` (one per output channel). Predicted is drawn as a line
-    on the bucket's union timestamp axis; observed values are scattered
-    only at cells where ``mask`` is True (so missing-channel rows show
-    only the predicted curve).
+    ``cols = D`` (one per output channel). Observed values are scattered
+    at the bucket's union timestamps where ``mask`` is True. The
+    predicted curve is drawn either:
+
+    * on the dataset's union timestamp axis (using the pre-computed
+      ``predictions`` argument) — the default when ``predictors`` /
+      ``simulate_fn`` / ``solver`` are not all supplied; or
+    * on a per-experiment dense grid (sorted unique union of the
+      experiment's measured timestamps and ``n_dense_points`` linearly
+      spaced samples between ``t0`` and ``t1``), re-simulated on the fly
+      via ``simulate_fn`` and projected through
+      ``dataset.state_to_output``. Activated when all three model
+      components are passed; this is the recommended path because
+      diffrax adaptive steps in the original ``predictions`` produce
+      visibly piecewise-linear curves between sparse measurement times.
+
+    The dense path runs ``simulate_fn`` eagerly (one call per plotted
+    experiment, no jit). At ``max_experiments=6`` and a few hundred dense
+    points this is cheap; if you bump either dramatically, expect a
+    proportional cost.
 
     Parameters
     ----------
     predictions : tuple of arrays
         Output of ``predict_dataset``; one ``[N_b, T_b, D]`` entry per
-        bucket.
+        bucket. Used as the curve when the dense path is inactive, and
+        always as the source of bucket-walk order so ``max_experiments``
+        picks the same first ``k`` rows in either mode.
     dataset : hybridmodels.Dataset
-        Used for ``output_channel_names`` and to walk the bucket-payload
-        list in lockstep with ``predictions``.
+        Used for ``output_channel_names``, ``state_to_output`` (dense
+        path), and to walk the bucket-payload list in lockstep with
+        ``predictions``.
+    predictors, simulate_fn, solver : optional
+        Trio that triggers the dense-grid re-simulation. Pass the same
+        objects used for ``predict_dataset``. If any is omitted the
+        helper falls back to plotting ``predictions`` as-is.
+    n_dense_points : int, optional
+        Target size of the linspace component of the dense grid. The
+        actual per-experiment grid is the sorted-unique union of this
+        linspace and the experiment's measured timestamps, so the
+        plotted ts always passes through every measurement. Set to ``0``
+        to disable the dense path even when the model trio is provided.
     max_experiments : int, optional
         Upper cap on rows so a 50-experiment dataset doesn't render a
         gigantic figure by default. Experiments are walked in
@@ -139,20 +174,53 @@ def trajectory_plot(
     matplotlib.figure.Figure
     """
     channels = list(dataset.output_channel_names)
+    state_to_output = dataset.state_to_output
+    # Bundle the dense-path trio into a single optional so type narrowing
+    # propagates from "is not None" into the loop body — keeping the three
+    # individual args nullable (so callers can opt out by omission) while
+    # giving the type checker a single witness to refine on.
+    dense_bundle: tuple[Any, Callable[..., Any], Any] | None = (
+        (predictors, simulate_fn, solver)
+        if (
+            predictors is not None
+            and simulate_fn is not None
+            and solver is not None
+            and n_dense_points > 0
+        )
+        else None
+    )
+
     rows: list[dict[str, np.ndarray]] = []
     for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
         N = bp.ts.shape[0]
         for i in range(N):
             if len(rows) >= max_experiments:
                 break
-            rows.append(
-                {
-                    "ts": np.asarray(bp.ts[i]),
-                    "y_obs": np.asarray(bp.y_observed[i]),
-                    "mask": np.asarray(bp.mask[i], dtype=bool),
-                    "y_pred": np.asarray(pred[i]),
-                }
-            )
+            ts_obs = np.asarray(bp.ts[i])
+            row: dict[str, np.ndarray] = {
+                "ts_obs": ts_obs,
+                "y_obs": np.asarray(bp.y_observed[i]),
+                "mask": np.asarray(bp.mask[i], dtype=bool),
+                "ts_pred": ts_obs,
+                "y_pred": np.asarray(pred[i]),
+            }
+            if dense_bundle is not None and ts_obs.size >= 2:
+                # Union of measured ts and a uniform linspace, deduped.
+                # Including the measured ts guarantees the plotted curve
+                # passes through every observation; the linspace fills
+                # in the gaps so curvature between sparse measurements is
+                # visible. ``np.unique`` also sorts.
+                preds_d, sim_fn_d, solver_d = dense_bundle
+                t0, t1 = float(ts_obs[0]), float(ts_obs[-1])
+                dense_grid = np.linspace(t0, t1, n_dense_points)
+                ts_dense = np.unique(np.concatenate([ts_obs, dense_grid]))
+                ts_jax = jnp.asarray(ts_dense)
+                cov_i = {k: v[i] for k, v in bp.covariates.items()}
+                full_state = sim_fn_d(preds_d, ts_jax, cov_i, bp.y0[i], solver_d)
+                y_dense = state_to_output(full_state)
+                row["ts_pred"] = ts_dense
+                row["y_pred"] = np.asarray(y_dense)
+            rows.append(row)
         if len(rows) >= max_experiments:
             break
 
@@ -168,12 +236,16 @@ def trajectory_plot(
     for r, row in enumerate(rows):
         for c, name in enumerate(channels):
             ax = axes_arr[r][c]
-            ts = row["ts"]
-            ax.plot(ts, row["y_pred"][:, c], label="predicted", linewidth=1.5)
+            ax.plot(
+                row["ts_pred"],
+                row["y_pred"][:, c],
+                label="predicted",
+                linewidth=1.5,
+            )
             mask_c = row["mask"][:, c]
             if bool(mask_c.any()):
                 ax.scatter(
-                    ts[mask_c],
+                    row["ts_obs"][mask_c],
                     row["y_obs"][mask_c, c],
                     s=18,
                     marker="o",

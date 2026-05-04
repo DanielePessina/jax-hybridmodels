@@ -407,6 +407,9 @@ def main() -> None:
         trajectory_plot(
             predictions,
             dataset,
+            predictors=trained,
+            simulate_fn=_simulate_fn,
+            solver=solver,
             max_experiments=len(experiments),
             title="Pendulum trajectories (trained model)",
             save_path=args.plot_dir / "trajectories.png",
