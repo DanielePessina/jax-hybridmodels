@@ -45,6 +45,7 @@ from __future__ import annotations
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 from flax import nnx
@@ -207,3 +208,39 @@ class KANPredictor(Predictor):
             basis=self.basis,
             key=key,
         )
+
+    def with_zero_final_head(self) -> KANPredictor:
+        """Return a copy whose final KAN layer's parameters are all zero.
+
+        For a KAN, the "final head" is the readout layer at index
+        ``len(hidden_widths)`` in the underlying ``layer_dims`` list. Each
+        layer carries four trainable arrays (``c_basis``, ``c_spl``,
+        ``c_res``, ``bias``); zeroing all of them makes the layer produce
+        ``zeros(out_size)`` regardless of input, which composed inside a
+        ``BoundedPredictor`` maps via ``out_scaler.from_latent(0)`` to the
+        midpoint of the physical bound box.
+
+        The earlier KAN layers keep their jaxkan-default init, so the
+        input feature transformation is non-degenerate; only the readout
+        is locked. Mirrors :meth:`MLPPredictor.with_zero_final_head` —
+        same intent (seed-independent initial physical output), different
+        parameterisation.
+        """
+        last_idx = len(self.hidden_widths)
+
+        def _zero_if_in_last_layer(path: Any, leaf: Any) -> Any:
+            # Path through ``nnx.State`` looks like
+            # (DictKey('layers'), DictKey(<int>), GetAttrKey('value')) — match
+            # on the second element being the final-layer index. ``DictKey``s
+            # expose their key via ``.key``; defensive ``getattr`` keeps this
+            # robust against future jax-tree internals that wrap path entries
+            # differently.
+            if len(path) >= 2:
+                k0 = getattr(path[0], "key", None)
+                k1 = getattr(path[1], "key", None)
+                if k0 == "layers" and k1 == last_idx:
+                    return jnp.zeros_like(leaf)
+            return leaf
+
+        new_params = jax.tree_util.tree_map_with_path(_zero_if_in_last_layer, self.params)
+        return eqx.tree_at(lambda kp: kp.params, self, new_params)

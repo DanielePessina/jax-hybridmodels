@@ -131,3 +131,40 @@ class MLPPredictor(Predictor):
             activation_name=self.activation_name,
             key=key,
         )
+
+    def with_zero_final_head(self) -> MLPPredictor:
+        """Return a copy whose final ``Linear`` layer's weight and bias are zero.
+
+        Hidden layers retain their LeCun-uniform random init, so the input
+        feature transformation is non-degenerate; only the readout layer is
+        forced to zero. Composed inside a ``BoundedPredictor``, the latent
+        zero produced for any input maps via ``out_scaler.from_latent(0)``
+        to the *exact midpoint* of the physical bound box — a known-good
+        starting output that is independent of the random key. This makes
+        training reproducible across seeds when the rate bounds span many
+        decades and an unlucky standard-normal readout draw could otherwise
+        place the initial output too far off midpoint for the downstream
+        ODE solver to handle.
+
+        Returns a structurally identical predictor; only the trailing
+        ``eqx.nn.Linear``'s ``weight`` and ``bias`` arrays change.
+        """
+        final = self.mlp.layers[-1]
+        # ``eqx.nn.Linear.bias`` is ``Array | None`` — typed as a union
+        # because ``use_bias=False`` is allowed. ``eqx.nn.MLP``'s default
+        # is ``use_final_bias=True`` so in practice ``final.bias`` is an
+        # Array here, but the no-bias case is supported for free by
+        # narrowing the where-tuple before calling ``tree_at``.
+        if final.bias is None:
+            zeroed = eqx.tree_at(
+                lambda layer: layer.weight,
+                final,
+                jnp.zeros_like(final.weight),
+            )
+        else:
+            zeroed = eqx.tree_at(
+                lambda layer: (layer.weight, layer.bias),
+                final,
+                (jnp.zeros_like(final.weight), jnp.zeros_like(final.bias)),
+            )
+        return eqx.tree_at(lambda mp: mp.mlp.layers[-1], self, zeroed)

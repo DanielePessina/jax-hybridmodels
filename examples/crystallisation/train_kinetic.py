@@ -1,73 +1,16 @@
-"""Crystallisation kinetic-MLP training (single-file end-to-end example).
+"""Crystallisation kinetic-MLP training example.
 
-Overview
---------
 Loads the thesis crystallisation Excel dataset (irregular concentration + d43
-observations across many experiments), wraps it into ``hybridmodels.Experiment``
-objects, and trains a hybrid model where MLPs predict reaction rates feeding
-the method-of-moments ODE.
+observations across many experiments), wraps each experiment into an
+``hybridmodels.Experiment``, and trains a hybrid model where two MLPs predict
+reaction rates that feed a method-of-moments ODE.
 
-This file demonstrates **two predictor parameterisations** of the same
-crystallisation hybrid model. Only the *direct-rate* path (1) is wired into
-``main()``; the *kinetic-parameter* path (2) is preserved as commented-out
-reference code so the comparison stays explicit.
+Each MLP consumes ``(temperature_C, supersaturation)`` and emits a bounded
+log-rate — ``log10(G)`` for crystal growth, ``log10(J)`` for nucleation.
+``supersaturation`` is state-derived inside the vector field; the
+population-balance moment ODEs and mass balance around them stay mechanistic.
 
-(1) Direct-rate predictors — **active**
-    Two ``BoundedPredictor``s consuming a 3-key input dict
-    ``(temperature_C, loading, supersaturation)`` and emitting bounded
-    log-rates::
-
-        predictors[0]: inputs -> log10_G   (growth log-rate, [m/s])
-        predictors[1]: inputs -> log10_J   (nucleation log-rate, [#/(m^3·s)])
-
-    Inside ``simulate_fn``'s vector field, ``supersaturation`` is computed
-    per timestep from the state (``S = conc/conc_sat(T)``) and mixed into
-    the inputs dict. Each call yields a physical rate after a single
-    ``power(10, log_rate)``. This collapses kinetic mechanism into the
-    network — the user no longer commits to a CNT / power-law form, the
-    network learns whatever ``(T, L, S) -> rate`` mapping the data implies.
-
-(2) Kinetic-parameter predictor — **commented-out reference**
-    A single ``BoundedPredictor`` consuming a 2-key dict
-    ``(temperature_C, loading)`` and emitting four bounded scalars
-    ``(logA, gamma, Ag, g)``. The vector field then plugs these into
-    classical CNT (nucleation) and power-law (growth) forms with
-    ``exp(logA)`` / ``10**Ag`` scalings done inside the user's vector field
-    code. Closer to the source-package thesis script
-    ``hybridcrystals/thesis_training/sharedgrowth.py``; preserved here so a
-    user can flip back by uncommenting and switching ``main()``'s builder
-    selection.
-
-The two paths share the same data loader, ``y0_fn``, ``state_to_output``,
-solver config, dataset shape, and training entry-point — only the predictors
-pytree and the rate-derivation logic inside ``simulate_fn`` differ.
-
-Initial state convention
-------------------------
-``y0 = [0, 0, 0, 0, 0, init_conc]`` — the five population-balance moments
-``mu0..mu4`` start at zero, and the dissolved-solute concentration starts at
-the experiment's first observed concentration value.
-
-Modules exercised by this example
----------------------------------
-The script exercises the framework end-to-end:
-
-- ``hybridmodels.data`` — ``ChannelObs``, ``Experiment``, ``make_dataset``
-- ``hybridmodels.solver`` — ``SolverConfig``
-- ``hybridmodels.predictors`` — ``BoundedPredictor``, ``BoundScaler``,
-  ``MLPPredictor``
-- ``hybridmodels.losses`` (``masked_mse``) and ``hybridmodels.prediction``
-- ``hybridmodels.trainable`` (default mask via ``train_with_optax``)
-- ``hybridmodels.rng`` (consumed inside training internals)
-- ``hybridmodels.ui`` (``SilentUI`` selected via ``verbose=False``)
-- ``hybridmodels.training.optax`` — ``train_with_optax``
-
-How to run
-----------
-``uv run python examples/crystallisation/train_kinetic.py``
-
-The thesis Excel is bundled at ``examples/crystallisation/data/`` so the
-script needs no external path. Override with ``--excel /path/to/file.xlsx``.
+Run: ``uv run python examples/crystallisation/train_kinetic.py``
 """
 
 # ruff: noqa: F722
@@ -76,19 +19,16 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 
 import jax
 
-# x64 is the default for this example — the population-balance moment ODE is
-# stiff enough that float32 mass balance drifts visibly within a single
-# experiment. Set before any other JAX-touching import so every dataset and
-# predictor leaf is constructed at float64.
+# x64 must be enabled before any other JAX-touching import. The population-
+# balance moments span ~18 decades during integration; float32 mass balance
+# drifts visibly within a single experiment.
 jax.config.update("jax_enable_x64", True)
 
-import diffrax  # noqa: E402  # x64 must be set before diffrax imports JAX dtypes.
-import equinox as eqx  # noqa: E402
+import diffrax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import jax.random as jr  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -108,9 +48,6 @@ from hybridmodels import (  # noqa: E402
 )
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax  # noqa: E402
 
-# ``examples/_shared`` is a sibling of this scenario directory; add the
-# parent of this file to sys.path so the helpers import as a top-level
-# package without requiring any install step.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402
     apply_default_style,
@@ -124,137 +61,187 @@ from _shared import (  # noqa: E402
 # Constants                                                                   #
 # --------------------------------------------------------------------------- #
 
-EXCEL_PATH_DEFAULT: Path = (
+EXCEL_PATH_DEFAULT = (
     Path(__file__).parent / "data" / "NODE_fullExperimental_dataset_ps3-dec2025__thesis.xlsx"
 )
-"""Default thesis dataset (irregular concentration + d43 over ~50 experiments).
+# ``Unseeded_thesis`` is the full thesis cut: per-row variances and a
+# particle-size column (``d43`` in newer cuts, ``PS`` in legacy thesis cuts)
+# with ``-1`` as the missing-row sentinel. The bare ``Unseeded`` sheet has
+# only concentration; choosing it would silently skip every experiment.
+DEFAULT_SHEET = "Unseeded_thesis"
 
-Bundled into the repo at ``examples/crystallisation/data/`` so the script
-runs out-of-the-box; the path is resolved relative to this file."""
+# Predictor input/output bounds. Centring matters: a random-init network sits
+# near the sigmoid midpoint, so the midpoint must be a physically reasonable
+# rate. ``G ~ 1e-10 m/s`` and ``J ~ 1.8e3 #/m³/s`` are matched to the source-
+# package's typical ranges; earlier wider bounds put the midpoint several
+# decades off and made the moment ODE intractably stiff at random init.
+TEMPERATURE_BOUNDS = (13.0, 27.0)  # °C, slightly wider than data span
+SUPERSATURATION_BOUNDS = (0.0, 12.0)  # S = conc / conc_sat
+LOG10_GROWTH_BOUNDS = (-15.0, -5.0)  # log10(G [m/s])
+LOG10_NUCLEATION_BOUNDS = (-6.5, 20.0)  # log10(J [#/(m³·s)])
 
-DEFAULT_SHEETS: tuple[str, ...] = ("Unseeded_thesis",)
-"""Excel sheets to load. Restricted to a single system so the example
-trains in a few minutes and avoids the multi-system conditioning
-problem, which is out of scope for this example.
+# ODE constants (from hybridcrystals/mechanistic.py).
+RHO_C = 1370.0  # crystal density [kg/m^3]
+K_V = 0.81  # volumetric shape factor
+D43_MAX = 55.0  # upper guard on d43 [um]
+D43_MU3_EPS = 1e-6  # mu3 floor for the d43 ratio
+META_EPS = 1e-5  # supersaturation must exceed 1 + eps for nucleation/growth
 
-The ``Unseeded_thesis`` sheet is the full thesis-cut record: it carries
-the per-row variance columns and the particle-size column (named
-``d43`` in newer cuts, ``PS`` in the legacy thesis cut) with ``-1`` as
-the missing-row sentinel. The bare ``Unseeded`` sheet only has
-concentration; choosing it would silently skip every experiment because
-no particle-size channel could be built."""
-
-COVARIATE_BOUNDS: dict[str, tuple[float, float]] = {
-    "temperature_C": (13.0, 27.0),
-    "loading": (0.0, 30.0),
-}
-"""``(low, high)`` pairs for input covariates; consumed by ``in_scaler``.
-Slightly wider than the data's actual span so sigmoid saturation is rare."""
-
-# Direct-rate path (1) — bounds on predictor inputs and outputs.
-SUPERSATURATION_BOUNDS: tuple[float, float] = (1.0, 3.0)
-"""Physical bounds on supersaturation ``S = conc / conc_sat`` fed as the
-third input key to each direct-rate predictor. The lower bound is at the
-nucleation/growth threshold (``S = 1``); the upper end is generous for the
-thesis dataset's typical ``S`` range."""
-
-LOG10_GROWTH_BOUNDS: tuple[float, float] = (-15.0, -5.0)
-"""Bounds on ``log10(G)`` where ``G`` is growth velocity in m/s. Centred at
-``-10`` (sigmoid midpoint), so a random-init predictor lands at
-``G ≈ 1e-10 m/s`` — physically reasonable for early-time growth and matched
-to the source-package's power-law growth-rate range. Earlier draft used
-``(-12, -3)``; that put the midpoint at ``G ≈ 3e-8 m/s``, large enough that
-random-init weights produced ODE rates the moment-balance solver could not
-track within ``max_steps``."""
-
-LOG10_NUCLEATION_BOUNDS: tuple[float, float] = (-6.5, 13.0)
-"""Bounds on ``log10(J)`` where ``J`` is nucleation rate in #/(m^3·s).
-Centred at ``+3.25`` so a random-init predictor produces ``J ≈ 1800``
-#/(m³·s) — equivalent to the source-package's ``J = exp(log_rate)`` with
-``log_rate ∈ (-15, 30)`` (midpoint ``J = exp(7.5) ≈ 1800``). The width
-spans ~19.5 decades, the same dynamic range. Earlier draft used
-``(0, 15)``; that put the midpoint at ``J ≈ 3e7`` — ~17,000× too large,
-which made the moment ODE intractably stiff at random init even though
-the same ODE solves cleanly with sensible kinetic parameters."""
-
-# Kinetic-parameter path (2) — bounds reproduced from the source-package
-# thesis runs; consumed only by the commented-out ``_build_kinetic_predictor``
-# below. Kept here so flipping the path requires only one uncomment.
-KINETIC_PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
-    "logA": (20.0, 65.0),  # ln of CNT pre-exponential
-    "gamma": (0.15, 1.0),  # interfacial energy [mJ/m^2]
-    "Ag": (-10.0, 6.0),  # log10 of growth pre-factor [m/s], converted to /min via /60
-    "g": (1.0, 3.5),  # power-law growth exponent
-}
-
-# ODE constants — from hybridcrystals/mechanistic.py
-_RHO_C: float = 1370.0  # crystal density [kg/m^3]
-_K_V: float = 0.81  # volumetric shape factor
-_M_V: float = 2.97e-26  # molecular volume [m^3]
-_K_B: float = 1.38064852e-23  # Boltzmann constant [J/K]
-_D43_MAX: float = 55.0  # upper guard on d43 [um]
-_D43_MU3_EPS: float = 1e-6
-_META_EPS: float = 1e-5  # supersaturation must exceed 1 + eps for nucleation/growth
-
-OUTPUT_CHANNELS: tuple[str, ...] = ("conc", "d43")
-"""Channel order on the trailing ``D`` axis of every ``BucketPayload``."""
-
-# Direct-rate path (1) — three-key input dict: two covariates + state-derived S.
-INPUT_KEYS_DIRECT: tuple[str, ...] = ("temperature_C", "loading", "supersaturation")
-
-# Kinetic-parameter path (2) — two covariates only (S is reconstructed in
-# the vector field from the predicted gamma / Ag / g but is not a predictor
-# input in this path).
-INPUT_KEYS_KINETIC: tuple[str, ...] = ("temperature_C", "loading")
+OUTPUT_CHANNELS = ("conc", "d43")
+INPUT_KEYS = ("temperature_C", "supersaturation")
 
 
 # --------------------------------------------------------------------------- #
-# Dataset loader                                                              #
+# Hook callables consumed by the framework                                    #
 # --------------------------------------------------------------------------- #
+# These three functions are passed into ``make_experiment``, ``make_dataset``,
+# and ``train_with_optax`` respectively. They have to live at module level so
+# their identities are stable across calls.
 
 
-def _load_experiments(
-    excel_path: Path, *, sheet_names: Sequence[str] = DEFAULT_SHEETS
-) -> list[Experiment]:
-    """Load experiments from the thesis Excel into ``hybridmodels.Experiment`` records.
+def y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Float[Array, " 6"]:
+    """Initial state ``[mu0..mu4, conc]``: moments at zero, conc at first observation."""
+    init_conc = jnp.asarray(channels["conc"].values[0])
+    return jnp.concatenate([jnp.zeros(5, dtype=init_conc.dtype), init_conc[None]])
 
-    Excel column contract (per ``hybridcrystals/data/_core.py::get_experiment_list``):
 
-    - ``Exp_ID`` (int)              — groups rows belonging to one experiment
-    - ``System`` (str)              — chemical system name; carried into ``exp_id``
-    - ``Time`` (float, minutes)     — observation time
-    - ``Concentration`` (float)     — solute concentration (dense across rows)
-    - ``Concentration_var`` (float) — per-row variance (optional; defaults to ``1e-4``)
-    - ``Temperature`` (°C)          — per-experiment scalar (constant within ``Exp_ID``)
-    - ``Loading`` (float)           — per-experiment scalar
-    - ``d43`` or ``PS`` (float, optional) — volume-weighted mean diameter [um];
-      ``-1`` (and any non-finite value) marks "no observation at this row".
-      ``d43`` is the canonical column name in newer dataset cuts; ``PS`` is
-      the legacy thesis-cut alias. Whichever is present is used.
-    - ``d43_var`` or ``PS_var`` (float, optional) — per-row variance for the
-      particle-size column above (same naming rule).
+def state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
+    """Project full state ``[mu0..mu4, conc]`` to observed channels ``[conc, d43]``."""
+    mu3 = state[..., 3]
+    mu4 = state[..., 4]
+    conc = state[..., 5]
+    # d43 = (mu4 / mu3) * 1e6 [um], guarded against the early-time near-zero-
+    # moments regime. The double-``where`` pattern is the canonical JAX-grad-
+    # safe guarded division: a naive ``jnp.where(cond, mu4/mu3, 0.0)`` still
+    # evaluates ``mu4/mu3`` on the masked branch, producing inf/nan whose
+    # gradient flows back through ``where`` and poisons the loss. Replacing
+    # the divisor on the masked branch gives a finite gradient on both sides.
+    safe_mu3 = jnp.where(mu3 > D43_MU3_EPS, mu3, 1.0)
+    ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
+    d43 = jnp.clip(jnp.where(jnp.isfinite(ratio) & (ratio > 0.0), ratio, 0.0), 0.0, D43_MAX)
+    return jnp.stack([conc, d43], axis=-1)
 
-    Per-channel sparsity is recovered by filtering rows where the d43/PS
-    value is ``-1`` or non-finite; those timestamps are dropped from the
-    d43 channel's ``ts`` axis but still appear on the dense concentration
-    channel. The framework's union-axis logic in ``make_dataset`` builds
-    the per-experiment ``[T, D]`` mask without any user mask code.
 
-    Time stays in **minutes** in the dataset; ``simulate_fn`` converts to seconds
-    before integration so the rate constants (CNT exponent uses K and seconds,
-    growth pre-factor is ``10**Ag / 60`` to convert per-minute) line up.
+def simulate_fn(
+    predictors: tuple[BoundedPredictor, BoundedPredictor],
+    ts: Float[Array, " T"],
+    covariates: dict[str, Array],
+    y0: Float[Array, " 6"],
+    solver: SolverConfig,
+) -> Float[Array, "T 6"]:
+    """Integrate the method-of-moments ODE using two direct-rate predictors.
+
+    ``predictors = (growth_BP, nucleation_BP)``. Each consumes
+    ``(temperature_C, supersaturation)`` and emits one bounded log-rate;
+    the vector field exponentiates with ``10**(.)`` to recover physical units.
+    Temperature is constant per experiment; supersaturation is state-derived
+    each step. Both rates are gated by ``(S > 1 + eps)`` so the ODE stops
+    moving below the metastable limit.
     """
-    sheet_dict = pd.read_excel(excel_path, sheet_name=list(sheet_names))
+    growth_bp, nucleation_bp = predictors
+    temperature_C = covariates["temperature_C"]
+
+    # Empirical saturation polynomial in °C (from hybridcrystals/mechanistic.py).
+    conc_sat = (
+        0.3705
+        + 7.171e-2 * temperature_C
+        - 1.924e-3 * temperature_C**2
+        + 17.97e-5 * temperature_C**3
+    )
+
+    def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
+        mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
+        S = conc / conc_sat
+        meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
+
+        inputs = {"temperature_C": temperature_C, "supersaturation": S}
+        log10_G = jnp.squeeze(growth_bp(inputs))
+        log10_J = jnp.squeeze(nucleation_bp(inputs))
+        G = meta_mask * jnp.power(10.0, log10_G)
+        J = meta_mask * jnp.power(10.0, log10_J)
+
+        # Hulburt-Katz form for size-independent nucleation at zero size and
+        # pure linear growth, plus a mass balance: solute lost equals crystal
+        # volume gained.
+        dmu0 = J
+        dmu1 = G * mu0
+        dmu2 = 2.0 * G * mu1
+        dmu3 = 3.0 * G * mu2
+        dmu4 = 4.0 * G * mu3
+        dconc = -3.0 * K_V * RHO_C * G * mu2
+        return jnp.stack([dmu0, dmu1, dmu2, dmu3, dmu4, dconc])
+
+    # Dataset stores time in minutes; rate constants are SI-second-based.
+    times_sec = ts * 60.0
+    if solver.dt0 is None:
+        # 1/1000 of the full span, floored at 1 s so the first step doesn't
+        # underflow on short trajectories.
+        span = times_sec[-1] - times_sec[0]
+        dt0 = jnp.maximum(span / 1000.0, jnp.asarray(1.0, dtype=times_sec.dtype))
+    else:
+        dt0 = jnp.asarray(solver.dt0, dtype=times_sec.dtype)
+
+    # diffrax.PIDController needs atol as a scalar/array — tuples don't
+    # broadcast against the y_error PyTree leaves.
+    atol = (
+        jnp.asarray(solver.atol, dtype=times_sec.dtype)
+        if isinstance(solver.atol, tuple)
+        else solver.atol
+    )
+
+    sol = diffrax.diffeqsolve(
+        diffrax.ODETerm(vector_field),
+        solver.solver,
+        t0=times_sec[0],
+        t1=times_sec[-1],
+        dt0=dt0,
+        y0=y0,
+        saveat=diffrax.SaveAt(ts=times_sec),
+        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=atol),
+        max_steps=solver.max_steps,
+        adjoint=diffrax.DirectAdjoint(),
+    )
+    return jnp.asarray(sol.ys)
+
+
+# --------------------------------------------------------------------------- #
+# Script body                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--excel", type=Path, default=EXCEL_PATH_DEFAULT)
+    parser.add_argument("--sheets", nargs="+", default=[DEFAULT_SHEET])
+    parser.add_argument("--steps", type=int, default=600)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "figures",
+    )
+    parser.add_argument("--no-plot", action="store_true")
+    args = parser.parse_args()
+
+    apply_default_style()
+    k_init, k_train = jr.split(jr.PRNGKey(args.seed), 2)
+
+    # ---- Load experiments from the thesis Excel --------------------------- #
+    # Excel column contract: ``Exp_ID`` (group key), ``Time`` (min),
+    # ``Concentration`` (+ optional ``Concentration_var``), ``Temperature``
+    # (°C, per-experiment scalar), ``Loading`` (per-experiment scalar), and a
+    # particle-size column — ``d43`` in newer cuts, ``PS`` in legacy ones.
+    # The size column uses ``-1`` (and any non-finite value) as a "no
+    # observation at this row" sentinel; filtering those rows recovers the
+    # per-channel sparsity that ``make_dataset`` then turns into a union axis.
+    print(f"[load] {args.excel}")
+    sheet_dict = pd.read_excel(args.excel, sheet_name=list(args.sheets))
     if not isinstance(sheet_dict, dict):
-        sheet_dict = {sheet_names[0]: sheet_dict}
+        sheet_dict = {args.sheets[0]: sheet_dict}
 
     experiments: list[Experiment] = []
     for sheet_name, df in sheet_dict.items():
-        # Resolve the particle-size value/variance column names once per
-        # sheet — accept the canonical ``d43`` first, fall back to the
-        # legacy ``PS`` alias. ``None`` means the sheet has no
-        # particle-size column at all (every experiment will be skipped
-        # below because OUTPUT_CHANNELS requires "d43").
         d43_col = "d43" if "d43" in df.columns else ("PS" if "PS" in df.columns else None)
         d43_var_col = (
             "d43_var" if "d43_var" in df.columns else ("PS_var" if "PS_var" in df.columns else None)
@@ -274,10 +261,7 @@ def _load_experiments(
             }
 
             if d43_col is not None:
-                d43_raw = df_exp[d43_col].to_numpy(dtype=float)
-                # ``-1`` sentinel and NaN/inf both mean "no d43 at this row";
-                # filter so the d43 channel's ts axis is sparse.
-                d43_arr = jnp.asarray(d43_raw)
+                d43_arr = jnp.asarray(df_exp[d43_col].to_numpy(dtype=float))
                 valid_mask = (d43_arr > 0.0) & jnp.isfinite(d43_arr)
                 if bool(jnp.any(valid_mask)):
                     valid_idx = jnp.where(valid_mask)[0]
@@ -285,18 +269,15 @@ def _load_experiments(
                     d43_vals = d43_arr[valid_idx]
                     if d43_var_col is not None:
                         var_raw = jnp.asarray(df_exp[d43_var_col].to_numpy(dtype=float))[valid_idx]
-                        # The legacy ``PS_var`` column also uses ``-1`` as
-                        # a missing sentinel — guard the same way the
-                        # values column does.
                         d43_var = jnp.where(jnp.isfinite(var_raw) & (var_raw > 0.0), var_raw, 1e-2)
                     else:
                         d43_var = jnp.full(d43_vals.shape, 1e-2)
                     channels["d43"] = ChannelObs(ts=d43_ts, values=d43_vals, variance=d43_var)
 
+            # ``make_dataset`` requires every experiment to define every
+            # channel listed in ``OUTPUT_CHANNELS``; skip experiments with no
+            # particle-size data rather than fabricate empty channels.
             if "d43" not in channels:
-                # make_dataset requires every experiment to define every output
-                # channel listed in OUTPUT_CHANNELS. Skip experiments with no
-                # particle-size data rather than fabricate empty channels.
                 continue
 
             experiments.append(
@@ -306,529 +287,33 @@ def _load_experiments(
                         "loading": float(df_exp["Loading"].iloc[0]),
                     },
                     channels=channels,
-                    y0_fn=_y0_fn,
+                    y0_fn=y0_fn,
                     exp_id=f"{sheet_name}_{int(exp_id)}",
                 )
             )
 
     if not experiments:
         raise RuntimeError(
-            f"no experiments loaded from {excel_path} (sheets={list(sheet_names)}); "
-            "check the file path and that PS observations exist."
+            f"no experiments loaded from {args.excel} (sheets={args.sheets}); "
+            "check the file path and that PS/d43 observations exist."
         )
-    return experiments
 
-
-# --------------------------------------------------------------------------- #
-# Hooks: y0_fn, state_to_output                                               #
-# --------------------------------------------------------------------------- #
-
-
-def _y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Float[Array, " 6"]:
-    """Build the full initial state ``[mu0, mu1, mu2, mu3, mu4, conc]``.
-
-    All five population-balance moments start at zero (the suspension is
-    nominally clear at ``t = 0``); the dissolved-solute concentration starts
-    at the first observed value of the ``conc`` channel for this experiment.
-    Matches ``hybridcrystals/mechanistic.py::simulate_ode_from_arrays`` line 331.
-    """
-    init_conc = jnp.asarray(channels["conc"].values[0])
-    return jnp.concatenate([jnp.zeros(5, dtype=init_conc.dtype), init_conc[None]])
-
-
-def _d43_from_moments(mu3: Float[Array, " T"], mu4: Float[Array, " T"]) -> Float[Array, " T"]:
-    """Volume-weighted mean diameter ``d43 = (mu4 / mu3) * 1e6`` [um], guarded.
-
-    The ``1e6`` factor converts metres to micrometres. Outputs are clamped to
-    ``[0, _D43_MAX]`` and ``mu3 < eps`` is replaced with ``0`` to avoid
-    division blow-ups during the early-time near-zero-moments regime.
-    Mirrors ``hybridcrystals/mechanistic.py::d43_from_moments``.
-
-    Autodiff-safe ``where``: a naive ``jnp.where(mu3 > eps, mu4 / mu3, 0.0)``
-    still computes ``mu4 / mu3`` on the masked-out branch, producing
-    ``inf`` / ``nan`` whose gradient flows back through ``jnp.where`` and
-    poisons the loss. Wrapping the divisor in a second
-    ``jnp.where(cond, mu3, 1.0)`` makes the unused branch evaluate
-    ``mu4 / 1.0 = mu4`` (finite), so the gradient is finite on both sides
-    and the outer ``where`` selects the correct branch. This is the
-    canonical JAX-grad-safe pattern for guarded division.
-    """
-    safe_mu3 = jnp.where(mu3 > _D43_MU3_EPS, mu3, 1.0)
-    ratio = jnp.where(mu3 > _D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
-    finite_positive = jnp.isfinite(ratio) & (ratio > 0.0)
-    guarded = jnp.where(finite_positive, ratio, 0.0)
-    return jnp.clip(guarded, 0.0, _D43_MAX)
-
-
-def _state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
-    """Project full state ``[mu0..mu4, conc]`` to observed channels ``[conc, d43]``.
-
-    Channel order must match ``OUTPUT_CHANNELS``. Channel 0 is concentration
-    (state index 5); channel 1 is the volume-weighted diameter d43 derived
-    from moments 3 and 4.
-    """
-    mu3 = state[..., 3]
-    mu4 = state[..., 4]
-    conc = state[..., 5]
-    d43 = _d43_from_moments(mu3, mu4)
-    return jnp.stack([conc, d43], axis=-1)
-
-
-# --------------------------------------------------------------------------- #
-# Saturation curve (shared by both predictor paths)                           #
-# --------------------------------------------------------------------------- #
-
-
-def _conc_sat(temperature_C: Array) -> Array:
-    """Empirical saturation-concentration polynomial in °C.
-
-    From ``hybridcrystals/mechanistic.py::simulate_ode_from_arrays`` line 328;
-    physical units match ``Concentration`` in the dataset. Used by both
-    predictor paths to compute supersaturation ``S = conc / conc_sat``.
-    """
-    return (
-        0.3705
-        + 7.171e-2 * temperature_C
-        - 1.924e-3 * temperature_C**2
-        + 17.97e-5 * temperature_C**3
-    )
-
-
-# --------------------------------------------------------------------------- #
-# simulate_fn (1) — direct-rate predictors  (ACTIVE)                          #
-# --------------------------------------------------------------------------- #
-
-
-def _simulate_fn(
-    predictors: tuple[BoundedPredictor, BoundedPredictor],
-    ts: Float[Array, " T"],
-    covariates: dict[str, Array],
-    y0: Float[Array, " 6"],
-    solver: SolverConfig,
-) -> Float[Array, "T 6"]:
-    """Integrate the method-of-moments ODE using two direct-rate predictors.
-
-    Conforms to the framework's ``simulate_fn`` signature
-    ``(predictors, ts, covariates, y0, solver) -> [T, S]`` — i.e. it
-    returns the full simulator state at every timestamp in ``ts``. The
-    user supplies the physics here; the framework owns the surrounding
-    ``vmap``, ``jit``, and gradient plumbing.
-
-    Predictor pytree
-    ----------------
-    ``predictors = (growth_BP, nucleation_BP)`` — a tuple of two
-    ``BoundedPredictor``s, the convention this framework uses for
-    multi-rate hybrid models. Each consumes a 3-key input dict
-    ``(temperature_C, loading, supersaturation)`` and emits one
-    bounded log-rate (``log10(G)`` or ``log10(J)``). Two of those
-    inputs are constant covariates supplied by the experiment;
-    ``supersaturation`` is *time-varying* — derived from the simulator
-    state at each integrator step — and is mixed into the input dict
-    alongside the covariates inside ``vector_field`` below.
-
-    Pipeline
-    --------
-    1. Pull ``temperature_C`` from ``covariates`` (constant in time) and
-       compute ``conc_sat(T)`` once.
-    2. Inside ``vector_field``: compute ``S = conc / conc_sat`` from state,
-       construct the per-call inputs dict, evaluate both predictors, then
-       exponentiate the log-rates back to physical units (``10**log_rate``).
-       Both rates are gated by a ``(S > 1 + 1e-5)`` mask so the ODE stops
-       moving below the metastable limit.
-    3. Convert ``ts`` from minutes to seconds (the dataset stores minutes;
-       the rate constants are SI-second-based) and call
-       ``diffrax.diffeqsolve``.
-
-    Shape conventions
-    -----------------
-    ``ts``: ``[T]`` (per-experiment union axis, in minutes).
-    ``covariates``: dict of 0-d arrays.
-    ``y0``: ``[6] = [mu0, mu1, mu2, mu3, mu4, conc]`` per ``_y0_fn``.
-    Returns ``sol.ys`` of shape ``[T, 6]`` aligned with ``ts``.
-    """
-    growth_bp, nucleation_bp = predictors
-
-    temperature_C = covariates["temperature_C"]
-    conc_sat = _conc_sat(temperature_C)
-
-    def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
-        mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
-        S = conc / conc_sat
-        meta_mask = (S > 1.0 + _META_EPS).astype(y.dtype)
-
-        # Construct the per-call predictor input dict. Key collision is
-        # intentional: covariates' "temperature_C" / "loading" pass through
-        # unchanged, "supersaturation" is the state-derived time-varying
-        # value (CONTEXT.md "Predictor inputs"). Each predictor pulls all
-        # three keys in its declared order via its ``input_keys`` field.
-        inputs = {
-            "temperature_C": covariates["temperature_C"],
-            "loading": covariates["loading"],
-            "supersaturation": S,
-        }
-
-        # Bounded log-rates -> physical rates via 10**(.) inside the vector
-        # field. The squeeze handles the [1] output shape from MLPPredictor
-        # configured with out_size=1.
-        log10_G = jnp.squeeze(growth_bp(inputs))
-        log10_J = jnp.squeeze(nucleation_bp(inputs))
-        G = meta_mask * jnp.power(10.0, log10_G)
-        J = meta_mask * jnp.power(10.0, log10_J)
-
-        # Population-balance moment ODEs (Hulburt-Katz form for size-independent
-        # nucleation at zero size and pure linear growth).
-        dmu0 = J
-        dmu1 = G * mu0
-        dmu2 = 2.0 * G * mu1
-        dmu3 = 3.0 * G * mu2
-        dmu4 = 4.0 * G * mu3
-        # Mass balance: solute lost to growing crystal volume.
-        dconc = -3.0 * _K_V * _RHO_C * G * mu2
-
-        return jnp.stack([dmu0, dmu1, dmu2, dmu3, dmu4, dconc])
-
-    times_sec = ts * 60.0
-    term = diffrax.ODETerm(vector_field)
-    saveat = diffrax.SaveAt(ts=times_sec)
-    # Heuristic dt0 if user did not pin one: 1/1000 of the full span,
-    # floored at 1 second to keep the first step from underflowing.
-    if solver.dt0 is None:
-        span = times_sec[-1] - times_sec[0]
-        dt0 = jnp.maximum(span / 1000.0, jnp.asarray(1.0, dtype=times_sec.dtype))
-    else:
-        dt0 = jnp.asarray(solver.dt0, dtype=times_sec.dtype)
-
-    # diffrax.PIDController arithmetic requires atol as an array (or scalar) —
-    # tuples don't broadcast against the y_error PyTree leaves.
-    atol = (
-        jnp.asarray(solver.atol, dtype=times_sec.dtype)
-        if isinstance(solver.atol, tuple)
-        else solver.atol
-    )
-
-    sol = diffrax.diffeqsolve(
-        term,
-        solver.solver,
-        t0=times_sec[0],
-        t1=times_sec[-1],
-        dt0=dt0,
-        y0=y0,
-        saveat=saveat,
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=atol),
-        max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
-    )
-    return jnp.asarray(sol.ys)
-
-
-# --------------------------------------------------------------------------- #
-# simulate_fn (2) — kinetic-parameter predictor  (REFERENCE, COMMENTED-OUT)   #
-# --------------------------------------------------------------------------- #
-#
-# The original kinetic-parameter path is preserved verbatim below. To
-# reactivate it: uncomment the block, swap the names ``_simulate_fn`` and
-# ``_simulate_fn_kinetic_params`` (or equivalent), and switch ``main()`` to
-# call ``_build_kinetic_predictor`` instead of ``_build_direct_rate_predictors``.
-#
-# def _simulate_fn_kinetic_params(
-#     predictors: tuple[BoundedPredictor],
-#     ts: Float[Array, " T"],
-#     covariates: dict[str, Array],
-#     y0: Float[Array, " 6"],
-#     solver: SolverConfig,
-# ) -> Float[Array, "T 6"]:
-#     """Integrate the method-of-moments ODE using a single kinetic-parameter predictor.
-#
-#     The single predictor is wrapped in a one-tuple ``(BP,)`` to keep
-#     the ``predictors`` argument shape consistent with the multi-rate
-#     case. The predictor maps
-#     ``(temperature_C, loading) -> [logA, gamma, Ag, g]`` and the
-#     vector field plugs the four scalars into a CNT (nucleation) and
-#     power-law (growth) form, applying the ``exp(logA)`` /
-#     ``10**Ag / 60`` scalings here.
-#     """
-#     (predictor,) = predictors
-#     temperature_C = covariates["temperature_C"]
-#     conc_sat = _conc_sat(temperature_C)
-#     T_K = temperature_C + 273.15
-#
-#     params = predictor(covariates)  # [4] in physical units (bounded)
-#     logA = params[0]
-#     gamma_mJ_m2 = params[1]
-#     Ag = params[2]
-#     g_exp = params[3]
-#     gamma_J_m2 = gamma_mJ_m2 * 1e-3  # [mJ/m^2] -> [J/m^2]
-#
-#     def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
-#         mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
-#         S = conc / conc_sat
-#         meta_mask = (S > 1.0 + _META_EPS).astype(y.dtype)
-#
-#         # CNT nucleation J = exp(logA) * S * exp(-16π γ³ v² / (3 (k_B T)³ ln²S))
-#         S_safe = jnp.clip(S, min=1.0 + 1e-12)
-#         logS = jnp.log(S_safe)
-#         cnt_exp = (
-#             -16.0 * jnp.pi * gamma_J_m2**3 * _M_V**2
-#             / (3.0 * (_K_B * T_K) ** 3 * logS**2)
-#         )
-#         J = meta_mask * jnp.exp(logA) * S_safe * jnp.exp(cnt_exp)
-#
-#         # Power-law growth G = (10**Ag / 60) * max(S - 1, 0)**g
-#         growth_drive = jnp.maximum(S - 1.0, 0.0)
-#         G = meta_mask * jnp.power(10.0, Ag) / 60.0 * jnp.power(growth_drive, g_exp)
-#
-#         dmu0 = J
-#         dmu1 = G * mu0
-#         dmu2 = 2.0 * G * mu1
-#         dmu3 = 3.0 * G * mu2
-#         dmu4 = 4.0 * G * mu3
-#         dconc = -3.0 * _K_V * _RHO_C * G * mu2
-#         return jnp.stack([dmu0, dmu1, dmu2, dmu3, dmu4, dconc])
-#
-#     times_sec = ts * 60.0
-#     term = diffrax.ODETerm(vector_field)
-#     saveat = diffrax.SaveAt(ts=times_sec)
-#     if solver.dt0 is None:
-#         span = times_sec[-1] - times_sec[0]
-#         dt0 = jnp.maximum(span / 1000.0, jnp.asarray(1.0, dtype=times_sec.dtype))
-#     else:
-#         dt0 = jnp.asarray(solver.dt0, dtype=times_sec.dtype)
-#     atol = (
-#         jnp.asarray(solver.atol, dtype=times_sec.dtype)
-#         if isinstance(solver.atol, tuple)
-#         else solver.atol
-#     )
-#     sol = diffrax.diffeqsolve(
-#         term, solver.solver,
-#         t0=times_sec[0], t1=times_sec[-1], dt0=dt0,
-#         y0=y0, saveat=saveat,
-#         stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=atol),
-#         max_steps=solver.max_steps, adjoint=diffrax.DirectAdjoint(),
-#     )
-#     return jnp.asarray(sol.ys)
-
-
-# --------------------------------------------------------------------------- #
-# Predictors (1) — direct-rate tuple  (ACTIVE)                                #
-# --------------------------------------------------------------------------- #
-
-
-def _zero_final_head(predictor: MLPPredictor) -> MLPPredictor:
-    """Return ``predictor`` with the inner MLP's final ``Linear`` layer zeroed.
-
-    The hidden layers keep their random LeCun-uniform weights so the input
-    feature transformation is non-degenerate, but the final readout becomes
-    ``z_out = 0`` for any input. Composed inside a ``BoundedPredictor``,
-    that latent zero maps via ``out_scaler.from_latent(0)`` to the *exact*
-    midpoint of the physical bound box — a known-good starting rate
-    regardless of the random key.
-
-    Why this matters here: a standard random init makes the inner MLP's
-    output ``z`` roughly ``Normal(0, 1)``, so ``sigmoid(z)`` covers
-    ``(0.27, 0.73)`` of the bound box — for ~19-decade rate bounds that
-    means the unlucky-draw initial rate is several decades from midpoint
-    and can be too extreme for the moment-balance ODE to resolve within
-    ``max_steps``. Zeroing the readout removes that variance from
-    initialisation while leaving every other parameter learnable.
-    """
-    final = predictor.mlp.layers[-1]
-    zeroed_final = eqx.tree_at(
-        lambda layer: (layer.weight, layer.bias),
-        final,
-        (jnp.zeros_like(final.weight), jnp.zeros_like(final.bias)),
-    )
-    return eqx.tree_at(lambda mp: mp.mlp.layers[-1], predictor, zeroed_final)
-
-
-def _build_direct_rate_predictors(
-    key: Array,
-) -> tuple[BoundedPredictor, BoundedPredictor]:
-    """Build the canonical predictors tuple ``(growth_BP, nucleation_BP)``.
-
-    Each ``BoundedPredictor`` consumes a 3-key dict
-    ``(temperature_C, loading, supersaturation)`` and emits one bounded
-    log-rate. The vector field exponentiates with ``10**(.)`` to recover
-    physical rates. Construction is symmetric across the two branches
-    except for the output bound (growth vs nucleation log-magnitudes).
-
-    Pipeline per branch::
-
-        BoundedPredictor.input_keys : dict -> [3] in declared INPUT_KEYS_DIRECT order
-        in_scaler                   : [3] physical -> [3] latent (logit-of-normalised)
-        MLPPredictor                : [3] -> [1]   (tanh, depth=2, width=16; final head zeroed)
-        out_scaler                  : [1] latent -> [1] physical (sigmoid into log-bounds)
-
-    The two branches receive *independent* MLP weights via key splitting so
-    the network architecture is identical but the initial parameters differ.
-    The final readout layer of each inner MLP is **zero-initialised** via
-    :func:`_zero_final_head` so the predictor's initial output sits at the
-    physical midpoint of its rate bound (``G ≈ 1e-10 m/s``,
-    ``J ≈ 1.8e3 #/(m³·s)``) — an empirically reasonable starting point that
-    keeps the moment-balance ODE solvable at random init. Without this, an
-    unlucky random key produces sigmoid outputs near 0 or 1, mapping to
-    rates several decades off midpoint that drown the solver in stiffness.
-    """
-    k_growth, k_nucleation = jr.split(key, 2)
-
-    in_scaler = BoundScaler(
-        bounds=(
-            COVARIATE_BOUNDS["temperature_C"],
-            COVARIATE_BOUNDS["loading"],
-            SUPERSATURATION_BOUNDS,
-        ),
-        transform="sigmoid",
-    )
-
-    growth_inner = _zero_final_head(
-        MLPPredictor(
-            in_size=len(INPUT_KEYS_DIRECT),
-            out_size=1,
-            width_size=16,
-            depth=2,
-            activation_name="tanh",
-            key=k_growth,
-        )
-    )
-    growth_out_scaler = BoundScaler(
-        bounds=(LOG10_GROWTH_BOUNDS,),
-        transform="sigmoid",
-    )
-    growth_bp = BoundedPredictor(
-        input_keys=INPUT_KEYS_DIRECT,
-        in_scaler=in_scaler,
-        inner=growth_inner,
-        out_scaler=growth_out_scaler,
-    )
-
-    nucleation_inner = _zero_final_head(
-        MLPPredictor(
-            in_size=len(INPUT_KEYS_DIRECT),
-            out_size=1,
-            width_size=16,
-            depth=2,
-            activation_name="tanh",
-            key=k_nucleation,
-        )
-    )
-    nucleation_out_scaler = BoundScaler(
-        bounds=(LOG10_NUCLEATION_BOUNDS,),
-        transform="sigmoid",
-    )
-    nucleation_bp = BoundedPredictor(
-        input_keys=INPUT_KEYS_DIRECT,
-        in_scaler=in_scaler,
-        inner=nucleation_inner,
-        out_scaler=nucleation_out_scaler,
-    )
-
-    return (growth_bp, nucleation_bp)
-
-
-# --------------------------------------------------------------------------- #
-# Predictors (2) — kinetic-parameter single  (REFERENCE, COMMENTED-OUT)       #
-# --------------------------------------------------------------------------- #
-#
-# The original kinetic-parameter builder is preserved verbatim below. To
-# reactivate it: uncomment, and switch ``main()`` to call this builder and
-# the matching ``_simulate_fn_kinetic_params``.
-#
-# def _build_kinetic_predictor(key: Array) -> tuple[BoundedPredictor]:
-#     """Construct a single-element predictors tuple holding the kinetic-parameter MLP.
-#
-#     Pipeline ``(temperature_C, loading) -> [logA, gamma, Ag, g]``::
-#
-#         BoundedPredictor.input_keys : dict -> [2] in declared INPUT_KEYS_KINETIC order
-#         in_scaler                   : [2] physical -> [2] latent (logit-of-normalised)
-#         MLPPredictor                : [2] -> [4]   (tanh, depth=2, width=16)
-#         out_scaler                  : [4] latent -> [4] physical (sigmoid into bounds)
-#
-#     Output is in physical units; the matching
-#     ``_simulate_fn_kinetic_params`` consumes it directly. Returned as
-#     a one-tuple to match the framework's ``predictors`` convention,
-#     so the same training entry-point handles single-rate and
-#     multi-rate cases uniformly.
-#     """
-#     in_scaler = BoundScaler(
-#         bounds=tuple(COVARIATE_BOUNDS[k] for k in INPUT_KEYS_KINETIC),
-#         transform="sigmoid",
-#     )
-#     inner = MLPPredictor(
-#         in_size=len(INPUT_KEYS_KINETIC),
-#         out_size=4,
-#         width_size=16,
-#         depth=2,
-#         activation_name="tanh",
-#         key=key,
-#     )
-#     out_scaler = BoundScaler(
-#         bounds=(
-#             KINETIC_PARAMETER_BOUNDS["logA"],
-#             KINETIC_PARAMETER_BOUNDS["gamma"],
-#             KINETIC_PARAMETER_BOUNDS["Ag"],
-#             KINETIC_PARAMETER_BOUNDS["g"],
-#         ),
-#         transform="sigmoid",
-#     )
-#     bp = BoundedPredictor(
-#         input_keys=INPUT_KEYS_KINETIC,
-#         in_scaler=in_scaler,
-#         inner=inner,
-#         out_scaler=out_scaler,
-#     )
-#     return (bp,)
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                        #
-# --------------------------------------------------------------------------- #
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--excel", type=Path, default=EXCEL_PATH_DEFAULT)
-    parser.add_argument("--sheets", nargs="+", default=list(DEFAULT_SHEETS))
-    parser.add_argument("--steps", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--plot-dir",
-        type=Path,
-        default=Path(__file__).resolve().parent / "figures",
-        help="Directory to write parity + trajectory PNGs into.",
-    )
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip plotting (still prints diagnostics).",
-    )
-    args = parser.parse_args()
-
-    apply_default_style()
-
-    # x64 is enabled at module import time (see top of file), so it's already
-    # active here regardless of how the script is launched.
-
-    root_key = jr.PRNGKey(args.seed)
-    k_init, k_train = jr.split(root_key, 2)
-
-    print(f"[load] {args.excel}")
-    experiments = _load_experiments(args.excel, sheet_names=tuple(args.sheets))
     print(f"  {len(experiments)} experiments loaded from {args.sheets}")
     for exp in experiments[:3]:
-        n_conc = exp.channels["conc"].values.shape[0]
-        n_d43 = exp.channels["d43"].values.shape[0]
         print(
             f"    {exp.exp_id}: T={float(exp.covariates['temperature_C']):.1f}°C, "
             f"L={float(exp.covariates['loading']):.2f}, "
-            f"conc obs={n_conc}, d43 obs={n_d43}"
+            f"conc obs={exp.channels['conc'].values.shape[0]}, "
+            f"d43 obs={exp.channels['d43'].values.shape[0]}"
         )
     if len(experiments) > 3:
         print(f"    ... and {len(experiments) - 3} more")
 
-    print("\n[build] dataset + bucketing")
+    # ---- Build dataset (bucket + union-axis logic) ------------------------ #
+    print("\n[build] dataset")
     dataset = make_dataset(
         experiments,
-        state_to_output=_state_to_output,
+        state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     print(f"  {len(dataset.bucket_payloads)} bucket(s)")
@@ -839,15 +324,14 @@ def main() -> None:
             f"mask={tuple(bp.mask.shape)}, n_obs={int(bp.n_obs)}"
         )
 
-    print("\n[build] solver + predictors (direct-rate path)")
-    # Per-state atol matched to natural moment magnitudes. The population-balance
-    # moments span ~18 decades during integration: mu0 ~ 1e11 (number density),
-    # mu1 ~ 1e6, mu2 ~ 1e2, mu3 ~ 1e-2, mu4 ~ 1e-7, conc ~ 1. A uniform atol=1e-5
-    # forces the PIDController to over-resolve the small components and
-    # under-resolve the large ones — the integrator hits max_steps before
-    # finishing one trajectory. Setting atol per-component at ~9 decades below
-    # each component's natural magnitude lets rtol=1e-4 dominate the error
-    # control once values are appreciable, with atol acting as a near-zero floor.
+    # ---- Solver ----------------------------------------------------------- #
+    # Per-state atol matched to the natural moment magnitudes (``mu0 ~ 1e11``,
+    # ``mu1 ~ 1e6``, ..., ``mu4 ~ 1e-7``, ``conc ~ 1``). A uniform atol
+    # forces the PIDController to over-resolve small components and
+    # under-resolve large ones, and the integrator hits ``max_steps`` before
+    # finishing one trajectory. Setting atol per-component ~9 decades below
+    # each natural magnitude lets ``rtol`` dominate once values are
+    # appreciable, with atol acting as a near-zero floor.
     solver = SolverConfig(
         solver=diffrax.Tsit5(),
         rtol=1e-4,
@@ -855,27 +339,66 @@ def main() -> None:
         max_steps=500_000,
         dt0=None,
     )
-    predictors = _build_direct_rate_predictors(k_init)
-    growth_bp, nucleation_bp = predictors
 
-    # Demo: evaluate both predictors at T, L of the first experiment with a
-    # plausible mid-range supersaturation. This is the same input shape the
-    # vector field constructs each timestep.
+    # ---- Build predictors (two BoundedPredictor branches) ----------------- #
+    # Each branch:
+    #     dict -> [2] (INPUT_KEYS order)
+    #          -> in_scaler  : physical -> latent (logit-of-normalised)
+    #          -> MLPPredictor: [2] -> [1] (relu, depth=1, width=64)
+    #          -> out_scaler : latent -> physical (sigmoid into log-bounds)
+    # Branches share the input scaler but get independent MLP weights via key
+    # splitting.
+    k_growth, k_nucleation = jr.split(k_init, 2)
+    in_scaler = BoundScaler(
+        bounds=(TEMPERATURE_BOUNDS, SUPERSATURATION_BOUNDS),
+        transform="sigmoid",
+    )
+
+    growth_bp = BoundedPredictor(
+        input_keys=INPUT_KEYS,
+        in_scaler=in_scaler,
+        inner=MLPPredictor(
+            in_size=2,
+            out_size=1,
+            width_size=64,
+            depth=1,
+            activation_name="relu",
+            key=k_growth,
+        ),
+        out_scaler=BoundScaler(bounds=(LOG10_GROWTH_BOUNDS,), transform="sigmoid"),
+    )
+    nucleation_bp = BoundedPredictor(
+        input_keys=INPUT_KEYS,
+        in_scaler=in_scaler,
+        inner=MLPPredictor(
+            in_size=2,
+            out_size=1,
+            width_size=64,
+            depth=1,
+            activation_name="relu",
+            key=k_nucleation,
+        ),
+        out_scaler=BoundScaler(bounds=(LOG10_NUCLEATION_BOUNDS,), transform="sigmoid"),
+    )
+    predictors = (growth_bp, nucleation_bp)
+
+    # Sanity-check evaluation at the first experiment's covariates and a
+    # plausible mid-range supersaturation. Same input shape the vector field
+    # constructs each timestep.
     sample_cov = experiments[0].covariates
     sample_inputs = {
         "temperature_C": jnp.asarray(sample_cov["temperature_C"]),
-        "loading": jnp.asarray(sample_cov["loading"]),
         "supersaturation": jnp.asarray(1.5),
     }
-    sample_log10_G = float(jnp.squeeze(growth_bp(sample_inputs)))
-    sample_log10_J = float(jnp.squeeze(nucleation_bp(sample_inputs)))
+    log10_G_init = float(jnp.squeeze(growth_bp(sample_inputs)))
+    log10_J_init = float(jnp.squeeze(nucleation_bp(sample_inputs)))
     print(
-        f"  predictors sample on T={float(sample_cov['temperature_C']):.1f}°C, "
-        f"L={float(sample_cov['loading']):.2f}, S=1.5 -> "
-        f"log10_G={sample_log10_G:.2f} (G={10.0**sample_log10_G:.2e} m/s), "
-        f"log10_J={sample_log10_J:.2f} (J={10.0**sample_log10_J:.2e} #/(m^3·s))"
+        f"\n[init] T={float(sample_cov['temperature_C']):.1f}°C, S=1.5 -> "
+        f"log10_G={log10_G_init:.2f} (G={10.0**log10_G_init:.2e} m/s), "
+        f"log10_J={log10_J_init:.2f} (J={10.0**log10_J_init:.2e} #/m³/s)"
     )
 
+    # ---- Train ------------------------------------------------------------ #
     print("\n[train] optax (single phase, mse loss)")
     config = OptaxTrainingConfig(
         steps=(args.steps,),
@@ -885,36 +408,40 @@ def main() -> None:
         length_schedule=(1.0,),
         loss="mse",
         log_every=max(1, args.steps // 10),
-        verbose=False,
+        verbose=True,
     )
     history, trained_predictors = train_with_optax(
         predictors,
         dataset,
         config,
-        simulate_fn=_simulate_fn,
+        simulate_fn=simulate_fn,
         solver=solver,
         key=k_train,
     )
-
     print(f"  {len(history)} steps; final loss {history[-1]:.6f}")
     sample_every = max(1, len(history) // 10)
-    sampled = [f"{loss:.4f}" for loss in history[::sample_every]]
-    print(f"  loss every ~{sample_every} steps: {sampled}")
-
-    trained_growth, trained_nucleation = trained_predictors
-    final_log10_G = float(jnp.squeeze(trained_growth(sample_inputs)))
-    final_log10_J = float(jnp.squeeze(trained_nucleation(sample_inputs)))
     print(
-        f"  trained predictors on same input -> "
-        f"log10_G={final_log10_G:.2f} (G={10.0**final_log10_G:.2e} m/s), "
-        f"log10_J={final_log10_J:.2f} (J={10.0**final_log10_J:.2e} #/(m^3·s))"
+        f"  loss every ~{sample_every} steps: {[f'{loss:.4f}' for loss in history[::sample_every]]}"
     )
 
-    # Diagnostics + default plots: predict_dataset returns one [N, T, D]
-    # array per bucket; the helpers walk it in lockstep with the dataset.
+    trained_growth, trained_nucleation = trained_predictors
+    log10_G_final = float(jnp.squeeze(trained_growth(sample_inputs)))
+    log10_J_final = float(jnp.squeeze(trained_nucleation(sample_inputs)))
+    print(
+        f"  trained -> "
+        f"log10_G={log10_G_final:.2f} (G={10.0**log10_G_final:.2e} m/s), "
+        f"log10_J={log10_J_final:.2f} (J={10.0**log10_J_final:.2e} #/m³/s)"
+    )
+
+    # ---- Diagnostics + plots --------------------------------------------- #
+    # ``predict_dataset`` returns one ``[N, T, D]`` array per bucket; the
+    # helpers walk it in lockstep with the dataset.
     print("\n[diagnostics] per-channel parity stats over the training set")
     predictions = predict_dataset(
-        trained_predictors, dataset, simulate_fn=_simulate_fn, solver=solver
+        trained_predictors,
+        dataset,
+        simulate_fn=simulate_fn,
+        solver=solver,
     )
     diag = compute_diagnostics(predictions, dataset)
     print_diagnostics(diag)
@@ -929,6 +456,9 @@ def main() -> None:
         trajectory_plot(
             predictions,
             dataset,
+            predictors=trained_predictors,
+            simulate_fn=simulate_fn,
+            solver=solver,
             max_experiments=6,
             title="Crystallisation trajectories (first 6 experiments)",
             save_path=args.plot_dir / "trajectories.png",

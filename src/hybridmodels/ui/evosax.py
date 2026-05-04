@@ -40,6 +40,7 @@ import time
 from collections import deque
 from typing import Any
 
+from rich.align import Align
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
@@ -277,7 +278,11 @@ class RichEvosaxUI:
         # on this ordering).
         if self._final_fitness is not None:
             children.append(self._render_footer())
-        return Group(*children)
+        # Constrain to half the current terminal width — see the matching
+        # comment in ``hybridmodels.ui.optax.RichTrainingUI._render`` for
+        # the rationale (avoid sprawling panels and resize-time overflow).
+        target_width = max(40, self._console.width // 2)
+        return Align.left(Group(*children), width=target_width)
 
     def _render_header(self) -> Panel:
         elapsed = 0.0
