@@ -59,7 +59,7 @@ The script exercises the framework end-to-end:
 - ``hybridmodels.losses`` (``masked_mse``) and ``hybridmodels.prediction``
 - ``hybridmodels.trainable`` (default mask via ``train_with_optax``)
 - ``hybridmodels.rng`` (consumed inside training internals)
-- ``hybridmodels.ui`` (``SilentUI`` selected via ``verbose=False``)
+- ``hybridmodels.ui`` (``RichTrainingUI`` selected via ``verbose=True``)
 - ``hybridmodels.training.optax`` — ``train_with_optax``
 
 How to run
@@ -88,7 +88,6 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import diffrax  # noqa: E402  # x64 must be set before diffrax imports JAX dtypes.
-import equinox as eqx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import jax.random as jr  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -613,33 +612,6 @@ def _simulate_fn(
 # --------------------------------------------------------------------------- #
 
 
-def _zero_final_head(predictor: MLPPredictor) -> MLPPredictor:
-    """Return ``predictor`` with the inner MLP's final ``Linear`` layer zeroed.
-
-    The hidden layers keep their random LeCun-uniform weights so the input
-    feature transformation is non-degenerate, but the final readout becomes
-    ``z_out = 0`` for any input. Composed inside a ``BoundedPredictor``,
-    that latent zero maps via ``out_scaler.from_latent(0)`` to the *exact*
-    midpoint of the physical bound box — a known-good starting rate
-    regardless of the random key.
-
-    Why this matters here: a standard random init makes the inner MLP's
-    output ``z`` roughly ``Normal(0, 1)``, so ``sigmoid(z)`` covers
-    ``(0.27, 0.73)`` of the bound box — for ~19-decade rate bounds that
-    means the unlucky-draw initial rate is several decades from midpoint
-    and can be too extreme for the moment-balance ODE to resolve within
-    ``max_steps``. Zeroing the readout removes that variance from
-    initialisation while leaving every other parameter learnable.
-    """
-    final = predictor.mlp.layers[-1]
-    zeroed_final = eqx.tree_at(
-        lambda layer: (layer.weight, layer.bias),
-        final,
-        (jnp.zeros_like(final.weight), jnp.zeros_like(final.bias)),
-    )
-    return eqx.tree_at(lambda mp: mp.mlp.layers[-1], predictor, zeroed_final)
-
-
 def _build_direct_rate_predictors(
     key: Array,
 ) -> tuple[BoundedPredictor, BoundedPredictor]:
@@ -661,12 +633,13 @@ def _build_direct_rate_predictors(
     The two branches receive *independent* MLP weights via key splitting so
     the network architecture is identical but the initial parameters differ.
     The final readout layer of each inner MLP is **zero-initialised** via
-    :func:`_zero_final_head` so the predictor's initial output sits at the
-    physical midpoint of its rate bound (``G ≈ 1e-10 m/s``,
-    ``J ≈ 1.8e3 #/(m³·s)``) — an empirically reasonable starting point that
-    keeps the moment-balance ODE solvable at random init. Without this, an
-    unlucky random key produces sigmoid outputs near 0 or 1, mapping to
-    rates several decades off midpoint that drown the solver in stiffness.
+    :meth:`MLPPredictor.with_zero_final_head` so the predictor's initial
+    output sits at the physical midpoint of its rate bound
+    (``G ≈ 1e-10 m/s``, ``J ≈ 1.8e3 #/(m³·s)``) — an empirically reasonable
+    starting point that keeps the moment-balance ODE solvable at random
+    init. Without this, an unlucky random key produces sigmoid outputs near
+    0 or 1, mapping to rates several decades off midpoint that drown the
+    solver in stiffness.
     """
     k_growth, k_nucleation = jr.split(key, 2)
 
@@ -679,16 +652,14 @@ def _build_direct_rate_predictors(
         transform="sigmoid",
     )
 
-    growth_inner = _zero_final_head(
-        MLPPredictor(
-            in_size=len(INPUT_KEYS_DIRECT),
-            out_size=1,
-            width_size=16,
-            depth=2,
-            activation_name="tanh",
-            key=k_growth,
-        )
-    )
+    growth_inner = MLPPredictor(
+        in_size=len(INPUT_KEYS_DIRECT),
+        out_size=1,
+        width_size=64,
+        depth=1,
+        activation_name="relu",
+        key=k_growth,
+    ).with_zero_final_head()
     growth_out_scaler = BoundScaler(
         bounds=(LOG10_GROWTH_BOUNDS,),
         transform="sigmoid",
@@ -700,16 +671,14 @@ def _build_direct_rate_predictors(
         out_scaler=growth_out_scaler,
     )
 
-    nucleation_inner = _zero_final_head(
-        MLPPredictor(
-            in_size=len(INPUT_KEYS_DIRECT),
-            out_size=1,
-            width_size=16,
-            depth=2,
-            activation_name="tanh",
-            key=k_nucleation,
-        )
-    )
+    nucleation_inner = MLPPredictor(
+        in_size=len(INPUT_KEYS_DIRECT),
+        out_size=1,
+        width_size=64,
+        depth=1,
+        activation_name="relu",
+        key=k_nucleation,
+    ).with_zero_final_head()
     nucleation_out_scaler = BoundScaler(
         bounds=(LOG10_NUCLEATION_BOUNDS,),
         transform="sigmoid",
@@ -739,7 +708,7 @@ def _build_direct_rate_predictors(
 #
 #         BoundedPredictor.input_keys : dict -> [2] in declared INPUT_KEYS_KINETIC order
 #         in_scaler                   : [2] physical -> [2] latent (logit-of-normalised)
-#         MLPPredictor                : [2] -> [4]   (tanh, depth=2, width=16)
+#         MLPPredictor                : [2] -> [4]   (relu, depth=1, width=64)
 #         out_scaler                  : [4] latent -> [4] physical (sigmoid into bounds)
 #
 #     Output is in physical units; the matching
@@ -759,7 +728,7 @@ def _build_direct_rate_predictors(
 #         depth=2,
 #         activation_name="tanh",
 #         key=key,
-#     )
+#     ).with_zero_final_head()
 #     out_scaler = BoundScaler(
 #         bounds=(
 #             KINETIC_PARAMETER_BOUNDS["logA"],
@@ -885,7 +854,7 @@ def main() -> None:
         length_schedule=(1.0,),
         loss="mse",
         log_every=max(1, args.steps // 10),
-        verbose=False,
+        verbose=True,
     )
     history, trained_predictors = train_with_optax(
         predictors,

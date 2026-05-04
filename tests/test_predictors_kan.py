@@ -148,6 +148,70 @@ class TestBasisValidation:
             _kan(basis="not_a_real_basis")
 
 
+class TestWithZeroFinalHead:
+    """Contract for ``with_zero_final_head``: zero readout layer, untouched hidden.
+
+    Mirrors :class:`tests.test_predictors_mlp.TestWithZeroFinalHead`. The KAN
+    "final head" is the readout layer at index ``len(hidden_widths)`` — its
+    four trainable arrays (``c_basis``, ``c_spl``, ``c_res``, ``bias``) are
+    all zeroed so the layer produces ``zeros(out_size)`` for any input.
+    """
+
+    def test_output_is_zero_for_arbitrary_input(self):
+        predictor = _kan(in_size=3, out_size=2, hidden_widths=(6,))
+        zeroed = predictor.with_zero_final_head()
+        for x in (jnp.zeros((3,)), jnp.ones((3,)), jnp.array([0.5, -1.7, 2.3])):
+            out = zeroed(x)
+            assert jnp.allclose(out, jnp.zeros((2,)), atol=0.0)
+
+    def test_final_layer_params_are_zero(self):
+        predictor = _kan(in_size=3, out_size=2, hidden_widths=(6,))
+        zeroed = predictor.with_zero_final_head()
+        last_idx = len(predictor.hidden_widths)
+        last_layer = zeroed.params["layers"][last_idx]
+        # Walk every leaf of the final layer; each must be zero.
+        for leaf in jtu.tree_leaves(last_layer):
+            assert jnp.array_equal(leaf, jnp.zeros_like(leaf))
+
+    def test_hidden_layers_unchanged(self):
+        predictor = _kan(in_size=3, out_size=2, hidden_widths=(6, 4))
+        zeroed = predictor.with_zero_final_head()
+        last_idx = len(predictor.hidden_widths)
+        for i in range(last_idx):
+            orig_leaves = jtu.tree_leaves(predictor.params["layers"][i])
+            new_leaves = jtu.tree_leaves(zeroed.params["layers"][i])
+            for orig, new in zip(orig_leaves, new_leaves, strict=True):
+                assert jnp.array_equal(orig, new)
+
+    def test_returns_new_instance_input_unchanged(self):
+        predictor = _kan(in_size=3, out_size=2, hidden_widths=(6,))
+        zeroed = predictor.with_zero_final_head()
+        assert zeroed is not predictor
+        # Original final layer is not zero — confirms no mutation.
+        last_idx = len(predictor.hidden_widths)
+        original_final_leaves = jtu.tree_leaves(predictor.params["layers"][last_idx])
+        assert any(
+            not jnp.array_equal(leaf, jnp.zeros_like(leaf)) for leaf in original_final_leaves
+        )
+
+    def test_preserves_static_fields(self):
+        predictor = _kan(in_size=4, out_size=3, hidden_widths=(7, 5), grid_size=6)
+        zeroed = predictor.with_zero_final_head()
+        assert zeroed.in_size == 4
+        assert zeroed.out_size == 3
+        assert zeroed.hidden_widths == (7, 5)
+        assert zeroed.grid_size == 6
+        assert zeroed.basis == predictor.basis
+        assert zeroed.seed == predictor.seed
+
+    def test_works_with_no_hidden_layers(self):
+        # hidden_widths=() means the KAN is a single layer (in_size -> out_size),
+        # so the readout layer is at index 0. Same zero-output guarantee.
+        predictor = _kan(in_size=3, out_size=2, hidden_widths=())
+        zeroed = predictor.with_zero_final_head()
+        assert jnp.allclose(zeroed(jnp.array([1.0, 2.0, 3.0])), jnp.zeros((2,)), atol=0.0)
+
+
 def test_top_level_export():
     import hybridmodels
 

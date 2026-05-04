@@ -66,9 +66,7 @@ class TestStaticFields:
 
     def test_static_fields_not_in_dynamic_leaves(self):
         predictor = _mlp()
-        leaves = [
-            leaf for leaf in jtu.tree_leaves(predictor) if not eqx.is_array(leaf)
-        ]
+        leaves = [leaf for leaf in jtu.tree_leaves(predictor) if not eqx.is_array(leaf)]
         for hyperparam in (
             predictor.in_size,
             predictor.out_size,
@@ -94,10 +92,7 @@ class TestKeyDeterminism:
         b = _mlp(seed=1)
         leaves_a = _array_leaves(a)
         leaves_b = _array_leaves(b)
-        assert any(
-            not jnp.array_equal(la, lb)
-            for la, lb in zip(leaves_a, leaves_b, strict=True)
-        )
+        assert any(not jnp.array_equal(la, lb) for la, lb in zip(leaves_a, leaves_b, strict=True))
 
         x = jnp.array([0.5, -0.2, 0.1])
         out_a = a(x)
@@ -122,8 +117,7 @@ class TestInitializedWithKey:
         leaves_new = _array_leaves(fresh)
         assert len(leaves_old) == len(leaves_new)
         assert any(
-            not jnp.array_equal(lo, ln)
-            for lo, ln in zip(leaves_old, leaves_new, strict=True)
+            not jnp.array_equal(lo, ln) for lo, ln in zip(leaves_old, leaves_new, strict=True)
         )
 
     def test_deterministic_for_same_key(self):
@@ -152,6 +146,57 @@ class TestActivation:
         out_a = a(x)
         out_b = b(x)
         assert not jnp.allclose(out_a, out_b)
+
+
+class TestWithZeroFinalHead:
+    """Contract for ``with_zero_final_head``: zero readout, identical hidden layers."""
+
+    def test_output_is_zero_for_arbitrary_input(self):
+        predictor = _mlp(in_size=3, out_size=2)
+        zeroed = predictor.with_zero_final_head()
+        # Several inputs spanning the trained domain — output must be exactly zero.
+        for x in (jnp.zeros((3,)), jnp.ones((3,)), jnp.array([0.5, -1.7, 2.3])):
+            assert jnp.allclose(zeroed(x), jnp.zeros((2,)), atol=0.0)
+
+    def test_final_layer_weight_and_bias_are_zero(self):
+        predictor = _mlp(in_size=3, out_size=2, width_size=8, depth=2)
+        zeroed = predictor.with_zero_final_head()
+        final = zeroed.mlp.layers[-1]
+        assert jnp.array_equal(final.weight, jnp.zeros_like(final.weight))
+        assert jnp.array_equal(final.bias, jnp.zeros_like(final.bias))
+
+    def test_hidden_layers_unchanged(self):
+        predictor = _mlp(in_size=3, out_size=2, depth=2)
+        zeroed = predictor.with_zero_final_head()
+        # Hidden layers (everything except the last) keep their LeCun-uniform init.
+        for orig_layer, zeroed_layer in zip(
+            predictor.mlp.layers[:-1], zeroed.mlp.layers[:-1], strict=True
+        ):
+            assert jnp.array_equal(orig_layer.weight, zeroed_layer.weight)
+            assert jnp.array_equal(orig_layer.bias, zeroed_layer.bias)
+
+    def test_returns_new_instance_input_unchanged(self):
+        predictor = _mlp()
+        zeroed = predictor.with_zero_final_head()
+        assert zeroed is not predictor
+        # Original final layer is *not* zero — confirms we didn't mutate.
+        original_final = predictor.mlp.layers[-1]
+        assert not jnp.array_equal(original_final.weight, jnp.zeros_like(original_final.weight))
+
+    def test_preserves_static_fields(self):
+        predictor = _mlp(in_size=4, out_size=3, width_size=7, depth=3, activation_name="relu")
+        zeroed = predictor.with_zero_final_head()
+        assert zeroed.in_size == 4
+        assert zeroed.out_size == 3
+        assert zeroed.width_size == 7
+        assert zeroed.depth == 3
+        assert zeroed.activation_name == "relu"
+
+    def test_works_for_depth_zero(self):
+        # depth=0 means a single linear layer (no hidden), so "final" == only layer.
+        predictor = _mlp(in_size=3, out_size=2, depth=0)
+        zeroed = predictor.with_zero_final_head()
+        assert jnp.allclose(zeroed(jnp.array([1.0, 2.0, 3.0])), jnp.zeros((2,)), atol=0.0)
 
 
 def test_top_level_export():
