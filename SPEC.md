@@ -154,7 +154,7 @@ jax-hybridmodels/                      (repo)
 │       ├── serialise.py                (save/load — last-shipped)
 │       ├── predictors/
 │       │   ├── __init__.py
-│       │   ├── base.py                 (Predictor, CovariateSelector, BoundScaler, BoundedPredictor, reinitialize_with_key, reinitialize_pytree_with_key)
+│       │   ├── base.py                 (Predictor, BoundScaler, BoundedPredictor, reinitialize_with_key, reinitialize_pytree_with_key)
 │       │   ├── mlp.py                  (MLPPredictor)
 │       │   └── kan.py                  (KANPredictor — uses jaxkan)
 │       ├── training/
@@ -293,7 +293,6 @@ solver = SolverConfig(
 ```python
 from hybridmodels.predictors import (
     Predictor,             # abstract base
-    CovariateSelector,
     BoundScaler,
     BoundedPredictor,
     MLPPredictor,
@@ -454,10 +453,6 @@ class Predictor(eqx.Module):
     """Abstract marker. Concrete subclasses are final per Equinox pattern.
     __call__: Float[Array, 'in'] -> Float[Array, 'out']."""
 
-class CovariateSelector(eqx.Module):
-    keys: tuple[str, ...] = eqx.field(static=True)
-    def __call__(self, covariates: dict[str, Array]) -> Array: ...
-
 class BoundScaler(eqx.Module):
     bounds: tuple[tuple[float, float], ...] = eqx.field(static=True)
     transform: str = eqx.field(static=True)        # "sigmoid" only in v1
@@ -466,11 +461,21 @@ class BoundScaler(eqx.Module):
     def from_latent(self, z: Array) -> Array: ...
 
 class BoundedPredictor(eqx.Module):
-    selector: CovariateSelector
+    input_keys: tuple[str, ...] = eqx.field(static=True)   # named-input order; len matches in_scaler.bounds (>= 1)
     in_scaler: BoundScaler
     inner: Predictor
     out_scaler: BoundScaler
-    def __call__(self, inputs: dict[str, Array]) -> Array: ...   # inputs may include state-derived / time-dependent keys
+
+    def __init__(self, *, in_scaler, inner, out_scaler, input_keys=None) -> None:
+        # input_keys=None auto-fills ("x1", ..., f"x{N}") so the static field is
+        # always populated; saved predictors are self-describing regardless.
+        ...
+
+    def __call__(self, inputs: dict[str, Array] | Array) -> Array: ...
+    # dict path: subset extraction in input_keys order (extra keys ignored, missing key -> KeyError).
+    # Array path: rank-1, length len(input_keys); validated via eqx.error_if and passed through.
+    # Inputs may include state-derived / exogenous time-dependent values mixed in by
+    # the user inside their vector field — provenance is intentionally invisible here.
 
 def reinitialize_with_key(predictor, key) -> Predictor:
     """Per-Module: re-init every inexact-float leaf to a fresh value matching its shape."""
@@ -484,6 +489,8 @@ def reinitialize_pytree_with_key(predictors, key) -> "PyTree[eqx.Module]":
     different re-init weights. R-T8 contract.
     """
 ```
+
+**Why `input_keys` lives on `BoundedPredictor` (not a separate selector).** An earlier draft of this section split the named-input ordering into a standalone `CovariateSelector` `eqx.Module` composed inside `BoundedPredictor`. That class held no trainable leaves and one operation (`jnp.stack([d[k] for k in keys])`) — a class wearing one logical line. Folding the keys onto `BoundedPredictor` deletes the empty Module while preserving the property that motivated keeping the field static at all: a saved predictor self-describes its input contract. `__call__` then becomes polymorphic — a `dict[str, Array]` (subset extraction in declared order, extra keys allowed) or a rank-1 `Array` (positional, passed through). The user mixes covariates / state-derived / exogenous time-dependent values into the input at the vector-field boundary as before; the predictor treats every key as a named scalar, provenance-blind.
 
 **`mlp.py`** — `MLPPredictor` wrapping `eqx.nn.MLP`. Static fields: `width`, `depth`, `activation_name`. Trainable: weights/biases.
 
@@ -665,7 +672,7 @@ Implement in this order; each step ships green tests before the next begins.
 
 1. **Project skeleton + tooling** — `pyproject.toml`, `uv sync`, empty modules, `tests/` skeleton.
 2. **`solver.py` + `SOLVER_REGISTRY`** — minimal, easiest to test.
-3. **`predictors/base.py`** — `Predictor`, `BoundScaler`, `CovariateSelector`, `BoundedPredictor`. **`test_predictors_serialise.py` is the gate.**
+3. **`predictors/base.py`** — `Predictor`, `BoundScaler`, `BoundedPredictor`. **`test_predictors_serialise.py` is the gate.**
 4. **`predictors/mlp.py`** — concrete predictor; serialisation test extended.
 5. **`data.py`** — `Experiment`, `Dataset`, `make_dataset`, `split_dataset`, bucketing.
 6. **`losses.py` + `prediction.py`** — pure functions, easy.

@@ -8,14 +8,11 @@ A JAX/Equinox library for **hybrid models** — composing trainable function app
 A narrow trainable `eqx.Module` whose `__call__` is `Array → Array`. Knows nothing about covariate names, bounds, or experiments. Concrete examples in v1: `MLPPredictor`, `KANPredictor`. (`NeuralNPolynomial` is deferred to post-v1; its supersaturation-polynomial form is an example pattern in user code, not a framework class — see "Out of scope".)
 _Avoid_: Regressor (the previous package's overloaded term — bundled bound-scaling, rate-pair semantics, and trainable weights together).
 
-**CovariateSelector**:
-An `eqx.Module` that pulls a fixed tuple of named covariates out of the dict and stacks them in declared order. Static `keys: tuple[str, ...]`.
-
 **BoundScaler**:
 An `eqx.Module` providing bidirectional sigmoid scaling between physical `[low, high]` and a latent space. Sigmoid only for v1; tanh deferred. No "temperature" knob in v1 unless we re-grill (default sigmoid: `low + (high-low) * sigmoid(z)`).
 
 **BoundedPredictor**:
-A composition wrapper: `selector → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). **No penalty term in v1** — the bound-excursion penalty machinery from the source package was never properly wired and is dropped.
+A composition wrapper: `input_keys (named-input order) → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). `input_keys` is a static `tuple[str, ...]` that names each input slot in declared order; cardinality must match `in_scaler.bounds` and be ≥ 1. Auto-fills to `("x1", ..., "xN")` when omitted, so the saved predictor is always self-describing. `__call__` accepts either `dict[str, Array]` (subset extraction in `input_keys` order — extra keys allowed; missing keys raise) or rank-1 `Array` (passed through). **No penalty term in v1** — the bound-excursion penalty machinery from the source package was never properly wired and is dropped.
 
 **simulate_fn**:
 A pure user-written function with a mandatory signature that, for one experiment, integrates the dynamics and returns the **full state trajectory**. The framework owns vmapping, jitting, and gradient flow; the user owns physics. Inside the user's vector field, multi-rate models compose their predictors directly (`growth, nucleation = predictors`) — there is no framework wrapper for "the pair of rate predictors"; the source package's `RatePair` is dropped.
@@ -62,7 +59,7 @@ def vector_field(t, y, args):
     G = predictors[0](inputs)
 ```
 
-Key collision is intentional: the dict can override a covariate's name with a time-varying value (e.g. `T(t)`). The `CovariateSelector` keys, the `BoundScaler` bounds, and the dict mixing are *unaware* of provenance — every key is treated as a named scalar regardless of whether it came from `covariates`, `y`, or `t`. This collapses "state-derived inputs to the predictor", "exogenous time-dependent inputs", and "covariate inputs" into one mechanism.
+Key collision is intentional: the dict can override a covariate's name with a time-varying value (e.g. `T(t)`). The `BoundedPredictor.input_keys`, the `BoundScaler.bounds`, and the dict mixing are *unaware* of provenance — every key is treated as a named scalar regardless of whether it came from `covariates`, `y`, or `t`. This collapses "state-derived inputs to the predictor", "exogenous time-dependent inputs", and "covariate inputs" into one mechanism.
 
 **Bucket**:
 A group of experiments sharing the same `len(union_ts)`. Within a bucket, individual experiments may have different `ts` values and different masks (mask is a per-experiment array). Not promoted to a class — `BucketPayload` is just a `NamedTuple` of stacked `[N, T, ...]` arrays produced once by `make_dataset`.
@@ -170,5 +167,6 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 ## Flagged ambiguities
 
 - "Model" was used in the source package both for the trainable Equinox module and for the simulate-able physics object. Resolved: the trainable thing is a **predictors pytree** (typically a tuple of `BoundedPredictor`s); the integrable physics is **simulate_fn**; nothing is called "Model".
-- "Regressor" in the source was overloaded with bound-scaling. Resolved: scaling is decoupled from **Predictor** via `BoundedPredictor` composition (`selector → in_scaler → inner → out_scaler`).
-- "Covariate" vs "predictor input" was historically conflated. Resolved: **covariate** is a constant-in-time per-experiment scalar at the data layer (`Experiment.covariates`); **predictor input** is the per-call dict the vector field hands to a predictor (covariates ∪ state-derived ∪ exogenous-time-dependent). Same shape (`dict[str, Array]`), different lifetime.
+- "Regressor" in the source was overloaded with bound-scaling. Resolved: scaling is decoupled from **Predictor** via `BoundedPredictor` composition (`input_keys → in_scaler → inner → out_scaler`).
+- "Covariate" vs "predictor input" was historically conflated. Resolved: **covariate** is a constant-in-time per-experiment scalar at the data layer (`Experiment.covariates`); **predictor input** is the per-call dict (or pre-stacked Array) the vector field hands to a predictor (covariates ∪ state-derived ∪ exogenous-time-dependent). The framework treats every key as a named scalar, regardless of provenance.
+- `CovariateSelector` was originally a separate `eqx.Module` composed inside `BoundedPredictor` to translate a named-covariates dict into a stacked Array. It held no trainable leaves and one operation, so it was folded into `BoundedPredictor` as the `input_keys` static field. The saved predictor still self-describes its input contract; `__call__` is now polymorphic (dict or Array) so users can construct inputs in either named or positional form at the vector-field boundary.

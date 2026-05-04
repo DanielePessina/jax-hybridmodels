@@ -156,7 +156,7 @@ SPEC §8 step 3. **R-A5 round-trip is the gate.** Every predictor in later phase
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 3.1 | Subagent: write `tests/test_predictors_serialise.py` red — parametrised over a placeholder `BoundedPredictor(<stub Predictor>)` fixture; assert `eqx.tree_serialise_leaves` round-trip is bit-exact | S | red |
-| 3.2 | Subagent: write `tests/test_predictors_base.py` red — `CovariateSelector` ordering, `BoundScaler` sigmoid bidirection (`from_latent(to_latent(x)) ≈ x` within bounds), `BoundedPredictor` composition, `reinitialize_with_key` re-inits inexact-float leaves of one Module, `reinitialize_pytree_with_key` splits an attempt key by traversal order across a tuple/dict pytree (R-T8) | S | red |
+| 3.2 | Subagent: write `tests/test_predictors_base.py` red — `BoundedPredictor.input_keys` ordering and dict/Array polymorphism (`TestBoundedPredictorInputKeys`), `BoundScaler` sigmoid bidirection (`from_latent(to_latent(x)) ≈ x` within bounds), `BoundedPredictor` composition, `reinitialize_with_key` re-inits inexact-float leaves of one Module, `reinitialize_pytree_with_key` splits an attempt key by traversal order across a tuple/dict pytree (R-T8) | S | red |
 | 3.3 | Subagent: implement `src/hybridmodels/predictors/base.py` to green | S | green |
 | 3.4 | `__init__.py` exports | O | import smoke |
 | 3.5 | ruff + ty | O | clean |
