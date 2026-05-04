@@ -34,7 +34,7 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-D2** — `Experiment` accepts **per-channel sparse observations** (`ChannelObs` with its own `ts/values/variance`). The framework computes the per-experiment union timestamp axis and the resulting mask **automatically** at `make_dataset` time. Users never write mask code.
 - **R-D3** — Bucketing groups by `len(union_ts)`. Within a bucket, individual experiments may have different `ts` values and different masks (mask is a per-experiment array).
 - **R-D4** — `BucketPayload` is **not promoted to a class** — a `NamedTuple` of stacked `[N, T, ...]` arrays.
-- **R-D5** — Covariates are passed as `dict[str, Array]`, **constant in time**, named (no canonical-order packed array).
+- **R-D5** — Covariates are passed as `dict[str, float]` (scalar per experiment, **constant in time**, named — no canonical-order packed array). Stored as 0-d JAX arrays after `make_experiment`. Array-valued covariates remain out of scope for v1.
 - **R-D6** — `y0` is the **full model state**, constructed at data-import time via a user-supplied `y0_fn` hook and stored on `Experiment`.
 - **R-D7** — `state_to_output` lives on `Dataset`; applied externally to `simulate_fn`'s full-state output, before loss.
 - **R-D8** — `split_dataset(dataset, *, train, val, test, key)` is provided.
@@ -388,10 +388,10 @@ from hybridmodels import save_predictor, load_predictor, save_run, load_run
 class ChannelObs(eqx.Module):
     ts: Float[Array, "Tc"]
     values: Float[Array, "Tc"]
-    variance: Float[Array, "Tc"] | float = 1.0     # scalar broadcasts
+    variance: Float[Array, "Tc"]                   # always rank-1 post-init
 
 class Experiment(eqx.Module):
-    covariates: dict[str, float]
+    covariates: dict[str, float]                   # rank-0 / scalar; v1 supports floats only
     y0: Float[Array, "S"]
     channels: dict[str, ChannelObs]
     exp_id: str = eqx.field(static=True)

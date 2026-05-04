@@ -133,14 +133,6 @@ class TestSplitDataset:
 class TestSplitFloorPolicy:
     """Non-divisible splits use floor for train and val; the remainder lands in test."""
 
-    def test_n7_default_fractions(self):
-        # n=7, 0.8/0.1/0.1 -> floor(5.6)=5, floor(0.7)=0, remainder=2.
-        ds = _dataset(7)
-        train, val, test = split_dataset(ds, key=jr.key(0))
-        assert len(train._experiments) == 5
-        assert len(val._experiments) == 0
-        assert len(test._experiments) == 2
-
     def test_n10_default_fractions(self):
         # n=10, 0.8/0.1/0.1 -> 8/1/1 (already integer).
         ds = _dataset(10)
@@ -160,8 +152,10 @@ class TestSplitFloorPolicy:
         assert len(test._experiments) == 2
 
     def test_total_is_always_n(self):
-        # Sweep a few non-divisible sizes; the partition must cover every experiment.
-        for n in (3, 7, 11, 17, 29):
+        # Sweep non-divisible sizes large enough that default 0.8/0.1/0.1 produces
+        # at least one experiment in every split (smaller n is covered by
+        # TestPositiveFractionMustNotRoundToZero).
+        for n in (11, 13, 17, 23, 29):
             ds = _dataset(n)
             train, val, test = split_dataset(ds, key=jr.key(n))
             assert (
@@ -182,3 +176,32 @@ class TestSplitWithoutExperiments:
         )
         with pytest.raises(ValueError, match="(?i)experiments"):
             split_dataset(ds, key=jr.key(0))
+
+
+class TestPositiveFractionMustNotRoundToZero:
+    """A non-zero fraction that floors to zero is a silent data-loss bug; raise instead."""
+
+    def test_n7_val_fraction_floors_to_zero_raises(self):
+        # n=7, 0.8/0.1/0.1 -> floor(5.6)=5, floor(0.7)=0 (val empty), remainder=2.
+        # User asked for val>0 but rounding gives nothing — must raise rather than
+        # silently return an empty val dataset that downstream code would treat as
+        # "no validation needed".
+        ds = _dataset(7)
+        with pytest.raises(ValueError, match="(?i)val.*0|empty"):
+            split_dataset(ds, key=jr.key(0))
+
+    def test_n3_train_fraction_floors_to_nonzero_but_val_empty_raises(self):
+        # n=3, 0.8/0.1/0.1 -> 2/0/1; val asked >0 but got 0.
+        ds = _dataset(3)
+        with pytest.raises(ValueError, match="(?i)val.*0|empty"):
+            split_dataset(ds, key=jr.key(0))
+
+    def test_explicit_zero_fraction_returns_empty_split(self):
+        # The user explicitly asked for no validation/test data — that's allowed.
+        ds = _dataset(10)
+        train, val, test = split_dataset(
+            ds, train=1.0, val=0.0, test=0.0, key=jr.key(0)
+        )
+        assert len(train._experiments) == 10
+        assert val.bucket_payloads == ()
+        assert test.bucket_payloads == ()
