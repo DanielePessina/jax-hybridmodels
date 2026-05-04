@@ -76,9 +76,13 @@ class RichEvosaxUI:
         (``Console(record=True, force_terminal=False, ...)``) so the
         rendered final state can be asserted on.
     log_every:
-        Throttle for the recent-generation table. ``log_every=1`` records
-        every generation, ``log_every=k`` records generations where
-        ``gen_idx % k == 0``.
+        Throttle for the recent-generation table. ``log_every=k`` records
+        generations where ``gen_idx % k == 0``. ``None`` (the default) defers
+        the choice to :meth:`on_run_start`, which sets it to
+        ``max(1, num_generations // 5)`` so the table accumulates to exactly
+        five rows over the run instead of sliding past a constantly-changing
+        last-five window. An explicit integer always overrides the
+        auto-scale.
     recent_generations:
         Maximum number of rows the recent-generation table holds.
     recent_messages:
@@ -96,14 +100,19 @@ class RichEvosaxUI:
         self,
         *,
         console: Console | None = None,
-        log_every: int = 1,
+        log_every: int | None = None,
         recent_generations: int = 5,
         recent_messages: int = 5,
     ) -> None:
-        if log_every < 1:
+        if log_every is not None and log_every < 1:
             raise ValueError(f"log_every must be >= 1, got {log_every}")
         self._console: Console = console if console is not None else Console()
-        self._log_every: int = int(log_every)
+        # ``None`` means "auto-scale at on_run_start"; a concrete int is the
+        # user's override and we lock it in immediately. The flag is what
+        # ``on_run_start`` consults — once an explicit value is set, the
+        # auto-scale path is permanently off for this instance.
+        self._auto_log_every: bool = log_every is None
+        self._log_every: int = 1 if log_every is None else int(log_every)
         # Each row is (gen_idx, best_fitness, mean_fitness, best_so_far).
         # The deque maxlen pins visible history without unbounded growth.
         self._generations: deque[tuple[int, float, float, float]] = deque(maxlen=recent_generations)
@@ -147,6 +156,14 @@ class RichEvosaxUI:
         self._population_size = int(population_size)
         self._final_fitness = None
         self._run_active = True
+        # Auto-scale ``log_every`` so the recent-generation table grows to
+        # exactly five rows over the run rather than constantly overwriting a
+        # sliding window. ``recent_generations`` is the deque cap (default 5);
+        # spacing log_every at ``num_generations // 5`` makes the deque fill
+        # exactly once across the whole run. An explicit log_every passed at
+        # construction time disables this and is honoured verbatim.
+        if self._auto_log_every:
+            self._log_every = max(1, self._num_generations // 5)
         # Reset per-generation / compile / message state so a reused instance
         # does not bleed prior-run rows into the new run.
         self._generations.clear()
