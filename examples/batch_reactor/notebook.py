@@ -55,19 +55,10 @@ def _intro(mo):
        (residual frozen at zero), the MLP weights in phase 2
        (parametric frozen at the phase-1 endpoint).
 
-    The hidden truth is
-
-    $$
-    k(T, \mathrm{pH}) = k_{\mathrm{sat}}(\mathrm{pH}) \cdot
-    \exp\!\Big(-\frac{E_a}{R}\Big(\frac{1}{T_K} - \frac{1}{T_{\mathrm{ref}}}\Big)\Big)
-    $$
-
-    where $k_{\mathrm{sat}}(\mathrm{pH})$ is a sigmoidal saturation curve
-    (taken from the slides accompanying the original presentation), and
-    the Arrhenius factor is centred at $T_{\mathrm{ref}} = 298.15\,\mathrm{K}$.
-    The dynamics are first-order: $dC_A/dt = -k\,C_A$, so each experiment
-    is a single exponential decay whose rate constant depends on its
-    fixed $(T,\mathrm{pH})$ pair.
+    The hidden truth is a centred-Arrhenius temperature law multiplied
+    by a sigmoidal pH-saturation factor — defined precisely in the
+    *True model* section below — and the predictor never sees that
+    factor directly; it only sees noisy concentration trajectories.
 
     A note on framework conventions used throughout. The trainable
     component of any model in `hybridmodels` is a *pytree of
@@ -146,28 +137,42 @@ def _imports():
 @app.cell(hide_code=True)
 def _truth_md(mo):
     mo.md(r"""
-    ## The hidden truth
+    ## True model
 
-    The data-generating model is composed of two factors. The
-    pH-dependent prefactor is a Hill-type saturation curve
+    The reactor runs a single first-order reaction $A \to B$ in a closed
+    batch at constant volume. The mass balance is
 
     $$
-    k_{\mathrm{sat}}(\mathrm{pH}) = b + \frac{a}{1 + (\mathrm{pH} / \mathrm{pH}_{50})^{n}}
+    \frac{dC_A}{dt} = -k(T,\mathrm{pH})\,C_A,
+    \qquad
+    \frac{dC_B}{dt} = +k(T,\mathrm{pH})\,C_A,
     $$
 
-    with baseline $b = 0.14$, amplitude $a = 1.05$, half-saturation
-    pH $\mathrm{pH}_{50} = 5.85$, and Hill coefficient $n = 5$. This
-    expression is taken verbatim from the saturation curve in the
-    accompanying slides; it produces a smooth roll-off from a maximum
-    rate near $\mathrm{pH} = 4$ to a plateau near $\mathrm{pH} = 8$.
+    with $C_A(0) = C_{A,0}$ and $C_B(0) = 0$. Mass conservation gives
+    $C_A(t) + C_B(t) = C_{A,0}$ for all $t$, so observing $C_A$ alone is
+    sufficient and the closed-form solution is a pure exponential decay
+    $C_A(t) = C_{A,0}\,e^{-k(T,\mathrm{pH})\,t}$.
 
-    The Arrhenius factor is centred at $T_{\mathrm{ref}} = 298.15\,\mathrm{K}$
-    so that $k(T_{\mathrm{ref}}, \mathrm{pH}) = k_{\mathrm{sat}}(\mathrm{pH})$
-    exactly. The activation energy $E_a^{\mathrm{true}} = 30\,\mathrm{kJ/mol}$
-    gives a roughly two-fold rate change per ten Kelvin around $T_{\mathrm{ref}}$,
-    which is mild enough to let CMA-ES locate the basin from a wide LHS
-    prior but strong enough to be visibly distinct from a flat-rate
-    model in the post-fit plots.
+    The hidden rate constant factorises as Arrhenius in temperature
+    times a Hill-type saturation in pH:
+
+    $$
+    k(T, \mathrm{pH}) = k_{\mathrm{sat}}(\mathrm{pH}) \cdot
+    \exp\!\Big(-\frac{E_a}{R}\Big(\frac{1}{T_K} - \frac{1}{T_{\mathrm{ref}}}\Big)\Big),
+    \qquad
+    k_{\mathrm{sat}}(\mathrm{pH}) = b + \frac{a}{1 + (\mathrm{pH}/\mathrm{pH}_{50})^{n}}.
+    $$
+
+    Numerical values: baseline $b = 0.14$, amplitude $a = 1.05$,
+    half-saturation $\mathrm{pH}_{50} = 5.85$, Hill coefficient $n = 5$,
+    activation energy $E_a^{\mathrm{true}} = 30\,\mathrm{kJ/mol}$, and
+    centring temperature $T_{\mathrm{ref}} = 298.15\,\mathrm{K}$. The
+    Arrhenius factor is centred so that
+    $k(T_{\mathrm{ref}}, \mathrm{pH}) = k_{\mathrm{sat}}(\mathrm{pH})$
+    exactly. Together this gives a smooth roll-off from a maximum rate
+    near $\mathrm{pH} = 4$ to a plateau near $\mathrm{pH} = 8$, with
+    roughly a two-fold rate change per ten Kelvin around
+    $T_{\mathrm{ref}}$.
 
     ```python
     T_REF = 298.15        # K (centring temperature)
@@ -201,7 +206,7 @@ def _truth(jnp):
     K_SAT_HILL = 5.0
 
     def _k_sat_from_ph(pH):
-        """Slides' saturation curve. Hidden truth for the pH dependence."""
+        """Sigmoidal saturation curve. Hidden truth for the pH dependence."""
         pH_arr = jnp.asarray(pH)
         return K_SAT_BASELINE + K_SAT_AMPLITUDE / (
             1.0 + jnp.maximum(pH_arr / K_SAT_PH50, 0.0) ** K_SAT_HILL
@@ -222,22 +227,73 @@ def _truth(jnp):
 
 
 @app.cell(hide_code=True)
+def _proposed_md(mo):
+    mo.md(r"""
+    ## Proposed mechanistic model
+
+    The proposed model integrates the same batch reactor mass balance,
+
+    $$
+    \frac{dC_A}{dt} = -\hat{k}(T,\mathrm{pH},C_{A,0})\,C_A,
+    \qquad C_A(0) = C_{A,0},
+    $$
+
+    but the rate constant $\hat{k}$ is now a hybrid of a deliberately
+    simple parametric trunk and a small neural residual, combined
+    log-additively:
+
+    $$
+    \log_{10}\hat{k}(T,\mathrm{pH},C_{A,0})
+    \;=\;
+    \underbrace{\log_{10} k_{\mathrm{param}}(T)}_{\text{parametric trunk}}
+    \;+\;
+    \underbrace{\Delta\log_{10}(T,\mathrm{pH},C_{A,0})}_{\text{residual MLP}}.
+    $$
+
+    The parametric trunk is a centred Arrhenius law in temperature only,
+
+    $$
+    \log_{10} k_{\mathrm{param}}(T)
+    = \frac{1}{\ln 10}\Big(
+        \log k_{\mathrm{ref}} - \frac{E_a}{R}\Big(\frac{1}{T_K} - \frac{1}{T_{\mathrm{ref}}}\Big)
+    \Big),
+    $$
+
+    with two trainable scalars $(\log k_{\mathrm{ref}},\,E_a)$ and
+    *no pH input*. By construction it is pH-blind: at fixed $T$ it
+    predicts the same rate regardless of $\mathrm{pH}$, so it cannot
+    represent the saturation factor at all. The residual
+    $\Delta\log_{10}$ is a 16-neuron one-hidden-layer MLP that takes
+    $(T,\mathrm{pH},C_{A,0})$ and is responsible for whatever the trunk
+    cannot represent — in this case, the hidden pH dependence.
+    $C_{A,0}$ is fed in deliberately as a *red-herring covariate*:
+    first-order kinetics depend only on $T$ and $\mathrm{pH}$, so a
+    well-trained residual should learn to give it negligible influence.
+
+    The two-phase fit nails the temperature dependence first
+    (phase 1, evosax/CMA-ES on the two-scalar trunk) and then learns
+    the pH residual on top of a frozen trunk
+    (phase 2, optax/Adam on the MLP weights).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
 def _doe_md(mo):
     mo.md(r"""
     ## Experimental design
 
-    Nine training experiments are produced by Latin hypercube sampling
-    over the box $T \in [15, 35]\,°\mathrm{C}$,
-    $\mathrm{pH} \in [4.5, 7.5]$, and
-    $C_{A,0} \in [0.75, 1.5]$. LHS gives near-uniform marginal
-    coverage in all three axes from only nine points, which is what
-    lets the residual MLP interpolate cleanly between the sampled
-    operating points. Two further experiments are placed off the LHS
-    grid as a held-out validation set at
-    $(T,\mathrm{pH},C_{A,0}) = (20\,°\mathrm{C}, 5.3, 0.85)$ and
-    $(30\,°\mathrm{C}, 6.8, 1.30)$. They sit near the saturation knee
-    at $\mathrm{pH}_{50} = 5.85$, the region in which the parametric
-    trunk's pH-blindness is most visibly wrong.
+    Eleven experiments are produced by Latin hypercube sampling over
+    the box $T \in [15, 35]\,°\mathrm{C}$,
+    $\mathrm{pH} \in [4.5, 7.5]$, and $C_{A,0} \in [0.75, 1.5]$. LHS
+    gives near-uniform marginal coverage in all three axes from a
+    small number of points, which is what lets the residual MLP
+    interpolate cleanly between the sampled operating points. There
+    is no hand-placed train/validation split — generalisation is
+    instead verified by *leave-one-out cross-validation* further down,
+    in which the entire two-phase pipeline is retrained eleven times,
+    each time holding out a single experiment as the validation
+    target.
 
     The initial concentration $C_{A,0}$ is treated as a *covariate*
     that the residual MLP receives as one of its three named inputs.
@@ -254,23 +310,20 @@ def _doe_md(mo):
     $A \to B$, so observing $C_B$ would add no information.
 
     Heteroscedastic Gaussian noise with $\sigma = 0.03 \cdot
-    \max(|C_A|, 0.02)$ is added to each observation, mirroring the
-    slides' noise model. The variance is recorded on the
-    `ChannelObs` so the framework's MLE-style losses could use it
-    later if desired.
+    \max(|C_A|, 0.02)$ is added to each observation. The variance is
+    recorded on the `ChannelObs` so the framework's MLE-style losses
+    could use it later if desired.
 
     ```python
     # 3-D LHS over (T, pH, Ca0). Ca0 is a covariate the truth doesn't depend on
     # (first-order kinetics); the residual MLP must learn to ignore it.
     sampler = qmc.LatinHypercube(d=3, seed=DOE_SEED)
-    unit = sampler.random(n=N_TRAIN_EXPERIMENTS)              # [9, 3] in [0, 1]
+    unit = sampler.random(n=N_EXPERIMENTS)                    # [11, 3] in [0, 1]
     lo = np.array([T_C_RANGE[0], PH_RANGE[0], CA0_RANGE[0]])
     hi = np.array([T_C_RANGE[1], PH_RANGE[1], CA0_RANGE[1]])
-    train_design = [
+    lhs_design = [
         (float(t), float(ph), float(ca0)) for t, ph, ca0 in lo + (hi - lo) * unit
     ]
-
-    VALIDATION_POINTS = ((20.0, 5.3, 0.85), (30.0, 6.8, 1.30))   # held-out
 
     def add_heteroscedastic_noise(values, key):
         scale = 0.03 * jnp.maximum(jnp.abs(values), 0.02)
@@ -285,12 +338,7 @@ def _doe(jnp, jr, np, qmc):
     T_C_RANGE = (15.0, 35.0)
     PH_RANGE = (4.5, 7.5)
     CA0_RANGE = (0.75, 1.5)
-    N_TRAIN_EXPERIMENTS = 9
-    # Validation samples extend the off-grid (T, pH) points with an off-grid Ca0.
-    VALIDATION_POINTS = (
-        (20.0, 5.3, 0.85),
-        (30.0, 6.8, 1.30),
-    )
+    N_EXPERIMENTS = 11
 
     T_MAX = 5.0
     N_TIMESTEPS = 12
@@ -304,27 +352,24 @@ def _doe(jnp, jr, np, qmc):
     # depend only on T and pH — so it acts as a "red-herring" covariate the
     # residual MLP must learn to ignore.
     sampler = qmc.LatinHypercube(d=3, seed=DOE_SEED)
-    unit = sampler.random(n=N_TRAIN_EXPERIMENTS)
+    unit = sampler.random(n=N_EXPERIMENTS)
     lo = np.array([T_C_RANGE[0], PH_RANGE[0], CA0_RANGE[0]])
     hi = np.array([T_C_RANGE[1], PH_RANGE[1], CA0_RANGE[1]])
-    train_design = [(float(t), float(ph), float(ca0)) for t, ph, ca0 in lo + (hi - lo) * unit]
+    lhs_design = [(float(t), float(ph), float(ca0)) for t, ph, ca0 in lo + (hi - lo) * unit]
 
-    print("LHS training samples:")
-    for _i, (_T, _ph, _ca0) in enumerate(train_design):
-        print(f"  [{_i}] T = {_T:5.2f} °C, pH = {_ph:.3f}, Ca0 = {_ca0:.3f}")
-    print("Validation samples (off-grid):")
-    for _i, (_T, _ph, _ca0) in enumerate(VALIDATION_POINTS):
-        print(f"  [{_i}] T = {_T:5.2f} °C, pH = {_ph:.3f}, Ca0 = {_ca0:.3f}")
+    print(f"LHS samples ({N_EXPERIMENTS}):")
+    for _i, (_T, _ph, _ca0) in enumerate(lhs_design):
+        print(f"  [{_i:2d}] T = {_T:5.2f} °C, pH = {_ph:.3f}, Ca0 = {_ca0:.3f}")
 
     noise_root = jr.PRNGKey(NOISE_SEED)
     ts_global = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
     return (
+        N_EXPERIMENTS,
         NOISE_FLOOR,
         NOISE_REL,
         T_MAX,
-        VALIDATION_POINTS,
+        lhs_design,
         noise_root,
-        train_design,
         ts_global,
     )
 
@@ -391,12 +436,12 @@ def _experiment_md(mo):
         },
         channels={"Ca": ChannelObs(ts=ts, values=noisy, variance=sigma**2)},
         y0_fn=y0_fn,
-        exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}_Ca0{ca0:.2f}",
+        exp_id=f"exp_{i:02d}_T{T_C:.1f}_pH{pH:.2f}_Ca0{ca0:.2f}",
     )
 
     # Stack experiments into buckets by len(union_ts); compute masks.
-    train_dataset = make_dataset(
-        train_experiments,
+    dataset = make_dataset(
+        experiments,
         state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
@@ -431,13 +476,12 @@ def _build_experiments(
     Experiment,
     NOISE_FLOOR,
     NOISE_REL,
-    VALIDATION_POINTS,
     add_heteroscedastic_noise,
     jnp,
     jr,
+    lhs_design,
     make_experiment,
     noise_root,
-    train_design,
     true_ca_trajectory,
     ts_global,
     y0_fn,
@@ -458,66 +502,42 @@ def _build_experiments(
             exp_id=exp_id,
         )
 
-    train_experiments: list[Experiment] = []
-    for _i, (_T, _ph, _ca0) in enumerate(train_design):
+    experiments: list[Experiment] = []
+    for _i, (_T, _ph, _ca0) in enumerate(lhs_design):
         _k = jr.fold_in(noise_root, _i)
-        train_experiments.append(
+        experiments.append(
             _build_one(
                 _T,
                 _ph,
                 _ca0,
                 _k,
-                f"train_{_i:02d}_T{_T:.1f}_pH{_ph:.2f}_Ca0{_ca0:.2f}",
+                f"exp_{_i:02d}_T{_T:.1f}_pH{_ph:.2f}_Ca0{_ca0:.2f}",
             )
         )
 
-    val_experiments: list[Experiment] = []
-    for _j, (_T, _ph, _ca0) in enumerate(VALIDATION_POINTS):
-        _k = jr.fold_in(noise_root, 1000 + _j)
-        val_experiments.append(
-            _build_one(
-                _T,
-                _ph,
-                _ca0,
-                _k,
-                f"val_{_j:02d}_T{_T:.1f}_pH{_ph:.2f}_Ca0{_ca0:.2f}",
-            )
-        )
-
-    print(
-        f"built {len(train_experiments)} training experiments + {len(val_experiments)} validation"
-    )
-    return train_experiments, val_experiments
+    print(f"built {len(experiments)} experiments (LHS over T, pH, Ca0)")
+    return (experiments,)
 
 
 @app.cell
 def _build_dataset(
     OUTPUT_CHANNELS,
+    experiments: "list[Experiment]",
     make_dataset,
     state_to_output,
-    train_experiments: "list[Experiment]",
-    val_experiments: "list[Experiment]",
 ):
-    train_dataset = make_dataset(
-        train_experiments,
+    dataset = make_dataset(
+        experiments,
         state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
-    val_dataset = make_dataset(
-        val_experiments,
-        state_to_output=state_to_output,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    print(f"train dataset: {len(train_dataset.bucket_payloads)} bucket(s)")
-    for _i, _bp in enumerate(train_dataset.bucket_payloads):
+    print(f"dataset: {len(dataset.bucket_payloads)} bucket(s)")
+    for _i, _bp in enumerate(dataset.bucket_payloads):
         print(
             f"  bucket {_i}: ts={tuple(_bp.ts.shape)}, "
             f"y_observed={tuple(_bp.y_observed.shape)}, n_obs={int(_bp.n_obs)}"
         )
-    print(f"val dataset:   {len(val_dataset.bucket_payloads)} bucket(s)")
-    for _i, _bp in enumerate(val_dataset.bucket_payloads):
-        print(f"  bucket {_i}: ts={tuple(_bp.ts.shape)}, n_obs={int(_bp.n_obs)}")
-    return train_dataset, val_dataset
+    return (dataset,)
 
 
 @app.cell(hide_code=True)
@@ -525,55 +545,37 @@ def _raw_data_md(mo):
     mo.md(r"""
     ### Raw data
 
-    Concentration trajectories for all eleven experiments. Training
-    points are coloured by pH; validation points are drawn as
-    triangles. The dispersion at any fixed time reflects the rate
-    spread across the $(T, \mathrm{pH})$ design — at high pH the
-    saturation curve flattens and the rate is small (slow decay),
-    while at low pH and high temperature the decay is fast.
+    Concentration trajectories for all eleven experiments, coloured
+    by pH. The dispersion at any fixed time reflects the rate spread
+    across the $(T, \mathrm{pH})$ design — at high pH the saturation
+    curve flattens and the rate is small (slow decay), while at low
+    pH and high temperature the decay is fast.
     """)
     return
 
 
 @app.cell
 def _raw_data_plot(
+    experiments: "list[Experiment]",
     plt,
-    train_experiments: "list[Experiment]",
-    val_experiments: "list[Experiment]",
 ):
     fig_raw, ax_raw = plt.subplots(figsize=(7.5, 4.5))
-    cmap_train = plt.get_cmap("viridis")
-    _ph_min = min(float(e.covariates["pH"]) for e in train_experiments + val_experiments)
-    _ph_max = max(float(e.covariates["pH"]) for e in train_experiments + val_experiments)
+    cmap = plt.get_cmap("viridis")
+    _ph_min = min(float(e.covariates["pH"]) for e in experiments)
+    _ph_max = max(float(e.covariates["pH"]) for e in experiments)
 
     def _color(ph):
-        return cmap_train((ph - _ph_min) / (_ph_max - _ph_min + 1e-12))
+        return cmap((ph - _ph_min) / (_ph_max - _ph_min + 1e-12))
 
-    for _exp in train_experiments:
+    for _exp in experiments:
         _ts = _exp.channels["Ca"].ts
         _ca = _exp.channels["Ca"].values
         _ph = float(_exp.covariates["pH"])
         ax_raw.plot(_ts, _ca, "o-", color=_color(_ph), markersize=4, linewidth=1.0, alpha=0.85)
-    for _exp in val_experiments:
-        _ts = _exp.channels["Ca"].ts
-        _ca = _exp.channels["Ca"].values
-        _ph = float(_exp.covariates["pH"])
-        ax_raw.plot(
-            _ts,
-            _ca,
-            "^--",
-            color=_color(_ph),
-            markersize=7,
-            linewidth=1.0,
-            markeredgecolor="black",
-            markeredgewidth=0.5,
-        )
     ax_raw.set_xlabel("t")
     ax_raw.set_ylabel("Ca")
-    ax_raw.set_title(
-        "Observed concentrations across the LHS design (circles) + validation (triangles)"
-    )
-    sm = plt.cm.ScalarMappable(cmap=cmap_train, norm=plt.Normalize(vmin=_ph_min, vmax=_ph_max))
+    ax_raw.set_title("Observed concentrations across the LHS design")
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=_ph_min, vmax=_ph_max))
     plt.colorbar(sm, ax=ax_raw, label="pH")
     ax_raw.grid(alpha=0.3)
     fig_raw.tight_layout()
@@ -902,6 +904,12 @@ def _phase1_md(mo):
     mo.md(r"""
     # Phase 1: evosax fits the parametric trunk
 
+    The headline pipeline trains once on all eleven experiments — the
+    purpose of that run is to expose the loss curve, the recovered
+    Arrhenius parameters, and the post-fit function shape. Out-of-sample
+    generalisation is verified separately by the leave-one-out
+    cross-validation section further down.
+
     The trainability mask for phase 1 marks every leaf as trainable
     by default (`trainable_mask`), then freezes any leaf inside a
     `BoundedPredictor` (which removes the residual MLP from the
@@ -942,7 +950,7 @@ def _phase1_md(mo):
         verbose=False,
     )
     history_p1, predictors_p1 = train_with_evosax(
-        predictors_init, train_dataset, config_p1,
+        predictors_init, dataset, config_p1,
         simulate_fn=simulate_fn, solver=solver,
         trainable=mask_p1, key=jr.PRNGKey(0),
     )
@@ -987,12 +995,12 @@ def _phase1_mask(
 @app.cell
 def _phase1_train(
     EvosaxTrainingConfig,
+    dataset,
     jr,
     mask_p1,
     predictors_init,
     simulate_fn,
     solver,
-    train_dataset,
     train_with_evosax,
 ):
     config_p1 = EvosaxTrainingConfig(
@@ -1007,7 +1015,7 @@ def _phase1_train(
     )
     history_p1, predictors_p1 = train_with_evosax(
         predictors_init,
-        train_dataset,
+        dataset,
         config_p1,
         simulate_fn=simulate_fn,
         solver=solver,
@@ -1023,26 +1031,19 @@ def _phase1_train(
 
 @app.cell
 def _phase1_predict(
+    dataset,
     predict_dataset,
     predictors_p1,
     simulate_fn,
     solver,
-    train_dataset,
-    val_dataset,
 ):
-    predictions_p1_train = predict_dataset(
+    predictions_p1 = predict_dataset(
         predictors_p1,
-        train_dataset,
+        dataset,
         simulate_fn=simulate_fn,
         solver=solver,
     )
-    predictions_p1_val = predict_dataset(
-        predictors_p1,
-        val_dataset,
-        simulate_fn=simulate_fn,
-        solver=solver,
-    )
-    return predictions_p1_train, predictions_p1_val
+    return (predictions_p1,)
 
 
 @app.cell
@@ -1078,52 +1079,44 @@ def _gather_diag(np):
 
 @app.cell
 def _phase1_diag(
+    dataset,
     gather_diagnostics,
-    predictions_p1_train,
-    predictions_p1_val,
-    train_dataset,
-    val_dataset,
+    predictions_p1,
 ):
-    diag_p1_train = gather_diagnostics(predictions_p1_train, train_dataset)
-    diag_p1_val = gather_diagnostics(predictions_p1_val, val_dataset)
-    print(f"  {'channel':<6} {'split':<5} {'n':>4} {'MSE':>12} {'RMSE':>10} {'MAE':>10} {'R^2':>8}")
-    for _name in train_dataset.output_channel_names:
-        for _label, _diag in (("train", diag_p1_train), ("val", diag_p1_val)):
-            _s = _diag[_name]
-            _r2 = "nan" if _s["r2"] != _s["r2"] else f"{_s['r2']:.4f}"
-            print(
-                f"  {_name:<6} {_label:<5} {_s['n']:>4d} "
-                f"{_s['mse']:>12.4e} {_s['rmse']:>10.4e} {_s['mae']:>10.4e} {_r2:>8}"
-            )
-    return diag_p1_train, diag_p1_val
-
-
-@app.cell(hide_code=True)
-def _phase1_traj_md(mo):
-    mo.md(r"""
-    ### Phase 1 trajectories
-
-    A 3×3 grid showing each training experiment with three
-    overlays: the noiseless truth (solid black), the noisy
-    observations (cyan markers), and the parametric prediction
-    (dashed red). The pH-blindness shows up wherever two panels at
-    similar $T$ but different pH have similar dashed curves but
-    different observation series — the trunk gives any pair of
-    experiments at the same temperature the same predicted rate, but
-    the truth fans out by pH.
-    """)
-    return
+    # In-sample fit diagnostics for the headline run. Out-of-sample
+    # generalisation is reported in the LOO-CV section below.
+    diag_p1 = gather_diagnostics(predictions_p1, dataset)
+    print(f"  {'channel':<6} {'n':>4} {'MSE':>12} {'RMSE':>10} {'MAE':>10} {'R^2':>8}")
+    for _name in dataset.output_channel_names:
+        _s = diag_p1[_name]
+        _r2 = "nan" if _s["r2"] != _s["r2"] else f"{_s['r2']:.4f}"
+        print(
+            f"  {_name:<6} {_s['n']:>4d} "
+            f"{_s['mse']:>12.4e} {_s['rmse']:>10.4e} {_s['mae']:>10.4e} {_r2:>8}"
+        )
+    return (diag_p1,)
 
 
 @app.cell
 def _trajectory_grid_helper(T_MAX, jnp, np, plt, true_ca_trajectory):
-    def trajectory_grid_plot(experiments, predictions_per_exp, title):
+    def trajectory_grid_plot(experiments, predictions_per_exp, title, predicted_label="predicted"):
+        """N-panel grid; each panel shows truth, observations, and the prediction
+        for one experiment. Used for both the in-sample headline run and the LOO-CV
+        out-of-fold reveal — caller decides what to pass.
+        """
         n = len(experiments)
-        if n != 9:
-            raise ValueError(f"expected 9 experiments, got {n}")
-        fig, axes = plt.subplots(3, 3, figsize=(11, 9), sharex=True, sharey=True)
+        if n != len(predictions_per_exp):
+            raise ValueError(
+                f"experiments ({n}) and predictions ({len(predictions_per_exp)}) length mismatch"
+            )
+        ncols = 3
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=(11, 3.0 * nrows), sharex=True, sharey=True, squeeze=False
+        )
         ts_dense = np.linspace(0.0, T_MAX, 200)
-        for _ax, _exp, _pred in zip(axes.flatten(), experiments, predictions_per_exp, strict=True):
+        flat_axes = axes.flatten()
+        for _ax, _exp, _pred in zip(flat_axes[:n], experiments, predictions_per_exp, strict=True):
             _T = float(_exp.covariates["temperature_C"])
             _ph = float(_exp.covariates["pH"])
             _ca0 = float(_exp.covariates["Ca0"])
@@ -1142,11 +1135,18 @@ def _trajectory_grid_helper(T_MAX, jnp, np, plt, true_ca_trajectory):
                 label="observed",
             )
             _ax.plot(
-                _ts_obs, _pred[:, 0], color="C3", linestyle="--", linewidth=1.4, label="predicted"
+                _ts_obs,
+                _pred[:, 0],
+                color="C3",
+                linestyle="--",
+                linewidth=1.4,
+                label=predicted_label,
             )
             _ax.set_title(f"T={_T:.1f}°C, pH={_ph:.2f}, Ca0={_ca0:.2f}", fontsize=9)
             _ax.set_ylim(-0.05, 1.6)
             _ax.grid(alpha=0.3)
+        for _ax in flat_axes[n:]:
+            _ax.set_visible(False)
         for _ax in axes[-1]:
             _ax.set_xlabel("t")
         for _ax in axes[:, 0]:
@@ -1163,111 +1163,13 @@ def _trajectory_grid_helper(T_MAX, jnp, np, plt, true_ca_trajectory):
 
 
 @app.cell
-def _phase1_traj_plot(
-    np,
-    predictions_p1_train,
-    train_experiments: "list[Experiment]",
-    trajectory_grid_plot,
-):
-    _per_exp = [np.asarray(predictions_p1_train[0][_i]) for _i in range(9)]
-    fig_traj_p1 = trajectory_grid_plot(
-        train_experiments,
-        _per_exp,
-        title="Phase 1 (evosax) — Arrhenius parametric only",
-    )
-    fig_traj_p1
-    return
-
-
-@app.cell(hide_code=True)
-def _phase1_parity_md(mo):
-    mo.md(r"""
-    ### Phase 1 parity
-
-    Predicted vs observed $C_A$ for both training and validation
-    sets. The training scatter is reasonable (the parametric does
-    capture the average decay rate at a given temperature) but the
-    spread around the diagonal is large because the parametric
-    cannot distinguish experiments that differ only in pH.
-    """)
-    return
-
-
-@app.cell
-def _parity_helper(np, plt):
-    def parity_overlay_plot(diag_train, diag_val, title):
-        _channels = list(diag_train.keys())
-        fig, axes = plt.subplots(
-            1, len(_channels), figsize=(4.5 * len(_channels), 4.2), squeeze=False
-        )
-        for _ax, _name in zip(axes.flatten(), _channels):
-            _st = diag_train[_name]
-            _sv = diag_val[_name]
-            _ax.scatter(_st["obs"], _st["pred"], s=24, alpha=0.75, color="C0", label="train")
-            _ax.scatter(
-                _sv["obs"],
-                _sv["pred"],
-                s=44,
-                alpha=0.85,
-                color="C3",
-                marker="^",
-                edgecolor="black",
-                linewidth=0.5,
-                label="val",
-            )
-            _all = np.concatenate([_st["obs"], _st["pred"], _sv["obs"], _sv["pred"]])
-            _lo, _hi = float(_all.min()), float(_all.max())
-            if _lo == _hi:
-                _pad = 1.0 if _lo == 0.0 else abs(_lo) * 0.1
-                _lo, _hi = _lo - _pad, _hi + _pad
-            _ax.plot([_lo, _hi], [_lo, _hi], color="black", linestyle="--", linewidth=0.8)
-            _r2t = "nan" if _st["r2"] != _st["r2"] else f"{_st['r2']:.3f}"
-            _r2v = "nan" if _sv["r2"] != _sv["r2"] else f"{_sv['r2']:.3f}"
-            _ax.set_title(f"{_name}\ntrain R²={_r2t} | val R²={_r2v}")
-            _ax.set_xlabel("observed")
-            _ax.set_ylabel("predicted")
-            _ax.legend(loc="best", fontsize=9)
-            _ax.grid(alpha=0.3)
-        fig.suptitle(title)
-        fig.tight_layout()
-        return fig
-
-    return (parity_overlay_plot,)
-
-
-@app.cell
-def _phase1_parity_plot(diag_p1_train, diag_p1_val, parity_overlay_plot):
-    fig_par_p1 = parity_overlay_plot(
-        diag_p1_train,
-        diag_p1_val,
-        title="Phase 1 parity — parametric Arrhenius only",
-    )
-    fig_par_p1
-    return
-
-
-@app.cell(hide_code=True)
-def _phase1_kreveal_md(mo):
-    mo.md(r"""
-    ### Phase 1 $\log_{10} k$ reveal
-
-    The headline diagnostic for the example. Each coloured curve
-    plots $\log_{10} k(\mathrm{pH})$ at a fixed temperature
-    (15 °C, 25 °C, 35 °C) — solid for the truth, dashed for the
-    parametric. The truth slopes downward in pH because of the
-    saturation curve; the parametric is *flat* in pH at every
-    temperature, by construction. The training and validation
-    sample points are overlaid at their actual $(\mathrm{pH}, \log_{10} k_{\mathrm{true}})$;
-    the vertical distance from each point to the dashed line at the
-    matching temperature is the parametric's residual error at that
-    sample.
-    """)
-    return
-
-
-@app.cell
 def _kreveal_helper(R_GAS, T_REF, jnp, k_true, np, plt):
-    def k_reveal_plot(predictors_p1, predictors_p2, train_experiments, val_experiments, title):
+    def k_reveal_plot(predictors_p1, predictors_p2, experiments, title):
+        """Plot log10 k(pH) at three fixed temperatures: truth (solid), the
+        parametric trunk's flat-in-pH prediction (dashed), and — if a hybrid
+        model is supplied — its log10 k curve (dotted). LHS sample points are
+        overlaid at their (pH, log10 k_true) location to anchor the reveal.
+        """
         # pH grid spanning slightly beyond the data box for visual context.
         pH_grid = jnp.linspace(4.0, 8.0, 200)
         T_C_lines = (15.0, 25.0, 35.0)
@@ -1331,33 +1233,19 @@ def _kreveal_helper(R_GAS, T_REF, jnp, k_true, np, plt):
                     label=("hybrid" if _T_C == T_C_lines[1] else None),
                 )
 
-        _train_T = np.array([float(_e.covariates["temperature_C"]) for _e in train_experiments])
-        _train_pH = np.array([float(_e.covariates["pH"]) for _e in train_experiments])
-        _train_log10k = np.log10(np.asarray(k_true(_train_T, _train_pH)))
-        _val_T = np.array([float(_e.covariates["temperature_C"]) for _e in val_experiments])
-        _val_pH = np.array([float(_e.covariates["pH"]) for _e in val_experiments])
-        _val_log10k = np.log10(np.asarray(k_true(_val_T, _val_pH)))
+        _exp_T = np.array([float(_e.covariates["temperature_C"]) for _e in experiments])
+        _exp_pH = np.array([float(_e.covariates["pH"]) for _e in experiments])
+        _exp_log10k = np.log10(np.asarray(k_true(_exp_T, _exp_pH)))
         ax.scatter(
-            _train_pH,
-            _train_log10k,
+            _exp_pH,
+            _exp_log10k,
             s=44,
             color="black",
             marker="o",
             edgecolor="white",
             linewidth=0.7,
             zorder=4,
-            label="LHS train (truth)",
-        )
-        ax.scatter(
-            _val_pH,
-            _val_log10k,
-            s=64,
-            color="black",
-            marker="^",
-            edgecolor="white",
-            linewidth=0.7,
-            zorder=4,
-            label="validation (truth)",
+            label="LHS samples (truth)",
         )
         ax.set_xlabel("pH")
         ax.set_ylabel("log10 k")
@@ -1368,24 +1256,6 @@ def _kreveal_helper(R_GAS, T_REF, jnp, k_true, np, plt):
         return fig
 
     return (k_reveal_plot,)
-
-
-@app.cell
-def _phase1_kreveal_plot(
-    k_reveal_plot,
-    predictors_p1,
-    train_experiments: "list[Experiment]",
-    val_experiments: "list[Experiment]",
-):
-    fig_kreveal_p1 = k_reveal_plot(
-        predictors_p1,
-        None,
-        train_experiments,
-        val_experiments,
-        title="log10 k(pH) — truth vs parametric (Phase 1)",
-    )
-    fig_kreveal_p1
-    return
 
 
 @app.cell(hide_code=True)
@@ -1408,7 +1278,7 @@ def _phase2_md(mo):
 
     Optax uses AdamW with learning rate $3 \times 10^{-3}$ for 200
     steps. Training one step here means one full pass over every
-    bucket (there is only one bucket of size 9), accumulating
+    bucket (there is only one bucket of size 11), accumulating
     gradients and applying a single optimiser update.
 
     ```python
@@ -1428,7 +1298,7 @@ def _phase2_md(mo):
         verbose=False,
     )
     history_p2, predictors_p2 = train_with_optax(
-        predictors_p1, train_dataset, config_p2,
+        predictors_p1, dataset, config_p2,
         simulate_fn=simulate_fn, solver=solver,
         trainable=mask_p2, key=jr.PRNGKey(1),
     )
@@ -1458,12 +1328,12 @@ def _phase2_mask(
 @app.cell
 def _phase2_train(
     OptaxTrainingConfig,
+    dataset,
     jr,
     mask_p2,
     predictors_p1,
     simulate_fn,
     solver,
-    train_dataset,
     train_with_optax,
 ):
     config_p2 = OptaxTrainingConfig(
@@ -1477,7 +1347,7 @@ def _phase2_train(
     )
     history_p2, predictors_p2 = train_with_optax(
         predictors_p1,
-        train_dataset,
+        dataset,
         config_p2,
         simulate_fn=simulate_fn,
         solver=solver,
@@ -1490,136 +1360,72 @@ def _phase2_train(
 
 @app.cell
 def _phase2_predict(
+    dataset,
     predict_dataset,
     predictors_p2,
     simulate_fn,
     solver,
-    train_dataset,
-    val_dataset,
 ):
-    predictions_p2_train = predict_dataset(
+    predictions_p2 = predict_dataset(
         predictors_p2,
-        train_dataset,
+        dataset,
         simulate_fn=simulate_fn,
         solver=solver,
     )
-    predictions_p2_val = predict_dataset(
-        predictors_p2,
-        val_dataset,
-        simulate_fn=simulate_fn,
-        solver=solver,
-    )
-    return predictions_p2_train, predictions_p2_val
+    return (predictions_p2,)
 
 
 @app.cell
 def _phase2_diag(
+    dataset,
     gather_diagnostics,
-    predictions_p2_train,
-    predictions_p2_val,
-    train_dataset,
-    val_dataset,
+    predictions_p2,
 ):
-    diag_p2_train = gather_diagnostics(predictions_p2_train, train_dataset)
-    diag_p2_val = gather_diagnostics(predictions_p2_val, val_dataset)
-    print(f"  {'channel':<6} {'split':<5} {'n':>4} {'MSE':>12} {'RMSE':>10} {'MAE':>10} {'R^2':>8}")
-    for _name in train_dataset.output_channel_names:
-        for _label, _diag in (("train", diag_p2_train), ("val", diag_p2_val)):
-            _s = _diag[_name]
-            _r2 = "nan" if _s["r2"] != _s["r2"] else f"{_s['r2']:.4f}"
-            print(
-                f"  {_name:<6} {_label:<5} {_s['n']:>4d} "
-                f"{_s['mse']:>12.4e} {_s['rmse']:>10.4e} {_s['mae']:>10.4e} {_r2:>8}"
-            )
-    return diag_p2_train, diag_p2_val
-
-
-@app.cell(hide_code=True)
-def _phase2_traj_md(mo):
-    mo.md(r"""
-    ### Phase 2 trajectories
-
-    The same nine panels, now with the hybrid prediction
-    overlaid. The dashed curves are tight to truth at every
-    $(T, \mathrm{pH})$ pair — the residual MLP has picked up the
-    pH dependence the parametric trunk could not represent. Note
-    that the parametric latent is *unchanged* between the two
-    plots; all the improvement comes from the residual.
-    """)
-    return
-
-
-@app.cell
-def _phase2_traj_plot(
-    np,
-    predictions_p2_train,
-    train_experiments: "list[Experiment]",
-    trajectory_grid_plot,
-):
-    _per_exp = [np.asarray(predictions_p2_train[0][_i]) for _i in range(9)]
-    fig_traj_p2 = trajectory_grid_plot(
-        train_experiments,
-        _per_exp,
-        title="Phase 2 (optax) — Arrhenius + residual MLP",
-    )
-    fig_traj_p2
-    return
-
-
-@app.cell(hide_code=True)
-def _phase2_parity_md(mo):
-    mo.md(r"""
-    ### Phase 2 parity
-
-    The training and validation scatter both collapse onto the
-    diagonal. Because the validation set is held out (its $(T, \mathrm{pH})$
-    pairs sit between LHS samples and never enter the loss), the
-    validation $R^2$ is the more honest measure of generalisation.
-    """)
-    return
-
-
-@app.cell
-def _phase2_parity_plot(diag_p2_train, diag_p2_val, parity_overlay_plot):
-    fig_par_p2 = parity_overlay_plot(
-        diag_p2_train,
-        diag_p2_val,
-        title="Phase 2 parity — Arrhenius + residual MLP",
-    )
-    fig_par_p2
-    return
+    # In-sample fit diagnostics for the headline run. Out-of-sample
+    # generalisation is reported in the LOO-CV section below.
+    diag_p2 = gather_diagnostics(predictions_p2, dataset)
+    print(f"  {'channel':<6} {'n':>4} {'MSE':>12} {'RMSE':>10} {'MAE':>10} {'R^2':>8}")
+    for _name in dataset.output_channel_names:
+        _s = diag_p2[_name]
+        _r2 = "nan" if _s["r2"] != _s["r2"] else f"{_s['r2']:.4f}"
+        print(
+            f"  {_name:<6} {_s['n']:>4d} "
+            f"{_s['mse']:>12.4e} {_s['rmse']:>10.4e} {_s['mae']:>10.4e} {_r2:>8}"
+        )
+    return (diag_p2,)
 
 
 @app.cell(hide_code=True)
 def _phase2_kreveal_md(mo):
     mo.md(r"""
-    ### Phase 2 $\log_{10} k$ reveal
+    ### Post-fit $\log_{10} k$ reveal
 
-    The same axes as the Phase 1 reveal, with the hybrid
-    prediction now overlaid as a dotted curve at each
-    temperature. The hybrid (dotted) tracks the truth (solid)
-    closely, while the parametric (dashed, carried over from
-    Phase 1 unchanged) stays flat. The residual MLP has recovered
+    The headline diagnostic for the hybrid pipeline. Each coloured
+    curve plots $\log_{10} k(\mathrm{pH})$ at a fixed temperature
+    (15 °C, 25 °C, 35 °C): solid for the hidden truth, dashed for
+    the parametric trunk's prediction (flat in pH by construction),
+    and dotted for the full hybrid (parametric + residual MLP). The
+    hybrid (dotted) tracks the truth (solid) closely, while the
+    parametric (dashed) stays flat. The residual MLP has recovered
     the saturation shape of the hidden $k_{\mathrm{sat}}(\mathrm{pH})$
     curve from concentration data alone, without ever seeing the
-    rate constant directly.
+    rate constant directly. The black markers show each LHS sample
+    at its true $(\mathrm{pH}, \log_{10} k_{\mathrm{true}})$.
     """)
     return
 
 
 @app.cell
 def _phase2_kreveal_plot(
+    experiments: "list[Experiment]",
     k_reveal_plot,
     predictors_p1,
     predictors_p2,
-    train_experiments: "list[Experiment]",
-    val_experiments: "list[Experiment]",
 ):
     fig_kreveal_p2 = k_reveal_plot(
         predictors_p1,
         predictors_p2,
-        train_experiments,
-        val_experiments,
+        experiments,
         title="log10 k(pH) — truth vs parametric vs hybrid (Phase 2)",
     )
     fig_kreveal_p2
@@ -1675,6 +1481,230 @@ def _loss_curve(history_p1, history_p2, np, plt):
 
 
 @app.cell(hide_code=True)
+def _loocv_md(mo):
+    mo.md(r"""
+    # Leave-one-out cross-validation
+
+    The headline run was trained on all eleven experiments. To verify
+    the hybrid model actually generalises, we now retrain the entire
+    two-phase pipeline eleven times — each time holding out a
+    different experiment and predicting it from the model fit on the
+    other ten. The aggregated out-of-fold predictions form the
+    validation set: every experiment is predicted exactly once by a
+    model that never saw it during training.
+
+    This is heavy — eleven full evosax + optax cycles, each with the
+    same population size and step budget as the headline run — but
+    the resulting OOF parity, trajectory grid, and per-fold loss
+    table are the most informative generalisation diagnostic this
+    small example can produce. The configs are identical to the
+    headline run; per-fold seeds are derived from the fold index so
+    folds remain reproducible across reruns.
+    """)
+    return
+
+
+@app.cell
+def _loocv_run(
+    EvosaxTrainingConfig,
+    OUTPUT_CHANNELS,
+    OptaxTrainingConfig,
+    experiments,
+    gather_diagnostics,
+    jr,
+    make_dataset,
+    mask_p1,
+    mask_p2,
+    np,
+    predict_dataset,
+    predictors_init,
+    simulate_fn,
+    solver,
+    state_to_output,
+    train_with_evosax,
+    train_with_optax,
+):
+    _cfg_p1 = EvosaxTrainingConfig(
+        algorithm="CMA_ES",
+        population_size=32,
+        num_generations=30,
+        init="lhs_box",
+        init_box_extent=2.0,
+        sigma_init=0.5,
+        loss="mse",
+        verbose=False,
+    )
+    _cfg_p2 = OptaxTrainingConfig(
+        steps=(200,),
+        lr=(3e-3,),
+        optimizer=("adamw",),
+        reset_optimiser_state=(False,),
+        length_schedule=(1.0,),
+        loss="mse",
+        verbose=False,
+    )
+
+    _n_folds = len(experiments)
+    fold_records: list[dict] = []
+    print(f"LOO-CV: training {_n_folds} folds (phase 1 evosax + phase 2 optax each)")
+
+    for _k in range(_n_folds):
+        _train_exps = [_e for _i, _e in enumerate(experiments) if _i != _k]
+        _train_ds = make_dataset(
+            _train_exps,
+            state_to_output=state_to_output,
+            output_channel_names=OUTPUT_CHANNELS,
+        )
+        _held_ds = make_dataset(
+            [experiments[_k]],
+            state_to_output=state_to_output,
+            output_channel_names=OUTPUT_CHANNELS,
+        )
+
+        # Phase 1 — refit the parametric trunk on the 10 in-fold experiments.
+        # mask_p1 is structural so it is reused across folds without rebuilding.
+        _hist_p1, _pred_p1 = train_with_evosax(
+            predictors_init,
+            _train_ds,
+            _cfg_p1,
+            simulate_fn=simulate_fn,
+            solver=solver,
+            trainable=mask_p1,
+            key=jr.PRNGKey(_k),
+        )
+        # Phase 2 — refit the residual MLP on the same 10 experiments, frozen trunk.
+        _hist_p2, _pred_p2 = train_with_optax(
+            _pred_p1,
+            _train_ds,
+            _cfg_p2,
+            simulate_fn=simulate_fn,
+            solver=solver,
+            trainable=mask_p2,
+            key=jr.PRNGKey(1000 + _k),
+        )
+
+        # Out-of-fold prediction: simulate the held-out experiment under the fold's predictors.
+        _oof_pred = predict_dataset(
+            _pred_p2,
+            _held_ds,
+            simulate_fn=simulate_fn,
+            solver=solver,
+        )
+        _diag = gather_diagnostics(_oof_pred, _held_ds)
+        _ch = next(iter(_diag))
+        _oof_traj = np.asarray(_oof_pred[0][0])  # [T, n_channels] — for the trajectory grid
+
+        _e = experiments[_k]
+        fold_records.append(
+            {
+                "k": _k,
+                "exp": _e,
+                "history_p1_final": float(_hist_p1[-1]),
+                "history_p2_final": float(_hist_p2[-1]),
+                "oof_obs": _diag[_ch]["obs"],
+                "oof_pred": _diag[_ch]["pred"],
+                "oof_traj": _oof_traj,
+                "oof_mse": _diag[_ch]["mse"],
+            }
+        )
+        print(
+            f"  fold {_k:2d}: T={float(_e.covariates['temperature_C']):5.2f}°C "
+            f"pH={float(_e.covariates['pH']):.3f} "
+            f"Ca0={float(_e.covariates['Ca0']):.3f} | "
+            f"p1 final={float(_hist_p1[-1]):.3e}, "
+            f"p2 final={float(_hist_p2[-1]):.3e}, "
+            f"OOF MSE={_diag[_ch]['mse']:.3e}"
+        )
+
+    _all_mse = np.array([_r["oof_mse"] for _r in fold_records])
+    print(
+        f"  aggregate: mean OOF MSE={float(_all_mse.mean()):.3e}, "
+        f"median={float(np.median(_all_mse)):.3e}, "
+        f"max={float(_all_mse.max()):.3e}"
+    )
+    return (fold_records,)
+
+
+@app.cell(hide_code=True)
+def _loocv_parity_md(mo):
+    mo.md(r"""
+    ### LOO-CV parity
+
+    Predicted vs observed $C_A$ for *every* observation across all
+    eleven folds, where each prediction comes from a model that
+    never saw the corresponding experiment during training. With
+    one bucket of twelve timestamps per fold, this is 132 OOF
+    points — a fair test of generalisation.
+    """)
+    return
+
+
+@app.cell
+def _loocv_parity_plot(fold_records, np, plt):
+    _obs_all = np.concatenate([_r["oof_obs"] for _r in fold_records])
+    _pred_all = np.concatenate([_r["oof_pred"] for _r in fold_records])
+    _resid = _pred_all - _obs_all
+    _mse = float(np.mean(_resid**2))
+    _ss_tot = float(np.sum((_obs_all - _obs_all.mean()) ** 2))
+    _r2 = 1.0 - float(np.sum(_resid**2)) / _ss_tot if _ss_tot > 0 else float("nan")
+
+    fig_oof_par, ax_oof_par = plt.subplots(figsize=(5.5, 5.0))
+    ax_oof_par.scatter(
+        _obs_all,
+        _pred_all,
+        s=24,
+        alpha=0.7,
+        color="C0",
+        label=f"OOF (n={len(_obs_all)})",
+    )
+    _lo = float(min(_obs_all.min(), _pred_all.min()))
+    _hi = float(max(_obs_all.max(), _pred_all.max()))
+    if _lo == _hi:
+        _pad = 0.1 if _lo == 0.0 else abs(_lo) * 0.1
+        _lo, _hi = _lo - _pad, _hi + _pad
+    ax_oof_par.plot([_lo, _hi], [_lo, _hi], color="black", linestyle="--", linewidth=0.8)
+    _r2_str = "nan" if _r2 != _r2 else f"{_r2:.4f}"
+    ax_oof_par.set_title(f"LOO-CV parity (Ca)\nOOF R²={_r2_str}, MSE={_mse:.3e}")
+    ax_oof_par.set_xlabel("observed")
+    ax_oof_par.set_ylabel("predicted (out-of-fold)")
+    ax_oof_par.legend(loc="best", fontsize=9)
+    ax_oof_par.grid(alpha=0.3)
+    fig_oof_par.tight_layout()
+    fig_oof_par
+    return
+
+
+@app.cell(hide_code=True)
+def _loocv_traj_md(mo):
+    mo.md(r"""
+    ### LOO-CV trajectories
+
+    One panel per fold: the held-out experiment's noisy observations
+    (cyan markers), the noiseless truth (solid black), and the model's
+    out-of-fold prediction (dashed red). The dashed curves should
+    track the truth at every $(T,\mathrm{pH},C_{A,0})$ — the fact
+    that they do, at points the model never trained on, is the
+    direct evidence that the residual MLP has learned the underlying
+    pH dependence rather than memorising the LHS samples.
+    """)
+    return
+
+
+@app.cell
+def _loocv_traj_plot(fold_records, trajectory_grid_plot):
+    _exps = [_r["exp"] for _r in fold_records]
+    _per_exp = [_r["oof_traj"] for _r in fold_records]
+    fig_oof_traj = trajectory_grid_plot(
+        _exps,
+        _per_exp,
+        title="LOO-CV out-of-fold trajectories — held-out experiment per panel",
+        predicted_label="OOF prediction",
+    )
+    fig_oof_traj
+    return
+
+
+@app.cell(hide_code=True)
 def _outro(mo):
     mo.md(r"""
     ## Take-aways
@@ -1703,6 +1733,12 @@ def _outro(mo):
        neither alone would do as well, and the framework lets the
        user write the composition explicitly without any
        polishing-from-config opaque magic.
+
+    Generalisation is verified by the leave-one-out
+    cross-validation section — the OOF parity tracks the diagonal
+    and every held-out experiment is predicted to within
+    observation-noise scale, including pH values the model never
+    trained on.
     """)
     return
 
