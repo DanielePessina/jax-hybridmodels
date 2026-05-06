@@ -169,20 +169,6 @@ def _truth_md(mo):
     near $\mathrm{pH} = 4$ to a plateau near $\mathrm{pH} = 8$, with
     roughly a two-fold rate change per ten Kelvin around
     $T_{\mathrm{ref}}$.
-
-    ```python
-    T_REF = 298.15        # K (centring temperature)
-    R_GAS = 8.314e-3      # kJ/(mol·K)
-    EA_TRUE = 30.0        # kJ/mol
-
-    def _k_sat_from_ph(pH):
-        return 0.14 + 1.05 / (1.0 + jnp.maximum(pH / 5.85, 0.0) ** 5.0)
-
-    def k_true(temperature_C, pH):
-        T_K = jnp.asarray(temperature_C) + 273.15
-        arrhenius = jnp.exp(-EA_TRUE / R_GAS * (1.0 / T_K - 1.0 / T_REF))
-        return _k_sat_from_ph(pH) * arrhenius
-    ```
     """)
     return
 
@@ -310,40 +296,6 @@ def _doe_md(mo):
     each observation; the per-observation variance is recorded on
     each `ChannelObs` so the framework's MLE-style losses could
     consume it later if desired.
-
-    ```python
-    T_C_RANGE = (15.0, 35.0)
-    CA0_RANGE = (0.75, 1.5)
-    PH_BINS = (5.0, 5.85, 7.0)
-    N_PER_BIN = 4
-
-    T_MAX = 5.0
-    N_TIMESTEPS = 12
-    NOISE_REL = 0.03
-    NOISE_FLOOR = 0.02
-
-    DOE_SEED = 0
-    NOISE_SEED = 1
-
-    # Per pH bin: 2-D LHS over (T, Ca0). The pH axis is *not* sampled by
-    # LHS — it is fixed to one of three discrete values per bin. This is
-    # what lets the pure mechanistic baseline (which has no pH input) be
-    # fitted bin-by-bin on identical data to the hybrid.
-    design = []
-    bin_of_exp = []
-    for bin_idx, ph in enumerate(PH_BINS):
-        sampler = qmc.LatinHypercube(d=2, seed=DOE_SEED + bin_idx)
-        unit = sampler.random(n=N_PER_BIN)
-        lo = np.array([T_C_RANGE[0], CA0_RANGE[0]])
-        hi = np.array([T_C_RANGE[1], CA0_RANGE[1]])
-        pts = lo + (hi - lo) * unit
-        for t, ca0 in pts:
-            design.append((float(t), float(ph), float(ca0)))
-            bin_of_exp.append(bin_idx)
-
-    noise_root = jr.PRNGKey(NOISE_SEED)
-    ts_global = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    ```
     """)
     return
 
@@ -444,48 +396,6 @@ def _experiment_md(mo):
     of experiments stacks them into buckets by union-timestep length
     and produces the observation-mask pytree consumed by the
     framework's losses.
-
-    ```python
-    def y0_fn(covariates, channels):
-        # [Ca, Cb] = [first observed Ca, 0]. Reads the (noisy) first observation.
-        ca0 = jnp.asarray(channels["Ca"].values[0])
-        return jnp.stack([ca0, jnp.zeros_like(ca0)])
-
-    def state_to_output(state):
-        # Project [Ca, Cb] to the observed channel [Ca].
-        return state[..., :1]
-
-    OUTPUT_CHANNELS = ("Ca",)
-
-    def build_one(temperature_C, pH, ca0, key, exp_id):
-        clean = true_ca_trajectory(ts_global, temperature_C, pH, ca0)
-        noisy = add_heteroscedastic_noise(clean, key)
-        sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
-        variance = sigma**2
-        return make_experiment(
-            covariates={
-                "temperature_C": float(temperature_C),
-                "pH": float(pH),
-                "Ca0": float(ca0),
-            },
-            channels={"Ca": ChannelObs(ts=ts_global, values=noisy, variance=variance)},
-            y0_fn=y0_fn,
-            exp_id=exp_id,
-        )
-
-    experiments = []
-    for i, (T, ph, ca0) in enumerate(design):
-        key = jr.fold_in(noise_root, i)
-        experiments.append(
-            build_one(T, ph, ca0, key, f"exp_{i:02d}_T{T:.1f}_pH{ph:.2f}_Ca0{ca0:.2f}")
-        )
-
-    dataset = make_dataset(
-        experiments,
-        state_to_output=state_to_output,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    ```
     """)
     return
 
@@ -674,59 +584,6 @@ def _predictor_md(mo):
     sigmoid midpoint, which under symmetric bounds maps to exactly
     zero decades — so phase 2 starts the residual at no correction
     without any explicit zeroing.
-
-    ```python
-    LOG_KREF_BOUNDS = (-3.0, 2.0)
-    EA_BOUNDS = (0.0, 80.0)
-
-    class ArrheniusKinetics(eqx.Module):
-        # Centred-Arrhenius parametric trunk: two trainable scalars.
-
-        latent: Float[Array, " 2"]
-        out_scaler: BoundScaler
-
-        def __init__(self, *, key):
-            self.latent = jr.normal(key, (2,)) * 0.1
-            self.out_scaler = BoundScaler(
-                bounds=(LOG_KREF_BOUNDS, EA_BOUNDS),
-                transform="sigmoid",
-            )
-
-        def __call__(self):
-            # Return (log_k_ref, Ea) in physical units.
-            return self.out_scaler.from_latent(self.latent)
-
-    INPUT_KEYS = ("temperature_C", "pH", "Ca0")
-    TEMPERATURE_BOUNDS = (0.0, 50.0)
-    PH_BOUNDS = (3.0, 9.0)
-    CA0_INPUT_BOUNDS = (0.75, 1.5)
-    RES_LOG10_BOUNDS = (-2.0, 2.0)
-
-    root = jr.PRNGKey(0)
-    k_param, k_residual = jr.split(root, 2)
-
-    parametric_trunk = ArrheniusKinetics(key=k_param)
-    residual_bp = BoundedPredictor(
-        input_keys=INPUT_KEYS,
-        in_scaler=BoundScaler(
-            bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS, CA0_INPUT_BOUNDS),
-            transform="sigmoid",
-        ),
-        inner=MLPPredictor(
-            in_size=3,
-            out_size=1,
-            width_size=16,
-            depth=1,
-            activation_name="relu",
-            key=k_residual,
-        ),
-        out_scaler=BoundScaler(
-            bounds=(RES_LOG10_BOUNDS,),
-            transform="sigmoid",
-        ),
-    )
-    predictors_init = (parametric_trunk, residual_bp)
-    ```
     """)
     return
 
@@ -822,49 +679,6 @@ def _simulate_md(mo):
     `covariates` (the per-experiment $T, \mathrm{pH}, C_{A,0}$),
     and the solver-config; the framework owns vmap, jit and
     autodiff around them.
-
-    ```python
-    def simulate_fn(predictors, ts, covariates, y0, solver):
-        parametric, residual = predictors
-        log_k_ref, Ea = parametric()
-
-        T_C = covariates["temperature_C"]
-        pH = covariates["pH"]
-        Ca0 = covariates["Ca0"]
-        T_K = T_C + 273.15
-
-        log10_k_param = (
-            log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)
-        ) / jnp.log(10.0)
-
-        inputs = {"temperature_C": T_C, "pH": pH, "Ca0": Ca0}
-        delta_log10_k = jnp.squeeze(residual(inputs))
-
-        log10_k = log10_k_param + delta_log10_k
-        k = jnp.power(10.0, log10_k)
-
-        def vector_field(t, y, args):
-            Ca = jnp.maximum(y[0], 0.0)
-            rate = k * Ca
-            return jnp.stack([-rate, rate])
-
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(vector_field),
-            solver.solver,
-            t0=ts[0],
-            t1=ts[-1],
-            dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-            y0=y0,
-            saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-            max_steps=solver.max_steps,
-            adjoint=diffrax.DirectAdjoint(),
-        )
-        return jnp.asarray(sol.ys)
-
-    # A second simulate_fn_baseline (defined separately) omits the residual term —
-    # used by the pure mechanistic baseline below.
-    ```
     """)
     return
 
@@ -1007,12 +821,6 @@ def _phase1_md(mo):
     `mask_p1` is reused unchanged across the pure mechanistic
     baseline (per-bin and per-bin-LOO-CV fits) and as phase 1 of
     the hybrid pipeline below.
-
-    ```python
-    mask_p1 = trainable_mask(predictors_init)
-    mask_p1 = freeze_modules_of_type(mask_p1, predictors_init, BoundedPredictor)
-    mask_p1 = freeze_modules_of_type(mask_p1, predictors_init, BoundScaler)
-    ```
     """)
     return
 
@@ -1070,48 +878,6 @@ def _baseline_md(mo):
     the trainable mask `mask_p1` already freezes everything except
     its two scalars. We simply run `train_with_evosax` once per
     bin, on the four in-bin experiments.
-
-    ```python
-    cfg_baseline = EvosaxTrainingConfig(
-        algorithm="CMA_ES",
-        population_size=32,
-        num_generations=30,
-        init="lhs_box",
-        init_box_extent=2.0,
-        sigma_init=0.5,
-        loss="mse",
-        verbose=False,
-    )
-
-    bin_predictors = []
-    for bin_idx, ph in enumerate(PH_BINS):
-        bin_exps = [e for i, e in enumerate(experiments) if bin_of_exp[i] == bin_idx]
-        bin_ds = make_dataset(
-            bin_exps,
-            state_to_output=state_to_output,
-            output_channel_names=OUTPUT_CHANNELS,
-        )
-        history, predictors = train_with_evosax(
-            predictors_init,
-            bin_ds,
-            cfg_baseline,
-            simulate_fn=simulate_fn_baseline,
-            solver=solver,
-            trainable=mask_p1,
-            key=jr.PRNGKey(bin_idx),
-        )
-        log_k_ref, Ea = predictors[0]()
-        bin_predictors.append(
-            {
-                "bin_idx": bin_idx,
-                "pH": ph,
-                "predictors": predictors,
-                "log_k_ref": float(log_k_ref),
-                "Ea": float(Ea),
-                "final_loss": float(history[-1]),
-            }
-        )
-    ```
     """)
     return
 
@@ -1266,49 +1032,6 @@ def _per_bin_loocv_md(mo):
     should sit tight on the diagonal — confirming that the
     classical mechanistic *does* generalise as long as one stays
     inside its trained pH bin.
-
-    ```python
-    bin_loocv = []
-    for bin_idx, ph in enumerate(PH_BINS):
-        bin_exps = [e for i, e in enumerate(experiments) if bin_of_exp[i] == bin_idx]
-        records = []
-        for k in range(len(bin_exps)):
-            train = [e for i, e in enumerate(bin_exps) if i != k]
-            train_ds = make_dataset(
-                train,
-                state_to_output=state_to_output,
-                output_channel_names=OUTPUT_CHANNELS,
-            )
-            held_ds = make_dataset(
-                [bin_exps[k]],
-                state_to_output=state_to_output,
-                output_channel_names=OUTPUT_CHANNELS,
-            )
-            history, predictors = train_with_evosax(
-                predictors_init,
-                train_ds,
-                cfg_baseline,
-                simulate_fn=simulate_fn_baseline,
-                solver=solver,
-                trainable=mask_p1,
-                key=jr.PRNGKey(bin_idx * 100 + k),
-            )
-            oof_pred = predict_dataset(
-                predictors, held_ds, simulate_fn=simulate_fn_baseline, solver=solver
-            )
-            diag = gather_diagnostics(oof_pred, held_ds)
-            ch = next(iter(diag))
-            records.append(
-                {
-                    "k": k,
-                    "exp": bin_exps[k],
-                    "oof_obs": diag[ch]["obs"],
-                    "oof_pred": diag[ch]["pred"],
-                    "oof_mse": diag[ch]["mse"],
-                }
-            )
-        bin_loocv.append(records)
-    ```
     """)
     return
 
@@ -1447,21 +1170,6 @@ def _transfer_md(mo):
     dependence, so the practitioner is forced to maintain a
     dictionary of bin-specific fits and lose all interpolation
     capability between them.
-
-    ```python
-    bin_target = 2  # pH = 7.0
-    bin_fitted = 0  # pH = 5.0
-    target_exps = [e for i, e in enumerate(experiments) if bin_of_exp[i] == bin_target]
-    target_ds = make_dataset(
-        target_exps,
-        state_to_output=state_to_output,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    fitted_predictors = bin_predictors[bin_fitted]["predictors"]
-    transfer_pred = predict_dataset(
-        fitted_predictors, target_ds, simulate_fn=simulate_fn_baseline, solver=solver
-    )
-    ```
     """)
     return
 
@@ -1536,54 +1244,6 @@ def _hybrid_md(mo):
     two-dimensional latent space; AdamW then polishes the much
     higher-dimensional residual smoothly. Neither optimiser alone
     would do as well on the combined search.
-
-    ```python
-    # Phase 1 — Arrhenius trunk fit (CMA-ES) on the full combined dataset.
-    config_p1 = EvosaxTrainingConfig(
-        algorithm="CMA_ES",
-        population_size=32,
-        num_generations=30,
-        init="lhs_box",
-        init_box_extent=2.0,
-        sigma_init=0.5,
-        loss="mse",
-        verbose=False,
-    )
-    history_p1, predictors_p1 = train_with_evosax(
-        predictors_init,
-        dataset,
-        config_p1,
-        simulate_fn=simulate_fn,
-        solver=solver,
-        trainable=mask_p1,
-        key=jr.PRNGKey(0),
-    )
-
-    # Flip the mask: freeze the trunk, leave only the residual MLP trainable.
-    mask_p2 = trainable_mask(predictors_p1)
-    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, ArrheniusKinetics)
-    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, BoundScaler)
-
-    # Phase 2 — residual MLP fit (AdamW) on the same dataset.
-    config_p2 = OptaxTrainingConfig(
-        steps=(200,),
-        lr=(3e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=False,
-    )
-    history_p2, predictors_p2 = train_with_optax(
-        predictors_p1,
-        dataset,
-        config_p2,
-        simulate_fn=simulate_fn,
-        solver=solver,
-        trainable=mask_p2,
-        key=jr.PRNGKey(1),
-    )
-    ```
     """)
     return
 
@@ -2054,60 +1714,6 @@ def _loocv_md(mo):
     small example can produce. The configs are identical to the
     headline run; per-fold seeds are derived from the fold index so
     folds remain reproducible across reruns.
-
-    ```python
-    n_folds = len(experiments)
-    fold_records = []
-    for k in range(n_folds):
-        train_exps = [e for i, e in enumerate(experiments) if i != k]
-        train_ds = make_dataset(
-            train_exps,
-            state_to_output=state_to_output,
-            output_channel_names=OUTPUT_CHANNELS,
-        )
-        held_ds = make_dataset(
-            [experiments[k]],
-            state_to_output=state_to_output,
-            output_channel_names=OUTPUT_CHANNELS,
-        )
-
-        # Phase 1 — refit the parametric trunk on the in-fold experiments.
-        hist_p1, pred_p1 = train_with_evosax(
-            predictors_init,
-            train_ds,
-            cfg_p1,
-            simulate_fn=simulate_fn,
-            solver=solver,
-            trainable=mask_p1,
-            key=jr.PRNGKey(k),
-        )
-        # Phase 2 — refit the residual MLP, frozen trunk.
-        hist_p2, pred_p2 = train_with_optax(
-            pred_p1,
-            train_ds,
-            cfg_p2,
-            simulate_fn=simulate_fn,
-            solver=solver,
-            trainable=mask_p2,
-            key=jr.PRNGKey(1000 + k),
-        )
-
-        # Out-of-fold prediction on the single held-out experiment.
-        oof_pred = predict_dataset(
-            pred_p2, held_ds, simulate_fn=simulate_fn, solver=solver
-        )
-        diag = gather_diagnostics(oof_pred, held_ds)
-        ch = next(iter(diag))
-        fold_records.append(
-            {
-                "k": k,
-                "exp": experiments[k],
-                "oof_obs": diag[ch]["obs"],
-                "oof_pred": diag[ch]["pred"],
-                "oof_mse": diag[ch]["mse"],
-            }
-        )
-    ```
     """)
     return
 
@@ -2333,51 +1939,6 @@ def _lopo_md(mo):
     **The hybrid model successfully learns the intermediate pH
     from its two flanking bins, recovering the kinetic equation
     $k(T, \mathrm{pH})$ at a pH it never saw during training.**
-
-    ```python
-    held_pH_idx = 1  # bin index 1 = pH = 5.85
-    train_exps_lopo = [
-        e for i, e in enumerate(experiments) if bin_of_exp[i] != held_pH_idx
-    ]
-    held_exps_lopo = [
-        e for i, e in enumerate(experiments) if bin_of_exp[i] == held_pH_idx
-    ]
-    train_ds_lopo = make_dataset(
-        train_exps_lopo,
-        state_to_output=state_to_output,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    held_ds_lopo = make_dataset(
-        held_exps_lopo,
-        state_to_output=state_to_output,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-
-    # Same two-phase pipeline, but on the LOPO training split.
-    hist_lopo_p1, predictors_lopo_p1 = train_with_evosax(
-        predictors_init,
-        train_ds_lopo,
-        cfg_p1,
-        simulate_fn=simulate_fn,
-        solver=solver,
-        trainable=mask_p1,
-        key=jr.PRNGKey(7777),
-    )
-    hist_lopo_p2, predictors_lopo_p2 = train_with_optax(
-        predictors_lopo_p1,
-        train_ds_lopo,
-        cfg_p2,
-        simulate_fn=simulate_fn,
-        solver=solver,
-        trainable=mask_p2,
-        key=jr.PRNGKey(8888),
-    )
-
-    # Predict the held-out pH = 5.85 trajectories from the LOPO model.
-    pred = predict_dataset(
-        predictors_lopo_p2, held_ds_lopo, simulate_fn=simulate_fn, solver=solver
-    )
-    ```
     """)
     return
 
