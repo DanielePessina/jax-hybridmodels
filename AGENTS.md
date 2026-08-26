@@ -1,6 +1,6 @@
 # Agent orientation — jax-hybridmodels
 
-You are working on a **JAX/Equinox library for hybrid (ODE + neural) models**, currently in spec-only state. There is no implementation yet; the design is locked. Your job is to implement it against the spec.
+You are working on a **JAX/Equinox library for hybrid (ODE + neural) models**. The v1 build order in SPEC.md §8 is complete and the suite is green; work now is refinement, correctness, and release readiness rather than first implementation. The design is locked in the sense that ADRs are not up for casual revision — but SPEC.md does grow, deliberately, when a decision genuinely needs revisiting (see ADR-0007 for a worked example of reversing a documented non-requirement).
 
 ## Read these first, in order
 
@@ -32,7 +32,7 @@ This project is uv-managed. Do not invoke `pip`, `python`, or `pytest` directly.
 | Run tests | `uv run pytest` |
 | Run one test file | `uv run pytest tests/test_data_buckets.py` |
 | Run an example | `uv run python examples/crystallisation/train_optax.py` |
-| Lint | `uv run ruff check src tests` |
+| Lint | `uv run ruff check .` |
 | Typecheck | `uv run ty check src` |
 
 If you need a one-off Python invocation, use `uv run python -c '...'`.

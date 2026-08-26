@@ -1,6 +1,6 @@
 # jax-hybridmodels — Architecture Specification
 
-**Status:** v1 design — *to be implemented*. Locked through interactive grilling on 2026-05-03.
+**Status:** v1 build order (§8) complete and green; the package is in pre-1.0 refinement. Locked through interactive grilling on 2026-05-03; amended 2026-08-26 to reinstate bound penalties (§2.2, R-P1..R-P7, [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md)).
 
 This spec is the architectural source of truth. It pairs with [`CONTEXT.md`](./CONTEXT.md) (the domain glossary) and the ADRs in [`docs/adr/`](./docs/adr/). Read CONTEXT.md first if any term here looks unfamiliar.
 
@@ -60,6 +60,16 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-E5** — Init modes: `"warm"` (default), `"uniform_box"`, `"lhs_box"` (Latin Hypercube via `scipy.stats.qmc`, host-side).
 - **R-E6** — Best-ever individual tracked **host-side** via `jnp.argmin(fitnesses)` per generation.
 
+#### Bound penalties
+
+- **R-P1** — Bounds stay enforced by **reparameterisation**; the penalty is an *additional* term, never the feasibility mechanism. A physical bound violation remains unrepresentable.
+- **R-P2** — `BoundScaler.to_latent` guards `logit` with a **linear continuation** (`soft_logit`), not `jnp.clip`. Rationale: a hard clip has exactly zero derivative outside the box, and sitting mid-graph that zero propagates to every upstream parameter, silently dropping state-derived sensitivities from the ODE adjoint. Inside `[logit_eps, 1-logit_eps]` the map is exactly the previous one.
+- **R-P3** — Penalties hinge on the **latent**, never the physical output. `from_latent`'s derivative underflows to exactly `0.0` past `|z/T| ~ 15`, so a physical-space penalty vanishes exactly where saturation is worst.
+- **R-P4** — See [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md). The default penalty is **top-level collocation** (`collocation_grids` + `bound_penalty`) over each predictor's declared input box. It requires **no** change to `simulate_fn`, `BoundedPredictor.__call__`, `predict_bucket`, or the `loss(pred_obs, bp)` contract, and is invariant to pytree nesting.
+- **R-P5** — Penalty weight is **opt-in, default zero**, and passed to the jitted kernel as a **traced 0-d array** (like `length_mask_fraction`) so changing it never retraces.
+- **R-P6** — `losses_history`, `restore_best`, early stopping, and the tournament score track the **data** term alone; the penalty is reported separately via `TrainingUI.on_step_end(penalty=...)`.
+- **R-P7** — `penalty_weight` is deliberately **not** an R-T2 phase-keyed field. Length 1 broadcasts across phases; any other length must equal `len(steps)`. R-T2's enumerated fields all lack a safe default, which is why they are mandatory; `penalty_weight` has an unambiguous off state.
+
 #### Trainability filter
 
 - **R-F1** — A **boolean PyTree mask** matching the `predictors` pytree structure is the canonical filter. Same shape consumed by both Optax (`eqx.filter_value_and_grad(..., filter_spec=mask)`) and Evosax (`eqx.partition(predictors, mask)`). See [ADR-0003](./docs/adr/0003-trainability-filter-as-pytree.md).
@@ -104,7 +114,7 @@ This section is the contract. Implementation is judged against these line by lin
 - Time-varying *covariates* at the data layer (`Experiment.covariates` stays constant in time). State-derived and exogenous time-dependent *predictor inputs* are **not** out of scope — they're first-class via dict-mixing inside the user's vector field; see CONTEXT.md "Predictor inputs".
 - A `Model` wrapper class.
 - Temperature annealing of any kind.
-- `_build_filter_spec` per-class registry; bound-excursion penalty machinery; per-step bucket shuffling.
+- `_build_filter_spec` per-class registry; per-step bucket shuffling.
 - Builder registry for serialisation (deferred until friction is real).
 - Live loss plots, ETA columns, notebook-specific UI layouts.
 - Sub-batching the population in evosax; sub-batching within a bucket.
@@ -118,6 +128,7 @@ This section is the contract. Implementation is judged against these line by lin
 - Sub-batching across population / within-bucket for memory-bound workloads.
 - Time-varying covariate hooks.
 - `tanh` bound-scaling option.
+- **Trajectory-dependent penalties.** The collocation penalty is trajectory-blind by construction: it reports saturation anywhere in the declared box, not whether a particular solve pushed an input out of range. Answering the latter means widening `simulate_fn` to return `(states, penalty)` — an ADR-0005 change — gated behind an explicit opt-in flag rather than auto-detected. Deferred to post-v1 pending a case that needs it.
 - Non-crystallisation example (pendulum) — **last deliverable** of v1, gating "domain-agnostic" claim.
 - Builder/loader registries for `state_to_output` / `simulate_fn` to enable Dataset round-trip.
 - **`NeuralNPolynomial` framework class.** The supersaturation-polynomial form (`sum_i c_i(T) · (S − 1)^p_i`) is implemented in user vector-field code in `examples/crystallisation/train_kinetic.py` (the `coeffs` come from a `BoundedPredictor`; the polynomial expansion is three lines in `vector_field`). Re-evaluate framework-class status when the form needs framework support beyond a user-side three-line expansion. Latent-vs-physical evaluation (Q4 of the 2026-05 grilling) is the design call to revisit.
@@ -141,11 +152,14 @@ jax-hybridmodels/                      (repo)
 │       ├── 0002-shared-tournament-only.md
 │       ├── 0003-trainability-filter-as-pytree.md
 │       ├── 0004-bucketed-irregular-only.md
-│       └── 0005-simulate-fn-mandatory-signature.md
+│       ├── 0005-simulate-fn-mandatory-signature.md
+│       ├── 0006-predictors-as-pytree.md
+│       └── 0007-collocation-bound-penalty.md
 ├── src/
 │   └── hybridmodels/
 │       ├── __init__.py                 (lazy public API re-exports)
 │       ├── data.py                     (Experiment, ChannelObs, Dataset, BucketPayload, make_dataset, split_dataset)
+│       ├── penalties.py                (soft_logit, softclip, clip_ste, box_violation, collocation_grids, bound_penalty)
 │       ├── solver.py                   (SolverConfig, SOLVER_REGISTRY, register_solver)
 │       ├── losses.py                   (masked_mse, masked_mle, bal_mse, bal_mle)
 │       ├── trainable.py                (default_trainable, trainable_mask, freeze_paths/_modules_of_type/_where)

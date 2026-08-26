@@ -83,7 +83,7 @@ on_message(self, *, level: str, text: str) -> None
 
 Free-form log line. ``level`` is one of ``"info"``, ``"warning"``, ``"error"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L88)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L98)</small>
 
 #### `TrainingUI.on_phase_end()`
 
@@ -119,7 +119,7 @@ on_run_end(self, *, final_loss: float) -> None
 
 Fires once after every phase has completed (or training was aborted gracefully).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L84)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L94)</small>
 
 #### `TrainingUI.on_run_start()`
 
@@ -134,10 +134,23 @@ Fires once before the first phase. ``total_steps`` is the sum across phases.
 #### `TrainingUI.on_step_end()`
 
 ```python
-on_step_end(self, *, step_idx: int, phase_idx: int, loss: float) -> None
+on_step_end(
+    self,
+    step_idx: int,
+    phase_idx: int,
+    loss: float,
+    penalty: float = 0.0,
+) -> None
 ```
 
 Fires after each training step. ``step_idx`` is global; ``phase_idx`` localises it.
+
+``loss`` is the **data** term only, never the combined objective:
+it is the series ``restore_best`` and early stopping act on, and
+mixing in a penalty whose weight ramps between phases would make
+successive values incomparable. ``penalty`` reports the unweighted
+bound penalty alongside it, and defaults to ``0.0`` so UIs written
+against the earlier signature keep satisfying this protocol.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L80)</small>
 
@@ -159,7 +172,7 @@ Differs from ``TrainingUI`` because evosax does not have phases or
 per-step gradient losses; instead each generation reports best/mean
 fitness across the population.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L93)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L103)</small>
 
 #### `EvosaxUI.on_compile_done()`
 
@@ -169,7 +182,7 @@ on_compile_done(self, *, bucket_idx: int) -> None
 
 The bucket finished compiling.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L114)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L124)</small>
 
 #### `EvosaxUI.on_compile_progress()`
 
@@ -179,7 +192,7 @@ on_compile_progress(self, *, bucket_idx: int, total_buckets: int) -> None
 
 Periodic compile-time heartbeat (best-effort).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L110)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L120)</small>
 
 #### `EvosaxUI.on_compile_start()`
 
@@ -189,7 +202,7 @@ on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> Non
 
 A bucket of shape ``bucket_shape`` is about to be JIT-compiled.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L106)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L116)</small>
 
 #### `EvosaxUI.on_generation_end()`
 
@@ -204,7 +217,7 @@ on_generation_end(
 
 Fires once per generation with population statistics.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L118)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L128)</small>
 
 #### `EvosaxUI.on_message()`
 
@@ -214,7 +227,7 @@ on_message(self, *, level: str, text: str) -> None
 
 Free-form log line; same level set as ``TrainingUI.on_message``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L126)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L136)</small>
 
 #### `EvosaxUI.on_run_end()`
 
@@ -224,7 +237,7 @@ on_run_end(self, *, best_fitness: float) -> None
 
 Fires once after the last generation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L122)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L132)</small>
 
 #### `EvosaxUI.on_run_start()`
 
@@ -234,7 +247,7 @@ on_run_start(self, *, num_generations: int, population_size: int) -> None
 
 Fires once before the first generation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L102)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L112)</small>
 
 ---
 
@@ -254,7 +267,7 @@ Selected when ``config.verbose=False`` and used in tests where stdout
 output would pollute captured logs. Every method accepts ``**kwargs``
 and returns ``None``, so it tolerates protocol drift without raising.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L131)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L141)</small>
 
 ---
 

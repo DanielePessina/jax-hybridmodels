@@ -48,7 +48,7 @@ default ``1e-3`` maps a 1% overshoot to ``|z| ~ 10`` — firmly outside
 the sigmoid's linear region, so the push-back is felt, but still a
 number a network can consume.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L52)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L83)</small>
 
 ---
 
@@ -85,7 +85,7 @@ derivative underflows just as a hard clip's does, so ``softclip``
 should be paired with :func:`box_violation` whenever the input can
 stray far — the hinge is what supplies unbounded push-back.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L92)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L123)</small>
 
 ---
 
@@ -112,7 +112,7 @@ indefinitely — a straight-through clip *never* pushes back on its own.
 Pair it with :func:`box_violation` on the pre-clip value, which is the
 term that actually supplies the restoring force.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L115)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L146)</small>
 
 ---
 
@@ -153,4 +153,4 @@ its units.
 | --- | --- | --- |
 | `Array` |  | Scalar sum of squared fractional violations. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L132)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L163)</small>

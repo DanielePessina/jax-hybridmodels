@@ -77,8 +77,18 @@ class TrainingUI(Protocol):
         """Fires after the last step of a phase, before any optimiser reset."""
         ...
 
-    def on_step_end(self, *, step_idx: int, phase_idx: int, loss: float) -> None:
-        """Fires after each training step. ``step_idx`` is global; ``phase_idx`` localises it."""
+    def on_step_end(
+        self, *, step_idx: int, phase_idx: int, loss: float, penalty: float = 0.0
+    ) -> None:
+        """Fires after each training step. ``step_idx`` is global; ``phase_idx`` localises it.
+
+        ``loss`` is the **data** term only, never the combined objective:
+        it is the series ``restore_best`` and early stopping act on, and
+        mixing in a penalty whose weight ramps between phases would make
+        successive values incomparable. ``penalty`` reports the unweighted
+        bound penalty alongside it, and defaults to ``0.0`` so UIs written
+        against the earlier signature keep satisfying this protocol.
+        """
         ...
 
     def on_run_end(self, *, final_loss: float) -> None:

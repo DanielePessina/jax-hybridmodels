@@ -42,11 +42,42 @@ pole-free (so it needs none of the double-``where`` guarding that
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 from jaxtyping import Array
 
-__all__ = ("soft_logit", "softclip", "clip_ste", "box_violation")
+if TYPE_CHECKING:
+    from hybridmodels.predictors import BoundedPredictor
+
+__all__ = (
+    "soft_logit",
+    "softclip",
+    "clip_ste",
+    "box_violation",
+    "collocation_grids",
+    "bound_penalty",
+)
+
+
+def _bounded_leaves(predictors: Any) -> list[BoundedPredictor]:
+    """Every ``BoundedPredictor`` in ``predictors``, in pytree traversal order.
+
+    Imported lazily to keep the dependency one-way: ``predictors.base``
+    imports this module for :func:`soft_logit`, so a module-level import
+    back would be circular.
+
+    Uses the same ``is_leaf``-stopped traversal as
+    ``reinitialize_pytree_with_key`` and ``freeze_modules_of_type``, which
+    is what makes leaf *order* consistent across all three and lets
+    :func:`collocation_grids` return a plain positional tuple.
+    """
+    from hybridmodels.predictors import BoundedPredictor
+
+    is_bp = lambda node: isinstance(node, BoundedPredictor)  # noqa: E731
+    return [leaf for leaf in jtu.tree_leaves(predictors, is_leaf=is_bp) if is_bp(leaf)]
 
 
 def soft_logit(s: Array, eps: float = 1e-3) -> Array:
@@ -160,3 +191,94 @@ def box_violation(x: Array, lows: Array, highs: Array) -> Array:
     below = jnp.maximum((lows - x) / width, 0.0)
     above = jnp.maximum((x - highs) / width, 0.0)
     return jnp.sum(below**2 + above**2)
+
+
+def collocation_grids(predictors: Any, n_per_dim: int = 5) -> tuple[Array, ...]:
+    """Build one input grid per ``BoundedPredictor`` leaf of ``predictors``.
+
+    Each grid is a tensor product of ``n_per_dim`` evenly spaced points
+    across every dimension of that predictor's ``in_scaler.bounds``, so it
+    has shape ``[n_per_dim ** n_inputs, n_inputs]`` and spans the box the
+    predictor declares it covers.
+
+    Call this once, on the host, before the training loop: the grids
+    depend only on static ``bounds``, so recomputing them per step would
+    add trace work for a constant. The returned tuple is positional and
+    aligns with the leaf order :func:`bound_penalty` walks, which is the
+    same ``jtu.tree_leaves(..., is_leaf=...)`` order used by
+    ``reinitialize_pytree_with_key`` and ``freeze_modules_of_type``.
+
+    A deterministic grid is preferred over random sampling because
+    ``restore_best`` compares raw loss values across steps; a penalty that
+    resampled each step would make that comparison noisy and could pick a
+    "best" that merely drew an easy sample.
+
+    Note the exponential growth in input dimension — ``n_per_dim=5`` over
+    six inputs is 15625 points. Predictors in this package take two or
+    three named inputs, where the grid is 25 to 125 forward passes and
+    negligible beside an ODE solve; lower ``n_per_dim`` if that stops
+    being true.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        One ``[G, n_inputs]`` grid per ``BoundedPredictor`` leaf, in
+        traversal order. Empty if the pytree holds no such leaf.
+    """
+    grids: list[Array] = []
+    for leaf in _bounded_leaves(predictors):
+        axes = [jnp.linspace(low, high, n_per_dim) for low, high in leaf.in_scaler.bounds]
+        mesh = jnp.meshgrid(*axes, indexing="ij")
+        grids.append(jnp.stack([m.reshape(-1) for m in mesh], axis=-1))
+    return tuple(grids)
+
+
+def bound_penalty(predictors: Any, grids: tuple[Array, ...]) -> Array:
+    """Mean output-squash saturation over every ``BoundedPredictor`` in a pytree.
+
+    For each leaf, evaluates ``inner(in_scaler.to_latent(x))`` across that
+    leaf's collocation grid and charges
+    :meth:`~hybridmodels.predictors.BoundScaler.saturation` on the
+    resulting latents. Leaves are summed.
+
+    This is the *default* way to penalise bound behaviour in this package,
+    and it is deliberately trajectory-blind. Saturation is a property of
+    the predictor as a function on its declared input box, not of any
+    particular solve, so it needs no cooperation from ``simulate_fn``,
+    ``predict_bucket``, or the loss protocol — none of their signatures
+    change. It is equally correct whether the predictor is called inside a
+    vector field or hoisted above one, because it never observes the call
+    site. And because it walks the pytree by leaf, arbitrary nesting works
+    for free (ADR-0006).
+
+    The flip side of trajectory-blindness: it reports saturation anywhere
+    in the declared box, including regions the training trajectories never
+    visited. For catching extrapolation failure before deployment that is
+    a feature. For "did this particular solve push an input out of range",
+    it is the wrong instrument — that question needs the penalty computed
+    where the state actually is.
+
+    Parameters
+    ----------
+    predictors : PyTree[eqx.Module]
+        Any pytree shape; only ``BoundedPredictor`` leaves contribute.
+    grids : tuple[Array, ...]
+        Output of :func:`collocation_grids` for this same pytree.
+
+    Returns
+    -------
+    Array
+        Non-negative scalar. Exactly zero when no leaf saturates.
+    """
+    leaves = _bounded_leaves(predictors)
+    if len(leaves) != len(grids):
+        raise ValueError(
+            f"grids has {len(grids)} entries but predictors holds "
+            f"{len(leaves)} BoundedPredictor leaves; rebuild the grids "
+            "with collocation_grids(predictors) after changing the pytree."
+        )
+    total = jnp.asarray(0.0)
+    for leaf, grid in zip(leaves, grids, strict=True):
+        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.to_latent(x)))(grid)
+        total = total + leaf.out_scaler.saturation(latents)
+    return total

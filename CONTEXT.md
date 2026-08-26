@@ -9,10 +9,14 @@ A narrow trainable `eqx.Module` whose `__call__` is `Array → Array`. Knows not
 _Avoid_: Regressor (the previous package's overloaded term — bundled bound-scaling, rate-pair semantics, and trainable weights together).
 
 **BoundScaler**:
-An `eqx.Module` providing bidirectional sigmoid scaling between physical `[low, high]` and a latent space. Sigmoid only for v1; tanh deferred. No "temperature" knob in v1 unless we re-grill (default sigmoid: `low + (high-low) * sigmoid(z)`).
+An `eqx.Module` providing bidirectional sigmoid scaling between physical `[low, high]` and a latent space. Sigmoid only for v1; tanh deferred. Carries a `temperature` leaf (frozen by convention) plus two static knobs, `logit_eps` and `z_knee`.
+
+`to_latent` guards `logit` against its poles with a **linear continuation** (`soft_logit`), not a hard clip. The clip it replaced had exactly zero derivative outside the box; sitting mid-graph, that zero propagated to every upstream parameter, so a state-derived input straying out of range silently dropped a real sensitivity from the ODE adjoint. Inside `[logit_eps, 1-logit_eps]` the map is exactly the old one, value and derivative both.
+
+Two pure penalty queries hang off it — `input_violation` (how far a physical input fell outside its box) and `saturation` (how hard the output squash is pinned). Neither is called by `__call__`; emitting a penalty is a query, never a side effect.
 
 **BoundedPredictor**:
-A composition wrapper: `input_keys (named-input order) → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). `input_keys` is a static `tuple[str, ...]` that names each input slot in declared order; cardinality must match `in_scaler.bounds` and be ≥ 1. Auto-fills to `("x1", ..., "xN")` when omitted, so the saved predictor is always self-describing. `__call__` accepts either `dict[str, Array]` (subset extraction in `input_keys` order — extra keys allowed; missing keys raise) or rank-1 `Array` (passed through). **No penalty term in v1** — the bound-excursion penalty machinery from the source package was never properly wired and is dropped.
+A composition wrapper: `input_keys (named-input order) → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). `input_keys` is a static `tuple[str, ...]` that names each input slot in declared order; cardinality must match `in_scaler.bounds` and be ≥ 1. Auto-fills to `("x1", ..., "xN")` when omitted, so the saved predictor is always self-describing. `__call__` accepts either `dict[str, Array]` (subset extraction in `input_keys` order — extra keys allowed; missing keys raise) or rank-1 `Array` (passed through). **Penalties are opt-in and default to zero** — see "Bound penalty" below.
 
 **simulate_fn**:
 A pure user-written function with a mandatory signature that, for one experiment, integrates the dynamics and returns the **full state trajectory**. The framework owns vmapping, jitting, and gradient flow; the user owns physics. Inside the user's vector field, multi-rate models compose their predictors directly (`growth, nucleation = predictors`) — there is no framework wrapper for "the pair of rate predictors"; the source package's `RatePair` is dropped.
@@ -160,9 +164,26 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 - A `Model` wrapper class. The "model" is the loose triple `(predictors, simulate_fn, solver_config)`; serialisation handles each piece appropriately.
 - **Temperature annealing** of any kind: `cosine_temperature_annealing`, `use_temp_annealing`, `initial_temperature`, `temp_cosine_fraction`, `temp_indices`. The bound-scaler's `temperature` is just a (typically frozen) parameter.
 - The `_build_filter_spec` per-class registry from the source package — replaced by composable freezer functions.
-- Bound-excursion penalty machinery (`bound_penalty_weight`, `_penalty()`, `call_with_penalty`) — never properly wired in source.
+- ~~Bound-excursion penalty machinery~~ — **reinstated**, properly wired this time. The source package's version was dropped because it was never plumbed through to the loss, not because the idea was wrong. See "Bound penalty".
 - `RatePair` framework class (deleted in this round of design). Multi-rate models compose by unpacking the predictors tuple at the top of the user's vector field.
 - `NeuralNPolynomial` framework class (**deferred to post-v1**, not deleted from intent — re-evaluate when the polynomial form needs framework support beyond a user-side three-line expansion).
+
+**Bound penalty**:
+A scalar added to the training objective that charges a `BoundedPredictor` for saturating its output squash. Computed at the **top level** over a deterministic collocation grid spanning each predictor's declared input box (`collocation_grids` / `bound_penalty`), then weighted by `OptaxTrainingConfig.penalty_weight` (per-phase tuple, length-1 broadcasts) or `EvosaxTrainingConfig.penalty_weight` (scalar).
+
+Three properties make this the default rather than an aux-threading scheme:
+
+- **No signature changes.** `simulate_fn`, `BoundedPredictor.__call__`, `predict_bucket`, and the `loss(pred_obs, bp)` contract are all untouched.
+- **Nesting-invariant.** It walks the pytree by leaf, the same `is_leaf`-stopped traversal `reinitialize_pytree_with_key` and `freeze_modules_of_type` use, so arbitrary nesting works for free (ADR-0006).
+- **Call-site blind.** Equally correct whether the predictor runs inside a vector field or is hoisted above one.
+
+The penalty hinges on the **latent**, never the physical output. `from_latent`'s derivative carries a `sigma'` factor that underflows to exactly `0.0` past `|z/T| ~ 15`, so a penalty written against the physical value dies precisely where saturation is worst.
+
+What it does *not* cover: whether a *particular solve* pushed an input out of range. That is trajectory-dependent and collocation is deliberately trajectory-blind.
+_Avoid_: "bound violation penalty" — with sigmoid reparameterisation a physical violation is unrepresentable; what is being charged is saturation.
+
+**Data loss vs. objective**:
+`losses_history`, `restore_best`, early stopping, and the tournament score all track the **data** term alone. The combined objective (`data + weight * penalty`) is what the optimiser descends, but reporting it would let "best" move when only the penalty weight ramped, and would make runs with different weights incomparable.
 
 ## Flagged ambiguities
 

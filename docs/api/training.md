@@ -29,6 +29,8 @@ OptaxTrainingConfig(
     optimizer: 'tuple[str, ...]',
     reset_optimiser_state: 'tuple[bool, ...]',
     length_schedule: 'tuple[float, ...]' = (1.0,),
+    penalty_weight: 'tuple[float, ...]' = (0.0,),
+    penalty_grid_points: 'int' = 5,
     loss: 'Callable[..., Array] | str' = 'mse',
     channel_idx: 'tuple[int, ...] | None' = None,
     channel_weights: 'tuple[float, ...] | None' = None,
@@ -41,9 +43,19 @@ OptaxTrainingConfig(
 ) -> None
 ```
 
-OptaxTrainingConfig(steps: 'tuple[int, ...]', lr: 'tuple[float, ...]', optimizer: 'tuple[str, ...]', reset_optimiser_state: 'tuple[bool, ...]', length_schedule: 'tuple[float, ...]' = (1.0,), loss: 'Callable[..., Array] | str' = 'mse', channel_idx: 'tuple[int, ...] | None' = None, channel_weights: 'tuple[float, ...] | None' = None, tournament_attempts: 'int' = 1, tournament_steps: 'int' = 0, tournament_lr: 'float' = 0.0001, patience: 'int' = 0, restore_best: 'bool' = True, verbose: 'bool' = True)
+OptaxTrainingConfig(steps: 'tuple[int, ...]', lr: 'tuple[float, ...]', optimizer: 'tuple[str, ...]', reset_optimiser_state: 'tuple[bool, ...]', length_schedule: 'tuple[float, ...]' = (1.0,), penalty_weight: 'tuple[float, ...]' = (0.0,), penalty_grid_points: 'int' = 5, loss: 'Callable[..., Array] | str' = 'mse', channel_idx: 'tuple[int, ...] | None' = None, channel_weights: 'tuple[float, ...] | None' = None, tournament_attempts: 'int' = 1, tournament_steps: 'int' = 0, tournament_lr: 'float' = 0.0001, patience: 'int' = 0, restore_best: 'bool' = True, verbose: 'bool' = True)
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L55)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L56)</small>
+
+#### `OptaxTrainingConfig.penalty_weight_for_phase()`
+
+```python
+penalty_weight_for_phase(self, phase_idx: 'int') -> 'float'
+```
+
+Penalty weight for ``phase_idx``, honouring the length-1 broadcast.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L75)</small>
 
 ---
 
@@ -89,7 +101,7 @@ training.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``. ``loss_history`` is the training loss recorded once per step across every phase; ``trained_predictors`` is the predictors corresponding to the best-loss step seen so far when ``config.restore_best=True``, or to the final step otherwise. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L272)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L350)</small>
 
 ---
 
@@ -105,6 +117,8 @@ EvosaxTrainingConfig(
     population_size: 'int' = 64,
     num_generations: 'int' = 100,
     init: "Literal['warm', 'uniform_box', 'lhs_box']" = 'warm',
+    penalty_weight: 'float' = 0.0,
+    penalty_grid_points: 'int' = 5,
     init_box_extent: 'float' = 2.0,
     sigma_init: 'float' = 0.1,
     loss: 'Callable[..., Array] | str' = 'mse',
@@ -135,7 +149,7 @@ a flat outer loop of ``num_generations`` over a population of
 | `log_every` |  | UI heartbeat cadence (currently honoured only by Rich UIs; the silent and recording UIs see every generation). |
 | `verbose` |  | Selects ``RichEvosaxUI`` vs ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L83)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L84)</small>
 
 ---
 
@@ -174,4 +188,4 @@ pytree (every inexact-array leaf).
 | `history` | `list[float]` | Best-loss-so-far per generation (length ``config.num_generations``). |
 | `best_predictors` | `Any` | The reconstructed predictors pytree whose flat-parameter vector minimised the loss across every generation. Same container shape as the input ``predictors``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L323)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L349)</small>

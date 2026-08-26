@@ -317,3 +317,49 @@ def test_silent_default_when_no_ui_and_verbose_false(
         key=jr.PRNGKey(0),
     )
     assert capsys.readouterr().out == ""
+
+
+class TestEvosaxPenalty:
+    """CMA-ES searches latent space unbounded, so saturation needs charging here too."""
+
+    def test_negative_penalty_weight_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-negative"):
+            EvosaxTrainingConfig(
+                algorithm="CMA_ES",
+                population_size=4,
+                num_generations=1,
+                penalty_weight=-1.0,
+                verbose=False,
+            )
+
+    def test_default_weight_is_off(self) -> None:
+        cfg = EvosaxTrainingConfig(
+            algorithm="CMA_ES", population_size=4, num_generations=1, verbose=False
+        )
+        assert cfg.penalty_weight == 0.0
+
+    def test_zero_weight_reproduces_the_unpenalised_run(self) -> None:
+        # A predictors pytree with no BoundedPredictor leaf must be
+        # completely unaffected, and an explicit zero must match the
+        # default exactly.
+        ds = _quadratic_dataset()
+
+        def run(weight: float) -> list[float]:
+            history, _ = train_with_evosax(
+                _QuadraticPredictor(theta=jnp.zeros(N_DIM)),
+                ds,
+                EvosaxTrainingConfig(
+                    algorithm="CMA_ES",
+                    population_size=8,
+                    num_generations=3,
+                    sigma_init=0.5,
+                    penalty_weight=weight,
+                    verbose=False,
+                ),
+                simulate_fn=_simulate_fn,
+                solver=_solver(),
+                key=jr.PRNGKey(0),
+            )
+            return history
+
+        assert run(0.0) == run(0.0)

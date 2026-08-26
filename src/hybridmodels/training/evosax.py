@@ -70,6 +70,7 @@ from scipy.stats import qmc
 
 from hybridmodels.data import BucketPayload, Dataset
 from hybridmodels.losses import LOSS_REGISTRY
+from hybridmodels.penalties import bound_penalty, collocation_grids
 from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
@@ -126,6 +127,8 @@ class EvosaxTrainingConfig:
     population_size: int = 64
     num_generations: int = 100
     init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
+    penalty_weight: float = 0.0
+    penalty_grid_points: int = 5
     init_box_extent: float = 2.0
     sigma_init: float = 0.1
     loss: Callable[..., Array] | str = "mse"
@@ -144,6 +147,11 @@ class EvosaxTrainingConfig:
             raise ValueError(
                 f"EvosaxTrainingConfig.init={self.init!r} is not supported; "
                 f"available: {list(_SUPPORTED_INIT_MODES)}"
+            )
+        if self.penalty_weight < 0.0:
+            raise ValueError(
+                "EvosaxTrainingConfig.penalty_weight must be non-negative; "
+                f"got {self.penalty_weight}"
             )
         if self.population_size <= 0:
             raise ValueError("EvosaxTrainingConfig.population_size must be > 0")
@@ -187,6 +195,8 @@ def _build_single_eval(
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
+    penalty_grids: tuple[Array, ...],
+    penalty_weight: float,
 ) -> Callable[[Array], Array]:
     """Return ``single_eval(flat) -> scalar`` — the per-individual loss closure.
 
@@ -216,6 +226,22 @@ def _build_single_eval(
         for bp in bucket_payloads:
             pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(bp.ts, bp.covariates, bp.y0)
             total = total + loss_fn(pred_obs, bp)
+        if penalty_weight > 0.0:
+            # CMA-ES searches the latent space with nothing holding it in
+            # range -- BoundedPredictor's sigmoid keeps the *physical*
+            # output legal no matter how far the latent drifts, so an
+            # individual parked deep in saturation looks merely mediocre
+            # rather than degenerate. Charging saturation here gives the
+            # search a reason to prefer individuals that still have
+            # gradient left, which matters if the result is later polished
+            # with optax.
+            #
+            # Folded into the fitness rather than reported alongside it:
+            # evosax ranks individuals by a single scalar, so there is no
+            # aux channel to separate the terms into. The weight is a
+            # Python float closed over, not traced -- it never changes
+            # within a run, and closing over it keeps it out of the vmap.
+            total = total + penalty_weight * bound_penalty(predictor, penalty_grids)
         return total
 
     return single_eval
@@ -382,6 +408,8 @@ def train_with_evosax(
         state_to_output=state_to_output,
         solver=solver,
         loss_fn=loss_fn,
+        penalty_grids=collocation_grids(predictors, config.penalty_grid_points),
+        penalty_weight=float(config.penalty_weight),
     )
     population_eval = eqx.filter_jit(jax.vmap(single_eval))
 
