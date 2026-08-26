@@ -117,10 +117,21 @@ def _scaffold_parts(
     dominated trace cost. The values are architecture-shaped and small, and
     the number of distinct architectures in a run is tiny, so an unbounded
     cache is not a leak in practice.
+
+    ``ensure_compile_time_eval`` is load-bearing, not an optimisation. The
+    first call usually happens *inside* a trace, because the first thing a
+    program does with a KAN is evaluate it under ``jit``. Without the
+    context, jaxkan's grid construction stages out into that trace and the
+    cache stores tracers belonging to it; the next trace then merges them
+    and JAX raises ``UnexpectedTracerError``. Forcing eager evaluation
+    makes the cached values concrete arrays, which is what the rest of this
+    docstring assumes they are.
     """
-    scaffold = _build_kan(in_size, out_size, hidden_widths, grid_size, basis, seed)
-    graphdef, _params, *rest_states = nnx.split(scaffold, nnx.Param, ...)
-    return graphdef, tuple(rest_states)
+    with jax.ensure_compile_time_eval():
+        scaffold = _build_kan(in_size, out_size, hidden_widths, grid_size, basis, seed)
+        graphdef, _params, *rest_states = nnx.split(scaffold, nnx.Param, ...)
+        rest = tuple(jax.tree.map(jnp.asarray, rest_states))
+    return graphdef, rest
 
 
 class KANPredictor(Predictor):

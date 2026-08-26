@@ -401,7 +401,7 @@ static.
 | `seed` | `int` | Integer seed used to build the underlying jaxkan model and to recreate its rng-state on demand inside ``__call__``. Derived from the user-supplied ``key`` at construction; static thereafter. |
 | `params` | `nnx.State` | Dynamic field — the ``nnx.Param`` slice of the KAN's state, all float arrays. Trainable; serialised round-trip via ``eqx.tree_serialise_leaves``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L126)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L137)</small>
 
 #### `KANPredictor.initialized_with_key()`
 
@@ -419,7 +419,7 @@ residual — drive the initialisation instead of replacing it with
 leaf-level standard-normal samples that would skew the
 distribution.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L248)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L259)</small>
 
 #### `KANPredictor.with_zero_final_head()`
 
@@ -443,7 +443,7 @@ is locked. Mirrors :meth:`MLPPredictor.with_zero_final_head` —
 same intent (seed-independent initial physical output), different
 parameterisation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L268)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L279)</small>
 
 ---
 

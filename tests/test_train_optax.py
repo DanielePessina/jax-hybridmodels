@@ -19,7 +19,9 @@ import pytest
 from jax import Array
 
 from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
+from hybridmodels.losses import masked_mse
 from hybridmodels.penalties import bound_penalty, collocation_grids
+from hybridmodels.prediction import predict_dataset
 from hybridmodels.predictors import BoundedPredictor, BoundScaler, MLPPredictor
 from hybridmodels.predictors.base import Predictor
 from hybridmodels.solver import SolverConfig
@@ -611,3 +613,141 @@ class TestPhaseOptimiserSwitch:
     def test_keeping_the_same_optimizer_needs_no_reset(self):
         cfg = self._cfg(("adamw", "adamw"), (False, False))
         assert cfg.reset_optimiser_state == (False, False)
+
+
+class TestRestoreBestAcrossHorizons:
+    """``restore_best`` must not compare losses measured over different horizons.
+
+    ``length_schedule`` masks the loss to a prefix of each trajectory, so
+    a phase at 0.2 and a phase at 1.0 are scoring different quantities.
+    Run one running minimum across both and it lands in the short phase
+    whenever the model cannot fit the long horizon as tightly, which is
+    the situation a curriculum exists to handle. The user then gets the
+    least-trained model in the run, silently.
+
+    The dataset here is deliberately unfittable: four oscillators with
+    four different true frequencies against a model holding one shared
+    ``omega``. Over the first two timestamps every frequency looks alike,
+    so the short phase reaches a low loss and carries almost no signal.
+    Over the full window no single ``omega`` works and the loss has a
+    floor well above it.
+    """
+
+    PHASE_1_STEPS = 12
+    PHASE_2_STEPS = 20
+    SHORT_HORIZON = 0.2
+    OMEGAS = (0.6, 0.9, 1.3, 1.7)
+
+    def _dataset(self) -> Dataset:
+        ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
+        experiments = []
+        for i, ((x0, v0), omega) in enumerate(zip(INITIAL_STATES, self.OMEGAS, strict=True)):
+            experiments.append(
+                make_experiment(
+                    covariates={"id": float(i)},
+                    channels={
+                        "position": ChannelObs(ts=ts, values=_true_position(omega, ts, x0, v0))
+                    },
+                    y0_fn=_y0_fn_factory(jnp.asarray([x0, v0])),
+                    exp_id=f"exp_{i}",
+                )
+            )
+        return make_dataset(
+            experiments,
+            state_to_output=_state_to_output,
+            output_channel_names=("position",),
+        )
+
+    def _full_length_loss(self, dataset: Dataset, predictor) -> float:
+        """Data loss over the whole window, the quantity a user cares about."""
+        predictions = predict_dataset(
+            predictor, dataset, simulate_fn=_make_simulate_fn(), solver=_solver_config()
+        )
+        total = sum(
+            float(masked_mse(pred, bp))
+            for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True)
+        )
+        return total / len(dataset.bucket_payloads)
+
+    def _run(self, dataset: Dataset, *, steps, length_schedule, restore_best, lr=3e-2):
+        history, trained = train_with_optax(
+            _OmegaPredictor(0.55),
+            dataset,
+            OptaxTrainingConfig(
+                steps=steps,
+                lr=(lr,) * len(steps) if isinstance(lr, float) else lr,
+                optimizer=("adamw",) * len(steps),
+                reset_optimiser_state=(False,) * len(steps),
+                length_schedule=length_schedule,
+                restore_best=restore_best,
+                verbose=False,
+            ),
+            simulate_fn=_make_simulate_fn(),
+            solver=_solver_config(),
+            key=jr.PRNGKey(0),
+        )
+        return history, trained
+
+    def test_short_phase_holds_the_global_minimum(self):
+        # Anti-vacuity. Without this the next test could pass because the
+        # two horizons happened to produce comparable losses, and the bug
+        # it guards would never be reachable.
+        history, _ = self._run(
+            self._dataset(),
+            steps=(self.PHASE_1_STEPS, self.PHASE_2_STEPS),
+            length_schedule=(self.SHORT_HORIZON, 1.0),
+            restore_best=True,
+        )
+        argmin = min(range(len(history)), key=history.__getitem__)
+        assert argmin < self.PHASE_1_STEPS
+        assert min(history[: self.PHASE_1_STEPS]) < min(history[self.PHASE_1_STEPS :])
+
+    def test_restored_model_comes_from_the_final_horizon(self):
+        dataset = self._dataset()
+        _, two_phase = self._run(
+            dataset,
+            steps=(self.PHASE_1_STEPS, self.PHASE_2_STEPS),
+            length_schedule=(self.SHORT_HORIZON, 1.0),
+            restore_best=True,
+        )
+        # What the pre-fix code handed back: the best point of the short phase.
+        _, short_only = self._run(
+            dataset,
+            steps=(self.PHASE_1_STEPS,),
+            length_schedule=(self.SHORT_HORIZON,),
+            restore_best=True,
+        )
+        assert self._full_length_loss(dataset, two_phase) < self._full_length_loss(
+            dataset, short_only
+        )
+
+    def test_a_constant_horizon_still_compares_across_phases(self):
+        # The reset is keyed on a *change* in length_schedule. Held flat,
+        # the two phases measure the same thing and the running minimum has
+        # to survive the boundary.
+        #
+        # Constructed so the two behaviours are distinguishable: phase 1
+        # runs at a learning rate high enough to overshoot, so its best
+        # point is mid-phase and its endpoint is worse. Phase 2 runs at
+        # zero, so it cannot improve on anything. Carrying the minimum
+        # across returns the good mid-phase-1 point; resetting at the
+        # boundary would return the phase-1 endpoint instead.
+        dataset = self._dataset()
+        history, restored = self._run(
+            dataset,
+            steps=(self.PHASE_1_STEPS, 3),
+            length_schedule=(1.0, 1.0),
+            restore_best=True,
+            lr=(0.4, 0.0),
+        )
+        _, endpoint = self._run(
+            dataset,
+            steps=(self.PHASE_1_STEPS, 3),
+            length_schedule=(1.0, 1.0),
+            restore_best=False,
+            lr=(0.4, 0.0),
+        )
+        argmin = min(range(len(history)), key=history.__getitem__)
+        assert argmin < self.PHASE_1_STEPS - 1, "phase 1 was meant to overshoot its own best"
+        assert self._full_length_loss(dataset, restored) < self._full_length_loss(dataset, endpoint)
+        assert len(history) == self.PHASE_1_STEPS + 3

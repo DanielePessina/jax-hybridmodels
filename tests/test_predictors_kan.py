@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import equinox as eqx
+import jax
+import jax.core
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
@@ -13,6 +15,7 @@ from hybridmodels.predictors import (
     BoundScaler,
     KANPredictor,
 )
+from hybridmodels.predictors.kan import _scaffold_parts
 
 
 def _kan(
@@ -216,3 +219,48 @@ def test_top_level_export():
     import hybridmodels
 
     assert hybridmodels.KANPredictor is KANPredictor
+
+
+class TestScaffoldCacheTracing:
+    """The cached scaffold has to hold concrete arrays, not tracers.
+
+    ``_scaffold_parts`` memoises ``(graphdef, rest_states)`` on the static
+    architecture so a KAN inside a vector field does not rebuild jaxkan on
+    every retrace. The first call is normally made *under* ``jit``,
+    because the first thing anyone does with a KAN is evaluate it inside a
+    compiled function. Build the scaffold plainly and jaxkan's grid
+    construction stages into that trace, the cache stores its tracers, and
+    the next trace merges them and dies with ``UnexpectedTracerError``.
+    Nothing catches it until a KAN is used twice, which is why it survived
+    the change that introduced the cache.
+    """
+
+    def test_a_cold_cache_warmed_inside_jit_survives_a_second_trace(self):
+        _scaffold_parts.cache_clear()
+        predictor = _kan(in_size=2, out_size=2, hidden_widths=(4,), grid_size=4)
+        x = jnp.array([0.3, -0.2])
+
+        # Two distinct jitted callables, so two traces. The first warms the
+        # cache from inside a trace; the second is the one that used to die.
+        first = eqx.filter_jit(lambda p, v: p(v))(predictor, x)
+        second = eqx.filter_jit(lambda p, v: 2.0 * p(v))(predictor, x)
+        assert jnp.allclose(second, 2.0 * first)
+
+    def test_cached_scaffold_leaves_are_concrete_after_a_jit_warm(self):
+        _scaffold_parts.cache_clear()
+        predictor = _kan(in_size=2, out_size=1, hidden_widths=(3,), grid_size=4)
+        eqx.filter_jit(lambda p, v: p(v))(predictor, jnp.array([0.1, 0.2]))
+
+        _graphdef, rest_states = _scaffold_parts(
+            predictor.in_size,
+            predictor.out_size,
+            predictor.hidden_widths,
+            predictor.grid_size,
+            predictor.basis,
+            predictor.seed,
+        )
+        leaves = [leaf for leaf in jtu.tree_leaves(rest_states) if hasattr(leaf, "shape")]
+        assert leaves, "expected the scaffold to carry at least one array leaf"
+        for leaf in leaves:
+            assert isinstance(leaf, jax.Array)
+            assert not isinstance(leaf, jax.core.Tracer)

@@ -559,6 +559,21 @@ def train_with_optax(
         # before its fresh learning rate had any chance to act.
         steps_since_improvement = 0
 
+        # "Best" only means something among losses measured over the same
+        # horizon. A phase with length_schedule=0.2 scores a fifth of each
+        # trajectory, so its numbers are far smaller than a full-length
+        # phase's for reasons that have nothing to do with fit quality.
+        # Carried across the boundary, the minimum lands in the shortest
+        # phase essentially every time and restore_best hands back the
+        # least-trained model in the run. Resetting at a horizon change
+        # makes best mean best at the current horizon, so the returned
+        # model always comes from the last one.
+        if phase_idx > 0 and (
+            config.length_schedule[phase_idx] != config.length_schedule[phase_idx - 1]
+        ):
+            best_loss = float("inf")
+            best_predictors = predictors
+
         ui_.on_phase_start(
             phase_idx=phase_idx,
             phase_steps=int(n_steps),

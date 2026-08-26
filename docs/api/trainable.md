@@ -108,7 +108,7 @@ every bound scaler's ``temperature`` leaf — the convention recommended
 for hybrid models where the scaler defines the activation shape and
 is not meant to drift during training.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L114)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L113)</small>
 
 ---
 
@@ -133,4 +133,4 @@ static-field inspection); applying it to leaf-value comparisons is
 undefined since the mask copy at a node carries boolean leaves while the
 predictors pytree carries arrays.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L137)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L136)</small>
