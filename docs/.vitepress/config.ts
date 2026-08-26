@@ -43,6 +43,8 @@ export default defineConfig({
       '/examples/': [
         { text: 'Crystallisation', link: '/examples/crystallisation-notebook' },
         { text: 'Batch reactor', link: '/examples/batch-reactor' },
+        { text: 'Batch reactor RL', link: '/examples/batch-reactor-rl' },
+        { text: 'Batch reactor RL notebook', link: '/examples/batch-reactor-rl-notebook' },
         { text: 'Hybrid ODE', link: '/examples/hybrid-ode' },
         { text: 'Hybrid ODE notebook', link: '/examples/hybrid-ode-notebook' },
       ],

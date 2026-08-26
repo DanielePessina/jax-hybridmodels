@@ -60,4 +60,4 @@ ignore = []
 # across cells by the marimo runtime rather than lexically (F821), and the
 # markdown tables embedded in prose cells carry alignment that reflowing to
 # 100 columns would destroy (E501).
-"examples/**/notebook.py" = ["B018", "F821", "E501"]
+"examples/**/notebook*.py" = ["B018", "F821", "E501"]
