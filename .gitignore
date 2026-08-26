@@ -220,6 +220,7 @@ examples/crystallisation/data/
 
 # Figures written by the example scripts' default plotting
 examples/*/figures/
+examples/*/figures_rl/
 
 # Worktrees the harness creates for sub-agents
 .claude/worktrees/

@@ -29,6 +29,7 @@ dependencies = [
 examples = [
     "matplotlib",
     "openpyxl",
+    "rlax>=0.1.9",
 ]
 
 [build-system]
@@ -42,6 +43,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.12",
+    "rlax>=0.1.9",
 ]
 
 [tool.ruff]

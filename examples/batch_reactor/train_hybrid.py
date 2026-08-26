@@ -57,6 +57,7 @@ from hybridmodels import (
     make_dataset,
     make_experiment,
     predict_dataset,
+    save_predictors,
     trainable_mask,
 )
 from hybridmodels.training import (
@@ -556,6 +557,15 @@ def main() -> None:
         default=Path(__file__).resolve().parent / "figures",
     )
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument(
+        "--save-predictors",
+        type=Path,
+        default=None,
+        help=(
+            "Write the phase-2 predictors to this path. train_rl_deactivation.py "
+            "loads the result as its frozen trunk."
+        ),
+    )
     args = parser.parse_args()
 
     apply_default_style()
@@ -775,6 +785,12 @@ def main() -> None:
         )
     else:
         print("  parametric latent bit-exact unchanged across phase 2 [OK]")
+
+    # ---- Persist the trained trunk ----------------------------------------- #
+    if args.save_predictors is not None:
+        args.save_predictors.parent.mkdir(parents=True, exist_ok=True)
+        save_predictors(args.save_predictors, predictors_p2)
+        print(f"\n[save] phase-2 predictors written to {args.save_predictors}")
 
     # ---- Plots after phase 2 ---------------------------------------------- #
     if not args.no_plot:

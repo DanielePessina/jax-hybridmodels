@@ -1,6 +1,6 @@
 # Batch reactor, part two: RL-trained catalyst deactivation
 
-**Status:** spec, not yet implemented. Locked through grilling on 2026-08-26.
+**Status:** implemented. Locked through grilling on 2026-08-26; section 11 records what the build changed.
 
 Design contract for `examples/batch_reactor/train_rl_deactivation.py`. Every
 decision below was settled in the grilling session and should not be
@@ -253,8 +253,10 @@ of 11 steps per update. Rollouts are cheap because nothing is differentiated.
 
 - `rlax.truncated_generalized_advantage_estimation` for advantages.
 - `rlax.clipped_surrogate_pg_loss` with `epsilon = 0.2`.
-- `rlax.entropy_loss` for the exploration bonus.
 - Value loss as plain MSE against the GAE returns.
+- Gaussian entropy in closed form. `rlax.entropy_loss` is categorical: it
+  reduces a softmax entropy over unnormalised logits, which a continuous
+  diagonal Gaussian has no use for.
 
 Optimiser `optax.adamw`, learning rate `3e-4`, gradient clipping at global
 norm 0.5. Advantages normalised per batch.
@@ -353,3 +355,91 @@ no amount of PPO tuning will fix it.
   page with the no-adjoint property rather than with accuracy.
 - **The extraction in step 1 changes behaviour.** Mitigated by the
   byte-identical check before anything else is built.
+
+---
+
+## 11. What the build changed
+
+Five things the spec got wrong, found while implementing it. Recorded here
+rather than silently edited above, since the reasons matter.
+
+### The return has no ceiling of `HORIZON`
+
+Section 6 claimed the undiscounted return tops out at 11. It does not. With
+`r = exp(-err^2 / sigma^2)` and residuals distributed as `N(0, sigma^2)` at the
+true model, `E[r] = 1/sqrt(3) = 0.577`, so a perfect model scores about
+`0.577 * HORIZON = 6.35`. Reporting progress against 11 would understate a
+converged policy by nearly a factor of two.
+
+Worse, the number is not a ceiling at all: a model can score *above* the true
+law by fitting observation noise, and the implementation reports exactly that.
+
+### The truth's own zero-order-hold target is the interval mean
+
+The first checkpoint scored the truth by holding `a_true(t_i)` across each
+interval and got 2.60, which failed the assertion. That was the checkpoint
+being wrong, not the design. For `dCa/dt = -k a(t) Ca` the solution over an
+interval is `Ca(t1) = Ca(t0) exp(-k * integral of a)`, so only the integral
+enters: holding activity at its **interval mean** reproduces the continuous
+truth exactly, while the left endpoint systematically overestimates on a
+falling curve. Scored properly the truth reaches 5.73 against 0.78 for no
+deactivation.
+
+This also sharpens what the policy is doing. It is not sampling `a_true(t_i)`;
+it is recovering the piecewise-constant activity that best represents each
+interval, and that target is exact rather than approximate.
+
+### The deactivation was too gentle
+
+`TAU_REF` was 2.6, which left the frozen trunk at validation R^2 0.895 and the
+gradient-trained policy at 0.996. A starting model that is already good makes
+the whole exercise decorative. `TAU_REF` is now 1.2, so fouling stalls the
+batch at roughly 55% conversion while the static model predicts near-complete
+conversion. The frozen trunk drops to R^2 -0.93, worse than predicting the
+mean, and there is something real to learn.
+
+The truth checkpoint was rewritten to match: it now asserts the observable
+consequence (the aged batch leaves at least 0.25 of the initial charge relative
+to the static prediction) rather than particular activity values. The absolute
+gap replaced a ratio because the static prediction goes to nearly zero at low
+pH, where any ratio is large and says nothing.
+
+### Two PPO rows, not one
+
+Training return climbs to 7.49 while validation peaks at 6.54 around update 130
+and then falls to 6.3. Selecting on training return, which is the only signal an
+honest RL loop has, picks an overfitted policy. The script now returns both the
+training-selected and the validation-selected agent and reports both, so the
+over-parameterisation is visible rather than implied. The validation peak sits
+almost exactly at the true law's own score, which is where theory says it should
+sit.
+
+### The agent cannot be a `lax.scan` carry
+
+`MLPPredictor` holds its activation as a callable leaf. `ppo_update` partitions
+the agent into `params` and `static` with the trainability mask before the
+scans, and only `params` rides the carry.
+
+---
+
+## 12. Measured results
+
+Aged validation set, 600 PPO updates, seed 0. `gap` is train R^2 minus val R^2.
+
+| model | train R^2 | val R^2 | val RMSE | gap |
+|---|---|---|---|---|
+| frozen trunk | -0.6217 | -0.9343 | 0.2413 | +0.3126 |
+| exp decay | 0.8406 | 0.8641 | 0.0640 | -0.0235 |
+| optax policy | 0.9934 | 0.9894 | 0.0178 | +0.0039 |
+| PPO train-selected | 0.9944 | 0.9836 | 0.0222 | +0.0108 |
+| PPO val-selected | 0.9933 | 0.9875 | 0.0194 | +0.0058 |
+
+Reference returns: the true deactivation law scores 5.73, no deactivation
+scores 0.78, the pure-noise optimum is 6.35. Best training return 7.49 (1.31x
+the true law, so noise-fitting); best validation return 6.54 at update 130.
+
+The gradient-trained policy edges out PPO on validation fit, as section 7
+anticipated. The page's conclusion is the one stated there: PPO reaches
+essentially the same model without ever differentiating the solver.
+
+Runtime: 85 s end to end on CPU, including both optax baselines.
