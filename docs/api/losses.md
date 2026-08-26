@@ -73,7 +73,7 @@ performed — this is a sum-of-likelihoods, scaling linearly with the
 number of observations. Use ``bal_mle`` for the per-experiment averaged
 counterpart.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L128)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L135)</small>
 
 ---
 
@@ -104,7 +104,7 @@ Per-experiment, per-channel denominators are clamped to ``1`` (via
 channel does not divide by zero; the corresponding numerator is also
 zero in that case (mask gating), so the contribution is exactly ``0.0``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L152)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L159)</small>
 
 ---
 
@@ -130,7 +130,7 @@ Same reduction skeleton as ``bal_mse`` but with ``_gaussian_nll_terms``
 (using ``bp.yvar``) replacing the pointwise squared error. Output is the
 bucket mean of per-experiment, channel-weighted, time-averaged NLLs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L181)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L195)</small>
 
 ---
 

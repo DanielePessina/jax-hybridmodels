@@ -45,6 +45,14 @@ from hybridmodels.trainable import trainable_mask
 from hybridmodels.ui.base import SilentUI, TrainingUI
 from hybridmodels.ui.optax import RichTrainingUI
 
+# R-T7 allows a tournament attempt to fail on a diffrax error or a
+# non-finite loss. Anything else is a bug in user or framework code and
+# must reach the user instead of being retried with a different seed.
+_TOURNAMENT_FAILURES: tuple[type[BaseException], ...] = (
+    FloatingPointError,
+    jax.errors.JaxRuntimeError,
+)
+
 _PHASE_KEYED_FIELDS: tuple[str, ...] = (
     "lr",
     "optimizer",
@@ -107,14 +115,32 @@ class OptaxTrainingConfig:
         for weight in self.penalty_weight:
             if float(weight) < 0.0:
                 raise ValueError(
-                    "OptaxTrainingConfig.penalty_weight entries must be non-negative; "
-                    f"got {weight}"
+                    f"OptaxTrainingConfig.penalty_weight entries must be non-negative; got {weight}"
                 )
         if self.penalty_grid_points < 2:
             raise ValueError(
                 "OptaxTrainingConfig.penalty_grid_points must be at least 2 "
                 f"(one point per box edge); got {self.penalty_grid_points}"
             )
+        for phase_idx in range(1, n):
+            # Without a reset only the learning rate is pushed into the
+            # existing opt_state, so a changed optimizer name was accepted
+            # and then ignored for the rest of the run. R-T4 makes the
+            # reset the thing that rebuilds the optimiser, so the honest
+            # move is to refuse the combination rather than silently pick
+            # one of the two.
+            if (
+                self.optimizer[phase_idx] != self.optimizer[phase_idx - 1]
+                and not self.reset_optimiser_state[phase_idx]
+            ):
+                raise ValueError(
+                    f"OptaxTrainingConfig: phase {phase_idx} changes optimizer from "
+                    f"{self.optimizer[phase_idx - 1]!r} to {self.optimizer[phase_idx]!r} "
+                    "but reset_optimiser_state[{0}] is False. Optimiser state is "
+                    "specific to the optimiser that built it, so switching without a "
+                    "reset would keep running the previous one. Set "
+                    "reset_optimiser_state[{0}]=True.".format(phase_idx)
+                )
         for fraction in self.length_schedule:
             f = float(fraction)
             if not (0.0 < f <= 1.0):
@@ -211,9 +237,7 @@ def _build_make_step(
         sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
         bp_masked = bp._replace(mask=bp.mask & sched_mask)
         diff_part, static_part = eqx.partition(predictors, trainable)
-        (total, (data, penalty)), grads = grad_fn(
-            diff_part, static_part, bp_masked, penalty_weight
-        )
+        (total, (data, penalty)), grads = grad_fn(diff_part, static_part, bp_masked, penalty_weight)
         return total, data, penalty, grads
 
     return make_step
@@ -260,9 +284,7 @@ def _accumulate_step(
     total_penalty = jnp.asarray(0.0)
     n_batches = 0
     for bp in dataset.bucket_payloads:
-        loss, data, penalty, grads = make_step(
-            predictors, bp, length_mask_fraction, penalty_weight
-        )
+        loss, data, penalty, grads = make_step(predictors, bp, length_mask_fraction, penalty_weight)
         acc_grads = jax.tree.map(jnp.add, acc_grads, grads)
         total_loss = total_loss + loss
         total_data = total_data + data
@@ -288,6 +310,7 @@ def _shared_tournament(
     length_mask_fraction: Array,
     penalty_weight: Array,
 ) -> Any:
+    last_error: BaseException | None = None
     for attempt in range(tournament_attempts):
         attempt_key = fold(key, f"tournament_attempt_{attempt}")
         try:
@@ -323,11 +346,20 @@ def _shared_tournament(
             if not math.isfinite(score_value):
                 raise FloatingPointError(f"non-finite tournament loss: {score_value}")
             return candidate
-        except Exception:
+        except _TOURNAMENT_FAILURES as exc:
+            # Narrow on purpose. R-T7 names two failure causes, a diffrax
+            # error and a non-finite loss. Catching everything also
+            # swallowed NameErrors and shape bugs in the user's
+            # simulate_fn, a mistyped input_keys, and failures in the
+            # framework's own reinit and optimiser code, then reported all
+            # of them as one attempt-agnostic warning while training
+            # carried on against unmodified predictors.
+            last_error = exc
             continue
 
     warnings.warn(
-        "tournament: all attempts failed; falling back to initial predictors",
+        "tournament: all attempts failed; falling back to initial predictors. "
+        f"Last failure: {last_error!r}",
         RuntimeWarning,
         stacklevel=2,
     )

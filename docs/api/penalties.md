@@ -21,34 +21,29 @@ soft_logit(s: 'Array', eps: 'float' = 0.001) -> 'Array'
 
 ``logit(s)``, extended linearly outside ``[eps, 1 - eps]``.
 
-Exact — value *and* derivative — for ``s`` inside the threshold band,
-and ``C^1`` across the junction, because the continuation uses
-``logit`` 's own slope at the crossing point. Outside the band the
-result therefore grows linearly instead of blowing up at the pole, and
-the derivative is a finite constant instead of zero.
+Exact in value and derivative for ``s`` inside the band, and C^1 across
+the junction, since the continuation uses logit's own slope at the
+crossing. Outside the band the result grows linearly instead of blowing
+up at the pole, and the derivative is a finite constant instead of zero.
 
-This replaces the ``logit(jnp.clip(s, eps, 1 - eps))`` idiom, whose
-derivative outside the band is exactly zero — see the module docstring
-for why a mid-graph zero derivative is a silent correctness bug rather
-than a numerical nuisance.
+Replaces the ``logit(jnp.clip(s, eps, 1 - eps))`` idiom, whose
+derivative outside the band is exactly zero. The module docstring
+explains why that is a silent correctness bug.
 
-A plain :func:`softclip` cannot be used for this. Its error in the
-interior is ``O(1 / beta)`` in the units of ``s``, and ``s`` here is
-normalised to ``[0, 1]``, so any ``beta`` gentle enough to retain
-gradient far outside the box also visibly distorts the middle of it.
-The two-regime construction sidesteps the trade-off entirely: no
-interior distortion at any threshold.
+:func:`softclip` cannot do this job. Its interior error is
+``O(1 / beta)`` in the units of ``s``, and ``s`` is normalised to
+``[0, 1]``, so any ``beta`` gentle enough to keep gradient far outside
+the box also distorts the middle of it. Two regimes avoid the trade
+entirely, with no interior distortion at any threshold.
 
-``eps`` sets the continuation slope, which is ``1 / (eps * (1 - eps))``
-— roughly ``1 / eps``. That is the one real tuning knob: too small and
-a modest excursion maps to an enormous latent (``eps = 1e-6`` sends a
-1% overshoot to ``|z| ~ 1e4``, which then saturates or overflows the
-inner network); too large and the exact-interior band shrinks. The
-default ``1e-3`` maps a 1% overshoot to ``|z| ~ 10`` — firmly outside
-the sigmoid's linear region, so the push-back is felt, but still a
-number a network can consume.
+``eps`` sets the continuation slope, ``1 / (eps * (1 - eps))``, roughly
+``1 / eps``. It is the one tuning knob. At ``eps = 1e-6`` a 1% overshoot
+maps to ``|z| ~ 1e4``, which saturates or overflows the inner network.
+Larger ``eps`` shrinks the exact band. The default 1e-3 maps a 1%
+overshoot to ``|z| ~ 10``, outside the sigmoid's linear region but still
+a number a network can consume.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L83)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L88)</small>
 
 ---
 
@@ -74,16 +69,13 @@ Built from two softplus shoulders, so the derivative is
 ``(0, 1)`` analytically. The interior is reproduced to ``O(1 / beta)``
 and the output asymptotes to the bounds rather than meeting them.
 
-``beta`` trades interior fidelity against far-field gradient: larger
-values track a hard clip more closely but decay to underflow sooner
-outside the box. The default of ``20`` keeps the interior error below
-roughly ``0.05`` box widths while retaining usable gradient about one
-width out.
+Larger ``beta`` tracks a hard clip more closely but underflows sooner
+outside the box. The default 20 holds interior error below about 0.05
+box widths and keeps usable gradient roughly one width out.
 
-This is a *near-field* repair only. Several widths outside the box the
-derivative underflows just as a hard clip's does, so ``softclip``
-should be paired with :func:`box_violation` whenever the input can
-stray far — the hinge is what supplies unbounded push-back.
+This repairs the near field only. Several widths out the derivative
+underflows just as a hard clip's does. Pair it with
+:func:`box_violation`, which supplies the unbounded push-back.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L123)</small>
 
@@ -107,12 +99,11 @@ before a ``log``, say) but the task loss should keep flowing as though
 the clip were not there.
 
 The identity gradient is a deliberate fiction. It propagates whatever
-the data loss asks for, including "keep going further out of bounds",
-indefinitely — a straight-through clip *never* pushes back on its own.
-Pair it with :func:`box_violation` on the pre-clip value, which is the
-term that actually supplies the restoring force.
+the data loss asks for, including "go further out of bounds", forever.
+A straight-through clip never pushes back on its own. Pair it with
+:func:`box_violation` on the pre-clip value for the restoring force.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L146)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L143)</small>
 
 ---
 
@@ -128,17 +119,15 @@ box_violation(x: 'Array', lows: 'Array', highs: 'Array') -> 'Array'
 
 Width-normalised squared hinge measuring how far ``x`` falls outside its box.
 
-Returns a scalar; exactly zero (value *and* gradient) strictly inside
-the box, so the penalty never perturbs the feasible interior. Outside,
-it grows quadratically, giving a restoring gradient that is linear in
-the overshoot and therefore does not vanish the way a reparameterised
-bound's does.
+Returns a scalar. Zero in value and gradient strictly inside the box,
+so it never perturbs the feasible interior. Outside it grows
+quadratically, giving a restoring gradient linear in the overshoot,
+which does not vanish the way a reparameterised bound's does.
 
-Normalising each component by its own width ``high - low`` is what
-makes a single penalty weight portable: bounds in this package range
-from fractions of a unit to hundreds of kelvin, and an unnormalised
-hinge would let the widest channel dominate the term purely through
-its units.
+Each component is normalised by its own width ``high - low`` so one
+penalty weight works across channels. Bounds in this package run from
+fractions of a unit to hundreds of kelvin, and an unnormalised hinge
+would let the widest channel dominate on units alone.
 
 **Parameters**
 
@@ -153,4 +142,4 @@ its units.
 | --- | --- | --- |
 | `Array` |  | Scalar sum of squared fractional violations. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L163)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L159)</small>

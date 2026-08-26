@@ -74,14 +74,13 @@ open box ``(low, high)``; outside a narrow band at the endpoints
 ``to_latent`` switches to a linear continuation (see method doc), so
 the round trip deviates there rather than saturating.
 
-Bounds are enforced by *construction* — the inner predictor emits an
-unbounded latent and ``from_latent`` squashes it — so a physical
-violation is unrepresentable and there is nothing to clip. What that
-costs is gradient: the squash derivative decays exponentially, so a
-predictor pinned against a bound has no signal left to pull it back.
-:meth:`saturation` and :meth:`input_violation` are the optional
-penalty queries that repair the two ends of that problem; both are
-pure and neither is invoked by ``__call__``.
+Bounds hold by construction. The inner predictor emits an unbounded
+latent and ``from_latent`` squashes it, so a physical violation cannot
+be represented and there is nothing to clip. The cost is gradient. The
+squash derivative decays exponentially, so a predictor pinned against
+a bound has no signal left to pull it back. :meth:`saturation` and
+:meth:`input_violation` are optional penalty queries that repair the
+two ends of this. Both are pure, and ``__call__`` invokes neither.
 
 Sigmoid is the only transform supported here; alternative transforms
 can be introduced by extending ``_SUPPORTED_TRANSFORMS`` and adding
@@ -118,7 +117,7 @@ Apply ``sigmoid(z / temperature)`` to land in ``(0, 1)``, then affine
 rescale to ``[low, high]``. The output is finite for any finite ``z``
 (no clipping required on the inverse direction).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L248)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L241)</small>
 
 #### `BoundScaler.input_violation()`
 
@@ -132,16 +131,14 @@ Zero in value *and* gradient strictly inside the box, so adding it
 to a loss never perturbs the feasible interior. Outside, it grows
 quadratically in the width-normalised overshoot.
 
-This is the push-back half of the pair whose forward half is the
-softclip in :meth:`to_latent`: the softclip keeps the forward pass
-finite and differentiable near the box, this term supplies a
-restoring force that keeps working arbitrarily far from it.
+This is the push-back half of a pair. :meth:`to_latent` keeps the
+forward pass finite and differentiable near the box; this term
+supplies a restoring force that keeps working far outside it.
 
-Pure and side-effect free — emitting a penalty is a separate query,
-never a side effect of calling the scaler, which is what lets the
-caller decide whether and where to pay for it.
+Pure and side-effect free. Emitting a penalty is a separate query,
+so the caller decides whether and where to pay for it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L205)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L202)</small>
 
 #### `BoundScaler.saturation()`
 
@@ -155,21 +152,19 @@ Measures how hard the output squash is pinned against its bound.
 ``z_knee`` defaults to ``3.0``, i.e. ``sigmoid(3) ~ 0.953`` — the
 outer 5% of the physical box on each side.
 
-Deliberately a function of the *latent*, not of the physical value
-it maps to. ``from_latent``'s derivative carries a ``sigma'(z / T)``
-factor that decays to ``4.5e-5`` by ``|z / T| = 10`` and underflows
-to exactly ``0.0`` past roughly ``15``; a penalty written against
-the physical output inherits that factor on the backward pass and
-so dies exactly where saturation is worst. Reading ``|z| / T``
-directly gives a gradient linear in the overshoot that never
-underflows.
+A function of the latent, not of the physical value it maps to.
+``from_latent``'s derivative carries a ``sigma'(z / T)`` factor that
+falls to 4.5e-5 by ``|z / T| = 10`` and underflows to exactly 0.0
+past roughly 15. A penalty written against the physical output
+inherits that factor on the backward pass and dies exactly where
+saturation is worst. Reading ``|z| / T`` gives a gradient linear in
+the overshoot that never underflows.
 
-Reduced with ``mean`` rather than ``sum`` so the term does not
-scale with the number of output components — one penalty weight
-then means the same thing for a one-output and a six-output
-predictor.
+Reduced with ``mean``, not ``sum``, so the term does not scale with
+output width. One weight then means the same for a one-output and a
+six-output predictor.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L224)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L219)</small>
 
 #### `BoundScaler.to_latent()`
 
@@ -182,28 +177,26 @@ Map a physical-space value to its latent representative.
 Steps: normalise to ``[0, 1]`` against ``bounds``, apply
 :func:`~hybridmodels.penalties.soft_logit`, scale by ``temperature``.
 
-The ``logit`` pole guard is a linear continuation, not a hard
-``jnp.clip``. A hard clip has *exactly* zero derivative outside the
-box, and because this guard sits mid-graph that zero propagates to
-every upstream parameter on the path. Predictor inputs are
-routinely state-derived — supersaturation in the crystallisation
-example is a traced function of the ODE state — so a clipped input
-silently drops a real sensitivity out of the ODE adjoint with
-nothing raised and nothing logged.
+The pole guard is a linear continuation, not a hard ``jnp.clip``.
+A hard clip has exactly zero derivative outside the box, and since
+the guard sits mid-graph that zero propagates to every upstream
+parameter on the path. Predictor inputs are often state-derived.
+Supersaturation in the crystallisation example is a traced function
+of the ODE state, so a clipped input drops a real sensitivity from
+the adjoint with nothing raised and nothing logged.
 
-Inside ``[logit_eps, 1 - logit_eps]`` the map is *exactly* the old
-``logit``, value and derivative both, so models trained before this
-change keep their numerics wherever they were behaving. Outside it,
-the map continues linearly at ``logit``'s own slope at the
-crossing: finite values, constant non-zero gradient, ``C^1`` across
-the junction so an adaptive ODE controller sees no kink.
+Inside ``[logit_eps, 1 - logit_eps]`` the map is exactly the old
+``logit`` in both value and derivative, so models trained before
+this change keep their numerics wherever they behaved. Outside, it
+continues linearly at logit's slope at the crossing. Values stay
+finite, gradient stays a non-zero constant, and the join is C^1 so
+an adaptive controller sees no kink.
 
-The continuation still only reports *direction*, not magnitude —
-it cannot tell a small excursion from a catastrophic one in a way a
-loss can act on. Pair it with :meth:`input_violation` when an input
-can leave its declared box.
+The continuation reports direction, not magnitude. It cannot tell a
+small excursion from a catastrophic one in a way a loss can act on.
+Pair it with :meth:`input_violation` when an input can leave its box.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L174)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L173)</small>
 
 ---
 
@@ -262,7 +255,34 @@ self-describing — the user can still call it with a positional
 | `inner` | `Predictor` | Trainable Array -> Array module operating in latent space. |
 | `out_scaler` | `BoundScaler` | Maps the inner network's latent output back to physical units. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L259)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L252)</small>
+
+#### `BoundedPredictor.initialized_with_key()`
+
+```python
+initialized_with_key(self, key: 'Array') -> 'BoundedPredictor'
+```
+
+Re-initialise ``inner`` only, leaving both scalers untouched.
+
+Without this, ``reinitialize_with_key`` falls through to its generic
+branch and replaces every inexact leaf, including
+``BoundScaler.temperature``, with a sample from ``N(0, 1)``. A
+temperature near zero (or negative) inverts and blows up both
+``to_latent`` (which multiplies by ``T``) and ``from_latent`` (which
+divides by it), so a tournament attempt on the documented
+``(BoundedPredictor, ...)`` shape came back numerically wrecked.
+
+Delegating to the free function also restores the inner predictor's
+own scheme. ``MLPPredictor.initialized_with_key`` re-instantiates so
+Equinox's LeCun-uniform init applies; leaf-level normal sampling
+skews that distribution, which is the failure its docstring warns
+about.
+
+The scalers hold the bound geometry, not learned state, so a restart
+has no reason to touch them.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L355)</small>
 
 ---
 
@@ -451,7 +471,7 @@ For re-initialising a *pytree* of predictors (the convention at the
 use :func:`reinitialize_pytree_with_key` so each ``eqx.Module`` leaf
 gets its own independently-derived key.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L363)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L382)</small>
 
 ---
 
@@ -494,4 +514,4 @@ one-leaf pytree, equivalent to calling
 Returns a structurally identical pytree with fresh weights on every
 ``eqx.Module`` leaf.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L394)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L413)</small>

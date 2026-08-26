@@ -103,6 +103,39 @@ class TestBoundPenaltyPytreeInvariance:
         grids = collocation_grids(bp, n_per_dim=3)
         assert float(bound_penalty(bp, grids)) >= 0.0
 
+    def test_a_bounded_predictor_nested_inside_another_is_found(self):
+        # ADR-0007 claims nesting invariance. An is_leaf-stopped traversal
+        # only delivers that for nesting in *containers*: it halts at the
+        # outermost BoundedPredictor, so an inner one declares a box that is
+        # never penalised.
+        inner_bp = _bp(key=jr.PRNGKey(0), in_bounds=((0.0, 10.0),), out_bounds=((0.0, 1.0),))
+        outer = BoundedPredictor(
+            input_keys=("x0",),
+            in_scaler=BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid"),
+            inner=inner_bp,
+            out_scaler=BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid"),
+        )
+        assert len(collocation_grids((outer,), n_per_dim=3)) == 2
+
+    def test_nested_predictor_contributes_to_the_penalty(self):
+        saturated_inner = _bp(
+            key=jr.PRNGKey(0), in_bounds=((0.0, 10.0),), out_bounds=((0.0, 1.0),), scale=50.0
+        )
+        fresh_inner = _bp(key=jr.PRNGKey(0), in_bounds=((0.0, 10.0),), out_bounds=((0.0, 1.0),))
+
+        def wrap(inner):
+            return BoundedPredictor(
+                input_keys=("x0",),
+                in_scaler=BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid"),
+                inner=inner,
+                out_scaler=BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid"),
+            )
+
+        hot, cold = (wrap(saturated_inner),), (wrap(fresh_inner),)
+        hot_v = float(bound_penalty(hot, collocation_grids(hot, 5)))
+        cold_v = float(bound_penalty(cold, collocation_grids(cold, 5)))
+        assert hot_v > cold_v
+
     def test_predictors_without_bounded_leaves_penalise_zero(self):
         # A user's parametric trunk need not be a BoundedPredictor at all.
         inner = MLPPredictor(

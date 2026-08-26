@@ -45,7 +45,7 @@ OptaxTrainingConfig(
 
 OptaxTrainingConfig(steps: 'tuple[int, ...]', lr: 'tuple[float, ...]', optimizer: 'tuple[str, ...]', reset_optimiser_state: 'tuple[bool, ...]', length_schedule: 'tuple[float, ...]' = (1.0,), penalty_weight: 'tuple[float, ...]' = (0.0,), penalty_grid_points: 'int' = 5, loss: 'Callable[..., Array] | str' = 'mse', channel_idx: 'tuple[int, ...] | None' = None, channel_weights: 'tuple[float, ...] | None' = None, tournament_attempts: 'int' = 1, tournament_steps: 'int' = 0, tournament_lr: 'float' = 0.0001, patience: 'int' = 0, restore_best: 'bool' = True, verbose: 'bool' = True)
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L56)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L64)</small>
 
 #### `OptaxTrainingConfig.penalty_weight_for_phase()`
 
@@ -55,7 +55,7 @@ penalty_weight_for_phase(self, phase_idx: 'int') -> 'float'
 
 Penalty weight for ``phase_idx``, honouring the length-1 broadcast.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L75)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L83)</small>
 
 ---
 
@@ -101,7 +101,7 @@ training.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``. ``loss_history`` is the training loss recorded once per step across every phase; ``trained_predictors`` is the predictors corresponding to the best-loss step seen so far when ``config.restore_best=True``, or to the final step otherwise. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L350)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L382)</small>
 
 ---
 

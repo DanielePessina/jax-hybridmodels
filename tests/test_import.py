@@ -2,6 +2,7 @@ def test_package_imports() -> None:
     import hybridmodels
 
     expected = {
+        "ADJOINT_REGISTRY",
         "BoundedPredictor",
         "BoundScaler",
         "box_violation",
@@ -43,6 +44,7 @@ def test_package_imports() -> None:
         "reinitialize_with_key",
         "save_predictors",
         "save_run",
+        "register_adjoint",
         "soft_logit",
         "softclip",
         "split_dataset",

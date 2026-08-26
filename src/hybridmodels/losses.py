@@ -119,7 +119,14 @@ def masked_mse(
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    se = jnp.where(m, (p - y) ** 2, 0.0)
+    # Sanitise the inputs before squaring, then gate the output. Masking
+    # only the output is not enough: jnp.where evaluates both branches, and
+    # the dead branch's local derivative is still computed, so a NaN or inf
+    # in a masked cell reaches the backward pass as 0 * nan = nan. Same
+    # double-where discipline _gaussian_nll_terms uses.
+    p_safe = jnp.where(m, p, 0.0)
+    y_safe = jnp.where(m, y, 0.0)
+    se = jnp.where(m, (p_safe - y_safe) ** 2, 0.0)
     weighted = se * weights[None, None, :]
     denom = jnp.maximum(m.sum(), 1)
     return weighted.sum() / denom
@@ -170,7 +177,14 @@ def bal_mse(
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    se = jnp.where(m, (p - y) ** 2, 0.0)
+    # Sanitise the inputs before squaring, then gate the output. Masking
+    # only the output is not enough: jnp.where evaluates both branches, and
+    # the dead branch's local derivative is still computed, so a NaN or inf
+    # in a masked cell reaches the backward pass as 0 * nan = nan. Same
+    # double-where discipline _gaussian_nll_terms uses.
+    p_safe = jnp.where(m, p, 0.0)
+    y_safe = jnp.where(m, y, 0.0)
+    se = jnp.where(m, (p_safe - y_safe) ** 2, 0.0)
     sum_se = se.sum(axis=1)
     count = jnp.maximum(m.sum(axis=1), 1)
     avg = sum_se / count

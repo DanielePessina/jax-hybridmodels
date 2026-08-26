@@ -13,6 +13,7 @@ from hybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     Predictor,
+    reinitialize_pytree_with_key,
     reinitialize_with_key,
 )
 
@@ -450,3 +451,58 @@ class TestBoundScalerPenalties:
         out = eqx.filter_jit(jax.vmap(scaler.input_violation))(xs)
         assert out.shape == (3,)
         assert jnp.all(jnp.isfinite(out))
+
+
+class TestBoundedPredictorReinit:
+    """Tournament re-init must not wreck the scalers it wraps."""
+
+    def _bp(self, key=None):
+        import equinox as eqx  # noqa: F401
+
+        from hybridmodels.predictors import MLPPredictor
+
+        key = key if key is not None else jr.PRNGKey(0)
+        return BoundedPredictor(
+            input_keys=("a", "b"),
+            in_scaler=BoundScaler(bounds=((0.0, 10.0), (0.0, 5.0)), transform="sigmoid"),
+            inner=MLPPredictor(
+                in_size=2, out_size=1, width_size=8, depth=1, activation_name="tanh", key=key
+            ),
+            out_scaler=BoundScaler(bounds=((-2.0, 2.0),), transform="sigmoid"),
+        )
+
+    def test_reinit_preserves_scaler_temperature(self):
+        # The generic leaf-level branch replaced temperature with a sample
+        # from N(0, 1). A negative near-zero temperature inverts and blows
+        # up both to_latent (* T) and from_latent (sigmoid(z / T)), so every
+        # tournament candidate on the canonical shape was numerically wrecked.
+        bp = self._bp()
+        fresh = reinitialize_with_key(bp, jr.PRNGKey(1))
+        assert float(fresh.in_scaler.temperature) == 1.0
+        assert float(fresh.out_scaler.temperature) == 1.0
+
+    def test_reinit_still_changes_the_inner_weights(self):
+        bp = self._bp()
+        fresh = reinitialize_with_key(bp, jr.PRNGKey(1))
+        assert not jnp.allclose(fresh.inner.mlp.layers[0].weight, bp.inner.mlp.layers[0].weight)
+
+    def test_reinit_uses_the_inner_predictors_own_init_scheme(self):
+        # MLPPredictor.initialized_with_key re-instantiates so Equinox's
+        # LeCun-uniform init applies. Leaf-level N(0, 1) sampling would give
+        # a visibly wider spread, which is what this catches.
+        bp = self._bp()
+        fresh = reinitialize_with_key(bp, jr.PRNGKey(1))
+        spread = float(jnp.std(fresh.inner.mlp.layers[0].weight))
+        assert spread < 0.7
+
+    def test_reinit_across_a_pytree_preserves_every_temperature(self):
+        preds = (self._bp(jr.PRNGKey(0)), self._bp(jr.PRNGKey(1)))
+        fresh = reinitialize_pytree_with_key(preds, jr.PRNGKey(2))
+        for leaf in fresh:
+            assert float(leaf.in_scaler.temperature) == 1.0
+            assert float(leaf.out_scaler.temperature) == 1.0
+
+    def test_bounded_predictor_is_a_predictor(self):
+        # Nesting already works at runtime; this declares the conformance
+        # the `inner: Predictor` annotation asks for.
+        assert isinstance(self._bp(), Predictor)

@@ -12,6 +12,7 @@ Pin the four built-in losses' contract:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 from jax import Array
@@ -174,3 +175,48 @@ def test_bal_mle_uses_yvar() -> None:
     bp_a = _make_bp(y_observed=y, mask=mask, yvar=var_a)
     bp_b = _make_bp(y_observed=y, mask=mask, yvar=var_b)
     assert not jnp.allclose(bal_mle(pred, bp_a), bal_mle(pred, bp_b), atol=1e-6, rtol=0)
+
+
+class TestMaskedNanGradients:
+    """The module docstring promises masked NaNs cannot poison the result.
+
+    "Result" has to mean the gradient too. ``length_schedule`` masks the
+    tail of every trajectory, so a solve that diverges only in the masked
+    tail would otherwise report a finite, plausible loss while handing the
+    optimiser NaN gradients.
+    """
+
+    def _payload(self):
+        mask = jnp.array([[[True], [True], [False]]])
+        return BucketPayload(
+            ts=jnp.zeros((1, 3)),
+            y_observed=jnp.zeros((1, 3, 1)),
+            yvar=jnp.ones((1, 3, 1)),
+            mask=mask,
+            covariates={},
+            y0=jnp.zeros((1, 1)),
+            n_obs=jnp.array([2]),
+        )
+
+    @pytest.mark.parametrize("loss_fn", [masked_mse, bal_mse, masked_mle, bal_mle])
+    def test_gradient_is_finite_when_masked_cells_hold_nan(self, loss_fn):
+        bp = self._payload()
+        pred = jnp.array([[[1.0], [1.0], [jnp.nan]]])
+        grad = jax.grad(lambda p: loss_fn(p, bp))(pred)
+        assert not bool(jnp.isnan(grad).any())
+
+    @pytest.mark.parametrize("loss_fn", [masked_mse, bal_mse, masked_mle, bal_mle])
+    def test_gradient_is_finite_when_masked_cells_hold_inf(self, loss_fn):
+        bp = self._payload()
+        pred = jnp.array([[[1.0], [1.0], [jnp.inf]]])
+        grad = jax.grad(lambda p: loss_fn(p, bp))(pred)
+        assert jnp.all(jnp.isfinite(grad))
+
+    @pytest.mark.parametrize("loss_fn", [masked_mse, bal_mse, masked_mle, bal_mle])
+    def test_masked_cell_gets_exactly_zero_gradient(self, loss_fn):
+        # Stronger than "not NaN": a masked observation must not influence
+        # the fit at all.
+        bp = self._payload()
+        pred = jnp.array([[[1.0], [1.0], [7.0]]])
+        grad = jax.grad(lambda p: loss_fn(p, bp))(pred)
+        assert float(grad[0, 2, 0]) == 0.0

@@ -463,12 +463,17 @@ class TestPenaltyWiring:
 
     def test_zero_weight_reproduces_the_unpenalised_run(self):
         # The default must be bit-for-bit inert, or every existing run
-        # silently changes meaning.
+        # silently changes meaning. Run this against a predictors pytree
+        # that actually holds a BoundedPredictor: with no such leaf the
+        # penalty is zero for reasons unrelated to the weight, and the
+        # test passes whether or not the feature works.
         ds = _make_oscillator_dataset()
-        h_off, _ = self._run(_OmegaPredictor(omega=1.5), ds, self._config(), bounded=False)
-        h_zero, _ = self._run(
-            _OmegaPredictor(omega=1.5), ds, self._config(penalty_weight=(0.0,)), bounded=False
-        )
+        preds = self._bounded_predictors(scale=50.0)
+        # Anti-vacuity guard: without this the test would also pass if the
+        # penalty never reached the loss at all.
+        assert float(bound_penalty(preds, collocation_grids(preds, 5))) > 0.0
+        h_off, _ = self._run(preds, ds, self._config())
+        h_zero, _ = self._run(preds, ds, self._config(penalty_weight=(0.0,)))
         assert h_off == h_zero
 
     def test_penalty_weight_broadcasts_across_phases(self):
@@ -562,3 +567,30 @@ class TestPenaltyWiring:
         steps = [kw for name, kw in ui.events if name == "on_step_end"]
         assert steps and all("penalty" in kw for kw in steps)
         assert any(kw["penalty"] > 0.0 for kw in steps)
+
+
+class TestPhaseOptimiserSwitch:
+    def _cfg(self, optimizer, reset):
+        return OptaxTrainingConfig(
+            steps=(2, 2),
+            lr=(1e-2, 1e-2),
+            optimizer=optimizer,
+            reset_optimiser_state=reset,
+            length_schedule=(1.0, 1.0),
+            verbose=False,
+        )
+
+    def test_switching_optimizer_without_a_reset_raises(self):
+        # It used to be accepted and then ignored: without a reset only the
+        # learning rate is pushed into the existing opt_state, so phase 1
+        # kept running adamw.
+        with pytest.raises(ValueError, match="reset_optimiser_state"):
+            self._cfg(("adamw", "adabelief"), (False, False))
+
+    def test_switching_optimizer_with_a_reset_is_allowed(self):
+        cfg = self._cfg(("adamw", "adabelief"), (False, True))
+        assert cfg.optimizer == ("adamw", "adabelief")
+
+    def test_keeping_the_same_optimizer_needs_no_reset(self):
+        cfg = self._cfg(("adamw", "adamw"), (False, False))
+        assert cfg.reset_optimiser_state == (False, False)

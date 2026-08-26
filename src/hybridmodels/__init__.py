@@ -41,7 +41,13 @@ if TYPE_CHECKING:
         save_predictors,
         save_run,
     )
-    from hybridmodels.solver import SOLVER_REGISTRY, SolverConfig, register_solver
+    from hybridmodels.solver import (
+        ADJOINT_REGISTRY,
+        SOLVER_REGISTRY,
+        SolverConfig,
+        register_adjoint,
+        register_solver,
+    )
     from hybridmodels.trainable import (
         default_trainable,
         freeze_modules_of_type,
@@ -64,6 +70,7 @@ if TYPE_CHECKING:
     )
 
 __all__: list[str] = [
+    "ADJOINT_REGISTRY",
     "BoundedPredictor",
     "BoundScaler",
     "box_violation",
@@ -105,6 +112,7 @@ __all__: list[str] = [
     "reinitialize_with_key",
     "save_predictors",
     "save_run",
+    "register_adjoint",
     "soft_logit",
     "softclip",
     "split_dataset",
@@ -114,6 +122,7 @@ __all__: list[str] = [
 ]
 
 _EXPORTS: dict[str, str] = {
+    "ADJOINT_REGISTRY": "hybridmodels.solver",
     "BoundedPredictor": "hybridmodels.predictors",
     "BoundScaler": "hybridmodels.predictors",
     "box_violation": "hybridmodels.penalties",
@@ -155,6 +164,7 @@ _EXPORTS: dict[str, str] = {
     "reinitialize_with_key": "hybridmodels.predictors",
     "save_predictors": "hybridmodels.serialise",
     "save_run": "hybridmodels.serialise",
+    "register_adjoint": "hybridmodels.solver",
     "soft_logit": "hybridmodels.penalties",
     "softclip": "hybridmodels.penalties",
     "split_dataset": "hybridmodels.data",

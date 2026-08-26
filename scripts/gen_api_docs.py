@@ -84,6 +84,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "SolverConfig",
             "SOLVER_REGISTRY",
             "register_solver",
+            "ADJOINT_REGISTRY",
+            "register_adjoint",
         ),
     ),
     (

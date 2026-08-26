@@ -16,7 +16,7 @@ The public surface is split across ten pages, grouped by concern. Every symbol b
 
 ## [Solver: ODE Integration](/api/solver)
 
-[`SolverConfig`](/api/solver#solverconfig), [`SOLVER_REGISTRY`](/api/solver#solver_registry), [`register_solver`](/api/solver#register_solver)
+[`SolverConfig`](/api/solver#solverconfig), [`SOLVER_REGISTRY`](/api/solver#solver_registry), [`register_solver`](/api/solver#register_solver), [`ADJOINT_REGISTRY`](/api/solver#adjoint_registry), [`register_adjoint`](/api/solver#register_adjoint)
 
 ## [Training: Optax & Evosax Loops](/api/training)
 
