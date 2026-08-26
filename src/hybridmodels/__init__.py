@@ -1,3 +1,31 @@
+"""Hybrid models: user-written ODE physics with trainable function approximators inside.
+
+A model here is not one object. It is three pieces the user holds
+together:
+
+- ``predictors``, a pytree of trainable ``eqx.Module`` leaves, usually a
+  tuple of ``BoundedPredictor``. Each one maps named inputs to a physical
+  quantity, keeping it inside a declared box.
+- ``simulate_fn``, a pure function the user writes. It integrates the
+  dynamics for one experiment and returns the full state trajectory. The
+  user owns the physics; the framework owns batching, compilation, and
+  gradients.
+- ``SolverConfig``, the diffrax settings for that integration.
+
+Data arrives as ``Experiment`` records with sparse per-channel
+observations. ``make_dataset`` groups them into buckets of equal
+timestamp-axis length so JAX can compile one kernel per bucket shape.
+``train_with_optax`` fits by gradient descent, ``train_with_evosax`` by
+evolutionary search, and both take the same boolean mask saying which
+parameters may move. ``save_run`` writes the result to disk.
+
+Every public name below is imported lazily. The ``TYPE_CHECKING`` block
+gives type checkers and IDEs the real symbols, while ``__getattr__``
+resolves a name to its module only when someone actually reads it. That
+keeps ``import hybridmodels`` from pulling in diffrax, optax, evosax, and
+rich on a run that needs none of them.
+"""
+
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
 

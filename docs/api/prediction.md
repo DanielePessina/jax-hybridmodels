@@ -28,26 +28,27 @@ predict_bucket(
 Vmap ``simulate_fn`` over the bucket's ``N`` axis and project to observed channels.
 
 The inner ``_per_experiment`` runs the user's ``simulate_fn`` once for
-one experiment to produce a full state trajectory ``[T, S]`` and then
-projects to the observed channels ``[T, D]`` via ``state_to_output``.
-``jax.vmap`` lifts this over ``(ts, covariates, y0)`` along the ``N``
-axis to produce ``[N, T, D]``. ``predictors`` and ``solver`` are
-closed over (no vmap axis) — they are constant across the bucket.
+one experiment, producing a full state trajectory ``[T, S]``, and maps
+it to the observed channels ``[T, D]`` with ``state_to_output``.
+``jax.vmap`` lifts that over ``(ts, covariates, y0)`` along the ``N``
+axis, giving ``[N, T, D]``. ``predictors`` and ``solver`` are closed
+over with no vmap axis, since they are the same for every experiment in
+the bucket.
 
-JIT caching: one compiled trace per bucket *shape*. The Python
-dispatch over ``dataset.bucket_payloads`` lives in
-``predict_dataset``, never inside the jitted region — that boundary
-is what keeps the cache predictable.
+One compiled kernel exists per bucket shape. The Python dispatch over
+``dataset.bucket_payloads`` lives in ``predict_dataset`` and never
+inside the compiled region. That boundary is what keeps the cache
+predictable.
 
 **Parameters**
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `predictors` | `PyTree[eqx.Module]` | Trainable component, typically a tuple of ``BoundedPredictor`` leaves but accepted as any pytree shape. Forwarded to ``simulate_fn`` as-is; this module does not inspect the container. |
-| `bp` | `BucketPayload` | One bucket; ``ts``, ``covariates``, ``y0`` are vmapped along ``N``. |
+| `predictors` | `PyTree[eqx.Module]` | The trainable part of the model, typically a tuple of ``BoundedPredictor`` leaves, accepted in any pytree shape. Forwarded to ``simulate_fn`` unchanged; this module does not inspect the container. |
+| `bp` | `BucketPayload` | One bucket. Its ``ts``, ``covariates``, and ``y0`` are vmapped along ``N``. |
 | `simulate_fn` |  | User-supplied integrator with signature ``(predictors, ts, covariates, y0, solver) -> [T, S]``. |
-| `state_to_output` |  | Pure ``[T, S] -> [T, D]`` projector held on ``Dataset``. |
-| `solver` |  | Static ``SolverConfig``. |
+| `state_to_output` |  | Pure ``[T, S] -> [T, D]`` map from full state to observed channels, held on the ``Dataset``. |
+| `solver` |  | ``SolverConfig``. All its fields are static, so it enters the compiled kernel as configuration rather than as data. |
 
 **Returns**
 
@@ -74,12 +75,13 @@ predict_dataset(
 
 Run ``predict_bucket`` over every bucket in ``dataset`` and return the stack tuple.
 
-The Python ``for`` loop over ``dataset.bucket_payloads`` is the dispatch
-driver: each bucket shape compiles ``predict_bucket`` exactly once.
-Returns a tuple aligned with ``dataset.bucket_payloads`` order, *not*
-a flat concatenation — each entry has its own ``[N_b, T_b, D]``
-shape and cannot be stacked into a single tensor (the buckets differ
-precisely in ``T``).
+The Python ``for`` loop over ``dataset.bucket_payloads`` drives the
+dispatch, and each bucket shape compiles ``predict_bucket`` exactly
+once.
+
+The result is a tuple in ``dataset.bucket_payloads`` order rather than
+one concatenated array. Buckets differ precisely in ``T``, so each
+entry has its own ``[N_b, T_b, D]`` shape and they cannot be stacked.
 
 **Returns**
 
@@ -87,4 +89,4 @@ precisely in ``T``).
 | --- | --- | --- |
 | `tuple[Float[Array, "N T D"], ...]` |  | One ``[N_b, T_b, D]`` array per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/prediction.py#L95)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/prediction.py#L98)</small>

@@ -1,36 +1,47 @@
 """Data containers and dataset construction.
 
-The framework targets a single data shape: **bucketed irregular**
-observations. Each channel of each experiment carries its own sparse
-timestamp set; ``make_dataset`` builds the per-experiment union of those
-sets, scatters values and variances onto it, and groups experiments with
-the same union length into one stacked ``BucketPayload``. Training and
-prediction then iterate over those buckets — one trace per bucket
-shape, no padding to a common length, no per-experiment Python
-overhead. Other data layouts (regular grids, single-channel, ragged) are
-deliberately not modelled here; if you have such data, pre-process it
-into the shape this module expects.
+This module turns a list of experiments, each with sparsely and
+irregularly sampled measurements, into rectangular arrays that JAX can
+compile against.
+
+The framework accepts one data layout, called bucketed irregular. Every
+measured quantity of an experiment (a *channel*) carries its own set of
+observation times, and no two channels need to agree. ``make_dataset``
+takes the union of those time sets per experiment (the *union timestamp
+axis*), writes each channel's values into the rows of that axis where it
+was actually measured, and records a boolean *mask* marking which cells
+are real measurements rather than filler. Experiments whose union axes
+happen to have the same length are then stacked into one ``BucketPayload``.
+That group is a *bucket*.
+
+Buckets exist because of how JAX compiles. A JAX function is compiled
+once per distinct input array shape, so batching experiments of equal
+length lets one compiled kernel run the whole group at once. Grouping by
+length avoids padding every experiment out to the longest one, and it
+keeps the number of compilations equal to the number of distinct
+lengths. Other layouts (regular grids, single-channel, ragged) are not
+modelled here. Pre-process such data into the shape this module expects.
 
 Lifecycle and lifetime
 ----------------------
-``ChannelObs`` and ``Experiment`` are **host-side input containers**:
-users build them, then hand them to ``make_dataset``, which scatters them
-onto the per-experiment union axis and stacks bucket-shaped JAX arrays.
-After that, training and prediction operate exclusively on
-``BucketPayload``; the original ``Experiment`` objects are retained on
-``Dataset._experiments`` only so ``split_dataset`` can re-bucket subsets
-after a permutation.
+``ChannelObs`` and ``Experiment`` are host-side input containers. Users
+build them, then hand them to ``make_dataset``, which scatters them onto
+the per-experiment union axis and stacks bucket-shaped JAX arrays. After
+that, training and prediction read only ``BucketPayload``. The original
+``Experiment`` objects stay on ``Dataset._experiments`` for one reason,
+so ``split_dataset`` can re-bucket subsets after a permutation.
 
 Shape conventions (used throughout the package)
 -----------------------------------------------
-- ``Tc`` — per-channel observation count (varies across channels)
-- ``T``  — per-experiment union timestamp count
-  (``= len(union(ts_c) for c in output_channel_names)``)
-- ``D``  — number of output channels (``len(output_channel_names)``)
-- ``S``  — full state dimension (``y0`` size; defined by the user's
-  ``simulate_fn``)
-- ``N``  — number of experiments stacked in a single bucket
-  (i.e. sharing ``T``)
+- ``Tc``: observation count for one channel of one experiment. Varies
+  across channels.
+- ``T``: length of one experiment's union timestamp axis
+  (``= len(union(ts_c) for c in output_channel_names)``).
+- ``D``: number of output channels (``len(output_channel_names)``).
+- ``S``: full state dimension, the size of ``y0``. Defined by the user's
+  ``simulate_fn``, never inspected by the framework.
+- ``N``: number of experiments stacked in a single bucket, that is, the
+  number sharing a given ``T``.
 """
 
 # ruff: noqa: F722
@@ -49,18 +60,21 @@ from jaxtyping import Array, Bool, Float, Int
 
 
 class ChannelObs(eqx.Module):
-    """Per-channel sparse observation triple ``(ts, values, variance)``.
+    """What one measured quantity of one experiment was observed to be, and when.
 
-    One ``ChannelObs`` describes a single observable channel for a single
-    experiment. Channels are sparse: each channel carries its own ``Tc``
-    timestamps independent of other channels, and the framework computes
-    the union timestamp axis and resulting mask at ``make_dataset`` time.
+    A *channel* is one observable quantity, for example concentration or
+    mean crystal size. Each channel of an experiment carries its own
+    ``Tc`` observation times, independent of every other channel, so
+    channels can be sampled at completely different rates. ``make_dataset``
+    later merges an experiment's channels onto a shared time axis and
+    builds the mask that says which cells hold real measurements.
 
     Shape contract
     --------------
-    All three arrays share the same leading dimension ``Tc``. ``ts`` does not
-    need to be sorted — ``_per_experiment_arrays`` re-sorts when building the
-    union axis — but it should not contain duplicates within a single channel.
+    All three arrays share the same leading dimension ``Tc``, the number of
+    observations for this channel. ``ts`` may be unsorted, since
+    ``_per_experiment_arrays`` sorts when it builds the union axis. It must
+    not contain duplicate times within a single channel.
 
     Attributes
     ----------
@@ -85,12 +99,12 @@ class ChannelObs(eqx.Module):
         values: Any,
         variance: Any = 1.0,
     ) -> None:
-        """Construct a ``ChannelObs``, eagerly broadcasting scalar variance.
+        """Construct a ``ChannelObs``, broadcasting a scalar variance up front.
 
-        ``variance`` may be passed as a scalar (typical when the user has no
-        per-observation uncertainty estimate) or as a ``Tc``-shaped array; in
-        the scalar case it is broadcast to ``values.shape`` here so all three
-        attributes are guaranteed rank-1 thereafter.
+        ``variance`` may be a scalar (typical when the user has no
+        per-observation uncertainty estimate) or a ``Tc``-shaped array. A
+        scalar is broadcast to ``values.shape`` here, so downstream code can
+        assume all three attributes are rank-1.
         """
         ts_arr = jnp.asarray(ts)
         values_arr = jnp.asarray(values)
@@ -103,25 +117,29 @@ class ChannelObs(eqx.Module):
 
 
 class Experiment(eqx.Module):
-    """One experiment: covariates, full initial state, and per-channel observations.
+    """One run of the physical system: its conditions, its starting state, its measurements.
 
-    Built by ``make_experiment``; stored on ``Dataset._experiments`` so
-    ``split_dataset`` can re-bucket subsets after a permutation.
+    Build these with ``make_experiment``. They are kept on
+    ``Dataset._experiments`` so ``split_dataset`` can re-bucket subsets
+    after a permutation.
 
     Attributes
     ----------
     covariates : dict[str, Array]
-        Named scalar covariates, **constant in time**. Keys must agree
-        across all experiments handed to a single ``make_dataset`` call.
+        Named scalar conditions of the run that do not change with time,
+        such as ``temperature_C`` or ``loading``. Every experiment passed to
+        one ``make_dataset`` call must define the same keys.
     y0 : Float[Array, "S"]
-        Full model state at ``t=0``, constructed via the user's ``y0_fn``
-        hook at experiment-build time. Shape is whatever the user's
-        ``simulate_fn`` consumes; the framework never inspects ``S``.
+        Full model state at ``t=0``, of length ``S``. Built by the user's
+        ``y0_fn`` hook when the experiment is constructed. The state may
+        contain components that are never observed, so ``S`` need not equal
+        the channel count. The framework never inspects ``S``.
     channels : dict[str, ChannelObs]
-        Per-channel sparse observations. Must contain every name listed in
-        ``make_dataset(..., output_channel_names=...)``.
+        Sparse observations, one entry per measured quantity. Must contain
+        every name listed in ``make_dataset(..., output_channel_names=...)``.
     exp_id : str
-        Identifier carried through for diagnostics (static field; not a leaf).
+        Identifier carried through for diagnostics. A static field, so it is
+        not a JAX array leaf and never reaches a compiled kernel as data.
     """
 
     covariates: dict[str, Array]
@@ -131,18 +149,19 @@ class Experiment(eqx.Module):
 
 
 class BucketPayload(NamedTuple):
-    """Bucket-shaped, JAX-traceable payload produced by ``make_dataset``.
+    """One bucket of experiments, stacked into rectangular arrays for JAX.
 
     A bucket holds ``N`` experiments that share the same union-timestamp
-    length ``T``. Within a bucket, individual experiments may still
-    have **different ts values and different masks** — the bucketing rule
-    only fixes ``len(union_ts)``, not the values themselves.
+    length ``T``. The bucketing rule fixes only that length. Two
+    experiments in the same bucket can still have different observation
+    times and different masks.
 
     This is a ``NamedTuple`` rather than an ``eqx.Module`` because every
-    field is a stacked JAX array and there is no module-level method
-    surface; the whole struct is consumed positionally by jitted training
-    and prediction kernels, and a NamedTuple is the lightest container
-    JAX recognises as a registered pytree out of the box.
+    field is a stacked JAX array and there are no methods to hang on it.
+    Compiled training and prediction kernels read the fields positionally,
+    and a ``NamedTuple`` is the lightest container JAX already recognises
+    as a pytree (a nested structure of arrays that JAX can flatten,
+    transform, and rebuild).
 
     Fields
     ------
@@ -156,11 +175,13 @@ class BucketPayload(NamedTuple):
         Per-observation variance (used by MLE losses). Defaults to ``1.0``
         at unobserved cells so masked positions never divide by zero.
     mask : Bool[Array, "N T D"]
-        ``True`` iff the corresponding ``y_observed`` cell came from a real
-        ``ChannelObs`` entry; ``False`` for union-axis padding.
+        ``True`` where the corresponding ``y_observed`` cell came from a
+        real ``ChannelObs`` entry, ``False`` where the union axis carries a
+        time at which that channel was not measured. Every loss reads this
+        to know which cells count.
     covariates : dict[str, Float[Array, "N"]]
         Per-key covariate stacked across the bucket. Same keys as on
-        ``Experiment.covariates``, hoisted by an ``N`` axis.
+        ``Experiment.covariates``, with an ``N`` axis added.
     y0 : Float[Array, "N S"]
         Per-experiment full initial state, stacked.
     n_obs : Int[Array, ""]
@@ -183,33 +204,34 @@ class BucketPayload(NamedTuple):
 
 
 class Dataset(eqx.Module):
-    """Container of bucketed experiments plus the static ``state_to_output`` hook.
+    """All buckets of a dataset, plus the hook that maps model state to observed channels.
 
-    A ``Dataset`` is the artifact training and prediction loops iterate
-    over. The ``bucket_payloads`` tuple is the dispatch list (one
-    compiled trace per bucket shape); ``state_to_output`` is held here
-    so the loss pipeline can apply it without the user threading it
-    through every call site.
+    Training and prediction loops iterate over a ``Dataset``. The
+    ``bucket_payloads`` tuple is the dispatch list, one compiled kernel per
+    bucket shape. ``state_to_output`` rides along so the loss pipeline can
+    apply it without the user passing it to every call.
 
     Attributes
     ----------
     bucket_payloads : tuple[BucketPayload, ...]
-        One ``BucketPayload`` per distinct ``len(union_ts)`` value, ordered
+        One ``BucketPayload`` per distinct union-axis length, ordered
         ascending by ``T``.
     state_to_output : Callable[[Array], Array]
-        Pure mapping ``[T, S] -> [T, D]`` projecting full simulator state
-        onto observed channels. Static — never serialised by the
-        framework; the user re-imports it on load.
+        Pure mapping ``[T, S] -> [T, D]``. It picks out (or derives) the
+        observed channels from the full simulator state, since the state
+        usually carries components no instrument measures. A static field,
+        so it is code rather than data. The framework never serialises it;
+        the user re-imports it on load.
     output_channel_names : tuple[str, ...]
-        Channel order along the trailing ``D`` axis of every payload. The
-        same order is honoured by ``make_dataset`` when scattering values.
+        Channel order along the trailing ``D`` axis of every payload.
+        ``make_dataset`` scatters values in this same order.
     covariate_names : tuple[str, ...]
-        Sorted covariate keys (matches each ``Experiment.covariates`` key
-        set; sorted for deterministic dict iteration).
+        Covariate keys, sorted. Matches each ``Experiment.covariates`` key
+        set. Sorting makes dict iteration deterministic.
     _experiments : tuple[Experiment, ...]
-        Source experiments, retained so ``split_dataset`` can re-bucket
-        per-split subsets. Empty when a ``Dataset`` is constructed manually
-        from raw payloads (in which case ``split_dataset`` will raise).
+        Source experiments, kept so ``split_dataset`` can re-bucket each
+        split. Empty when a ``Dataset`` is built by hand from raw payloads,
+        and ``split_dataset`` then raises.
     """
 
     bucket_payloads: tuple[BucketPayload, ...]
@@ -228,26 +250,29 @@ def make_experiment(
 ) -> Experiment:
     """Build one ``Experiment`` from raw covariates, channels, and a state-init hook.
 
-    The ``y0_fn`` hook receives the (already-jnp) covariates dict and the
-    channels dict and returns the full state at ``t=0`` as
-    ``Float[Array, "S"]``. For systems where the observed channels *are*
-    the state, a typical hook is
+    ``y0_fn`` builds the model's full starting state. It receives the
+    covariates dict (already converted to JAX arrays) and the channels
+    dict, and returns ``Float[Array, "S"]``.
+
+    Where the observed channels are the whole state, a typical hook is
     ``lambda c, ch: jnp.array([ch["x"].values[0], ch["v"].values[0]])``.
-    For systems with hidden latent components, the hook constructs them
-    from covariates and/or initial channel values — for example, a
-    rate-of-change latent that is initialised to zero, or a temperature
-    derived from a covariate.
+    Where the model carries unobserved state components, the hook
+    constructs them from covariates or from initial channel values. A
+    population moment initialised to zero is a common case.
 
     Parameters
     ----------
     covariates
-        Scalar covariates; values are converted to 0-d ``jnp`` arrays.
+        Scalar run conditions, constant in time. Values are converted to
+        0-d ``jnp`` arrays.
     channels
         Sparse observations keyed by channel name.
     y0_fn
-        Hook ``(covariates, channels) -> [S]`` building the full initial state.
+        Hook ``(covariates, channels) -> [S]`` building the full initial
+        state, where ``S`` is the state dimension the user's ``simulate_fn``
+        integrates.
     exp_id
-        Optional human-readable id propagated to ``Experiment.exp_id``.
+        Optional human-readable id copied to ``Experiment.exp_id``.
     """
     cov_arr: dict[str, Array] = {k: jnp.asarray(v) for k, v in covariates.items()}
     y0 = jnp.asarray(y0_fn(cov_arr, channels))
@@ -265,10 +290,10 @@ def _per_experiment_arrays(
     each channel's ``(values, variance)`` into the rows matching its ``ts``
     and lights the corresponding ``mask`` entries.
 
-    Done host-side via ``numpy`` (rather than ``jnp``) because this is a
-    one-shot build at import time, not a traced operation; falling back to
-    plain Python loops keeps the timestamp set-membership cheap and avoids
-    spuriously promoting these dtypes to JAX defaults.
+    Uses ``numpy`` rather than ``jnp`` because this runs once when data is
+    imported, outside any compiled region. Plain Python loops keep the
+    timestamp set-membership cheap, and staying on ``numpy`` avoids
+    promoting the user's dtypes to JAX's defaults.
 
     Returns
     -------
@@ -281,9 +306,9 @@ def _per_experiment_arrays(
     mask : Bool[Array, "T D"]
         ``True`` iff cell ``[t, d]`` came from a real ``ChannelObs`` entry.
     """
-    # One pass: cache each channel's host-side arrays, accumulate dtypes, and
-    # collect the union timestamp set. The scatter loop below then reuses the
-    # cached arrays without re-running np.asarray on the eqx-leaf data.
+    # One pass caches each channel's host-side arrays, accumulates dtypes, and
+    # collects the union timestamp set. The scatter loop below reuses the
+    # cached arrays instead of re-running np.asarray on the eqx-leaf data.
     channel_arrays: list[
         tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any]]
     ] = []
@@ -338,36 +363,35 @@ def make_dataset(
 ) -> Dataset:
     """Bucket and stack ``experiments`` into a JAX-traceable ``Dataset``.
 
-    Three things happen here, in order:
+    Three steps run in order.
 
-    1. **Validation.** All experiments must agree on the set of covariate
-       keys, and each must define every requested output channel. Mismatches
-       raise immediately with the offending ``exp_id``.
-    2. **Per-experiment scattering.** For each experiment, ``_per_experiment_arrays``
-       builds its union timestamp axis and the ``[T, D]`` observation/mask
-       tensors.
-    3. **Bucketing.** Experiments are grouped by
-       ``T = len(union_ts)``, and each group is stacked along a new
-       leading ``N`` axis to produce one ``BucketPayload``. Buckets are
-       emitted in ascending ``T`` order.
+    1. Validation. All experiments must agree on the set of covariate keys,
+       and each must define every requested output channel. A mismatch
+       raises at once, naming the offending ``exp_id``.
+    2. Per-experiment scattering. ``_per_experiment_arrays`` builds each
+       experiment's union timestamp axis and its ``[T, D]`` observation,
+       variance, and mask tensors.
+    3. Bucketing. Experiments are grouped by their union-axis length ``T``,
+       and each group is stacked along a new leading ``N`` axis into one
+       ``BucketPayload``. Buckets come out in ascending ``T`` order.
 
     Parameters
     ----------
     experiments
-        Non-empty sequence of ``Experiment`` objects (typically built via
-        ``make_experiment``).
+        Non-empty sequence of ``Experiment`` objects, usually built with
+        ``make_experiment``.
     state_to_output
-        Pure mapping ``[T, S] -> [T, D]`` projecting full state onto the
-        observed channels. Stored static on the resulting ``Dataset``.
+        Pure mapping ``[T, S] -> [T, D]`` from full simulator state to the
+        observed channels. Stored as a static field on the ``Dataset``.
     output_channel_names
         Channel order for the trailing ``D`` axis. Coerced to a tuple before
-        being captured statically on the ``Dataset``.
+        being stored statically on the ``Dataset``.
 
     Returns
     -------
     Dataset
-        ``bucket_payloads`` ordered ascending by ``T``; ``_experiments``
-        retained so ``split_dataset`` can re-bucket subsets.
+        ``bucket_payloads`` ordered ascending by ``T``, with
+        ``_experiments`` kept so ``split_dataset`` can re-bucket subsets.
     """
     if not experiments:
         raise ValueError("make_dataset requires at least one experiment")
@@ -438,26 +462,26 @@ def split_dataset(
 ) -> tuple[Dataset, Dataset, Dataset]:
     """Permute experiments and re-bucket each split independently.
 
-    Splits are computed at the ``Experiment`` level — *not* by carving up
-    bucket payloads — so each split is re-bucketed from scratch. (Carving
-    payloads would couple the split sizes to the original bucket
-    boundaries; rebucketing keeps each split's bucket structure
-    appropriate for its own contents.) Counts use ``floor(train*n)`` and
-    ``floor(val*n)``; the test split takes the remainder so the three
-    sizes sum to ``n`` even with rounding. An empty split is returned as
-    a ``Dataset`` with no payloads (and no ``_experiments``, so it cannot
-    be split again).
+    Splitting happens at the ``Experiment`` level, and each split is then
+    bucketed from scratch. Carving up existing bucket payloads instead
+    would tie the split sizes to the original bucket boundaries. Rebucketing
+    gives each split a bucket structure suited to its own contents.
+
+    Counts use ``floor(train*n)`` and ``floor(val*n)``. The test split takes
+    the remainder, so the three sizes sum to ``n`` even after rounding. An
+    empty split comes back as a ``Dataset`` with no payloads and no
+    ``_experiments``, so it cannot be split again.
 
     Parameters
     ----------
     dataset
-        Source dataset; must carry ``_experiments`` (raises otherwise).
+        Source dataset. Must carry ``_experiments``, or this raises.
     train, val, test
         Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``).
     key
         Required ``jr.PRNGKey`` for the permutation. There is no silent
-        default — the framework refuses to permute under an implicit key
-        so reproducibility never relies on a hidden global.
+        default. The framework refuses to permute under an implicit key so
+        reproducibility never rests on a hidden global.
 
     Returns
     -------
@@ -482,11 +506,10 @@ def split_dataset(
     n_val = int(np.floor(val * n))
     n_test = n - n_train - n_val
 
-    # A positive fraction that floors to zero would silently return an empty
-    # split — a sharp edge: downstream code would treat it as "no validation
-    # needed" rather than "validation set was lost to rounding". Refuse the
-    # split and let the caller pick a larger n or set the fraction to exactly
-    # 0.0 if they truly want the split skipped.
+    # A positive fraction that floors to zero would hand back an empty split,
+    # and downstream code reads that as "no validation needed" rather than
+    # "the validation set was lost to rounding". Refuse instead, and let the
+    # caller raise n, raise the fraction, or ask for 0.0 explicitly.
     for name, frac, count in (
         ("train", train, n_train),
         ("val", val, n_val),

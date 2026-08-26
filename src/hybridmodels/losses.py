@@ -1,29 +1,35 @@
-"""Loss functions for hybrid mechanistic training.
+"""How far a simulated trajectory is from the measurements.
 
-Each loss is a pure function ``loss(pred_obs, bp) -> scalar``. The
-framework composes it with the simulator and ``state_to_output`` and
-wraps the whole pipeline in JIT; the losses themselves are unjitted, so
-they can be developed and tested without a tracing harness.
+Each loss is a pure function ``loss(pred_obs, bp) -> scalar``, where
+``pred_obs`` has shape ``[N, T, D]`` (``N`` experiments in the bucket,
+``T`` timestamps on the bucket's union axis, ``D`` output channels) and
+``bp`` is the matching ``BucketPayload``. The framework composes the loss
+with the simulator and ``state_to_output`` and compiles the whole
+pipeline. The losses here are left uncompiled, so they can be written and
+tested by calling them on plain arrays.
 
-NaN safety: contributions at masked-out positions are multiplied by zero
-(never divided by the mask), so ``pred_obs`` may carry NaNs in
-masked-out cells without poisoning the result. Per-experiment
-denominators are clamped at ``1`` so an experiment with zero observations
-on a channel does not divide by zero.
+Only cells the bucket's ``mask`` marks as real measurements count. The
+union timestamp axis puts a row at every time any channel was measured,
+so most cells of a sparse dataset hold filler.
+
+NaN safety. Contributions at masked-out positions are multiplied by zero,
+never divided by the mask, so ``pred_obs`` may carry NaNs in masked-out
+cells without poisoning the result. Per-experiment denominators are
+clamped at ``1``, so an experiment with zero observations on a channel
+does not divide by zero.
 
 Variants in this module
 -----------------------
-- ``masked_*`` — single denominator across the whole bucket (one global
-  reduction). Equivalent to "concatenate every observation into one flat
-  vector and reduce."
-- ``bal_*``     — per-experiment normalised: each experiment contributes
-  its own per-channel average across time, then the bucket mean over the
-  ``N`` axis is taken. Useful when experiments have wildly different
-  observation counts and you do not want long-trajectory experiments to
-  dominate the gradient.
+- ``masked_*`` uses a single denominator across the whole bucket. This is
+  the same as concatenating every observation into one flat vector and
+  reducing that.
+- ``bal_*`` normalises per experiment. Each experiment contributes its own
+  per-channel average across time, then the bucket takes the mean over the
+  ``N`` axis. Use it when experiments differ widely in observation count
+  and you do not want long trajectories to dominate the gradient.
 
 All four accept ``channel_idx`` (which trailing-``D`` indices to keep) and
-``channel_weights`` (multiplicative per-channel weights, length matching
+``channel_weights`` (per-channel multipliers, length matching
 ``channel_idx`` or ``D``).
 """
 
@@ -73,14 +79,15 @@ def _select(
 def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
     """Pointwise Gaussian NLL ``0.5 * (log(2*pi*var) + (p-y)**2/var)`` with mask gating.
 
-    NaN-safety strategy: every input that could be NaN at masked-out cells is
-    replaced with a benign value before any arithmetic, then the final term
-    is multiplied by the mask. ``var_safe`` swaps masked variance for ``1.0``
-    so subsequent ``log`` and division are finite even if the simulator filled
-    the cell with NaN; ``var_stable`` clips at ``1e-12`` to keep ``log`` and
-    division finite when a real but tiny variance was supplied. The result
-    has the same ``[N, T, D]`` shape as the inputs and is zero at masked-out
-    positions.
+    Every input that could be NaN at a masked-out cell is replaced with a
+    benign value before any arithmetic, and only then is the term multiplied
+    by the mask. ``var_safe`` swaps masked variance for ``1.0``, so the
+    following ``log`` and division stay finite even if the simulator wrote a
+    NaN there. ``var_stable`` clips at ``1e-12``, which keeps ``log`` and
+    division finite when a real but tiny variance was supplied.
+
+    The result has the same ``[N, T, D]`` shape as the inputs and is exactly
+    zero at masked-out positions.
     """
     var_safe = jnp.where(m, var, 1.0)
     var_stable = jnp.maximum(var_safe, 1e-12)
@@ -101,16 +108,17 @@ def masked_mse(
     """Mean squared error reduced over a single global denominator.
 
     Computes ``sum(mask * weights * (pred - y_observed)**2) / max(mask.sum(), 1)``
-    over the selected channels. Long-trajectory experiments contribute more
-    terms to the numerator and the denominator proportionally — they do not
-    receive an explicit per-experiment weighting (see ``bal_mse`` for that).
+    over the selected channels. A long-trajectory experiment adds terms to
+    the numerator and the denominator in proportion, and gets no explicit
+    per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 
     Parameters
     ----------
     pred_obs : Float[Array, "N T D"]
-        Predicted output (``state_to_output(simulate_fn(...))`` per experiment).
+        Predicted output channels, one ``[T, D]`` block per experiment in
+        the bucket, from ``state_to_output(simulate_fn(...))``.
     bp : BucketPayload
-        Bucket data; ``mask`` and ``y_observed`` are read.
+        Bucket data. Reads ``mask`` and ``y_observed``.
     channel_idx
         Trailing-axis indices to keep. ``None`` keeps all ``D`` channels.
     channel_weights
@@ -119,10 +127,10 @@ def masked_mse(
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    # Sanitise the inputs before squaring, then gate the output. Masking
-    # only the output is not enough: jnp.where evaluates both branches, and
-    # the dead branch's local derivative is still computed, so a NaN or inf
-    # in a masked cell reaches the backward pass as 0 * nan = nan. Same
+    # Sanitise the inputs before squaring, then gate the output. Gating only
+    # the output leaves a bug, because jnp.where evaluates both branches and
+    # still computes the dead branch's local derivative, so a NaN or inf in a
+    # masked cell reaches the backward pass as 0 * nan = nan. This is the same
     # double-where discipline _gaussian_nll_terms uses.
     p_safe = jnp.where(m, p, 0.0)
     y_safe = jnp.where(m, y, 0.0)
@@ -141,12 +149,14 @@ def masked_mle(
 ) -> Array:
     """Total Gaussian negative log-likelihood across the bucket.
 
-    Sums the pointwise Gaussian NLL (variance from ``bp.yvar``) over the
-    time axis to produce per-(experiment, channel) NLLs ``[N, D]``, then
-    multiplies by per-channel ``weights`` and sums. **No averaging** is
-    performed — this is a sum-of-likelihoods, scaling linearly with the
-    number of observations. Use ``bal_mle`` for the per-experiment averaged
-    counterpart.
+    Sums the pointwise Gaussian negative log-likelihood (variance from
+    ``bp.yvar``) over the time axis, giving one NLL per experiment and
+    channel, shape ``[N, D]``. Multiplies by the per-channel ``weights`` and
+    sums those.
+
+    Nothing is averaged. The result is a sum of log-likelihoods and grows
+    linearly with the number of observations. Use ``bal_mle`` for the
+    per-experiment averaged version.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
@@ -163,24 +173,24 @@ def bal_mse(
     channel_idx: tuple[int, ...] | None = None,
     channel_weights: tuple[float, ...] | None = None,
 ) -> Array:
-    """Per-experiment-balanced MSE: average over time per experiment, then mean over experiments.
+    """MSE averaged over time within each experiment, then averaged over experiments.
 
-    Reduction order is ``[N, T, D] -> [N, D] (per-channel time-average) ->
-    [N] (channel-weighted sum) -> scalar (mean across N)``. This balances
-    experiments regardless of how many observations each contributed,
-    preventing long trajectories from dominating the gradient signal.
+    Reduction order is ``[N, T, D] -> [N, D]`` (per-channel time average),
+    then ``[N]`` (channel-weighted sum), then a scalar (mean across ``N``).
+    Every experiment therefore counts the same, however many observations it
+    contributed, so a long trajectory cannot dominate the gradient.
 
-    Per-experiment, per-channel denominators are clamped to ``1`` (via
-    ``maximum(count, 1)``) so an experiment with zero observations on a
-    channel does not divide by zero; the corresponding numerator is also
-    zero in that case (mask gating), so the contribution is exactly ``0.0``.
+    Per-experiment, per-channel denominators are clamped to ``1`` with
+    ``maximum(count, 1)``, so an experiment with zero observations on a
+    channel does not divide by zero. Mask gating has already zeroed the
+    matching numerator, so that contribution is exactly ``0.0``.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    # Sanitise the inputs before squaring, then gate the output. Masking
-    # only the output is not enough: jnp.where evaluates both branches, and
-    # the dead branch's local derivative is still computed, so a NaN or inf
-    # in a masked cell reaches the backward pass as 0 * nan = nan. Same
+    # Sanitise the inputs before squaring, then gate the output. Gating only
+    # the output leaves a bug, because jnp.where evaluates both branches and
+    # still computes the dead branch's local derivative, so a NaN or inf in a
+    # masked cell reaches the backward pass as 0 * nan = nan. This is the same
     # double-where discipline _gaussian_nll_terms uses.
     p_safe = jnp.where(m, p, 0.0)
     y_safe = jnp.where(m, y, 0.0)
@@ -201,10 +211,10 @@ def bal_mle(
 ) -> Array:
     """Per-experiment-balanced Gaussian NLL.
 
-    Time-averages per experiment, then takes the mean over experiments.
-    Same reduction skeleton as ``bal_mse`` but with ``_gaussian_nll_terms``
-    (using ``bp.yvar``) replacing the pointwise squared error. Output is the
-    bucket mean of per-experiment, channel-weighted, time-averaged NLLs.
+    Averages over time within each experiment, then over experiments. Same
+    reduction as ``bal_mse``, with ``_gaussian_nll_terms`` (which reads
+    ``bp.yvar``) in place of the pointwise squared error. Returns the bucket
+    mean of the per-experiment, channel-weighted, time-averaged NLLs.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
@@ -223,3 +233,4 @@ LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
     "bal_mse": bal_mse,
     "bal_mle": bal_mle,
 }
+"""Short name to loss function, so a training config can name its loss as a string."""

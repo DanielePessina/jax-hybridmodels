@@ -1,18 +1,30 @@
 # Crystallisation (hybrid MLP)
 
-This is the canonical end-to-end example for `hybridmodels`. We train a hybrid kinetic model on four crystallisation experiments — irregular concentration trajectories with a single terminal particle-size measurement — where two `BoundedPredictor`s emit log-rates feeding a method-of-moments ODE.
+The canonical end-to-end example. We fit a hybrid kinetic model to four
+crystallisation experiments. Each one is an irregular concentration
+trajectory with a single particle-size measurement at the end. Two
+neural networks emit the unknown rate laws, and those rates drive a
+population-balance ODE.
 
-The full script lives at `examples/crystallisation/train_kinetic.py`. Run it with:
+**Crystallisation** is a dissolved solute leaving solution as solid
+crystals. Two rates drive it. **Nucleation** is new crystals appearing.
+**Growth** is existing crystals getting larger. Nobody can derive either
+rate from first principles for a given system, which is the situation
+this library is for.
+
+The full script lives at `examples/crystallisation/train_kinetic.py`:
 
 ```bash
 uv run python examples/crystallisation/train_kinetic.py
 ```
 
-The four experiments are inlined in the script — no Excel, CSV, or external data dependency. This page walks through the script piece by piece; every step here corresponds directly to a section in the file.
+The four experiments are written into the script, so there is no Excel,
+CSV, or external data dependency. Every section here corresponds to a
+section of the file.
 
 ## What we're modelling
 
-Six-state population balance ODE:
+A six-state population balance:
 
 $$
 \begin{aligned}
@@ -22,15 +34,34 @@ $$
 \end{aligned}
 $$
 
-where $G$ (growth velocity, m/s) and $J$ (nucleation rate, #/m³·s) are the *unknown* rate functions. The hybrid part is: instead of committing to a CNT or power-law form, we let two MLPs learn $\log_{10} G$ and $\log_{10} J$ from `(temperature_C, supersaturation)`. The vector field exponentiates back to physical rates inside the integrator.
+The $\mu_k$ are **moments** of the crystal size distribution. $\mu_0$
+counts crystals, $\mu_3$ tracks total volume, and the ratio
+$\mu_4 / \mu_3$ gives a mean diameter. Tracking five moments rather than
+the full distribution turns a partial differential equation into six
+ordinary ones.
 
-The two observed channels are concentration (dense) and the volume-weighted mean diameter $d_{43} = \mu_4 / \mu_3 \cdot 10^6$ µm (a single terminal observation per experiment in this cut).
+$G$ (growth velocity, m/s) and $J$ (nucleation rate, per m³ per second)
+are the unknowns. Rather than committing to a Classical Nucleation
+Theory or power-law form, we let two neural networks learn
+$\log_{10} G$ and $\log_{10} J$ from `(temperature_C, supersaturation)`,
+and the vector field exponentiates back to physical rates inside the
+integrator. **Supersaturation** is the concentration divided by the
+saturation concentration; above 1 the solution is loaded and crystals
+can form.
 
-For a parametric counterpart that fits four CNT + power-law scalars instead of two MLPs, see [Crystallisation (mechanistic)](/examples/crystallisation-mechanistic).
+Two quantities are observed: concentration (measured often) and the
+volume-weighted mean diameter $d_{43} = \mu_4 / \mu_3 \cdot 10^6$ µm
+(one measurement per experiment, at the end).
+
+For a parametric counterpart that fits four scalars instead of two
+networks, see [Crystallisation (mechanistic)](/examples/crystallisation-mechanistic).
 
 ## The dataset
 
-Four experiments reproduced from the thesis `Unseeded_LowData4` cut, rounded to 1 dp on values and 3 dp on variance. Concentration variance is a single made-up scalar (`CONC_VAR = 0.1`) broadcast across every row; the d43 variances are the rounded thesis values.
+Four experiments reproduced from the thesis `Unseeded_LowData4` cut,
+rounded to 1 dp on values and 3 dp on variance. Concentration variance
+is one made-up scalar (`CONC_VAR = 0.1`) broadcast across every row. The
+$d_{43}$ variances are the rounded thesis values.
 
 | `exp_id`      | T (°C) | n conc | n d43 | t span (min) | terminal d43 (µm) |
 |---------------|-------:|-------:|------:|--------------|------------------:|
@@ -39,9 +70,16 @@ Four experiments reproduced from the thesis `Unseeded_LowData4` cut, rounded to 
 | `LowData4_7`  | 21.0   | 7      | 1     | 0 → 360      | 10.5              |
 | `LowData4_9`  | 21.0   | 7      | 1     | 0 → 375      | 11.9              |
 
-Two experiments at each of two temperatures, with different time grids. `make_dataset` will form a per-experiment union axis and bucket by length parity, so you'll see two buckets at training time.
+Two experiments at each of two temperatures, with different time grids.
+`make_dataset` merges each experiment's per-channel timestamps into one
+axis and groups experiments by the length of that axis, so training sees
+two groups.
 
-## Step 1 — define the hardcoded experiments
+## Step 1: define the experiments
+
+An **experiment** is one run of the real thing. A **channel** is one
+measured quantity with its own timestamps. A **covariate** is a
+condition that stays fixed for the whole run.
 
 ```python
 from hybridmodels import ChannelObs, Experiment, make_experiment
@@ -87,13 +125,22 @@ for data in EXPERIMENTS_DATA:
     ))
 ```
 
-The `y0_fn` hook runs *once per experiment* at dataset-build time. Five population-balance moments start at zero (suspension nominally clear at `t = 0`); concentration starts at the first observed value of the `conc` channel. Temperature is the only covariate — the thesis `Loading` column is uniformly zero across LowData4 and is intentionally dropped.
+`y0_fn` builds the ODE's full initial state. It runs once per
+experiment, when you build it, never during training. Five moments start
+at zero, because the suspension is nominally clear at `t = 0`.
+Concentration starts at the first observed value. Temperature is the
+only covariate; the thesis `Loading` column is uniformly zero across
+`LowData4` and is dropped on purpose.
 
-The two channels carry independent `ts` axes: `conc` has 7-9 points per experiment, `d43` has just one (the terminal measurement). `make_dataset` recovers per-channel sparsity from this without any user mask code.
+The two channels carry independent time axes. `conc` has 7 to 9 points
+per experiment; `d43` has one, at the end. `make_dataset` recovers that
+sparsity without any mask code from you.
 
-## Step 2 — `state_to_output` projector
+## Step 2: the state_to_output projector
 
-The integrator returns the full six-state trajectory; we observe only `(conc, d43)`. The projector converts moments to $d_{43}$ with an autodiff-safe guarded division — see [Recommendations → Pitfalls](/guide/recommendations#autodiff-safe-guarded-division) for why the `safe_mu3` trick is mandatory.
+The integrator returns all six states. We observe two. `state_to_output`
+maps one to the other, and here it also derives $d_{43}$ from two
+moments.
 
 ```python
 D43_MU3_EPS = 1e-6
@@ -108,7 +155,12 @@ def state_to_output(state):
     return jnp.stack([conc, d43], axis=-1)
 ```
 
-## Step 3 — bucket via `make_dataset`
+The `safe_mu3` line is mandatory, not stylistic. Replacing the divisor
+before dividing is what keeps the gradient finite on the discarded
+branch. See
+[Recommendations](/guide/recommendations#guarded-division-must-guard-the-divisor-not-the-result).
+
+## Step 3: build the dataset
 
 ```python
 from hybridmodels import make_dataset
@@ -123,14 +175,26 @@ for i, bp in enumerate(dataset.bucket_payloads):
     print(f"  bucket {i}: ts={tuple(bp.ts.shape)}, n_obs={int(bp.n_obs)}")
 ```
 
-For LowData4 you'll see two buckets — one for the two T=17 experiments (length 9, since `d43_time_min=270` is already in the conc grid) and one for the two T=21 experiments (length 7, with `d43_time_min` in {360, 375} extending the union axis by one). Each bucket is a JIT cache key; the framework compiles `make_step` once per bucket shape, then reuses it across every step.
+You get two buckets. The two 17 °C experiments have merged axes of
+length 9, because `d43_time_min=270` already appears in the
+concentration grid. The two 21 °C experiments have length 7, because
+their `d43` times (360 and 375) each add one entry to the union axis.
+Each bucket is compiled once and reused for the whole run.
 
-## Step 4 — predictors: two `BoundedPredictor`s
+## Step 4: two bounded predictors
 
-The `predictors` pytree convention is a **tuple of predictors** — `(growth_bp, nucleation_bp)`. Both consume the same 2-key dict; the `BoundedPredictor` subsets by its `input_keys` field.
+The convention is a tuple: `(growth_bp, nucleation_bp)`. Both take the
+same two-key dict, and each `BoundedPredictor` picks out the keys named
+in its `input_keys`.
 
 ::: info MLP and KAN side by side
-The shipped script trains the same `(growth_bp, nucleation_bp)` topology twice — once with an `MLPPredictor` inner and once with a `KANPredictor` inner — and writes both sets of figures into `figures/mlp/` and `figures/kan/`. The walkthrough below shows the MLP path; the KAN swap is one line (replace `MLPPredictor(...)` with `KANPredictor(in_size=2, out_size=1, hidden_widths=(64,), grid_size=5, basis="spline", key=...)`). Bound choices, scalers, and the surrounding ODE are identical.
+The shipped script trains the same `(growth_bp, nucleation_bp)`
+structure twice, once with an `MLPPredictor` inside and once with a
+`KANPredictor`, writing figures into `figures/mlp/` and `figures/kan/`.
+The walkthrough below shows the MLP path. The KAN swap is one line:
+replace `MLPPredictor(...)` with
+`KANPredictor(in_size=2, out_size=1, hidden_widths=(64,), grid_size=5, basis="spline", key=...)`.
+Bounds, scalers, and the surrounding ODE are identical.
 :::
 
 ```python
@@ -167,22 +231,37 @@ nucleation = BoundedPredictor(
 predictors = (growth, nucleation)
 ```
 
-The bound choice matters. `LOG10_GROWTH_BOUNDS = (-15, -5)` puts the sigmoid midpoint at $G \approx 10^{-10}$ m/s — physically reasonable for early-time growth. An earlier `(-12, -3)` draft put the midpoint at $G \approx 3 \cdot 10^{-8}$ m/s, large enough that random-init weights produced ODE rates the moment-balance solver could not track within `max_steps`. See [Recommendations → Bounds](/guide/recommendations#bounds).
+The bound choice matters more than anything else on this page. A fresh
+network emits the midpoint of its output box, so the midpoint is what
+the integrator sees on step 0. `LOG10_GROWTH_BOUNDS = (-15, -5)` puts it
+at $G \approx 10^{-10}$ m/s, which is physically reasonable for early
+growth. An earlier `(-12, -3)` draft put it at
+$G \approx 3 \cdot 10^{-8}$ m/s, large enough that random weights
+produced rates the moment solver could not track within `max_steps`. See
+[Recommendations](/guide/recommendations#bounds).
 
-::: tip Optional: pin the readout to the bound midpoint
-For very wide rate bounds — like the nucleation `(-6.5, 20.0)` decade range here — an unlucky standard-normal readout draw can still place the initial output far enough off midpoint that the moment ODE is intractably stiff. [`MLPPredictor.with_zero_final_head()`](/api/predictors#mlppredictor) (and its KAN counterpart) returns a copy of the predictor whose final readout layer is zeroed, so the initial output sits at the *exact* physical midpoint regardless of the random key. The hidden layers keep their default init, so the input feature transformation is non-degenerate. Drop in by chaining onto the constructor:
+::: tip Optional: pin the readout to the box midpoint
+The nucleation box spans 26 decades. Even well centred, an unlucky final-layer
+draw can put the initial output far enough off midpoint to make the ODE
+intractably stiff.
+[`MLPPredictor.with_zero_final_head()`](/api/predictors#mlppredictor)
+and its KAN counterpart return a copy whose readout layer is zeroed, so
+the initial output is the exact midpoint whatever the key. Hidden layers
+keep their random init.
 
 ```python
 inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
                    depth=1, activation_name="relu", key=k_growth).with_zero_final_head()
 ```
 
-The shipped script runs without it for the default seed; turn it on if you see `max_steps` exceeded on a different seed.
+The shipped script runs without it on the default seed. Turn it on if
+you hit `max_steps` on another.
 :::
 
-## Step 5 — the vector field
+## Step 5: the vector field
 
-This is where you write physics. The framework's `simulate_fn` signature is fixed; everything inside is yours.
+This is where you write physics. The `simulate_fn` signature is fixed.
+Everything inside it is yours.
 
 ```python
 RHO_C = 1370.0    # crystal density [kg/m^3]
@@ -201,9 +280,9 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
         mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
         S = conc / conc_sat
 
-        # Predictor inputs: temperature is a covariate (constant in time),
-        # supersaturation is state-derived. The framework treats every key
-        # as a named scalar regardless of provenance.
+        # Predictor inputs. Temperature is a covariate, constant in time;
+        # supersaturation comes from the state and changes every step.
+        # The library treats every key as a named scalar either way.
         inputs = {"temperature_C": temperature_C, "supersaturation": S}
 
         meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
@@ -226,18 +305,26 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
         diffrax.ODETerm(vector_field), solver.solver,
         t0=times_sec[0], t1=times_sec[-1], dt0=solver.dt0, y0=y0,
         saveat=diffrax.SaveAt(ts=times_sec),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+        stepsize_controller=solver.stepsize_controller(),
         max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
+        adjoint=solver.adjoint,
     )
     return jnp.asarray(sol.ys)
 ```
 
-Two notes: (1) the metastable mask `(S > 1 + 1e-5)` zeros both rates below the metastable limit, so the ODE stops moving on the dissolved branch; (2) the time conversion is one-line — keeping the dataset in minutes makes plots readable.
+Two notes. The metastable mask zeros both rates below $S = 1 + 10^{-5}$,
+so the ODE stops moving once the solution is no longer loaded. And the
+time conversion is one line, because keeping the dataset in minutes
+makes the plots readable.
 
-## Step 6 — solver and training config
+`solver.stepsize_controller()` and `solver.adjoint` come from the
+`SolverConfig`. Building a `PIDController` by hand instead would silently
+ignore a per-state `atol` tuple.
 
-Per-state `atol` matched to natural moment magnitudes — population-balance moments span ~18 decades during integration, so a uniform `atol` over-resolves the small components and under-resolves the large ones.
+## Step 6: solver and training config
+
+The moments span roughly 18 decades during an integration, so `atol`
+gets one entry per state component.
 
 ```python
 from hybridmodels import SolverConfig
@@ -246,7 +333,7 @@ from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 solver = SolverConfig(
     solver=diffrax.Tsit5(),
     rtol=1e-4,
-    atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),  # per-state floor at ~9 decades below natural magnitude
+    atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),  # about 9 decades below each natural magnitude
     max_steps=500_000,
     dt0=None,
 )
@@ -262,9 +349,10 @@ config = OptaxTrainingConfig(
 )
 ```
 
-Single-phase to start. Once the loss flattens, add a second phase with a lower LR for fine-tuning.
+One phase to start. Add a second at a lower learning rate once the loss
+flattens.
 
-## Step 7 — train
+## Step 7: train
 
 ```python
 history, trained_predictors = train_with_optax(
@@ -274,9 +362,10 @@ history, trained_predictors = train_with_optax(
 print(f"final loss: {history[-1]:.6f}")
 ```
 
-600 steps × N buckets is what compiles. The first step pays the JIT cost (one trace per bucket shape); subsequent steps are at full JAX speed.
+The first step pays for compilation, once per bucket shape. Every step
+after that runs at full speed.
 
-## Step 8 — predict and diagnose
+## Step 8: predict and inspect
 
 ```python
 from hybridmodels import predict_dataset
@@ -284,9 +373,10 @@ from hybridmodels import predict_dataset
 predictions = predict_dataset(
     trained_predictors, dataset, simulate_fn=simulate_fn, solver=solver,
 )
-# predictions is a tuple — one [N, T, D] array per bucket, parallel to dataset.bucket_payloads.
+# One [N, T, D] array per bucket, in the same order as dataset.bucket_payloads.
+# The buckets differ in T, so they cannot be stacked into one tensor.
 
-# Read the trained log-rates at any (T, S) point you like.
+# Read the trained rate laws at any condition you like.
 sample_inputs = {
     "temperature_C": jnp.asarray(20.0),
     "supersaturation": jnp.asarray(1.5),
@@ -297,12 +387,19 @@ log10_J = float(jnp.squeeze(trained_nucleation(sample_inputs)))
 print(f"G(20°C, S=1.5) = {10**log10_G:.2e} m/s, J = {10**log10_J:.2e} #/(m³·s)")
 ```
 
-The shipped script also writes parity and trajectory plots under `examples/crystallisation/figures/` via the helpers in `examples/_shared/`.
+Reading the predictors directly at conditions no experiment visited is
+the point of a bounded hybrid model. The script also writes parity and
+trajectory plots under `examples/crystallisation/figures/`.
 
 ## What's next
 
-- [Crystallisation (mechanistic)](/examples/crystallisation-mechanistic) — same dataset and ODE backbone, but with four CNT + power-law scalars trained by CMA-ES.
-- [Pendulum example](/examples/pendulum) — a 60-line synthetic counterpart with a known optimum.
-- [Recommendations](/guide/recommendations) — bounds choice, tolerances, freezing, and the autodiff-safe `where` pattern used in `state_to_output`.
-- [Training](/guide/training) — multi-phase Optax, the shared tournament, evosax.
-- [API: Data](/api/data), [API: Predictors](/api/predictors), [API: Training](/api/training) — full reference.
+- [Crystallisation (mechanistic)](/examples/crystallisation-mechanistic).
+  Same dataset and ODE, four fitted scalars instead of two networks,
+  trained by CMA-ES.
+- [Harmonic oscillator](/examples/pendulum). A synthetic counterpart with
+  a known correct answer.
+- [Recommendations](/guide/recommendations). Bounds, tolerances,
+  freezing, guarded division.
+- [Training](/guide/training). Phases, tournaments, population search.
+- [API: Data](/api/data), [API: Predictors](/api/predictors),
+  [API: Training](/api/training).

@@ -1,16 +1,21 @@
-"""Composable trainability filters.
+"""Saying which parameters train and which stay fixed.
 
-Trainability is represented as a boolean PyTree *mask* whose structure
-mirrors the ``predictors`` pytree (any container shape: tuple, dict,
-NamedTuple, single Module). Optimisers consume the mask alongside the
-parameters: Optax via ``eqx.filter_value_and_grad(..., filter_spec=mask)``,
-Evosax via ``eqx.partition(predictors, mask)``. ``True`` marks a leaf as
-trainable, ``False`` freezes it.
+Trainability is a boolean *mask*. The mask is a pytree (a nested
+container of leaves that JAX can flatten and rebuild) with exactly the
+structure of the ``predictors`` pytree, but with a ``bool`` wherever the
+predictors have a parameter array. ``True`` means the optimiser may
+update that leaf, ``False`` freezes it. Any container shape works: tuple,
+dict, NamedTuple, or a single Module.
 
-The default predicate marks every inexact-array leaf as trainable; the
-freezers in this module are free functions ``(mask, predictors) -> mask``
-— they never mutate their inputs, so masks compose by chaining. A
-typical pipeline reads:
+Both optimisers take the mask directly. Optax reads it through
+``eqx.filter_value_and_grad(..., filter_spec=mask)``. Evosax reads it
+through ``eqx.partition(predictors, mask)``, which splits the pytree into
+a trainable half and a frozen half.
+
+The default predicate marks every inexact (floating-point) array leaf as
+trainable. The freezers here are free functions of the form
+``(mask, predictors) -> mask``. None of them mutates its input, so masks
+compose by chaining. A typical pipeline reads:
 
     mask = trainable_mask(predictors)
     mask = freeze_modules_of_type(mask, predictors, BoundScaler)
@@ -30,12 +35,12 @@ import jax.tree_util as jtu
 
 
 def default_trainable(leaf: Any) -> bool:
-    """Default leaf-trainability predicate: ``True`` for inexact-array leaves only.
+    """Default trainability rule. ``True`` only for inexact-array leaves.
 
-    "Inexact" means JAX arrays with float (or complex) dtype — every other
-    leaf (ints, bools, Python scalars, static fields' frozen values) is
-    treated as non-trainable. This matches what gradient-based optimisers
-    can actually update.
+    "Inexact" means a JAX array with a float or complex dtype. Every other
+    leaf is treated as fixed, including ints, bools, Python scalars, and
+    the frozen values of static fields. That matches what a gradient-based
+    optimiser can actually update.
     """
     return bool(eqx.is_inexact_array(leaf))
 
@@ -44,14 +49,13 @@ def trainable_mask(
     predictors: Any,
     predicate: Callable[[Any], bool] = default_trainable,
 ) -> Any:
-    """Build a boolean PyTree mask matching ``predictors``'s structure.
+    """Build a boolean mask matching the structure of ``predictors``.
 
-    Maps ``predicate`` over every leaf of the ``predictors`` pytree to produce
-    a mask of the same tree shape with ``bool`` leaves. Accepts any
-    container shape (tuple, dict, NamedTuple, single ``eqx.Module``). The
-    result is consumed unchanged by both Optax
-    (``eqx.filter_value_and_grad(..., filter_spec=mask)``) and Evosax
-    (``eqx.partition(predictors, mask)``).
+    Applies ``predicate`` to every leaf of the ``predictors`` pytree,
+    returning a tree of the same shape whose leaves are ``bool``. Any
+    container shape works (tuple, dict, NamedTuple, single ``eqx.Module``).
+    Both Optax (``eqx.filter_value_and_grad(..., filter_spec=mask)``) and
+    Evosax (``eqx.partition(predictors, mask)``) take the result unchanged.
     """
     return jtu.tree_map(predicate, predictors)
 
@@ -81,10 +85,10 @@ def freeze_paths(mask: Any, paths: tuple[str, ...]) -> Any:
     lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
     addresses ``mask.inner.mlp.layers[0].weight``.
 
-    A path matching nothing raises. Silently ignoring it meant a typo left
-    a leaf the caller believed was frozen training normally, which shows up
-    as a wrong experiment rather than a wrong program. The error lists the
-    closest realised paths, since the usual cause is one wrong segment.
+    A path matching nothing raises. Ignoring it quietly meant a typo left a
+    leaf the caller believed was frozen training as normal, and that shows
+    up as a wrong experiment rather than a wrong program. The error lists
+    the closest real paths, since the usual cause is one wrong segment.
     """
     target = set(paths)
     seen: set[str] = set()
@@ -113,13 +117,15 @@ def _zero_subtree(submask: Any) -> Any:
 def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
     """Return a new mask with every leaf inside any subtree of type ``cls`` set to ``False``.
 
-    Walks ``mask`` and ``predictors`` in lockstep; when a node in
-    ``predictors`` is an instance of ``cls``, the corresponding sub-mask is
-    replaced wholesale by an all-``False`` subtree. Typical use:
-    ``freeze_modules_of_type(mask, predictors, BoundScaler)`` to freeze
-    every bound scaler's ``temperature`` leaf — the convention recommended
-    for hybrid models where the scaler defines the activation shape and
-    is not meant to drift during training.
+    Walks ``mask`` and ``predictors`` in lockstep. When a node in
+    ``predictors`` is an instance of ``cls``, the matching sub-mask is
+    replaced wholesale by an all-``False`` subtree.
+
+    The common use is
+    ``freeze_modules_of_type(mask, predictors, BoundScaler)``, which freezes
+    every bound scaler's ``temperature`` leaf. Every example does this,
+    because the temperature sets how sharply the scaler's squash saturates
+    and is not meant to drift while the model trains.
     """
 
     def _is_target(node: Any) -> bool:
@@ -136,10 +142,10 @@ def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
 def freeze_where(mask: Any, predictors: Any, fn: Callable[[eqx.Module], bool]) -> Any:
     """Return a new mask with every leaf inside any submodule satisfying ``fn`` set to ``False``.
 
-    ``fn`` should be a structural predicate (``isinstance`` checks,
-    static-field inspection); applying it to leaf-value comparisons is
-    undefined since the mask copy at a node carries boolean leaves while the
-    predictors pytree carries arrays.
+    ``fn`` must be a structural test, such as an ``isinstance`` check or a
+    look at a static field. It must not compare leaf values. The walk pairs
+    a mask node, whose leaves are booleans, with a predictors node, whose
+    leaves are arrays, so a value comparison has no defined meaning here.
     """
 
     def _is_target(node: Any) -> bool:

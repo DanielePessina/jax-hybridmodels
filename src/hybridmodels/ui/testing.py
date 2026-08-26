@@ -1,9 +1,9 @@
 """Spy UI for tests: records every lifecycle call instead of rendering it.
 
-Used by ``tests/test_ui_callbacks.py`` and any future training test that
-needs to assert on which events fired and in what order. Lives under the
-``hybridmodels.ui.testing`` namespace to keep it out of the main public
-``hybridmodels.ui`` re-export surface.
+Used by ``tests/test_ui_callbacks.py`` and any training test that needs
+to assert on which events fired and in what order. It lives under
+``hybridmodels.ui.testing`` so it stays out of what ``hybridmodels.ui``
+re-exports.
 """
 
 from typing import Any

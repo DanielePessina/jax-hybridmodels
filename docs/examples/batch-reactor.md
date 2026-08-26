@@ -3,13 +3,19 @@ aside: false
 outline: false
 ---
 
-# Batch reactor — runnable notebook
+# Batch reactor: runnable notebook
 
-Two-phase evosax → optax fit on a synthetic first-order $A \to B$ batch
-reactor with a hidden pH dependence. Exported from
-`examples/batch_reactor/notebook.py`. Source lives in the repo and can
-be run interactively with `uv run marimo edit
-examples/batch_reactor/notebook.py`.
+A first-order reaction $A \to B$ whose rate constant depends on
+temperature through Arrhenius, which we know, and on pH through a curve
+with no first-principles form, which we do not. The classical fit gives
+you one set of Arrhenius constants per pH and no way to predict between
+them. The hybrid model keeps the Arrhenius trunk and adds a small
+bounded residual network, so one model covers every pH at once and
+interpolates. Fitted in two stages: CMA-ES for the parametric trunk,
+then gradients for the residual.
+
+Exported from `examples/batch_reactor/notebook.py`. Run it yourself with
+`uv run marimo edit examples/batch_reactor/notebook.py`.
 
 <iframe
   src="/jax-hybridmodels/notebooks/batch_reactor.html"

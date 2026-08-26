@@ -1,12 +1,14 @@
-"""Concrete ``MLPPredictor`` wrapping ``eqx.nn.MLP``.
+"""``MLPPredictor``, a dense feedforward network wrapping ``eqx.nn.MLP``.
 
-All hyperparameters are stored as static ``eqx.field``s so the module
-serialises cleanly: the structural metadata travels with the JSON
-sidecar, only the inner ``mlp``'s weights and biases are dynamic leaves
-written into the binary checkpoint, and the activation function is
-referenced by *name* (a string key into ``_ACTIVATION_MAP``) rather than
-by its callable identity, so loading does not require re-importing or
-guessing at the activation.
+The default inner predictor. Give it an input and output width, a
+hidden width, a depth, and a PRNG key.
+
+Every hyperparameter is a static ``eqx.field`` so the module serialises
+cleanly. Structural metadata travels in the JSON sidecar, and the only
+dynamic leaves written to the binary checkpoint are the inner ``mlp``'s
+weights and biases. The activation is stored by *name*, a string key
+into ``_ACTIVATION_MAP``, rather than by callable identity, so loading
+never has to re-import or guess at a function.
 """
 
 # ruff: noqa: F722
@@ -83,10 +85,10 @@ class MLPPredictor(Predictor):
         """Build the MLP, materialising the activation callable from its name.
 
         ``key`` is required and threaded into ``eqx.nn.MLP`` for layer
-        weight initialisation — the framework refuses silent default keys
-        so reproducibility never relies on a hidden global RNG.
-        ``activation_name`` must be a key of ``_ACTIVATION_MAP``; an
-        unknown name raises with the supported set.
+        weight initialisation. The framework refuses silent default keys,
+        so reproducibility never rests on a hidden global RNG.
+        ``activation_name`` must be a key of ``_ACTIVATION_MAP``. An
+        unknown name raises, listing the supported set.
         """
         activation = _resolve_activation(activation_name)
         self.in_size = int(in_size)
@@ -118,10 +120,10 @@ class MLPPredictor(Predictor):
         Implements the re-init protocol consumed by
         :func:`reinitialize_with_key` and by the training tournament loop
         when it restarts a stalled attempt. Re-instantiating the whole
-        module is cleaner than reinitialising leaves in place because
-        ``eqx.nn.MLP`` owns its own per-layer init logic (Glorot/normal
-        scaling, zero biases); leaf-level standard-normal sampling would
-        skew the distribution and break that scheme.
+        module beats reinitialising leaves in place, because
+        ``eqx.nn.MLP`` owns its per-layer init logic (LeCun-uniform
+        weights scaled by fan-in, zero biases). Leaf-level standard-normal
+        sampling would replace that scheme with a badly scaled one.
         """
         return MLPPredictor(
             in_size=self.in_size,
@@ -135,26 +137,25 @@ class MLPPredictor(Predictor):
     def with_zero_final_head(self) -> MLPPredictor:
         """Return a copy whose final ``Linear`` layer's weight and bias are zero.
 
-        Hidden layers retain their LeCun-uniform random init, so the input
-        feature transformation is non-degenerate; only the readout layer is
-        forced to zero. Composed inside a ``BoundedPredictor``, the latent
-        zero produced for any input maps via ``out_scaler.from_latent(0)``
-        to the *exact midpoint* of the physical bound box — a known-good
-        starting output that is independent of the random key. This makes
-        training reproducible across seeds when the rate bounds span many
-        decades and an unlucky standard-normal readout draw could otherwise
-        place the initial output too far off midpoint for the downstream
-        ODE solver to handle.
+        Hidden layers keep their LeCun-uniform random init, so the input
+        feature transformation stays non-degenerate. Only the readout is
+        forced to zero. Composed inside a ``BoundedPredictor``, the zero
+        latent produced for every input maps through
+        ``out_scaler.from_latent(0)`` to the *exact midpoint* of the
+        physical output box, a known-good starting value independent of
+        the key. That matters when the rate bounds span many decades: an
+        unlucky readout draw can place the initial output several decades
+        off midpoint, far enough that the ODE solver stalls or fails on
+        step one.
 
-        Returns a structurally identical predictor; only the trailing
+        Returns a structurally identical predictor. Only the trailing
         ``eqx.nn.Linear``'s ``weight`` and ``bias`` arrays change.
         """
         final = self.mlp.layers[-1]
-        # ``eqx.nn.Linear.bias`` is ``Array | None`` — typed as a union
-        # because ``use_bias=False`` is allowed. ``eqx.nn.MLP``'s default
-        # is ``use_final_bias=True`` so in practice ``final.bias`` is an
-        # Array here, but the no-bias case is supported for free by
-        # narrowing the where-tuple before calling ``tree_at``.
+        # ``eqx.nn.Linear.bias`` is ``Array | None`` because
+        # ``use_bias=False`` is allowed. ``eqx.nn.MLP`` defaults to
+        # ``use_final_bias=True``, so in practice there is a bias here, but
+        # narrowing the where-tuple covers the no-bias case for free.
         if final.bias is None:
             zeroed = eqx.tree_at(
                 lambda layer: layer.weight,

@@ -1,42 +1,139 @@
-# Getting Started
+# Getting started
 
-`hybridmodels` is a JAX library for fitting hybrid ODE models: a user-supplied vector field whose unknown rate terms are produced by trainable predictors (MLP, KAN, a small bounded-parameter module, or a custom subclass). The framework owns the JAX plumbing, meaning vectorisation across experiments, JIT compilation per bucket shape, and gradient propagation through the integrator. The user owns the physics: the vector field, the projection from full state to observed channels, and the choice of predictors.
+## What problem this solves
 
-This page covers installation, the public API a typical model uses, and a minimal end-to-end example. For a full walkthrough on a real dataset see the [Crystallisation example](/examples/crystallisation). For a self-contained synthetic problem with a known optimum see the [Harmonic Oscillator](/examples/pendulum).
+You have measurements of something changing over time. You believe an
+ordinary differential equation (ODE) governs it. You can write down
+part of that ODE from first principles, and part of it you cannot: a
+rate that depends on temperature in some unknown way, a correction term
+you know is missing, a growth law nobody has derived.
+
+`hybridmodels` fits the part you cannot write down while keeping the
+part you can. This is a **hybrid** modelling package.
+[Diffrax](https://docs.kidger.site/diffrax/) already lets you put a
+neural network in a vector field and differentiate through the solver;
+this library is built on it and does not re-teach it. What it adds is
+the machinery around that: physical ranges that hold by construction,
+ragged per-channel measurements handled without padding, and a training
+loop shaped for both.
+
+Concretely, you supply four things:
+
+1. Your measurements, grouped into **experiments** (one experiment is
+   one run of the real thing, with its own conditions and its own
+   observations).
+2. One Python function that integrates your ODE for a single experiment.
+3. A statement of which quantities the network predicts, and the
+   physical range each one lives in.
+4. A training budget.
+
+Training runs the integrator forward, compares the result to your
+measurements, and sends gradients back through the integrator into the
+network.
+
+## What you need to know
+
+You need Python. You do not need to know the stack below, and these
+one-liners are enough to read the rest of this page.
+
+| Library | What it does here |
+|---|---|
+| [JAX](https://docs.jax.dev/) | NumPy-style arrays that can be differentiated and compiled. `jax.numpy` is imported as `jnp` and behaves like NumPy. |
+| [Equinox](https://docs.kidger.site/equinox/) | Neural networks written as plain Python classes JAX can differentiate. Written `eqx`. |
+| [Diffrax](https://docs.kidger.site/diffrax/) | ODE solvers you can differentiate through. You call `diffrax.diffeqsolve` yourself. |
+| [Optax](https://optax.readthedocs.io/) | Gradient optimisers (Adam and friends). |
+| [evosax](https://github.com/RobertTLange/evosax) | Population search (CMA-ES), for when the fit has many local minima. |
+
+One JAX word recurs throughout these docs. A **pytree** is any nesting
+of tuples, lists, dicts, and Equinox modules with arrays at the bottom.
+JAX walks that nesting and applies an operation to every array it finds,
+so you can hand it a tuple of two networks and it differentiates both.
+When the docs say "a pytree of predictors", read "your networks, in
+whatever container you like".
 
 ## Installation
 
-The package targets Python ≥ 3.11 and is managed with [`uv`](https://docs.astral.sh/uv/). It is not yet on PyPI; install directly from the GitHub repository:
+The package needs Python 3.11 or newer and is managed with
+[`uv`](https://docs.astral.sh/uv/). It is not on PyPI yet, so install
+from GitHub:
 
 ```bash
 uv add git+https://github.com/DanielePessina/jax-hybridmodels
 ```
 
-Or, if you have cloned the repository for development:
+If you cloned the repository to work on it:
 
 ```bash
 uv sync
 ```
 
-Either path installs `hybridmodels` together with its core dependencies (`jax`, `equinox`, `diffrax`, `optax`, `evosax`, `jaxkan`) and a small set of plotting and CLI utilities.
+Either path installs `hybridmodels` with `jax`, `equinox`, `diffrax`,
+`optax`, `evosax`, and `jaxkan`.
 
 ## The pieces of a hybrid model
 
-A working model brings together five components. The first three are user-written; the last two are framework-provided types the user instantiates.
+Five things go into a working model. You write the first three. The last
+two are library types you fill in.
 
-1. Experiments ([`Experiment`](/api/data#experiment), built via [`make_experiment`](/api/data#make_experiment)). One record per real run, holding constant-in-time covariates, an initial-state hook, and per-channel sparse observations ([`ChannelObs`](/api/data#channelobs)).
-2. A `simulate_fn` with the [mandatory signature](/guide/concepts#simulate-fn) `(predictors, ts, covariates, y0, solver) -> [T, S]`. Inside, the user constructs the vector field and calls `diffrax.diffeqsolve` with `adjoint=diffrax.DirectAdjoint()`.
-3. A `state_to_output` projector. A pure function `[T, S] -> [T, D]` that maps the full simulator state to the observed channels in a fixed order.
-4. A predictors PyTree. Conventionally a tuple of [`BoundedPredictor`](/api/predictors#boundedpredictor) leaves wrapping `MLPPredictor`, `KANPredictor`, or a custom [`Predictor`](/api/predictors#predictor) subclass. Models with no covariate dependence (a small set of global kinetic constants, for example) can use a minimal `eqx.Module` directly.
-5. A [`SolverConfig`](/api/solver#solverconfig). A frozen container holding a `diffrax` solver instance and tolerances.
+**1. Experiments.** One [`Experiment`](/api/data#experiment) per run of
+the real thing, built with
+[`make_experiment`](/api/data#make_experiment). It holds:
 
-[`make_dataset`](/api/data#make_dataset) packages experiments together with the projector into a [`Dataset`](/api/data#dataset). It aligns per-channel timestamps onto per-experiment union grids and groups experiments by grid length into JIT-friendly buckets.
+- **covariates**, the conditions that stay fixed for the whole run
+  (temperature, pH, initial loading), given as a dict of named scalars;
+- **channels**, one per measured quantity. Each channel is a
+  [`ChannelObs`](/api/data#channelobs) carrying its own timestamps, its
+  own values, and a variance. Two channels in one experiment can be
+  measured at completely different times;
+- a **`y0_fn`** hook, which builds the ODE's full initial state from the
+  covariates and the channels. The state usually has components nobody
+  measured, and this is where you supply their starting values.
 
-[`train_with_optax`](/api/training#train_with_optax) and [`train_with_evosax`](/api/training#train_with_evosax) both accept `(predictors, dataset, config)` together with `simulate_fn`, `solver`, and a JAX random key, and both return `(loss_history, trained_predictors)`.
+**2. A `simulate_fn`.** Your function, with a
+[signature the library fixes](/guide/concepts#simulate-fn):
+`(predictors, ts, covariates, y0, solver) -> [T, S]`. It integrates one
+experiment and returns the full state at every requested time. Inside,
+you write the vector field (the right-hand side of your ODE) and call
+`diffrax.diffeqsolve`.
 
-## A minimal example
+**3. A `state_to_output`.** A function mapping the full state
+trajectory `[T, S]` to only the quantities you actually measured
+`[T, D]`, in a fixed order. The integrator tracks state your
+instruments never see, and this drops or combines it.
 
-A scalar harmonic oscillator with a single trainable parameter `omega`. The dataset is synthesised at runtime from the closed-form solution. The trainer has to recover `omega ≈ 1.0` from noisy position observations alone.
+**4. Predictors.** A **predictor** is a trainable network: array in,
+array out, and nothing else. Wrap each one in a
+[`BoundedPredictor`](/api/predictors#boundedpredictor), which names its
+inputs and declares a low and a high value for every input and output.
+The inner network works in an unbounded space; the wrapper squashes its
+output into the declared range. Ship both
+[`MLPPredictor`](/api/predictors#mlppredictor) (a standard multi-layer
+network) and [`KANPredictor`](/api/predictors#kanpredictor) (a
+Kolmogorov-Arnold network), or write your own by subclassing
+[`Predictor`](/api/predictors#predictor). By convention you put them in
+a tuple, even when there is only one.
+
+**5. A [`SolverConfig`](/api/solver#solverconfig).** The Diffrax solver
+instance plus its tolerances, step budget, and adjoint. The **adjoint**
+is the strategy Diffrax uses to get gradients back out of the
+integration; see [Concepts](/guide/concepts#solverconfig).
+
+[`make_dataset`](/api/data#make_dataset) turns your experiments plus
+`state_to_output` into a [`Dataset`](/api/data#dataset). It merges each
+experiment's per-channel timestamps into one axis, records which cells
+are real observations, and groups experiments by axis length.
+
+[`train_with_optax`](/api/training#train_with_optax) and
+[`train_with_evosax`](/api/training#train_with_evosax) both take
+`(predictors, dataset, config)` plus `simulate_fn`, `solver`, and a
+random `key`, and both return `(loss_history, trained_predictors)`.
+
+## A runnable example
+
+A harmonic oscillator with one unknown: the angular frequency `omega`.
+The data is generated at runtime from the closed-form solution, with
+noise. The trainer must recover `omega = 1.0` from noisy positions
+alone, never seeing velocity.
 
 ```python
 import diffrax
@@ -57,7 +154,8 @@ from hybridmodels.predictors.base import Predictor
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 
-# 1. Custom predictor: a single trainable scalar.
+# 1. A predictor holding one trainable scalar. It ignores its input,
+#    because every experiment shares the same omega.
 class OmegaPredictor(Predictor):
     omega_lat: Array
 
@@ -68,7 +166,9 @@ class OmegaPredictor(Predictor):
         return self.omega_lat[None]
 
 
-# 2. Wrap the predictor with sigmoid-scaled output bounds [0.5, 2.0].
+# 2. Wrap it so its output is confined to [0.5, 2.0]. BoundScaler is the
+#    map between physical units and the unbounded space the inner
+#    predictor works in; "sigmoid" is how it saturates near the edges.
 key = jr.PRNGKey(0)
 k_init, k_noise, k_train = jr.split(key, 3)
 
@@ -81,7 +181,8 @@ predictor = BoundedPredictor(
 predictors = (predictor,)
 
 
-# 3. simulate_fn: the second-order linear ODE for one experiment.
+# 3. simulate_fn: integrate one experiment. The signature is fixed by
+#    the library; everything inside it is yours.
 def simulate_fn(predictors, ts, covariates, y0, solver):
     omega = predictors[0](covariates).reshape(())
 
@@ -96,19 +197,20 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
         dt0=solver.dt0 if solver.dt0 is not None else 0.05,
         y0=y0,
         saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+        stepsize_controller=solver.stepsize_controller(),
         max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
+        adjoint=solver.adjoint,
     )
     return jnp.asarray(sol.ys)
 
 
-# 4. state_to_output: only the position channel is observed.
+# 4. state_to_output: the state is (position, velocity); only position
+#    is measured.
 def state_to_output(state):
     return state[..., :1]
 
 
-# 5. Synthesise three experiments with omega=1.0 and different initial states.
+# 5. Three experiments, omega=1.0, different initial states.
 NOISE_STD = 0.02
 ts = jnp.linspace(0.0, 5.0, 12)
 experiments = []
@@ -137,7 +239,7 @@ dataset = make_dataset(
 )
 
 
-# 6. Solver and training configuration.
+# 6. Solver settings and training budget.
 solver = SolverConfig(
     solver=diffrax.Tsit5(),
     rtol=1e-6,
@@ -170,14 +272,37 @@ print(f"final loss: {history[-1]:.6f}")
 print(f"recovered omega: {recovered:.4f} (target: 1.0000)")
 ```
 
-Running the script with the seed above produces a final loss around `2e-4` and an `omega` estimate within roughly 1% of the target.
+With the seed above this prints a final loss of `0.000252` and
+`recovered omega: 1.0013`.
 
-The same API scales up. Replacing `OmegaPredictor` with an `MLPPredictor` or a `KANPredictor`, adding real covariates and channels, and writing a population-balance vector field gives the [Crystallisation walkthrough](/examples/crystallisation). Some models have a handful of global parameters as their trainable component rather than a function approximator, for example four kinetic constants feeding a Classical Nucleation Theory rate law. The [mechanistic crystallisation example](/examples/crystallisation-mechanistic) shows the same training entry points used with [`train_with_evosax`](/api/training#train_with_evosax) and CMA-ES.
+Two details in that script recur everywhere.
+
+The **`"dummy"` covariate** exists because a `BoundedPredictor` must
+declare at least one input. A predictor with no inputs has no training
+signal, so the constructor refuses one. `OmegaPredictor` ignores the
+value it receives.
+
+**`key=` is keyword-only** on both trainers, and has no default. The
+library never falls back to `jr.PRNGKey(0)` behind your back, so every
+run states its own seed.
+
+## Scaling this up
+
+Replace `OmegaPredictor` with an `MLPPredictor`, add real covariates and
+channels, and write a real vector field, and you have the
+[crystallisation walkthrough](/examples/crystallisation-notebook).
+
+Some models have no network at all. Their trainable part is a handful of
+kinetic constants feeding a classical rate law. That works the same way,
+and is usually better fitted by population search than by gradients. See
+the [mechanistic crystallisation example](/examples/crystallisation-mechanistic).
 
 ## Next steps
 
-- [Crystallisation walkthrough](/examples/crystallisation): a full end-to-end example on a real dataset, with two `BoundedPredictor` branches predicting growth and nucleation rates inside a method-of-moments ODE. Read this first; the rest of the documentation is easier with it as context.
-- [Concepts](/guide/concepts): the package's vocabulary. `Predictor`, `BoundScaler`, `BoundedPredictor`, `Experiment`, `Dataset`, `BucketPayload`, `simulate_fn`, `state_to_output`, predictor inputs versus covariates.
-- [Training](/guide/training): multi-phase Optax schedules, the shared-tournament restart loop, when to reach for `train_with_evosax`, and the named-fold RNG discipline that keeps runs reproducible.
-- [Recommendations](/guide/recommendations): choosing bounds, solver tolerances, freezing patterns, and the autodiff-safe guards needed to keep gradients finite under JAX tracing.
-- [API Reference](/api/): every public symbol with signature, parameters, and source link.
+- [Concepts](/guide/concepts). The vocabulary, and why each design
+  choice is the way it is. Read this second.
+- [Training](/guide/training). Multi-phase schedules, restart tournaments,
+  population search, and freezing.
+- [Recommendations](/guide/recommendations). Choosing bounds, solver
+  tolerances, and the traps that cost a debugging session.
+- [API reference](/api/). Every public symbol.

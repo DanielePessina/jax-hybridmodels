@@ -21,17 +21,16 @@ a :class:`rich.console.Group` that swaps panels as the run progresses:
   ``log_every``;
 * a message-log panel with the most recent ``recent_messages`` lines.
 
-The class is defensive about event ordering: events that arrive before
-the state they reference (e.g. ``on_run_end`` with no generations
-seen) become no-ops rather than assertions, because graceful abort
-paths and recording-UI tests can legitimately fire events out of
-order.
+The class is defensive about event ordering. An event that arrives
+before the state it references, ``on_run_end`` with no generations seen
+for instance, becomes a no-op rather than an assertion. Graceful-abort
+paths and recording-UI tests can legitimately fire events out of order.
 
 This class deliberately does **not** subclass ``RichTrainingUI``. The
-two share a handful of small rendering helpers, but the bodies are
-short enough that duplication is cheaper than introducing a shared
-base — extracting one would force both UIs to negotiate every future
-panel change through a single supertype.
+two share a few small rendering helpers, but the bodies are short enough
+that duplication costs less than a shared base. Extracting one would
+force both UIs to negotiate every future panel change through a single
+supertype.
 """
 
 from __future__ import annotations
@@ -56,11 +55,11 @@ from rich.text import Text
 
 
 def _format_fitness(value: float) -> str:
-    """Format a fitness value to four significant figures (fixed-decimal).
+    """Format a fitness value to four decimal places.
 
-    Matches the convention used by ``RichTrainingUI._format_loss`` so the
-    rendered-output tests in both surfaces share the ``\\d\\.\\d{4,}``
-    significant-figure regex.
+    Same convention as ``hybridmodels.ui.optax._format_loss``, so the
+    rendered-output tests for both UIs can share one ``\\d\\.\\d{4,}``
+    regex.
     """
     return f"{float(value):.4f}"
 
@@ -107,10 +106,10 @@ class RichEvosaxUI:
         if log_every is not None and log_every < 1:
             raise ValueError(f"log_every must be >= 1, got {log_every}")
         self._console: Console = console if console is not None else Console()
-        # ``None`` means "auto-scale at on_run_start"; a concrete int is the
-        # user's override and we lock it in immediately. The flag is what
-        # ``on_run_start`` consults — once an explicit value is set, the
-        # auto-scale path is permanently off for this instance.
+        # ``None`` means "auto-scale at on_run_start". A concrete int is the
+        # user's override and is locked in immediately. on_run_start reads
+        # the flag, so once an explicit value is set the auto-scale path is
+        # off for the life of this instance.
         self._auto_log_every: bool = log_every is None
         self._log_every: int = 1 if log_every is None else int(log_every)
         # Each row is (gen_idx, best_fitness, mean_fitness, best_so_far).
@@ -130,8 +129,8 @@ class RichEvosaxUI:
         # advancing past its old total.
         self._gen_progress_bar: Progress | None = None
         self._gen_task_id: TaskID | None = None
-        # Best-so-far tracker, surfaced both in the recent-generation table
-        # and in the header summary.
+        # Best-so-far tracker, shown in both the recent-generation table
+        # and the header summary.
         self._best_so_far: float | None = None
 
         # Compile-panel state. Same slot semantics as ``RichTrainingUI``:
@@ -224,15 +223,15 @@ class RichEvosaxUI:
         best = float(best_fitness)
         mean = float(mean_fitness)
 
-        # Best-so-far is monotone non-increasing — update before
-        # recording the row so the table reflects the post-update
-        # value (the same best-ever bookkeeping the training loop
-        # itself maintains).
+        # Best-so-far is monotone non-increasing. Update it before
+        # recording the row, so the table shows the post-update value.
+        # This mirrors the best-ever bookkeeping the training loop keeps.
         if self._best_so_far is None or best < self._best_so_far:
             self._best_so_far = best
 
-        # Advance the generation progress bar (guarded — out-of-order events
-        # might call on_generation_end without a preceding on_run_start).
+        # Advance the generation progress bar. Guarded because an
+        # out-of-order run can call on_generation_end with no preceding
+        # on_run_start.
         if self._gen_progress_bar is not None and self._gen_task_id is not None:
             try:
                 self._gen_progress_bar.advance(self._gen_task_id, advance=1)
@@ -295,9 +294,9 @@ class RichEvosaxUI:
         # on this ordering).
         if self._final_fitness is not None:
             children.append(self._render_footer())
-        # Constrain to half the current terminal width — see the matching
-        # comment in ``hybridmodels.ui.optax.RichTrainingUI._render`` for
-        # the rationale (avoid sprawling panels and resize-time overflow).
+        # Constrain to half the current terminal width. The matching
+        # comment in ``hybridmodels.ui.optax.RichTrainingUI._render`` has
+        # the reasoning: sprawling panels and resize-time overflow.
         target_width = max(40, self._console.width // 2)
         return Align.left(Group(*children), width=target_width)
 
@@ -315,8 +314,8 @@ class RichEvosaxUI:
         if self._best_so_far is not None:
             body.add_row("best so far", _format_fitness(self._best_so_far))
         if self._final_fitness is not None:
-            # Header surfaces the final fitness post-run; the word "final"
-            # here is what the rendered-output test pins on.
+            # The header shows the final fitness once the run is over. The
+            # word "final" here is what the rendered-output test pins on.
             body.add_row("final fitness", _format_fitness(self._final_fitness))
 
         title = "evosax run" if self._run_active else "evosax run (finished)"

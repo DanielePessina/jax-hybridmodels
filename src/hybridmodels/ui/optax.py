@@ -17,11 +17,11 @@ A single :class:`rich.live.Live` is started in
 * a message-log panel showing the most recent ``recent_messages``
   lines fired through :meth:`RichTrainingUI.on_message`.
 
-The class is intentionally defensive about event ordering: events
-that arrive before the state they reference (e.g. ``on_phase_end``
-with no active phase) become no-ops rather than assertions, because
-tournament restarts and graceful-abort paths can legitimately fire
-events out of order.
+The class is deliberately defensive about event ordering. An event that
+arrives before the state it references, ``on_phase_end`` with no active
+phase for instance, becomes a no-op rather than an assertion. Tournament
+restarts and graceful-abort paths can legitimately fire events out of
+order, and a rendering failure must never take down a training run.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from rich.text import Text
 
 
 def _format_loss(loss: float) -> str:
-    """Format a loss value to four significant figures (fixed-decimal)."""
+    """Format a loss value to four decimal places."""
     return f"{float(loss):.4f}"
 
 
@@ -96,10 +96,9 @@ class RichTrainingUI:
         self._phase_task_id: TaskID | None = None
         self._phase_lr: float | None = None
         self._phase_optimizer: str | None = None
-        # Cumulative phase summary (phase_idx, optimizer, lr). Surfaced in the
-        # header so the final rendered frame still names every optimiser used,
-        # not just the active one — matches user expectations after a multi-
-        # phase run finishes.
+        # Cumulative phase summary (phase_idx, optimizer, lr). Shown in the
+        # header so the final frame of a multi-phase run names every
+        # optimiser it used, rather than only the last one.
         self._phase_history: list[tuple[int, str, float]] = []
 
         # Compile-panel state. The compile panel occupies the same
@@ -207,10 +206,10 @@ class RichTrainingUI:
         self, *, step_idx: int, phase_idx: int, loss: float, penalty: float = 0.0
     ) -> None:
         # Advance the phase progress bar and push the latest loss into the
-        # bar's ``loss`` field so the trailing column renders a live value
-        # alongside step / elapsed columns. Both calls are guarded — out-of-
-        # order events might call on_step_end without a preceding
-        # on_phase_start, in which case there is nothing to update.
+        # bar's ``loss`` field, so the trailing column renders a live value
+        # next to the step and elapsed columns. Guarded because an
+        # out-of-order run can call on_step_end with no preceding
+        # on_phase_start, leaving nothing to update.
         if self._phase_progress_bar is not None and self._phase_task_id is not None:
             try:
                 # Penalty is appended only when it is actually charged,
@@ -305,8 +304,8 @@ class RichTrainingUI:
             )
             body.add_row("phases seen", phase_summary)
         if self._final_loss is not None:
-            # Header surfaces the final-loss summary post-run; the word
-            # "final" here is what the rendered-output test pins on.
+            # The header shows the final-loss summary once the run is over.
+            # The word "final" here is what the rendered-output test pins on.
             body.add_row("final loss", _format_loss(self._final_loss))
 
         title = "training run" if self._run_active else "training run (finished)"
@@ -341,8 +340,8 @@ class RichTrainingUI:
             placeholder = Text("no active phase", style="dim")
             return Panel(placeholder, title="phase progress", border_style="green")
 
-        # Surface lr/optimizer alongside the bar so the rendered output test
-        # can pin "adamw" without needing a separate panel.
+        # Show lr and optimizer next to the bar, so the rendered-output test
+        # can pin "adamw" without a separate panel.
         meta = Table.grid(padding=(0, 2))
         meta.add_column(style="bold")
         meta.add_column()

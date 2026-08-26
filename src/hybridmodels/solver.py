@@ -1,13 +1,16 @@
-"""SolverConfig and a name-keyed solver registry for JSON-serialisable configs.
+"""How the ODE gets integrated, in a form that can be saved to JSON.
 
-Every field on ``SolverConfig`` is declared ``eqx.field(static=True)`` so
-the config carries no JAX-array leaves: it is closed over by jitted
-training and prediction kernels, contributing only to their static
-signature, and so it can round-trip through plain JSON. The price of
-that JSON round-trip is that the concrete diffrax solver class must be
-discoverable by name; ``SOLVER_REGISTRY`` is that name table, and users
-extend it with :func:`register_solver` before serialising a config that
-references a custom solver.
+``SolverConfig`` holds the settings handed to diffrax, the ODE solver
+library this package integrates with. Every field is declared
+``eqx.field(static=True)``, so the config holds no JAX arrays. Compiled
+training and prediction kernels close over it as configuration rather
+than take it as data, and it can round-trip through plain JSON.
+
+The JSON round-trip has one cost. A solver is a Python object, and JSON
+cannot hold one, so the concrete diffrax class must be findable by name.
+``SOLVER_REGISTRY`` and ``ADJOINT_REGISTRY`` are those name tables. Add a
+custom class with :func:`register_solver` or :func:`register_adjoint`
+before saving a config that references it.
 """
 
 from __future__ import annotations
@@ -35,8 +38,11 @@ ADJOINT_REGISTRY: dict[str, type[diffrax.AbstractAdjoint]] = {
 }
 """Name to diffrax adjoint class. Extend via :func:`register_adjoint`.
 
-Which one you pick decides the memory cost of the backward pass, and for
-a neural ODE that is usually the binding constraint:
+An *adjoint* is the method used to get gradients back through an ODE
+solve. The forward solve takes many small steps, and the backward pass
+has to recover the sensitivity of the loss to the parameters through all
+of them. The choices below trade memory against recomputation and
+accuracy, and for a neural ODE memory is usually the binding constraint.
 
 - ``Direct`` stores the whole forward tape. Cheapest to differentiate,
   most memory. The default here because every example wrote it by hand
@@ -64,35 +70,45 @@ def register_adjoint(name: str, cls: type[diffrax.AbstractAdjoint]) -> None:
 def register_solver(name: str, cls: type[diffrax.AbstractSolver[Any]]) -> None:
     """Register a custom diffrax solver class under ``name`` for round-trip serialisation.
 
-    After registration, ``SolverConfig(solver=cls(), ...).to_dict()`` will
-    emit ``{"solver": name, ...}`` and ``SolverConfig.from_dict`` will accept
-    it. Re-registering an existing name overwrites silently — calling code
-    is responsible for namespace hygiene.
+    After registration, ``SolverConfig(solver=cls(), ...).to_dict()`` emits
+    ``{"solver": name, ...}`` and ``SolverConfig.from_dict`` accepts it.
+    Re-registering an existing name overwrites without warning. Calling code
+    owns the naming.
     """
     SOLVER_REGISTRY[name] = cls
 
 
 class SolverConfig(eqx.Module):
-    """Static-only ``diffrax`` solver configuration.
+    """Everything the ODE solve needs, held as static configuration.
 
-    Every field is ``eqx.field(static=True)`` so the config carries no JAX
-    array leaves — it is closed over by jitted training/prediction functions
-    and contributes to their static signature without re-tracing on value
-    changes (changes do trigger a recompile, which is what we want).
+    Every field is ``eqx.field(static=True)``, so the config carries no JAX
+    array leaves. Compiled training and prediction functions close over it,
+    which means changing a value recompiles rather than silently reusing the
+    old kernel. That is the intended behaviour, since a tolerance change
+    must change the compiled solve.
 
     Attributes
     ----------
     solver : diffrax.AbstractSolver
-        Concrete solver instance (e.g. ``diffrax.Tsit5()``); its class must
-        appear in ``SOLVER_REGISTRY`` for ``to_dict`` to round-trip.
+        Concrete solver instance, for example ``diffrax.Tsit5()``. Its class
+        must appear in ``SOLVER_REGISTRY`` for ``to_dict`` to round-trip.
     rtol, atol : float | tuple[float, ...]
-        Diffrax tolerances. ``atol`` may be per-state-component — a tuple
-        whose length matches ``S`` (the full state dimension consumed by
-        the user's ``simulate_fn``).
+        Relative and absolute error tolerances for the adaptive step-size
+        controller. ``atol`` may be set per state component, as a tuple
+        whose length matches ``S``, the full state dimension the user's
+        ``simulate_fn`` integrates.
     max_steps : int
-        Diffrax ``max_steps`` budget.
+        Upper limit on solver steps. The solve errors rather than running
+        forever if it needs more.
     dt0 : float | None
-        Initial step size; ``None`` lets diffrax pick.
+        Initial step size. ``None`` lets diffrax pick one.
+    adjoint : diffrax.AbstractAdjoint
+        How gradients are taken back through the solve. See
+        ``ADJOINT_REGISTRY`` for what each choice costs.
+    pcoeff, icoeff, dcoeff : float
+        Gains of the PID step-size controller. The defaults ``(0, 1, 0)``
+        are diffrax's own and give plain I-control. See
+        :meth:`stepsize_controller`.
     """
 
     solver: diffrax.AbstractSolver[Any] = eqx.field(static=True)
@@ -106,20 +122,20 @@ class SolverConfig(eqx.Module):
     dcoeff: float = eqx.field(static=True, default=0.0)
 
     def stepsize_controller(self) -> diffrax.PIDController:
-        """Build the ``PIDController`` this config describes.
+        """Build the adaptive step-size controller this config describes.
 
         Exists to remove a coercion every caller had to remember. Diffrax
         broadcasts ``atol`` against the state pytree, and a Python tuple is
-        not an array, so per-state tolerances raised or silently misbehaved
-        unless the caller wrapped them in ``jnp.asarray`` first. Two of the
-        four example scripts did; the other two could not use tuple
-        tolerances at all.
+        not an array, so per-state tolerances raised or misbehaved unless
+        the caller wrapped them in ``jnp.asarray`` first. Two of the four
+        example scripts did. The other two could not use tuple tolerances at
+        all.
 
-        The ``pcoeff``/``icoeff``/``dcoeff`` defaults of ``(0, 1, 0)`` are
-        diffrax's own, i.e. plain I-control, so calling this reproduces the
-        ``PIDController(rtol=..., atol=...)`` the examples wrote by hand.
-        Raise ``pcoeff`` (0.3 to 0.4) to damp step-size oscillation on
-        stiff problems.
+        The ``pcoeff``, ``icoeff``, and ``dcoeff`` defaults of ``(0, 1, 0)``
+        are diffrax's own, that is, plain I-control, so calling this
+        reproduces the ``PIDController(rtol=..., atol=...)`` the examples
+        wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp step-size
+        oscillation on stiff problems.
         """
         atol = jnp.asarray(self.atol) if isinstance(self.atol, tuple) else self.atol
         return diffrax.PIDController(
@@ -131,11 +147,12 @@ class SolverConfig(eqx.Module):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise to a JSON-compatible dict via ``SOLVER_REGISTRY``.
+        """Serialise to a JSON-compatible dict via the two registries.
 
-        The solver instance is replaced by its registered name; tuple ``atol``
-        becomes a list (JSON has no tuple). Unknown solver classes raise so
-        users register custom solvers explicitly via ``register_solver``.
+        The solver and adjoint instances are replaced by their registered
+        names. A tuple ``atol`` becomes a list, since JSON has no tuple. An
+        unregistered class raises rather than being guessed at, so users
+        register custom classes explicitly.
         """
         solver_name: str | None = None
         for name, cls in SOLVER_REGISTRY.items():
@@ -180,9 +197,10 @@ class SolverConfig(eqx.Module):
         """Reconstruct a ``SolverConfig`` from ``to_dict`` output.
 
         Looks ``d["solver"]`` up in ``SOLVER_REGISTRY`` and instantiates the
-        class with no arguments. List-valued ``atol`` is coerced back to a
-        tuple to match the static-field type. Unknown names raise with the
-        currently-registered set.
+        class with no arguments, so a solver that needs constructor
+        arguments cannot round-trip this way. A list-valued ``atol`` is
+        coerced back to a tuple to match the static-field type. An unknown
+        name raises, listing what is currently registered.
         """
         name = d["solver"]
         if name not in SOLVER_REGISTRY:

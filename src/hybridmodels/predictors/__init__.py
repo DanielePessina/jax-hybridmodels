@@ -1,23 +1,23 @@
-"""Public predictor surface.
+"""The predictors a user builds with.
 
-A *predictor* is an ``eqx.Module`` mapping a covariate vector to a real
-or vector output that the user's ``simulate_fn`` consumes (typically as
-a coefficient or rate inside a differential equation). The
-``BoundedPredictor`` wrapper composes any inner predictor with a
-``BoundScaler`` to constrain the output to a physically meaningful
-range; ``MLPPredictor`` and ``KANPredictor`` are the two concrete
-inner-predictor families shipped here.
+A *predictor* is an ``eqx.Module`` that maps an input array to the value
+the user's ``simulate_fn`` needs, typically a rate or a coefficient
+inside a differential equation. ``MLPPredictor`` and ``KANPredictor``
+are the two concrete families shipped here, and ``Predictor`` is the
+abstract marker to subclass for a third.
 
-Multi-rate hybrid models compose by passing a *tuple* of predictors to
-training and unpacking that tuple inside ``simulate_fn`` — the framework
-deliberately does not provide a single wrapper class for "two rates" or
-"a list of rates", because the JIT-friendly thing is for the user's
-simulator to know exactly what each predictor is for.
+Wrap the network in ``BoundedPredictor`` to work in physical units. It
+composes an inner predictor with two ``BoundScaler``s, one normalising
+the named inputs and one squashing the output into its declared range,
+so the network itself never handles a bound.
 
-The file ``neural_npoly.py`` ships an experimental
-``NeuralNPolynomial`` that is **not** re-exported here; it is held
-in-tree as a future candidate but is not yet part of the supported
-public API.
+Multi-rate hybrid models pass a *tuple* of predictors to training and
+unpack it inside ``simulate_fn``. There is no framework class for "two
+rates" or "a list of rates", so each predictor's role is named where it
+is used.
+
+``neural_npoly.py`` holds an experimental ``NeuralNPolynomial``. It is
+not re-exported here and is not part of the supported public API.
 """
 
 from hybridmodels.predictors.base import (

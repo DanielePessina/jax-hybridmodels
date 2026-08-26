@@ -1,71 +1,65 @@
-"""Hybrid ODE on bucketed irregular data: two networks, two placements.
+"""Hybrid ODE fit: keep the physics you know, learn the parts you do not.
 
-What this is
-------------
-The same spiral as ``train_neural_ode.py``, but the model keeps what is
-known and learns only what is not, and the data has the shape the
-framework was actually built for.
+What this example is for
+------------------------
+A mechanistic model with two gaps. One is a rate constant that varies with
+an operating condition in a way you cannot write down. The other is a term
+missing from the model entirely. The library's job is to let you learn both
+with networks while the mechanistic structure, the physical ranges and the
+irregular sampling are all handled for you.
 
-Ground truth::
+The ground truth::
 
     dy/dt = [[-k, w], [-w, -k]] y  +  C y^3        w = 1, k = k(temperature)
 
-The model keeps the rotation and its frequency ``w``, which is known. It
-learns the other two pieces with two separate networks, placed on
-opposite sides of the solver:
+The model keeps the rotation and knows ``w``. It learns ``k`` from a
+temperature covariate with one network and ``C y^3`` with another.
 
-    **outside the solve** -- ``rate_net``: ``temperature -> k``. One
-    evaluation per experiment, hoisted above ``diffeqsolve`` because the
-    covariate does not change during a trajectory. It is not on the
-    solver tape at all, so its gradient path is short and its cost is
-    independent of how many steps the solver takes. ``k`` is bounded to
-    ``(1e-3, 1)`` with ``warp="log10"``, because the true rates span
-    decades and a linear box would put 99% of the latent range above
-    ``0.5``.
+The four things this shows
+--------------------------
+**Two network placements.** ``rate_net`` maps a covariate to a parameter and
+runs once per experiment, hoisted above ``diffeqsolve`` because the
+covariate is constant along a trajectory. It never touches the solver tape.
+``residual_net`` depends on the state, so it runs inside the vector field,
+once per solver step. (A trainable network inside a vector field is a neural
+ODE; diffrax and Equinox document that technique, and this example assumes
+it rather than teaching it.) The two travel as a plain tuple and are
+unpacked at the top of ``simulate_fn``. The library never inspects the
+container (ADR-0006), so a dict or a NamedTuple works the same, and
+``--mechanistic-only`` shortens the tuple to one entry with no other change.
 
-    **inside the solve** -- ``residual_net``: ``y -> correction``. One
-    evaluation per solver step, on the tape, exactly like the pure neural
-    ODE. Bounded to a small symmetric box so it can correct the
-    mechanistic core without replacing it.
+**Bounds that hold by construction.** Both networks are wrapped in
+``BoundedPredictor``, so neither sees a bound and neither can emit a value
+outside one. ``k`` is bounded to ``(1e-3, 1)`` under ``warp="log10"``,
+because the true rates span 1.6 decades and a linear box would put 99% of
+the latent range above 0.5. The residual uses ``softsign`` rather than
+``sigmoid`` because a term that visits the edge of its box needs a squash
+whose gradient decays polynomially instead of underflowing to zero.
 
-They travel together as a plain tuple, ``(rate_net, residual_net)``,
-unpacked at the top of ``simulate_fn``. The framework never inspects the
-container (ADR-0006); a dict or a NamedTuple would work identically.
-``--mechanistic-only`` drops the second entry and the tuple becomes
-length one, with no other change to the plumbing.
+**Two data layouts, one model.** ``--data rectangular`` samples every
+experiment on one grid and gives a single bucket with a full mask.
+``--data irregular`` thins each channel separately and gives three buckets
+about half full. The model code is identical. Regular data is the
+degenerate case of the general one, not a separate path.
 
-Data
-----
-``irregular_spiral`` gives every experiment its own end time, its own
-sample times, and independently thinned channels. Union lengths then
-differ across experiments, so ``make_dataset`` builds three buckets and
-the mask runs about half full. Nothing is padded to a common length and
-nothing is dropped. Compare the one dense bucket in
-``train_neural_ode.py``.
+**A saturation penalty on the latent.** Charged where the gradient still
+exists, and evaluated on a grid over each predictor's declared input box
+rather than along the trajectories, so it reports extrapolation trouble the
+training loss cannot see.
 
 Extensibility
 -------------
-Two things this file needs that the package does not ship, both added
-without touching the package:
-
-``register_warp("symlog", ...)`` -- the residual box straddles zero, so
-``log10`` is unusable, but a linear box spends its resolution on large
-corrections that should never happen. Symlog is linear near zero and
-logarithmic in the tails, which is where a residual's prior belongs.
-
-``penalty_weight`` -- the saturation penalty, charged on the latent
-rather than the physical output, so it keeps pulling after the squash
-gradient has died. See ``docs/adr/0007-collocation-bound-penalty.md``.
-
-``--inner kan`` swaps both networks from MLPs to KANs. The rest of the
-file is unchanged, which is the point of ``BoundedPredictor`` holding a
-``Predictor`` rather than subclassing one.
+The residual's box straddles zero, so ``log10`` is unusable and a linear box
+wastes resolution on large corrections that should never happen. The script
+registers a signed-logarithmic warp of its own with ``register_warp``.
+``register_bound_transform`` is the same idea on the squash axis.
 
 How to run
 ----------
-``uv run python examples/neural_ode/train_hybrid_ode.py``
-``uv run python examples/neural_ode/train_hybrid_ode.py --mechanistic-only``
-``uv run python examples/neural_ode/train_hybrid_ode.py --inner kan``
+``uv run python examples/hybrid_ode/train_hybrid_ode.py``
+``uv run python examples/hybrid_ode/train_hybrid_ode.py --data rectangular``
+``uv run python examples/hybrid_ode/train_hybrid_ode.py --mechanistic-only``
+``uv run python examples/hybrid_ode/train_hybrid_ode.py --inner kan``
 """
 
 # ruff: noqa: F722
@@ -87,7 +81,6 @@ from hybridmodels import (
     MLPPredictor,
     SolverConfig,
     Warp,
-    make_dataset,
     predict_dataset,
     register_warp,
 )
@@ -100,12 +93,13 @@ from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _data import (  # noqa: E402
-    CHANNELS,
     COUPLING,
     OMEGA_TRUE,
     TEMPERATURES,
+    build_dataset,
     describe_buckets,
-    irregular_spiral,
+    irregular_experiments,
+    rectangular_experiments,
     true_k,
 )
 from _shared import (  # noqa: E402
@@ -117,17 +111,16 @@ from _shared import (  # noqa: E402
 )
 
 SYMLOG_EPS: float = 0.25
-"""Half-width of the linear region of the ``symlog`` warp, in the units of
-whatever axis it is applied to."""
+"""Half-width of the linear region of the ``symlog`` warp."""
 
 TEMPERATURE_BOUNDS: tuple[tuple[float, float], ...] = ((270.0, 350.0),)
-"""Input box of the rate network. Slightly wider than the covariate levels
-in the data, so ``to_latent`` stays in its exact region at the extremes."""
+"""Input box of the rate network. Wider than the covariate levels in the
+data, so ``to_latent`` stays in its exact region at the extremes."""
 
 K_BOUNDS: tuple[tuple[float, float], ...] = ((1e-3, 1.0),)
 """Output box of the rate network, three decades wide. The true rates span
-0.006 to 0.28, so the box is loose on purpose: the point of ``log10`` is
-that a loose box costs almost nothing in resolution."""
+0.006 to 0.28, so the box is loose on purpose. Under ``log10`` a loose box
+costs almost nothing in resolution."""
 
 STATE_BOUNDS: tuple[tuple[float, float], ...] = ((-2.0, 2.0), (-2.0, 2.0))
 """Input box of the residual network."""
@@ -143,14 +136,13 @@ def _register_symlog() -> None:
 
     ``forward(x) = sign(x) log(1 + |x| / eps)``, inverted exactly. Monotone
     on the whole line, smooth through zero, and ``forward(0) = 0``, so the
-    box midpoint stays at zero: a freshly initialised residual network
-    sitting near latent zero produces a correction near zero rather than
-    one at some arbitrary interior point.
+    box midpoint stays at zero. A freshly initialised residual network then
+    produces a correction near zero rather than at an arbitrary interior
+    point.
 
-    Registration is idempotent here because the module-level call runs
-    once, but ``register_warp`` overwrites without warning, so a name
-    collision with a future package warp would be silent. Prefix custom
-    names if that matters to you.
+    ``register_warp`` overwrites without warning, so a name collision with
+    a future package warp would be silent. Prefix custom names if that
+    matters to you.
     """
     register_warp(
         "symlog",
@@ -193,12 +185,12 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
 def build_rate_net(key: Array, kind: str) -> BoundedPredictor:
     """``temperature -> k``, evaluated once per experiment above the solver.
 
-    ``warp="log10"`` is the whole reason this reads well. With a linear
-    box over ``(1e-3, 1)`` the latent midpoint is ``0.5``, and every rate
-    in the data would sit in the bottom 3% of the box where the sigmoid is
-    steepest and the network has to produce large negative latents to
-    reach. Under ``log10`` the midpoint is ``0.032`` and the true range
-    covers the middle of the box.
+    ``warp="log10"`` is what makes this read well. With a linear box over
+    ``(1e-3, 1)`` the latent midpoint is ``0.5``, and every rate in the data
+    would sit in the bottom 3% of the box where the sigmoid is steepest and
+    the network has to produce large negative latents to reach. Under
+    ``log10`` the midpoint is ``0.032`` and the true range covers the middle
+    of the box.
     """
     return BoundedPredictor(
         input_keys=("temperature",),
@@ -218,11 +210,6 @@ def build_residual_net(key: Array, kind: str) -> BoundedPredictor:
     )
 
 
-def _state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 2"]:
-    """Both coordinates are observed."""
-    return state
-
-
 def simulate_fn(
     predictors: tuple[BoundedPredictor, ...],
     ts: Float[Array, " T"],
@@ -232,11 +219,11 @@ def simulate_fn(
 ) -> Float[Array, "T 2"]:
     """Integrate the hybrid field for one experiment.
 
-    The two network placements are visible in the first six lines. The
-    rate network runs here, once, and its output is closed over as a
-    constant. The residual network runs inside ``vector_field``, once per
-    step. Both are ordinary calls on ordinary pytrees; the framework does
-    not need to be told which is which.
+    The two network placements are visible in the first six lines. The rate
+    network runs here, once, and its output is closed over as a constant.
+    The residual network runs inside ``vector_field``, once per step. Both
+    are ordinary calls on ordinary pytrees; the library does not need to be
+    told which is which.
     """
     rate_net = predictors[0]
     residual_net = predictors[1] if len(predictors) > 1 else None
@@ -268,10 +255,10 @@ def simulate_fn(
 def report_rate_net(rate_net: BoundedPredictor) -> None:
     """Print recovered against true ``k`` at every temperature level in the data.
 
-    This is the check that matters for the outside-the-solver network: it
-    never sees ``k``, only trajectories, so agreeing with the Arrhenius
-    law here means the covariate dependence was recovered rather than
-    memorised per experiment.
+    This is the check that matters for the outside-the-solver network. It
+    never sees ``k``, only trajectories, so agreeing with the Arrhenius law
+    here means the covariate dependence was recovered rather than memorised
+    per experiment.
     """
     print("  temperature   true k     fitted k    ratio")
     for temperature in TEMPERATURES:
@@ -300,6 +287,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=400)
     parser.add_argument("--experiments", type=int, default=24)
+    parser.add_argument(
+        "--data",
+        choices=("irregular", "rectangular"),
+        default="irregular",
+        help="Sampling layout. Same model either way; only the bucketing differs.",
+    )
     parser.add_argument("--inner", choices=("mlp", "kan"), default="mlp")
     parser.add_argument(
         "--mechanistic-only",
@@ -320,11 +313,12 @@ def main() -> None:
     apply_default_style()
     k_data, k_rate, k_res, k_train = jr.split(jr.PRNGKey(args.seed), 4)
 
-    print("[data] irregular spiral, diffrax latent_ode sampling, thinned per channel")
-    experiments = irregular_spiral(n_experiments=args.experiments, key=k_data)
-    dataset = make_dataset(
-        experiments, state_to_output=_state_to_output, output_channel_names=CHANNELS
-    )
+    print(f"[data] {args.data} sampling")
+    if args.data == "rectangular":
+        experiments = rectangular_experiments(n_experiments=args.experiments, key=k_data)
+    else:
+        experiments = irregular_experiments(n_experiments=args.experiments, key=k_data)
+    dataset = build_dataset(experiments)
     print(describe_buckets(dataset))
 
     solver = SolverConfig(
@@ -333,6 +327,9 @@ def main() -> None:
         atol=1e-6,
         max_steps=4096,
         dt0=0.1,
+        # A network inside the vector field makes the forward tape the
+        # memory bottleneck. RecursiveCheckpoint trades recomputation for
+        # O(log n) storage; Direct, the library default, keeps the lot.
         adjoint=diffrax.RecursiveCheckpointAdjoint(),
     )
 
@@ -364,10 +361,12 @@ def main() -> None:
     # The penalty the optimiser was actually charged, read back at the end.
     # Zero means no predictor is pinned against a bound anywhere in its
     # declared input box, which is the state you want to ship in. A
-    # non-zero value says the network is relying on its bound to represent
+    # non-zero value says a network is relying on its bound to represent
     # something, and the bound is probably in the wrong place.
-    saturation = float(bound_penalty(trained, collocation_grids(trained)))
-    print(f"  end-of-run saturation penalty: {saturation:.3e}")
+    print("  end-of-run saturation penalty, by leaf:")
+    names = ("rate_net", "residual_net")
+    for name, leaf in zip(names, trained, strict=False):
+        print(f"    {name:13s} {float(bound_penalty((leaf,), collocation_grids((leaf,)))):.4e}")
 
     print("\n[rate network] recovered temperature dependence")
     report_rate_net(trained[0])
@@ -381,12 +380,13 @@ def main() -> None:
     print_diagnostics(diag)
 
     if not args.no_plot:
-        suffix = "mechanistic" if args.mechanistic_only else args.inner
+        variant = "mechanistic" if args.mechanistic_only else args.inner
+        suffix = f"{args.data}_{variant}"
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         parity_plot(
             diag,
             title=f"Hybrid ODE parity ({suffix})",
-            save_path=args.plot_dir / f"hybrid_parity_{suffix}.png",
+            save_path=args.plot_dir / f"parity_{suffix}.png",
         )
         trajectory_plot(
             predictions,
@@ -396,7 +396,7 @@ def main() -> None:
             solver=solver,
             max_experiments=4,
             title=f"Hybrid ODE trajectories ({suffix})",
-            save_path=args.plot_dir / f"hybrid_trajectories_{suffix}.png",
+            save_path=args.plot_dir / f"trajectories_{suffix}.png",
         )
         print(f"\n[plot] figures written to {args.plot_dir}")
 

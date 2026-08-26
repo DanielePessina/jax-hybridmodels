@@ -43,7 +43,8 @@ export default defineConfig({
       '/examples/': [
         { text: 'Crystallisation', link: '/examples/crystallisation-notebook' },
         { text: 'Batch reactor', link: '/examples/batch-reactor' },
-        { text: 'Neural ODE and hybrid', link: '/examples/neural-ode' },
+        { text: 'Hybrid ODE', link: '/examples/hybrid-ode' },
+        { text: 'Hybrid ODE notebook', link: '/examples/hybrid-ode-notebook' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },

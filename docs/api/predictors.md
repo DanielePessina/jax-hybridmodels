@@ -26,20 +26,36 @@ Predictors are the trainable components of a hybrid model — Equinox modules wi
 Predictor() -> None
 ```
 
-Abstract marker for trainable Array -> Array modules.
+Abstract marker for a trainable ``Array -> Array`` module.
 
-Concrete subclasses (MLPPredictor, KANPredictor, ...) implement `__call__`
-with signature ``Float[Array, "in"] -> Float[Array, "out"]``. The
-composition wrapper (`BoundedPredictor`) holds a `Predictor` as a field
-and exposes a richer call signature (``dict[str, Array] | Array -> Array``)
-without subclassing it.
+``Predictor`` carries no behaviour. It exists so the rest of the
+framework can say "this leaf is a trainable function approximator"
+and so composition wrappers have one type to accept. The base
+``__call__`` raises.
 
-Multi-rate models do not need a framework wrapper: multiple
+To add your own family, subclass ``Predictor``, declare your
+trainable arrays as ordinary fields and your hyperparameters as
+``eqx.field(static=True)``, and implement
+``__call__(self, x: Float[Array, "in"]) -> Float[Array, "out"]``.
+Two rules apply to every predictor in this package. Dynamic leaves
+must be JAX float arrays and static fields must be JSON-encodable,
+so the module round-trips through ``eqx.tree_serialise_leaves``.
+Optionally implement ``initialized_with_key(self, key) -> Self`` to
+control how the training tournament restarts your weights; without
+it, :func:`reinitialize_with_key` replaces every float leaf with a
+standard-normal sample, which skews any considered init scheme.
+
+Do not subclass to add bound handling or named inputs.
+``BoundedPredictor`` holds a ``Predictor`` as a field and supplies
+both, and it exposes the richer call signature
+(``dict[str, Array] | Array -> Array``) without touching this class.
+
+Multi-rate models need no framework wrapper either. Several
 predictors compose as a tuple at the ``simulate_fn`` boundary and
 the user unpacks them at the top of the vector field, naming each
 one in their own code (``rate_growth, rate_nucleation = predictors``).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L66)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L70)</small>
 
 ---
 
@@ -60,51 +76,102 @@ BoundScaler(
 ) -> None
 ```
 
-Bidirectional sigmoid scaler between physical ``[low, high]`` and an unbounded latent.
+Two-way map between a physical range ``[low, high]`` and an unbounded latent.
 
-The trainable inner predictor sees no bounds and outputs an
-unbounded latent value; this scaler translates between that latent
-and the physical box the simulator actually needs.
+**Why this exists**
 
-The forward map is
-``physical -> latent = logit((x - low) / (high - low)) * T``; the
-inverse is
-``latent -> physical = low + (high - low) * sigmoid(z / T)``.
+Physical quantities have ranges. A rate constant is positive, a
+solubility lies between known limits, and an ODE solver handed a
+value outside the range either fails or returns nonsense. An
+optimiser knows none of that. It proposes whatever number lowers the
+loss.
+
+Clipping the proposal looks like the fix and is not usable here. A
+clip has exactly zero derivative outside the range, so the moment a
+parameter leaves the box the gradient that would pull it back is
+zero and it stays out. This scaler reparameterises instead. The
+inner predictor reads and writes a *latent* value, any real number,
+and the scaler squashes that latent into the physical range. No
+latent maps to an out-of-range physical value, so a violation is
+unrepresentable and there is nothing to clip.
+
+**Vocabulary**
+
+latent
+    The unbounded real number the inner predictor works in. Written
+    ``z`` below.
+physical
+    The value in the units the simulator uses. Always inside
+    ``[low, high]``.
+warp
+    Decides what "halfway between the bounds" means. ``"linear"``
+    puts the midpoint of ``(1e-6, 1e2)`` at 50 and collapses the
+    eight-decade low end into a sliver; ``"log10"`` puts it at
+    ``1e-2``. Bounds are declared in physical units either way.
+    Name-keyed registry in ``transforms.py``.
+squash
+    The map from latent onto ``(0, 1)``, applied before the affine
+    rescale onto the box. ``"sigmoid"`` (default), ``"algebraic"``,
+    ``"softsign"``. Same module, ``BOUND_TRANSFORMS``. Stored as the
+    ``transform`` field.
+temperature
+    Divides the latent before the squash. A larger ``T`` spreads the
+    same box over a wider latent range, so the squash saturates more
+    slowly. ``T = 1.0`` is the plain squash.
+knee
+    The ``z_knee`` field. Latent magnitude past which
+    :meth:`saturation` starts charging. Derived per transform from
+    one physical criterion, the outer 5% of the box.
+
+**The two maps**
+
+:meth:`to_latent` warps the physical value, normalises it to
+``[0, 1]`` against the warped bounds, applies the squash inverse, and
+multiplies by ``T``. :meth:`from_latent` squashes ``z / T`` into
+``(0, 1)``, rescales onto the warped box, and unwarps. With the
+default ``"linear"`` warp and ``"sigmoid"`` squash these read
+``z = logit((x - low) / (high - low)) * T`` and
+``x = low + (high - low) * sigmoid(z / T)``.
+
 Composing inverse with forward is the identity strictly inside the
-open box ``(low, high)``; outside a narrow band at the endpoints
-``to_latent`` switches to a linear continuation (see method doc), so
-the round trip deviates there rather than saturating.
+open box ``(low, high)``. Outside a narrow band at the endpoints
+``to_latent`` switches to a linear continuation (see its docstring),
+so the round trip deviates there rather than hitting a pole.
 
-Bounds hold by construction. The inner predictor emits an unbounded
-latent and ``from_latent`` squashes it, so a physical violation cannot
-be represented and there is nothing to clip. The cost is gradient. The
-squash derivative decays exponentially, so a predictor pinned against
-a bound has no signal left to pull it back. :meth:`saturation` and
-:meth:`input_violation` are optional penalty queries that repair the
-two ends of this. Both are pure, and ``__call__`` invokes neither.
+**The cost**
 
-Sigmoid is the only transform supported here; alternative transforms
-can be introduced by extending ``_SUPPORTED_TRANSFORMS`` and adding
-matching forward/inverse maps.
+Bounds now hold by construction, and the price is gradient. The
+squash derivative decays as ``|z|`` grows, so a predictor pinned
+against a bound has little signal left to pull it back. Sigmoid's
+decay is exponential and dies at ``z = 16.8`` in float32; the
+``"algebraic"`` and ``"softsign"`` transforms decay polynomially and
+buy far more runway (numbers in ``transforms.py``). Runway alone is
+not enough, because escape time still grows fast with ``|z|``.
+:meth:`saturation` charges the output end for sitting deep in the
+squash and :meth:`input_violation` charges the input end for arriving
+outside its box. Both are pure queries. ``__call__`` invokes neither,
+and the caller decides whether to pay for them.
 
-The temperature ``T`` is a leaf, not a static field, so it could in
-principle be trained. The recommended convention is to freeze it
-(e.g. via ``freeze_modules_of_type(mask, predictor, BoundScaler)``)
-because the scaler is meant to define the activation shape, not
-learn it; leaving it trainable shifts the gradient signal between
-the scaler and the inner predictor and tends to slow convergence.
+The temperature ``T`` is a dynamic leaf, so it could be trained. The
+recommended convention is to freeze it, for example with
+``freeze_modules_of_type(mask, predictor, BoundScaler)``. The scaler
+defines the activation shape and the inner predictor learns inside
+it; a trainable ``T`` moves gradient between the two and tends to
+slow convergence.
 
 **Attributes**
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `bounds` | `tuple[tuple[float, float], ...]` | Per-component ``(low, high)`` pairs. Length sets the I/O dimension; applies elementwise to the last axis of inputs. |
-| `transform` | `str` | Name of the scaling transform; ``"sigmoid"`` is currently the only supported value. |
-| `temperature` | `Array` | Scalar (or per-component) sharpness multiplier in latent space. ``T = 1.0`` recovers the standard logit/sigmoid pair. |
-| `logit_eps` | `float` | Static. Half-width of the band at each end of ``[0, 1]`` outside which ``to_latent`` continues linearly instead of running into ``logit``'s pole. Sets the continuation slope (``~1 / logit_eps``). |
-| `z_knee` | `float` | Static. Latent magnitude past which :meth:`saturation` starts charging. ``3.0`` is the outer 5% of the physical box. |
+| `bounds` | `tuple[tuple[float, float], ...]` | Per-component ``(low, high)`` pairs in physical units. Length sets the input/output dimension and the pairs apply elementwise to the last axis. Must be finite and ordered ``low < high``. |
+| `transform` | `str` | Static. Squash name, a key of ``BOUND_TRANSFORMS``. Register your own with ``register_bound_transform``. |
+| `temperature` | `Array` | Scalar (or per-component) latent sharpness. ``T = 1.0`` recovers the plain squash and its inverse. |
+| `warp` | `str` | Static. Warp name, a key of ``WARPS``. Register your own with ``register_warp``. |
+| `warped_bounds` | `tuple[tuple[float, float], ...]` | Static. ``bounds`` pushed through the warp once at construction. Resolved eagerly so no call has to warp the edges under a trace. |
+| `logit_eps` | `float` | Static. Half-width of the band at each end of ``[0, 1]`` outside which ``to_latent`` continues linearly instead of running into the squash inverse's pole. Also sets the continuation slope (roughly ``1 / logit_eps``). |
+| `z_knee` | `float` | Static. The knee. Defaults to the transform's own value, which for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the box. Do not share one number across transforms: 2.944 is 12.5% from the bound on softsign, which would charge 2.7x too hard. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L85)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L105)</small>
 
 #### `BoundScaler.from_latent()`
 
@@ -114,11 +181,11 @@ from_latent(self, z: 'Array') -> 'Array'
 
 Map a latent value back into the physical box ``[low, high]``.
 
-Apply ``sigmoid(z / temperature)`` to land in ``(0, 1)``, then affine
-rescale to ``[low, high]``. The output is finite for any finite ``z``
-(no clipping required on the inverse direction).
+Squash ``z / temperature`` into ``(0, 1)``, affine rescale onto the
+warped box, then unwarp. The result is finite and inside the box for
+any finite ``z``, so this direction needs no guard.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L267)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L350)</small>
 
 #### `BoundScaler.input_violation()`
 
@@ -139,7 +206,7 @@ supplies a restoring force that keeps working far outside it.
 Pure and side-effect free. Emitting a penalty is a separate query,
 so the caller decides whether and where to pay for it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L228)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L311)</small>
 
 #### `BoundScaler.saturation()`
 
@@ -150,10 +217,10 @@ saturation(self, z: 'Array') -> 'Array'
 Scalar squared overshoot of ``|z / temperature|`` past ``z_knee``.
 
 Measures how hard the output squash is pinned against its bound.
-``z_knee`` defaults to ``3.0``, i.e. ``sigmoid(3) ~ 0.953`` — the
-outer 5% of the physical box on each side.
+For sigmoid the knee is ``2.944``, where ``sigmoid(2.944) = 0.95``,
+the outer 5% of the physical box on each side.
 
-A function of the latent, not of the physical value it maps to.
+The argument is the latent, never the physical value it maps to.
 ``from_latent``'s derivative carries a ``sigma'(z / T)`` factor that
 falls to 4.5e-5 by ``|z / T| = 10`` and underflows to exactly 0.0
 past roughly 15. A penalty written against the physical output
@@ -165,7 +232,7 @@ Reduced with ``mean``, not ``sum``, so the term does not scale with
 output width. One weight then means the same for a one-output and a
 six-output predictor.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L245)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L328)</small>
 
 #### `BoundScaler.to_latent()`
 
@@ -173,31 +240,35 @@ six-output predictor.
 to_latent(self, x: 'Array') -> 'Array'
 ```
 
-Map a physical-space value to its latent representative.
+Map a physical value to its latent representative.
 
-Steps: normalise to ``[0, 1]`` against ``bounds``, apply
-:func:`~hybridmodels.penalties.soft_logit`, scale by ``temperature``.
+Three steps. Warp ``x`` and normalise it to ``[0, 1]`` against the
+warped bounds, apply the squash inverse through
+:func:`~hybridmodels.penalties.soft_inverse`, multiply by
+``temperature``.
 
-The pole guard is a linear continuation, not a hard ``jnp.clip``.
-A hard clip has exactly zero derivative outside the box, and since
-the guard sits mid-graph that zero propagates to every upstream
-parameter on the path. Predictor inputs are often state-derived.
-Supersaturation in the crystallisation example is a traced function
-of the ODE state, so a clipped input drops a real sensitivity from
-the adjoint with nothing raised and nothing logged.
+The squash inverse has a pole at each end of ``[0, 1]``, and the
+guard against it is a linear continuation rather than a hard
+``jnp.clip``. A hard clip has exactly zero derivative outside the
+box. The guard sits mid-graph, so that zero propagates to every
+upstream parameter on the path. Predictor inputs are often
+state-derived. Supersaturation in the crystallisation example is a
+traced function of the ODE state, so a clipped input drops a real
+sensitivity from the adjoint with nothing raised and nothing
+logged.
 
-Inside ``[logit_eps, 1 - logit_eps]`` the map is exactly the old
-``logit`` in both value and derivative, so models trained before
-this change keep their numerics wherever they behaved. Outside, it
-continues linearly at logit's slope at the crossing. Values stay
-finite, gradient stays a non-zero constant, and the join is C^1 so
-an adaptive controller sees no kink.
+Inside ``[logit_eps, 1 - logit_eps]`` the map is exactly the plain
+inverse in both value and derivative, so a model trained before
+this guard existed keeps its numerics wherever it behaved. Outside,
+the map continues linearly at the inverse's slope at the crossing.
+Values stay finite, the gradient stays a non-zero constant, and the
+join is C^1 so an adaptive step controller sees no kink.
 
 The continuation reports direction, not magnitude. It cannot tell a
 small excursion from a catastrophic one in a way a loss can act on.
 Pair it with :meth:`input_violation` when an input can leave its box.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L195)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L274)</small>
 
 ---
 
@@ -216,36 +287,53 @@ BoundedPredictor(
 ) -> None
 ```
 
-Composition wrapper: ``in_scaler.to_latent -> inner -> out_scaler.from_latent``.
+A predictor in physical units, built from a network that never sees a bound.
 
-The full physical-units forward pass for a bound-scaled predictor.
-The user constructs predictor inputs in the vector field by mixing
+This is the thing a user's vector field calls. It takes named inputs
+in physical units, returns an output in physical units, and keeps
+both inside their declared ranges.
+
+**Three stages**
+
+1. **Normalise the input.** ``in_scaler.to_latent`` maps each input
+   from its physical range onto an unbounded latent, so the network
+   receives numbers of comparable size whether the input was a
+   temperature in the tens or a concentration in the thousandths.
+2. **Run the network.** The trainable ``inner`` ``Predictor`` maps
+   latent to latent. It is handed no bound information at all.
+3. **Squash the output.** ``out_scaler.from_latent`` maps the
+   network's unbounded output into the physical output box.
+
+The network is better off never seeing a bound. Given one it would
+have to enforce the range itself, and the only tools it has are a
+clip (zero gradient outside the range, so a parameter that leaves
+cannot come back) or a final squash it would have to learn to aim.
+Moving the squash into ``out_scaler`` makes an out-of-range output
+unrepresentable, leaves ``inner`` free to be any ``Array -> Array``
+function, and lets the same network be reused under different bounds.
+
+**Calling it**
+
+The user builds predictor inputs in the vector field by mixing
 constant covariates with state-derived or exogenous time-dependent
-values (CONTEXT.md "Predictor inputs"). ``__call__`` accepts that
-construction in two equivalent forms:
+values (CONTEXT.md, "Predictor inputs"). ``__call__`` accepts that in
+two forms:
 
-- ``dict[str, Array]`` — the dict may carry extra keys; only the
-  named subset listed in ``self.input_keys`` is pulled, in declared
-  order. Missing keys raise ``KeyError``.
-- ``Array`` (rank-1, length ``len(input_keys)``) — passed through
-  after a shape check (``eqx.error_if``). Useful when the user
-  prefers to stack positionally at the call site.
-
-From there, ``in_scaler`` maps each value into the inner network's
-latent input space, the trainable ``Predictor`` runs in unbounded
-latent space, and ``out_scaler`` maps its output back into the
-physical output box. ``inner`` therefore sees no bound information
-and never has to clamp itself.
+- ``dict[str, Array]``. Extra keys are allowed. Only the subset named
+  in ``self.input_keys`` is pulled, in declared order. A missing key
+  raises ``KeyError``.
+- ``Array``, rank-1 of length ``len(input_keys)``, passed through
+  after a shape check. Use this when stacking positionally at the
+  call site is more natural.
 
 **Construction**
 
-``input_keys`` is required to match ``len(in_scaler.bounds)`` and
-that length must be at least 1 (a predictor with zero inputs has no
-training signal). When ``input_keys`` is omitted (``None``), the
-constructor auto-fills ``("x1", "x2", ..., "xN")`` so the static
-field is always populated and the saved predictor remains
-self-describing — the user can still call it with a positional
-``Array`` even if they never wrote a names tuple.
+``input_keys`` must have the same length as ``in_scaler.bounds``, and
+that length must be at least 1. A predictor with zero inputs has no
+training signal. Omitting ``input_keys`` auto-fills
+``("x1", "x2", ..., "xN")``, so the static field is always populated
+and a saved predictor still describes its own input contract. A
+positional ``Array`` call works either way.
 
 **Attributes**
 
@@ -256,7 +344,7 @@ self-describing — the user can still call it with a positional
 | `inner` | `Predictor` | Trainable Array -> Array module operating in latent space. |
 | `out_scaler` | `BoundScaler` | Maps the inner network's latent output back to physical units. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L280)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L363)</small>
 
 #### `BoundedPredictor.initialized_with_key()`
 
@@ -266,8 +354,8 @@ initialized_with_key(self, key: 'Array') -> 'BoundedPredictor'
 
 Re-initialise ``inner`` only, leaving both scalers untouched.
 
-Without this, ``reinitialize_with_key`` falls through to its generic
-branch and replaces every inexact leaf, including
+Without this method, ``reinitialize_with_key`` falls through to its
+generic branch and replaces every inexact leaf, including
 ``BoundScaler.temperature``, with a sample from ``N(0, 1)``. A
 temperature near zero (or negative) inverts and blows up both
 ``to_latent`` (which multiplies by ``T``) and ``from_latent`` (which
@@ -283,7 +371,7 @@ about.
 The scalers hold the bound geometry, not learned state, so a restart
 has no reason to touch them.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L383)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L481)</small>
 
 ---
 
@@ -319,7 +407,7 @@ Only the inner ``mlp`` field carries trainable weights; the rest is metadata.
 | `width_size, depth` | `int` | Hidden width and number of hidden layers (static). |
 | `activation_name` | `str` | Key into ``_ACTIVATION_MAP``; stored as a string rather than the callable so the module is JSON-serialisable. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L45)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L47)</small>
 
 #### `MLPPredictor.initialized_with_key()`
 
@@ -332,12 +420,12 @@ Return a fresh ``MLPPredictor`` with the same architecture, new weights.
 Implements the re-init protocol consumed by
 :func:`reinitialize_with_key` and by the training tournament loop
 when it restarts a stalled attempt. Re-instantiating the whole
-module is cleaner than reinitialising leaves in place because
-``eqx.nn.MLP`` owns its own per-layer init logic (Glorot/normal
-scaling, zero biases); leaf-level standard-normal sampling would
-skew the distribution and break that scheme.
+module beats reinitialising leaves in place, because
+``eqx.nn.MLP`` owns its per-layer init logic (LeCun-uniform
+weights scaled by fan-in, zero biases). Leaf-level standard-normal
+sampling would replace that scheme with a badly scaled one.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L115)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L117)</small>
 
 #### `MLPPredictor.with_zero_final_head()`
 
@@ -347,21 +435,21 @@ with_zero_final_head(self) -> 'MLPPredictor'
 
 Return a copy whose final ``Linear`` layer's weight and bias are zero.
 
-Hidden layers retain their LeCun-uniform random init, so the input
-feature transformation is non-degenerate; only the readout layer is
-forced to zero. Composed inside a ``BoundedPredictor``, the latent
-zero produced for any input maps via ``out_scaler.from_latent(0)``
-to the *exact midpoint* of the physical bound box — a known-good
-starting output that is independent of the random key. This makes
-training reproducible across seeds when the rate bounds span many
-decades and an unlucky standard-normal readout draw could otherwise
-place the initial output too far off midpoint for the downstream
-ODE solver to handle.
+Hidden layers keep their LeCun-uniform random init, so the input
+feature transformation stays non-degenerate. Only the readout is
+forced to zero. Composed inside a ``BoundedPredictor``, the zero
+latent produced for every input maps through
+``out_scaler.from_latent(0)`` to the *exact midpoint* of the
+physical output box, a known-good starting value independent of
+the key. That matters when the rate bounds span many decades: an
+unlucky readout draw can place the initial output several decades
+off midpoint, far enough that the ODE solver stalls or fails on
+step one.
 
-Returns a structurally identical predictor; only the trailing
+Returns a structurally identical predictor. Only the trailing
 ``eqx.nn.Linear``'s ``weight`` and ``bias`` arrays change.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L135)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L137)</small>
 
 ---
 
@@ -382,13 +470,14 @@ KANPredictor(
 ) -> None
 ```
 
-Kolmogorov-Arnold network predictor: ``Float[Array, "in_size"] -> Float[Array, "out_size"]``.
+Kolmogorov-Arnold network ``Float[Array, "in_size"] -> Float[Array, "out_size"]``.
 
-Wraps ``jaxkan.models.KAN`` with a serialisation-clean static/dynamic split
-(see module docstring for the full rationale). The trainable content is
-exposed as a single ``params`` ``nnx.State`` field whose leaves are float
-Param arrays; everything else (architecture, rng seed, basis kind) is
-static.
+A KAN learns a basis expansion on each edge instead of a weight
+matrix per layer. Wraps ``jaxkan.models.KAN`` with a
+serialisation-clean static/dynamic split; the module docstring has
+the full reasoning. The trainable content is one ``params``
+``nnx.State`` field whose leaves are float Param arrays. Everything
+else (architecture, rng seed, basis kind) is static.
 
 **Attributes**
 
@@ -399,7 +488,7 @@ static.
 | `grid_size` | `int` | Number of spline grid intervals (``G``). Static; passed as ``required_parameters['G']`` to jaxkan. |
 | `basis` | `str` | Layer-type code, one of ``"spline"`` or ``"base"``. Static. |
 | `seed` | `int` | Integer seed used to build the underlying jaxkan model and to recreate its rng-state on demand inside ``__call__``. Derived from the user-supplied ``key`` at construction; static thereafter. |
-| `params` | `nnx.State` | Dynamic field — the ``nnx.Param`` slice of the KAN's state, all float arrays. Trainable; serialised round-trip via ``eqx.tree_serialise_leaves``. |
+| `params` | `nnx.State` | The one dynamic field. The ``nnx.Param`` slice of the KAN's state, all float arrays. Trainable, and round-trips through ``eqx.tree_serialise_leaves``. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L137)</small>
 
@@ -412,14 +501,13 @@ initialized_with_key(self, key: 'Array') -> 'KANPredictor'
 Return a same-architecture KANPredictor with freshly initialised parameters.
 
 Implements the re-init protocol used by the training tournament
-loop. Building a whole new ``KANPredictor`` (rather than
-tweaking ``self.params`` in place) lets jaxkan's per-layer init
-logic — truncated-normal spline weights, ones bias, identity
-residual — drive the initialisation instead of replacing it with
-leaf-level standard-normal samples that would skew the
-distribution.
+loop. Building a whole new ``KANPredictor``, rather than editing
+``self.params`` in place, keeps jaxkan's per-layer init logic in
+charge (truncated-normal spline weights, ones bias, identity
+residual). Leaf-level standard-normal samples would replace that
+scheme with a badly scaled one.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L259)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L262)</small>
 
 #### `KANPredictor.with_zero_final_head()`
 
@@ -438,12 +526,12 @@ layer carries four trainable arrays (``c_basis``, ``c_spl``,
 midpoint of the physical bound box.
 
 The earlier KAN layers keep their jaxkan-default init, so the
-input feature transformation is non-degenerate; only the readout
-is locked. Mirrors :meth:`MLPPredictor.with_zero_final_head` —
-same intent (seed-independent initial physical output), different
-parameterisation.
+input feature transformation stays non-degenerate. Only the
+readout is locked. Same intent as
+:meth:`MLPPredictor.with_zero_final_head`, a seed-independent
+initial physical output, over a different parameterisation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L279)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L281)</small>
 
 ---
 
@@ -457,22 +545,21 @@ parameterisation.
 reinitialize_with_key(predictor: 'eqx.Module', key: 'Array') -> 'eqx.Module'
 ```
 
-Return a fresh copy of `predictor` with inexact-float leaves re-initialised.
+Return a fresh copy of ``predictor`` with its float leaves re-initialised.
 
-Single-Module helper. If `predictor` implements the
+Single-Module helper. If ``predictor`` implements the
 ``initialized_with_key`` protocol (a method ``self -> key -> self``
-used by predictor classes that want a custom re-init scheme — for
-example a KAN that needs to rebuild its grid), it is delegated to.
-Otherwise every inexact-array leaf in the pytree is replaced with a
-standard-normal sample of matching shape and dtype; non-inexact
-leaves and static fields are left untouched.
+for classes that want their own re-init scheme, such as a KAN that
+has to rebuild its grid), this delegates to it. Otherwise every
+inexact-array leaf is replaced with a standard-normal sample of
+matching shape and dtype, and non-inexact leaves and static fields
+are left alone.
 
-For re-initialising a *pytree* of predictors (the convention at the
-``simulate_fn`` boundary — typically a tuple of ``BoundedPredictor``s),
-use :func:`reinitialize_pytree_with_key` so each ``eqx.Module`` leaf
-gets its own independently-derived key.
+To re-initialise a *pytree* of predictors, the convention at the
+``simulate_fn`` boundary, use :func:`reinitialize_pytree_with_key`.
+It gives each ``eqx.Module`` leaf its own independently derived key.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L410)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L508)</small>
 
 ---
 
@@ -495,15 +582,14 @@ per-attempt key, calls this function, and restarts. Each
 sibling predictors with identical shapes still re-init to
 different random weights.
 
-The split is done by **traversal order**: we count the
+Subkeys are handed out in **traversal order**. Count the
 ``eqx.Module`` leaves with a Module-stopped traversal, call
-``jr.split(key, n_module_leaves)`` once, and hand out subkeys in
-that order. The alternative — folding the per-leaf path string —
-would give path-stable subkeys but cost a hash per leaf and
-produce a less obvious correspondence between subkeys and
-pytree positions; traversal-order splitting is simpler and
-sufficient because the pytree shape is fixed across re-inits
-within a single training run.
+``jr.split(key, n_module_leaves)`` once, and assign in that order.
+The alternative, folding each leaf's path string, would give
+path-stable subkeys at the cost of a hash per leaf and a less
+obvious correspondence between subkey and pytree position.
+Traversal order is enough because the pytree shape is fixed across
+re-inits within one training run.
 
 Accepts any pytree shape: the conventional
 ``tuple[BoundedPredictor, ...]``, a bare ``eqx.Module`` (a
@@ -515,4 +601,4 @@ one-leaf pytree, equivalent to calling
 Returns a structurally identical pytree with fresh weights on every
 ``eqx.Module`` leaf.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L441)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L538)</small>

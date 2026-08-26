@@ -1,19 +1,20 @@
-"""Concrete ``KANPredictor`` wrapping a ``jaxkan`` Kolmogorov-Arnold network.
+"""``KANPredictor``, wrapping a ``jaxkan`` Kolmogorov-Arnold network.
 
-A KAN predictor differs from an MLP in that the learnable nonlinearities live
-on the *edges* (parameterised as splines / radial bases / orthogonal polynomial
-expansions) rather than as fixed activations on the *nodes*. The trainable
-content per layer is the set of basis-function coefficients (``c_basis``,
-``c_spl``, ``c_res``, ``bias``), not weight matrices.
+A Kolmogorov-Arnold network (KAN) puts the learnable nonlinearity on the
+*edges* of the network, as a spline or other basis expansion per
+connection, where an MLP uses a fixed activation on the *nodes* and
+learns a weight matrix. So the trainable content of a KAN layer is a set
+of basis coefficients (``c_basis``, ``c_spl``, ``c_res``, ``bias``)
+rather than a weight matrix.
 
 Static-vs-dynamic split
 -----------------------
-``jaxkan.models.KAN`` is a Flax NNX ``Module``: when flattened as a JAX
-pytree its leaves include ``PRNGKeyArray`` and ``uint32`` rng-counter
+``jaxkan.models.KAN`` is a Flax NNX ``Module``. Flattened as a JAX
+pytree, its leaves include ``PRNGKeyArray`` and ``uint32`` rng-counter
 scalars alongside the float ``nnx.Param`` arrays.
 ``eqx.tree_serialise_leaves`` refuses to ``np.save`` the typed PRNG-key
-leaves, so the raw KAN model cannot be exposed as a dynamic field on
-this predictor — the binary checkpoint must contain only float arrays.
+leaves, and the binary checkpoint must hold only float arrays, so the
+raw KAN model cannot be a dynamic field on this predictor.
 
 The workaround:
 
@@ -21,21 +22,20 @@ The workaround:
   ``hidden_widths``, ``grid_size``, ``basis``) and the integer ``seed``
   used to build the underlying jaxkan model.
 * The single dynamic field ``params`` is the ``nnx.State`` returned by
-  ``nnx.split(model, nnx.Param, ...)``: it contains *only* float Param
-  leaves with shapes determined by the static config, so it is
-  identical-structured across different seeds and round-trips
-  cleanly through Equinox's leaf serialisation.
+  ``nnx.split(model, nnx.Param, ...)``. It holds *only* float Param
+  leaves whose shapes come from the static config, so its structure is
+  the same across seeds and it round-trips through Equinox's leaf
+  serialisation.
 * The forward pass rebuilds the rng-bearing rest-state of the KAN from
-  ``seed`` (deterministic) and merges in ``self.params`` via
-  ``nnx.merge``. Every per-call construction is driven by static
-  values plus the dynamic ``params`` state, so the merged model is
-  JIT-traceable.
+  ``seed``, deterministically, and merges ``self.params`` back in with
+  ``nnx.merge``. Every per-call construction is driven by static values
+  plus the dynamic ``params``, so the merged model is JIT-traceable.
 
-This couples us to ``flax.nnx`` pytree internals via ``jaxkan``. A
-future jaxkan release that stops exposing ``Param``-based filtering
-would force the wrapper to reach into individual layers; a leaner
-alternative path is to re-implement KAN directly on top of
-``equinox``, which would remove the static/dynamic split entirely.
+This ties the wrapper to ``flax.nnx`` pytree internals through
+``jaxkan``. A future jaxkan release that stops exposing ``Param``-based
+filtering would force this code to reach into individual layers. The
+leaner escape route is to reimplement KAN directly on ``equinox``, which
+removes the static/dynamic split altogether.
 """
 
 # ruff: noqa: F722
@@ -107,25 +107,25 @@ def _scaffold_parts(
 ) -> tuple[Any, tuple[Any, ...]]:
     """Cached ``(graphdef, rest_states)`` for one KAN architecture.
 
-    Keyed on the static fields only, which is exactly what determines the
-    scaffold, so the cache can never return a mismatched graph. The result
-    holds no trainable parameters: ``nnx.split`` peels those off and
-    ``KANPredictor.__call__`` merges its own ``self.params`` back in.
+    Keyed on the static fields alone, which are exactly what determines
+    the graph, so the cache can never hand back a mismatched one. The
+    result holds no trainable parameters. ``nnx.split`` peels those off
+    and ``KANPredictor.__call__`` merges its own ``self.params`` back in.
 
-    Cached because a KAN evaluated inside a vector field is traced once per
-    solver stage, and rebuilding the jaxkan model in Python each time
-    dominated trace cost. The values are architecture-shaped and small, and
-    the number of distinct architectures in a run is tiny, so an unbounded
-    cache is not a leak in practice.
+    Cached because a KAN evaluated inside a vector field is traced once
+    per solver stage, and rebuilding the jaxkan model in Python each time
+    dominated trace cost. The cached values are architecture-shaped and
+    small, and a run uses very few distinct architectures, so the
+    unbounded cache is not a leak in practice.
 
-    ``ensure_compile_time_eval`` is load-bearing, not an optimisation. The
-    first call usually happens *inside* a trace, because the first thing a
-    program does with a KAN is evaluate it under ``jit``. Without the
-    context, jaxkan's grid construction stages out into that trace and the
-    cache stores tracers belonging to it; the next trace then merges them
-    and JAX raises ``UnexpectedTracerError``. Forcing eager evaluation
-    makes the cached values concrete arrays, which is what the rest of this
-    docstring assumes they are.
+    ``jax.ensure_compile_time_eval`` is load-bearing, not an
+    optimisation. The first call usually lands *inside* a trace, because
+    the first thing a program does with a KAN is evaluate it under
+    ``jit``. Without the context, jaxkan's grid construction stages out
+    into that trace and the cache stores tracers belonging to it. The
+    next trace merges those tracers and JAX raises
+    ``UnexpectedTracerError``. Forcing eager evaluation makes the cached
+    values concrete arrays, which is what everything downstream assumes.
     """
     with jax.ensure_compile_time_eval():
         scaffold = _build_kan(in_size, out_size, hidden_widths, grid_size, basis, seed)
@@ -135,13 +135,14 @@ def _scaffold_parts(
 
 
 class KANPredictor(Predictor):
-    """Kolmogorov-Arnold network predictor: ``Float[Array, "in_size"] -> Float[Array, "out_size"]``.
+    """Kolmogorov-Arnold network ``Float[Array, "in_size"] -> Float[Array, "out_size"]``.
 
-    Wraps ``jaxkan.models.KAN`` with a serialisation-clean static/dynamic split
-    (see module docstring for the full rationale). The trainable content is
-    exposed as a single ``params`` ``nnx.State`` field whose leaves are float
-    Param arrays; everything else (architecture, rng seed, basis kind) is
-    static.
+    A KAN learns a basis expansion on each edge instead of a weight
+    matrix per layer. Wraps ``jaxkan.models.KAN`` with a
+    serialisation-clean static/dynamic split; the module docstring has
+    the full reasoning. The trainable content is one ``params``
+    ``nnx.State`` field whose leaves are float Param arrays. Everything
+    else (architecture, rng seed, basis kind) is static.
 
     Attributes
     ----------
@@ -162,8 +163,8 @@ class KANPredictor(Predictor):
         recreate its rng-state on demand inside ``__call__``. Derived from
         the user-supplied ``key`` at construction; static thereafter.
     params : nnx.State
-        Dynamic field — the ``nnx.Param`` slice of the KAN's state, all
-        float arrays. Trainable; serialised round-trip via
+        The one dynamic field. The ``nnx.Param`` slice of the KAN's
+        state, all float arrays. Trainable, and round-trips through
         ``eqx.tree_serialise_leaves``.
     """
 
@@ -173,9 +174,9 @@ class KANPredictor(Predictor):
     grid_size: int = eqx.field(static=True)
     basis: str = eqx.field(static=True)
     seed: int = eqx.field(static=True)
-    # ``nnx.State`` is generic over ``MutableMapping[K, V]``; the concrete
-    # parameterisation is internal to flax-nnx and not part of our public
-    # surface, so the annotation here uses ``Any, Any`` to keep the type
+    # ``nnx.State`` is generic over ``MutableMapping[K, V]``. The concrete
+    # parameterisation is internal to flax-nnx and not part of this package's
+    # public API, so the annotation stays at ``Any, Any``: it keeps the type
     # checker quiet without leaking flax internals.
     params: nnx.State[Any, Any]
 
@@ -191,12 +192,13 @@ class KANPredictor(Predictor):
     ) -> None:
         """Build the KAN, split off its Param state, and pin the rest as static config.
 
-        ``key`` is required (the framework refuses silent default keys
-        for reproducibility) and used to derive the integer ``seed``
-        threaded into ``jaxkan.models.KAN``. The constructed KAN is
-        split immediately via ``nnx.split(model, nnx.Param, ...)`` so
-        the non-serialisable rng-state never lands on this module — only
-        the float Param leaves are kept as the dynamic ``params`` field.
+        ``key`` is required (the framework refuses silent default keys, so
+        reproducibility never rests on a hidden global RNG) and is used to
+        derive the integer ``seed`` threaded into ``jaxkan.models.KAN``.
+        The constructed KAN is split immediately with
+        ``nnx.split(model, nnx.Param, ...)``, so the non-serialisable
+        rng-state never lands on this module. Only the float Param leaves
+        are kept, as the dynamic ``params`` field.
         """
         if basis not in _SUPPORTED_BASES:
             raise ValueError(f"Basis {basis!r} not supported. Available: {list(_SUPPORTED_BASES)}")
@@ -209,10 +211,10 @@ class KANPredictor(Predictor):
 
         model = self._build_model(self.seed)
         # Filter the model's state into Params (trainable, float-only) and the
-        # rng-rest (uint32 counters + PRNGKeyArrays). We intentionally drop
-        # the rest here — it is regenerated on demand from the same seed.
-        # nnx.split returns ``(GraphDef, State, *State)`` (variadic in the
-        # number of filters), hence the trailing star unpack.
+        # rng-rest (uint32 counters and PRNGKeyArrays). Dropping the rest is
+        # deliberate: it is regenerated on demand from the same seed.
+        # nnx.split returns ``(GraphDef, State, *State)``, variadic in the
+        # number of filters, hence the trailing star unpack.
         _, params, *_ = nnx.split(model, nnx.Param, ...)
         self.params = params
 
@@ -230,18 +232,19 @@ class KANPredictor(Predictor):
     def __call__(self, x: Float[Array, " in_size"]) -> Float[Array, " out_size"]:
         """Forward pass: ``[in_size] -> [out_size]``.
 
-        jaxkan's KAN expects a leading batch axis; we add and strip it around
-        the call. The merge pattern (build fresh -> split -> swap params)
-        gives us a usable model whose Param leaves are the trainable
+        jaxkan's KAN expects a leading batch axis, so this adds and strips
+        one around the call. The merge pattern (build fresh, split, swap
+        params) yields a usable model whose Param leaves are the trainable
         ``self.params`` while the rng-state comes from a deterministic
-        rebuild (so the forward pass is a pure function of static config and
-        dynamic params).
+        rebuild. The forward pass is therefore a pure function of the
+        static config and the dynamic params.
 
-        The scaffold and its split are cached on the static architecture.
-        They are trace-time constants, so XLA folds them away, but the
-        Python-level jaxkan construction and ``nnx.split`` ran on every
-        retrace. A KAN called from inside a vector field is traced once per
-        solver stage, which made that a real compile-time cost.
+        The graph and its split come from :func:`_scaffold_parts`, cached
+        on the static architecture. They are trace-time constants either
+        way, so XLA folds them away, but the Python-level jaxkan
+        construction and ``nnx.split`` ran on every retrace before the
+        cache existed. A KAN called from inside a vector field is traced
+        once per solver stage, which made that a real compile-time cost.
         """
         graphdef, rest_states = _scaffold_parts(
             self.in_size,
@@ -260,12 +263,11 @@ class KANPredictor(Predictor):
         """Return a same-architecture KANPredictor with freshly initialised parameters.
 
         Implements the re-init protocol used by the training tournament
-        loop. Building a whole new ``KANPredictor`` (rather than
-        tweaking ``self.params`` in place) lets jaxkan's per-layer init
-        logic — truncated-normal spline weights, ones bias, identity
-        residual — drive the initialisation instead of replacing it with
-        leaf-level standard-normal samples that would skew the
-        distribution.
+        loop. Building a whole new ``KANPredictor``, rather than editing
+        ``self.params`` in place, keeps jaxkan's per-layer init logic in
+        charge (truncated-normal spline weights, ones bias, identity
+        residual). Leaf-level standard-normal samples would replace that
+        scheme with a badly scaled one.
         """
         return KANPredictor(
             in_size=self.in_size,
@@ -288,20 +290,20 @@ class KANPredictor(Predictor):
         midpoint of the physical bound box.
 
         The earlier KAN layers keep their jaxkan-default init, so the
-        input feature transformation is non-degenerate; only the readout
-        is locked. Mirrors :meth:`MLPPredictor.with_zero_final_head` —
-        same intent (seed-independent initial physical output), different
-        parameterisation.
+        input feature transformation stays non-degenerate. Only the
+        readout is locked. Same intent as
+        :meth:`MLPPredictor.with_zero_final_head`, a seed-independent
+        initial physical output, over a different parameterisation.
         """
         last_idx = len(self.hidden_widths)
 
         def _zero_if_in_last_layer(path: Any, leaf: Any) -> Any:
             # Path through ``nnx.State`` looks like
-            # (DictKey('layers'), DictKey(<int>), GetAttrKey('value')) — match
-            # on the second element being the final-layer index. ``DictKey``s
-            # expose their key via ``.key``; defensive ``getattr`` keeps this
-            # robust against future jax-tree internals that wrap path entries
-            # differently.
+            # (DictKey('layers'), DictKey(<int>), GetAttrKey('value')), so
+            # match on the second element being the final-layer index.
+            # ``DictKey`` exposes its key via ``.key``; the defensive
+            # ``getattr`` survives future jax-tree internals that wrap path
+            # entries differently.
             if len(path) >= 2:
                 k0 = getattr(path[0], "key", None)
                 k1 = getattr(path[1], "key", None)

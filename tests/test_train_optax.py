@@ -751,3 +751,85 @@ class TestRestoreBestAcrossHorizons:
         assert argmin < self.PHASE_1_STEPS - 1, "phase 1 was meant to overshoot its own best"
         assert self._full_length_loss(dataset, restored) < self._full_length_loss(dataset, endpoint)
         assert len(history) == self.PHASE_1_STEPS + 3
+
+
+class TestTournamentSelection:
+    """The tournament returns the best candidate, not the first survivor.
+
+    It used to compute a score for every attempt and then return whichever
+    one happened to finish first, so ``tournament_attempts`` was a retry
+    count and the score was dead work. Nothing caught it, because a
+    re-initialised candidate given a short warm-up already beats an
+    untrained baseline whether or not selection happens.
+
+    The property tested here is independent of how selection is
+    implemented. Attempt keys come from ``fold(key, f"..._{i}")``, so the
+    candidate pool for ``n + 1`` attempts contains the pool for ``n``.
+    The best achievable score is therefore non-increasing in
+    ``tournament_attempts``. Under first-survivor-wins the sequence is
+    flat instead.
+    """
+
+    ATTEMPT_COUNTS = (2, 3, 4, 5, 6)
+    # Chosen because attempt 0 is a poor candidate under it, so the pool
+    # has somewhere to improve. Under the default key attempt 0 happens to
+    # be the best of six, which would make the test below pass whether or
+    # not selection happens. The running best here is
+    # 0.561 -> 0.019 -> 0.002, two strict improvements.
+    KEY_SEED = 8
+
+    def _config(self, attempts: int) -> OptaxTrainingConfig:
+        return OptaxTrainingConfig(
+            # One main-loop step at zero learning rate, so what comes back
+            # is the tournament's choice and nothing else.
+            steps=(1,),
+            lr=(0.0,),
+            optimizer=("adamw",),
+            reset_optimiser_state=(False,),
+            length_schedule=(1.0,),
+            tournament_attempts=attempts,
+            tournament_steps=15,
+            tournament_lr=1e-2,
+            restore_best=False,
+            verbose=False,
+        )
+
+    def _winner_loss(self, dataset: Dataset, attempts: int) -> float:
+        _history, trained = train_with_optax(
+            _OmegaPredictor(0.55),
+            dataset,
+            self._config(attempts),
+            simulate_fn=_make_simulate_fn(),
+            solver=_solver_config(),
+            key=jr.PRNGKey(self.KEY_SEED),
+        )
+        predictions = predict_dataset(
+            trained, dataset, simulate_fn=_make_simulate_fn(), solver=_solver_config()
+        )
+        return sum(
+            float(masked_mse(pred, bp))
+            for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True)
+        ) / len(dataset.bucket_payloads)
+
+    def test_more_attempts_never_gives_a_worse_winner(self):
+        dataset = _make_oscillator_dataset()
+        losses = [self._winner_loss(dataset, n) for n in self.ATTEMPT_COUNTS]
+        for smaller, larger in zip(losses, losses[1:], strict=False):
+            assert larger <= smaller + 1e-9, (
+                f"a larger attempt pool returned a worse winner: {losses}"
+            )
+
+    def test_the_pool_is_not_degenerate(self):
+        # Anti-vacuity for the test above. If every candidate scored the
+        # same, non-increasing would hold trivially and would also hold
+        # under first-survivor-wins. At least one larger pool has to do
+        # strictly better.
+        dataset = _make_oscillator_dataset()
+        losses = [self._winner_loss(dataset, n) for n in self.ATTEMPT_COUNTS]
+        assert min(losses) < losses[0] - 1e-9, (
+            f"no larger pool improved on two attempts, so selection is untested: {losses}"
+        )
+
+    def test_selection_is_deterministic_in_the_key(self):
+        dataset = _make_oscillator_dataset()
+        assert self._winner_loss(dataset, 4) == self._winner_loss(dataset, 4)

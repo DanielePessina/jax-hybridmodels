@@ -1,22 +1,28 @@
-"""Optax-driven training loop for hybrid mechanistic models.
+"""Gradient training loop for hybrid mechanistic models, driven by Optax.
 
-A training *step* here is one full pass over every bucket: the loop
-computes per-bucket gradients via ``make_step`` (jitted, one trace per
-bucket shape), accumulates and averages them across the dataset, and
-applies a single ``optimizer.update`` via ``apply_update``. The
-training run is divided into one or more *phases*; each phase has its
-own learning rate, optimizer type, length-schedule mask, and optional
-optimiser-state reset, all carried in ``OptaxTrainingConfig`` as
-same-length tuples (one entry per phase).
+One training **step** is one full pass over every bucket. The loop
+computes per-bucket gradients with ``make_step`` (jitted, one trace per
+bucket shape), accumulates and averages them across the dataset, then
+applies a single ``optimizer.update`` through ``apply_update``. A bucket
+is not a step, and there is no minibatching: every step sees all the
+data.
 
-Optionally the loop runs a *tournament* before the main phases: it
-re-initialises the predictors several times under the same fresh key
-discipline, takes a few short training steps with each candidate, and
-keeps the candidate with the lowest training loss. The tournament is
-intentionally implemented on top of the same compiled ``make_step`` and
-``apply_update`` rather than as a parallel kernel — that way the
-short-burst attempts share JIT cache entries with the main loop and pay
-no extra compilation cost.
+A run is a sequence of **phases**. A phase is a contiguous block of
+steps that share hyperparameters. Each one has its own step count,
+learning rate, optimizer name, length-schedule fraction, and
+optimiser-state reset flag, carried in ``OptaxTrainingConfig`` as
+same-length tuples with one entry per phase. Phases are how a run
+changes strategy partway through, for example a coarse pass at a high
+learning rate followed by a slow refinement.
+
+Before the phases the loop can run a **tournament**. It re-initialises
+the predictors several times from different keys, trains each candidate
+for a few steps, and keeps the one with the lowest data loss. This
+escapes an unlucky initial draw, which matters because a hybrid ODE
+model can be unrecoverable from a bad start. The tournament runs on the
+same compiled ``make_step`` and ``apply_update`` as the main loop rather
+than a parallel kernel, so its short bursts hit the same JIT cache
+entries and add no compilation cost.
 """
 
 # ruff: noqa: F722
@@ -63,6 +69,91 @@ _PHASE_KEYED_FIELDS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class OptaxTrainingConfig:
+    """Configuration for :func:`train_with_optax`.
+
+    The first five fields are **phase-keyed**. A run is a sequence of
+    phases (see the module docstring), and each of these tuples carries
+    one entry per phase. ``steps``, ``lr``, ``optimizer``,
+    ``reset_optimiser_state`` and ``length_schedule`` must all have the
+    same length, and no scalar broadcasts. None of them has a defensible
+    default, so a single-phase run spells out one-element tuples::
+
+        OptaxTrainingConfig(
+            steps=(500,), lr=(1e-3,), optimizer=("adamw",),
+            reset_optimiser_state=(False,),
+        )
+
+    ``penalty_weight`` is the exception. It has an unambiguous off state,
+    so a length-1 tuple broadcasts across every phase.
+
+    Attributes
+    ----------
+    steps : tuple[int, ...]
+        Step budget per phase. Its length is the number of phases.
+    lr : tuple[float, ...]
+        Learning rate per phase. Applied to the live optimiser state
+        unless that phase also resets it.
+    optimizer : tuple[str, ...]
+        Optimiser name per phase, ``"adamw"`` or ``"adabelief"``. A phase
+        that changes the name must also set ``reset_optimiser_state``,
+        because optimiser state belongs to the optimiser that built it.
+    reset_optimiser_state : tuple[bool, ...]
+        Per phase, rebuild the optimiser and discard its state at that
+        boundary. Set it when switching optimiser, and when a
+        length-schedule change has made the accumulated momentum wrong.
+    length_schedule : tuple[float, ...]
+        Fraction of each experiment's timeline the loss looks at, per
+        phase, in ``(0, 1]``. It masks the **loss**, never the
+        integration: the solver still runs the full trajectory, and only
+        the first ``fraction`` of the observation times is scored.
+        Training on early times first is a standard way to stop a
+        long-horizon divergence from drowning the gradient. Because it is
+        a runtime mask rather than a shape change, crossing a phase
+        boundary costs no recompile. Default ``(1.0,)`` scores everything.
+    penalty_weight : tuple[float, ...]
+        Weight on the bound-saturation penalty. Length 1 broadcasts to
+        every phase; any other length must match ``steps``. Entries must
+        be non-negative. ``0.0`` disables the penalty.
+    penalty_grid_points : int
+        Points per input dimension in the collocation grid the penalty is
+        evaluated on. At least 2 (one per box edge).
+    loss : Callable | str
+        A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``,
+        ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``.
+    channel_idx, channel_weights : tuple | None
+        Forwarded into the resolved loss. See ``hybridmodels.losses``.
+    tournament_attempts, tournament_steps : int
+        The tournament runs only when ``tournament_steps > 0`` and
+        ``tournament_attempts > 1``. It re-initialises the predictors
+        ``tournament_attempts`` times, trains each candidate for
+        ``tournament_steps`` steps, scores each on the data term alone
+        with a forward-only pass, and keeps the lowest-scoring candidate.
+        An attempt that raises a diffrax error or produces a non-finite
+        loss is dropped and the next key is tried. If every attempt
+        fails, the original predictors are used and a ``RuntimeWarning``
+        is raised, so a tournament cannot leave training worse off than
+        not running one.
+    tournament_lr : float
+        Learning rate for the tournament's short bursts, independent of
+        ``lr``.
+    patience : int
+        Number of consecutive steps without a new best data loss before
+        the current phase stops early. Counted within a phase and reset
+        at every phase boundary, so a plateau at the end of one phase
+        cannot kill the next one before its new learning rate acts.
+        ``0`` disables early stopping.
+    restore_best : bool
+        When true, :func:`train_with_optax` returns the predictors from
+        the step with the lowest data loss instead of the last step. The
+        running minimum resets whenever ``length_schedule`` changes,
+        because losses measured over different horizons are not
+        comparable and the shortest-horizon phase would otherwise always
+        own the minimum.
+    verbose : bool
+        Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An
+        explicit ``ui=...`` argument always wins.
+    """
+
     steps: tuple[int, ...]
     lr: tuple[float, ...]
     optimizer: tuple[str, ...]
@@ -195,11 +286,11 @@ def _build_make_step(
         static_predictors: Any,
         bp_masked: BucketPayload,
     ) -> Array:
-        # ``predictors`` here is whatever pytree the user passed in
-        # (typically a tuple of BoundedPredictor leaves; could also be a
-        # dict, NamedTuple, single Module, ...). ``eqx.combine`` walks
-        # any pytree shape, so we never need to inspect the container —
-        # we just hand the recombined pytree to the user's simulate_fn.
+        # ``predictors`` is whatever pytree the user passed in: typically a
+        # tuple of BoundedPredictor leaves, possibly a dict, NamedTuple, or
+        # single Module. ``eqx.combine`` walks any shape, so the container
+        # is never inspected. The recombined pytree goes straight to the
+        # user's simulate_fn.
         predictors = eqx.combine(diff_predictors, static_predictors)
 
         def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
@@ -356,7 +447,26 @@ def _shared_tournament(
     key: Array,
     length_mask_fraction: Array,
 ) -> Any:
+    """Warm-start selection: train several fresh inits briefly, keep the best.
+
+    Runs ``tournament_attempts`` candidates. Each is re-initialised from
+    its own subkey, trained for ``tournament_steps`` steps at
+    ``tournament_lr``, then scored on the data term with a forward-only
+    pass. The lowest-scoring candidate is returned and the main loop
+    continues from it.
+
+    Scoring on the data term alone, not on the combined objective, keeps
+    a candidate from winning by drifting somewhere the penalty happens to
+    like rather than by fitting.
+
+    An attempt that raises a diffrax error or produces a non-finite score
+    is dropped and the next key is tried. If every attempt fails, the
+    original ``predictors`` come back with a ``RuntimeWarning``, so a
+    tournament can never leave training worse off than not running one.
+    """
     last_error: BaseException | None = None
+    best_score = math.inf
+    best_candidate: Any = None
     for attempt in range(tournament_attempts):
         attempt_key = fold(key, f"tournament_attempt_{attempt}")
         try:
@@ -386,7 +496,11 @@ def _shared_tournament(
             score_value = float(score)
             if not math.isfinite(score_value):
                 raise FloatingPointError(f"non-finite tournament loss: {score_value}")
-            return candidate
+            # Strict ``<``, so ties keep the earlier attempt and the
+            # result stays a deterministic function of ``key``.
+            if score_value < best_score:
+                best_score = score_value
+                best_candidate = candidate
         except _TOURNAMENT_FAILURES as exc:
             # Narrow on purpose. R-T7 names two failure causes, a diffrax
             # error and a non-finite loss. Catching everything also
@@ -397,6 +511,9 @@ def _shared_tournament(
             # carried on against unmodified predictors.
             last_error = exc
             continue
+
+    if best_candidate is not None:
+        return best_candidate
 
     warnings.warn(
         "tournament: all attempts failed; falling back to initial predictors. "
@@ -433,20 +550,23 @@ def train_with_optax(
 ) -> tuple[list[float], Any]:
     """Train ``predictors`` against ``dataset`` with Optax.
 
-    ``predictors`` is a ``PyTree[eqx.Module]``: by convention a tuple of
-    ``BoundedPredictor`` leaves, but any pytree shape is accepted (dict,
-    NamedTuple, single Module — ``eqx.partition`` walks them uniformly).
-    ``key`` is required keyword-only — calling without it raises
-    ``TypeError`` before any compilation, so reproducibility never
-    relies on an implicit default.
+    Runs the phases described by ``config``, optionally preceded by a
+    tournament. See the module docstring for what a step, a phase, and
+    the tournament are, and :class:`OptaxTrainingConfig` for the fields.
 
-    The ``trainable`` argument is a boolean PyTree mask matching
-    ``predictors``'s structure. When omitted, it defaults to
-    :func:`hybridmodels.trainable.trainable_mask` over the supplied
-    pytree, which marks every inexact-array leaf as trainable; pass a
-    custom mask (typically built with the freezers in
-    ``hybridmodels.trainable``) to hold specific leaves fixed during
-    training.
+    ``predictors`` is a ``PyTree[eqx.Module]``. The convention is a tuple
+    of ``BoundedPredictor`` leaves, but any pytree shape is accepted
+    (dict, NamedTuple, single Module) because ``eqx.partition`` walks
+    them uniformly. ``key`` is keyword-only and required. Calling without
+    it raises ``TypeError`` before any compilation, so reproducibility
+    never rests on an implicit default.
+
+    ``trainable`` is a boolean PyTree mask matching the structure of
+    ``predictors``. Omitting it defaults to
+    :func:`hybridmodels.trainable.trainable_mask`, which marks every
+    inexact-array leaf trainable. Pass a custom mask, usually built with
+    the freezers in ``hybridmodels.trainable``, to hold specific leaves
+    fixed. Freezing ``BoundScaler`` leaves is the common case.
 
     Returns
     -------
@@ -454,18 +574,26 @@ def train_with_optax(
         ``(loss_history, trained_predictors)``.
 
         ``loss_history`` is the **raw per-step data loss**, one entry per
-        step across every phase. It can go up. Note the difference from
+        step, concatenated across phases. It can go up.
+
+        Two things are excluded from it. The bound penalty, because
+        including it would move the series when only the penalty weight
+        ramped between phases and would make runs with different weights
+        incomparable. And any smoothing: these are the values the
+        optimiser actually saw.
+
+        It also differs from
         :func:`~hybridmodels.training.evosax.train_with_evosax`, whose
-        history is best-so-far and therefore monotone: the two are the same
-        type and the same position in the return tuple, but plotting them
-        on one axis or feeding both to a shared stopping rule will mislead.
+        history is best-so-far and therefore monotone non-increasing. Same
+        type, same position in the return tuple, different meaning.
+        Plotting the two on one axis, or feeding both to a shared stopping
+        rule, will mislead.
 
-        The penalty term is excluded. Including it would move the series
-        when only the penalty weight ramped between phases, and make runs
-        with different weights incomparable.
-
-        ``trained_predictors`` is the predictors at the best-loss step when
-        ``config.restore_best=True``, or at the final step otherwise.
+        ``trained_predictors`` is the predictors from the lowest-loss step
+        when ``config.restore_best=True``, or from the final step
+        otherwise. The running minimum behind "lowest" resets whenever
+        ``length_schedule`` changes between phases, so the returned model
+        always comes from the last horizon trained on.
     """
     if trainable is None:
         trainable = trainable_mask(predictors)

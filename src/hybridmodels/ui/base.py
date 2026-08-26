@@ -1,12 +1,16 @@
 """UI lifecycle protocols and the no-op ``SilentUI``.
 
-The training loops drive a UI by calling lifecycle methods at
-well-defined points. Two protocols are defined here — ``TrainingUI``
-(consumed by the Optax loop) and ``EvosaxUI`` (consumed by the Evosax
-loop). They share several event names but the arguments differ enough
-that a merged supertype would just be confusing, so the two are kept
-separate and a UI implementation that wants to support both training
-loops simply implements both protocols.
+Progress reporting is callback-based, not log-based. A training loop
+calls lifecycle methods on the UI object it was handed, at fixed points
+in the run, and the UI decides what to do with them. Writing your own
+means implementing the methods below; nothing needs to inherit from
+anything.
+
+Two protocols live here. ``TrainingUI`` is what the Optax loop calls and
+``EvosaxUI`` is what the Evosax loop calls. Several event names are
+shared, but the arguments differ enough that a merged supertype would
+only confuse, so they stay separate. A UI that wants to serve both loops
+implements both protocols, as ``SilentUI`` does.
 
 UI selection
 ------------
@@ -17,11 +21,11 @@ An explicit ``ui=...`` argument to ``train_with_optax`` /
 
 Compile events
 --------------
-Per-bucket-shape JIT compilation is the dominant cost of the first
-epoch. ``on_compile_start`` / ``on_compile_progress`` /
-``on_compile_done`` exist so users have visible feedback during that
-latency; without them, a Rich progress bar would hang on the first
-bucket while the kernel compiles and look like an apparent hang.
+JIT compilation, once per bucket shape, dominates the first epoch and
+can take tens of seconds. ``on_compile_start``,
+``on_compile_progress`` and ``on_compile_done`` exist so the user sees
+something during that wait. Without them a progress bar sits at zero on
+the first bucket and the run looks hung.
 """
 
 from typing import Any, Protocol, runtime_checkable
@@ -31,10 +35,10 @@ from typing import Any, Protocol, runtime_checkable
 class TrainingUI(Protocol):
     """Callback protocol for ``train_with_optax``.
 
-    Implementations are duck-typed (``@runtime_checkable``) so users can
-    define their own UI without inheriting from this class. The default
-    Rich and Silent implementations live in ``ui/optax.py`` and
-    ``ui/base.py`` respectively.
+    Implementations are duck-typed (``@runtime_checkable``), so a custom
+    UI just defines the methods and never inherits from this class. The
+    shipped implementations are ``RichTrainingUI`` in ``ui/optax.py`` and
+    ``SilentUI`` below.
 
     Event order during a typical run::
 
@@ -47,8 +51,8 @@ class TrainingUI(Protocol):
             on_phase_end
         on_run_end
 
-    ``on_message`` may fire at any point for log lines (e.g. tournament
-    fallback warnings).
+    ``on_message`` can fire at any point, for log lines such as the
+    tournament's fallback warning.
     """
 
     def on_run_start(self, *, total_steps: int, num_phases: int) -> None:
@@ -80,14 +84,15 @@ class TrainingUI(Protocol):
     def on_step_end(
         self, *, step_idx: int, phase_idx: int, loss: float, penalty: float = 0.0
     ) -> None:
-        """Fires after each training step. ``step_idx`` is global; ``phase_idx`` localises it.
+        """Fires after each training step. ``step_idx`` counts within the phase.
 
-        ``loss`` is the **data** term only, never the combined objective:
-        it is the series ``restore_best`` and early stopping act on, and
-        mixing in a penalty whose weight ramps between phases would make
-        successive values incomparable. ``penalty`` reports the unweighted
-        bound penalty alongside it, and defaults to ``0.0`` so UIs written
-        against the earlier signature keep satisfying this protocol.
+        ``loss`` is the **data** term alone, never the combined
+        objective. It is the series ``restore_best`` and early stopping
+        act on, and mixing in a penalty whose weight ramps between phases
+        would make successive values incomparable. ``penalty`` reports
+        the unweighted bound penalty next to it. It defaults to ``0.0``
+        so a UI written against the earlier signature still satisfies
+        this protocol.
         """
         ...
 
@@ -104,9 +109,16 @@ class TrainingUI(Protocol):
 class EvosaxUI(Protocol):
     """Callback protocol for ``train_with_evosax``.
 
-    Differs from ``TrainingUI`` because evosax does not have phases or
-    per-step gradient losses; instead each generation reports best/mean
-    fitness across the population.
+    Differs from ``TrainingUI`` because the evosax loop has no phases and
+    no per-step gradient loss. Each generation reports the best and mean
+    fitness across its population instead.
+
+    Event order during a typical run::
+
+        on_run_start
+        on_compile_start -> on_compile_progress* -> on_compile_done
+        on_generation_end (one per generation)
+        on_run_end
     """
 
     def on_run_start(self, *, num_generations: int, population_size: int) -> None:
@@ -141,9 +153,9 @@ class EvosaxUI(Protocol):
 class SilentUI:
     """No-op UI satisfying both ``TrainingUI`` and ``EvosaxUI``.
 
-    Selected when ``config.verbose=False`` and used in tests where stdout
-    output would pollute captured logs. Every method accepts ``**kwargs``
-    and returns ``None``, so it tolerates protocol drift without raising.
+    Selected when ``config.verbose=False``, and used in tests where
+    stdout would pollute captured logs. Every method takes ``**kwargs``
+    and returns ``None``, so a new event argument never breaks it.
     """
 
     def on_run_start(self, **kwargs: Any) -> None:

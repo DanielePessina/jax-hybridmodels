@@ -26,18 +26,18 @@ BoundTransform(
 )
 ```
 
-A latent to unit-interval squash, its inverse, and the metadata around them.
+A squash from the whole real line into ``(0, 1)``, with its inverse and metadata.
 
 **Attributes**
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `forward` | `Callable` | ``R -> (0, 1)``. What ``from_latent`` applies. |
-| `inverse` | `Callable` | ``(0, 1) -> R``. What ``to_latent`` inverts with. |
-| `inverse_slope` | `Callable` | ``d(inverse)/ds``. Used to build the linear continuation that keeps ``to_latent`` differentiable outside the box. |
-| `knee` | `float` | Latent at which ``forward`` reaches 0.95, the outer 5% of the box. This is the default for ``BoundScaler.z_knee``. It has to come from the transform: sharing sigmoid's 2.944 with softsign would start charging the saturation penalty at 12.5% from the bound instead of 5%, roughly 2.7 times more aggressive in physical terms. |
+| `forward` | `Callable` | ``R -> (0, 1)``. Applied by ``from_latent`` on the way from latent to physical. |
+| `inverse` | `Callable` | ``(0, 1) -> R``. Applied by ``to_latent`` on the way back. |
+| `inverse_slope` | `Callable` | ``d(inverse)/ds``. Builds the linear continuation that keeps ``to_latent`` differentiable for inputs that fall outside the box. |
+| `knee` | `float` | The latent at which ``forward`` reaches 0.95, that is, the point where the physical value enters the outer 5% of its box. Default for ``BoundScaler.z_knee``, which is where the saturation penalty starts charging. It must come from the transform. Reusing sigmoid's 2.944 for softsign would start charging at 12.5% from the bound instead of 5%, roughly 2.7 times more aggressive in physical terms. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L71)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L76)</small>
 
 ---
 
@@ -85,7 +85,7 @@ only the name, so a custom transform must be registered before a saved
 scaler that references it can be rebuilt. Re-registering an existing
 name overwrites without warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L201)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L214)</small>
 
 ---
 
@@ -103,17 +103,22 @@ Warp(
 )
 ```
 
-A monotone reparameterisation of the physical axis before normalising.
+A monotone change of coordinate applied to the physical axis before normalising.
+
+The warp runs first, then the box is normalised to ``[0, 1]`` in warped
+coordinates, then the transform's inverse takes it to the latent.
+Choosing ``log10`` is what makes a bound spanning decades resolvable at
+its low end.
 
 **Attributes**
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `forward` | `Callable` | Physical to warped coordinate. Must accept a Python float as well as an array, because :func:`warp_bounds` calls it on the static edges at construction time. |
+| `forward` | `Callable` | Physical to warped coordinate. Must accept a Python float as well as an array, because :func:`warp_bounds` calls it on the static box edges when a scaler is constructed. |
 | `inverse` | `Callable` | Warped coordinate back to physical. Must invert ``forward`` exactly on the declared box. |
-| `requires_positive` | `bool` | Whether the warp is undefined at or below zero. Checked against the declared bounds at construction, where it can raise a useful error, rather than at trace time where it would surface as a silent nan. |
+| `requires_positive` | `bool` | Whether the warp is undefined at or below zero. Checked against the declared bounds at construction, where it can raise a useful error, rather than during a compiled solve where it would appear as a silent nan. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L97)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L104)</small>
 
 ---
 
@@ -160,4 +165,4 @@ Same contract as :func:`register_bound_transform`. A warp must be
 monotone on the declared box and ``inverse`` must undo ``forward``
 there, or the scaler's round trip stops being the identity.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L212)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L225)</small>

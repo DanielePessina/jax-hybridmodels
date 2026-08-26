@@ -1,6 +1,18 @@
 # Crystallisation (mechanistic, CNT + power-law)
 
-A four-parameter parametric counterpart to the [hybrid MLP example](/examples/crystallisation). Same four hardcoded experiments, same method-of-moments ODE, same `state_to_output` projector — but the two MLP rate predictors are replaced by a single `KineticParameters` module holding four scalars `(logA, gamma, Ag, g)` that drive Classical Nucleation Theory and a power-law growth term inside the vector field.
+The parametric counterpart to the [hybrid MLP example](/examples/crystallisation).
+Same four experiments, same population-balance ODE, same
+`state_to_output`. The two neural rate predictors are replaced by one
+`KineticParameters` module holding four scalars `(logA, gamma, Ag, g)`
+that drive Classical Nucleation Theory and a power-law growth term
+inside the vector field.
+
+**Classical Nucleation Theory** (CNT) is the standard closed-form
+expression for how fast new crystals appear as a function of
+supersaturation and temperature. It has two free constants. Using it
+means committing to that mechanism, which is exactly what the hybrid
+model avoids and exactly what makes this the right baseline to measure
+the hybrid model against.
 
 The full script lives at `examples/crystallisation/train_crystallisation_mechanistic.py`. Run it with:
 
@@ -8,20 +20,27 @@ The full script lives at `examples/crystallisation/train_crystallisation_mechani
 uv run python examples/crystallisation/train_crystallisation_mechanistic.py
 ```
 
-This page focuses only on what *differs* from the hybrid MLP version. For dataset details, the moment ODE, the `state_to_output` projector, and bucketing, read [Crystallisation (hybrid MLP)](/examples/crystallisation) first.
+This page covers only what differs from the hybrid version. Read
+[Crystallisation (hybrid MLP)](/examples/crystallisation) first for the
+dataset, the moment ODE, the projector, and bucketing.
 
 ## Why a separate example
 
-Two reasons:
+It is the parametric baseline. Knowing what four fitted scalars achieve
+on this dataset is the yardstick any hybrid model trained on it has to
+beat.
 
-1. **It's the parametric baseline.** Knowing what a small mechanistic model achieves on this dataset is the obvious yardstick for any hybrid model trained on it. Four parameters versus an MLP each side per rate.
-2. **It's the canonical evosax use case.** `train_with_evosax` is sized for handful-of-scalar problems where gradient-based optimisation is overkill and CMA-ES sidesteps the local minima the CNT exponential creates near the metastable limit.
+It is also the canonical use for `train_with_evosax`. Population search
+is sized for handful-of-scalar problems where gradients are overkill,
+and CMA-ES steps past the local minima the CNT exponential creates near
+the metastable limit.
 
-Everything else — dataset loading, `y0_fn`, `state_to_output`, the moment ODE, the solver — is identical to the hybrid MLP example.
+Everything else (dataset loading, `y0_fn`, `state_to_output`, the moment
+ODE, the solver) is identical.
 
 ## The dataset
 
-Same four hardcoded experiments as the hybrid MLP example:
+The same four experiments as the hybrid MLP example.
 
 | `exp_id`      | T (°C) | n conc | n d43 | t span (min) | terminal d43 (µm) |
 |---------------|-------:|-------:|------:|--------------|------------------:|
@@ -32,7 +51,7 @@ Same four hardcoded experiments as the hybrid MLP example:
 
 Concentration variance is a single made-up scalar (`CONC_VAR = 0.1`) broadcast across every row; the d43 variances are the rounded thesis values.
 
-## Step 1 — the four mechanistic rate laws
+## Step 1: the four mechanistic rate laws
 
 The vector field uses the same population-balance moment ODEs as the hybrid example, but $G$ and $J$ are now the parametric forms
 
@@ -46,18 +65,29 @@ $$
 
 with four global trainable scalars:
 
-| symbol  | name           | physical meaning                       | bounds          |
+| symbol  | constant       | physical meaning                       | bounds          |
 |---------|----------------|----------------------------------------|-----------------|
 | `logA`  | `LOGA_BOUNDS`  | $\ln A$, CNT pre-exponential           | (20.0, 65.0)    |
 | `gamma` | `GAMMA_BOUNDS` | interfacial energy [mJ/m²]             | (0.15, 1.0)     |
 | `Ag`    | `AG_BOUNDS`    | $\log_{10}$ growth pre-factor [m/s]    | (-20.0, -5.0)   |
 | `g`     | `G_BOUNDS`     | power-law growth exponent              | (1.0, 3.5)      |
 
-These are reproduced from the thesis-package bounds in `hybridcrystals/regressor_constants.py` so the trained scalars sit in the same physical box as the source-package runs.
+These bounds are reproduced from `hybridcrystals/regressor_constants.py`
+so the fitted scalars sit in the same physical box as the source-package
+runs.
 
-## Step 2 — the `KineticParameters` module
+## Step 2: the KineticParameters module
 
-The framework's `BoundedPredictor` is built around a covariate-keyed `__call__(dict | Array) -> Array` and requires at least one input. Here the four parameters are *global* (no covariate dependence at all), so we sidestep `BoundedPredictor` and define a minimal `eqx.Module` whose only inexact-array leaf is the four-vector latent. The `BoundScaler` output mapping is the same primitive the MLP-based predictor uses, so the optimiser still operates in an unbounded latent space and the simulator still sees physical-units parameters inside the bound box.
+`BoundedPredictor` requires at least one input, because a predictor with
+no inputs has no training signal. These four parameters are global, with
+no covariate dependence at all, so we skip `BoundedPredictor` and write
+a minimal `eqx.Module` whose only trainable array is the four-vector
+latent.
+
+It still uses `BoundScaler` for the output map, so the optimiser works
+in an unbounded space and the simulator still sees physical-units
+parameters inside the declared box. The predictors pytree can be any
+container the user likes; the library never inspects it.
 
 ```python
 import equinox as eqx
@@ -87,11 +117,17 @@ class KineticParameters(eqx.Module):
         return self.out_scaler.from_latent(self.latent)
 ```
 
-CMA-ES sees a four-dimensional unbounded search; the sigmoid in `out_scaler` keeps every candidate inside the physical box no matter how wide the search spreads.
+CMA-ES sees an unconstrained four-dimensional search. The squash in
+`out_scaler` keeps every candidate inside the physical box no matter how
+wide the search spreads, which is why bounds are not enforced during the
+search itself.
 
-## Step 3 — the vector field
+## Step 3: the vector field
 
-The simulator evaluates `predictor()` once at the top of the call (the parameters are global, not state-dependent) and closes them over by the vector field. The `(S > 1 + eps)` mask gates both rates so the ODE stops moving below the metastable limit.
+The parameters are global, so `predictor()` is called once at the top
+and closed over by the vector field, above `diffeqsolve`. It never lands
+on the solver tape. The `(S > 1 + eps)` mask gates both rates so the ODE
+stops moving below the metastable limit.
 
 ```python
 M_V = 2.97e-26          # molecular volume [m^3]
@@ -116,7 +152,7 @@ def simulate_fn(predictor, ts, covariates, y0, solver):
         meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
 
         # Clip S inside the log so the exponent stays finite when meta_mask
-        # is zero — the mask wipes the contribution out anyway, but the
+        # is zero. The mask wipes the contribution out anyway, but the
         # gradient through the clipped log must stay finite or autodiff
         # returns NaN at every ODE step on a sub-saturated trajectory.
         S_safe = jnp.clip(S, min=1.0 + 1e-12)
@@ -137,9 +173,14 @@ def simulate_fn(predictor, ts, covariates, y0, solver):
     ...
 ```
 
-The `S_safe` clip on the inside of the log is the only structural difference from the MLP vector field. Without it, `log(S)` is `-inf` whenever `S <= 1`, so the CNT exponent is `-inf`, `exp(...)` is zero, *but the gradient through `log` is still NaN* and propagates regardless of `meta_mask`.
+The `S_safe` clip inside the log is the only structural difference from
+the hybrid vector field. Without it, `log(S)` is `-inf` whenever
+`S <= 1`, so the CNT exponent is `-inf` and `exp(...)` is zero. The
+value is fine. The gradient through `log` is still `nan`, and it
+propagates regardless of `meta_mask`. Clip the argument, not the
+result.
 
-## Step 4 — train with evosax (CMA-ES)
+## Step 4: train with evosax (CMA-ES)
 
 ```python
 from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
@@ -163,11 +204,17 @@ history, trained_predictor = train_with_evosax(
 print(f"final best loss: {history[-1]:.6f}")
 ```
 
-`init="lhs_box"` injects a Latin-hypercube-sampled population at generation 0, so every quadrant of the four-parameter box is touched on the first evaluation; CMA-ES then takes over with `sigma_init=0.5` and adapts the step size from there. Population evaluation is `vmap`-parallel — 64 individuals × 4 buckets × 4 experiments fuses into one JIT-compiled kernel after the first generation.
+`init="lhs_box"` seeds generation 0 with a Latin hypercube, so every
+corner of the four-parameter box is touched on the first evaluation.
+CMA-ES then adapts the step size from `sigma_init=0.5`. The population
+is evaluated in parallel: 64 individuals across 4 buckets and 4
+experiments fuse into one compiled kernel after the first generation.
 
-The Rich UI's recent-generations table is sized to show **five rows total** (one row every `num_generations // 5 = 16` generations by default) so the table grows over the run rather than sliding past a constantly-changing window.
+The progress table shows five rows total, one every
+`num_generations // 5` generations, so it grows over the run rather than
+sliding past a window that never settles.
 
-## Step 5 — read the trained constants
+## Step 5: read the trained constants
 
 ```python
 final_params = trained_predictor()
@@ -179,11 +226,14 @@ print(
 )
 ```
 
-These four scalars *are* the trained model. Same `predict_dataset` + diagnostics + parity/trajectory plots as the hybrid example for evaluation.
+These four scalars are the whole trained model. Evaluation uses the same
+`predict_dataset` call and the same parity and trajectory plots as the
+hybrid example.
 
 ## Comparing against the hybrid model
 
-The two scripts share dataset, ODE, projector, solver, and diagnostics — only the trainable component and the loop change.
+The two scripts share dataset, ODE, projector, solver, and diagnostics.
+Only the trainable component and the training loop change.
 
 | Aspect              | hybrid MLP                          | mechanistic                         |
 |---------------------|-------------------------------------|-------------------------------------|
@@ -196,7 +246,10 @@ The two scripts share dataset, ODE, projector, solver, and diagnostics — only 
 
 ## What's next
 
-- [Crystallisation (hybrid MLP)](/examples/crystallisation) — the canonical end-to-end walk-through.
-- [Recommendations](/guide/recommendations) — bounds choice, tolerances, freezing, autodiff-safe guarded division.
-- [Training](/guide/training) — Optax, evosax, and the shared tournament.
-- [API: Training](/api/training) — full reference for `EvosaxTrainingConfig` and `train_with_evosax`.
+- [Crystallisation (hybrid MLP)](/examples/crystallisation). The
+  end-to-end walkthrough.
+- [Recommendations](/guide/recommendations). Bounds, tolerances,
+  freezing, guarded division.
+- [Training](/guide/training). Optax, evosax, and the tournament.
+- [API: Training](/api/training). Full reference for
+  `EvosaxTrainingConfig` and `train_with_evosax`.

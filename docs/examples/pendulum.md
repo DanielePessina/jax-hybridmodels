@@ -1,6 +1,10 @@
 # Harmonic Oscillator
 
-A self-contained synthetic counterpart to the [crystallisation example](/examples/crystallisation): the "hidden physics" is a single trainable scalar — the angular frequency $\omega$ of a 1-D harmonic oscillator. The known optimum ($\omega = 1$) makes this a good sanity check that everything is wired correctly.
+A synthetic counterpart to the [crystallisation example](/examples/crystallisation),
+with one unknown: the angular frequency $\omega$ of a one-dimensional
+harmonic oscillator. Because the correct answer is $\omega = 1$, this is
+the example to run when you want to know whether your pipeline is wired
+correctly rather than whether your model is any good.
 
 The full script lives at `examples/pendulum/train_harmonic.py`. Run it with:
 
@@ -8,7 +12,9 @@ The full script lives at `examples/pendulum/train_harmonic.py`. Run it with:
 uv run python examples/pendulum/train_harmonic.py
 ```
 
-The dataset is synthesised on every run from the closed form $x(t) = x_0 \cos(\omega t) + (v_0 / \omega) \sin(\omega t)$, so there's no external file to manage.
+The data is generated on every run from the closed form
+$x(t) = x_0 \cos(\omega t) + (v_0 / \omega) \sin(\omega t)$, so there is
+no file to manage.
 
 ## What we're modelling
 
@@ -18,11 +24,19 @@ $$
 \frac{dx}{dt} = v, \qquad \frac{dv}{dt} = -\omega^2\, x
 $$
 
-Each experiment is one oscillator with a known ground-truth $\omega = 1.0$ and a different initial state $(x_0, v_0)$. **Only the position channel is observed** with light Gaussian noise; velocity is part of the latent state. The trainer is invited to recover $\omega \approx 1.0$ from positions alone.
+Each **experiment** is one oscillator: a true $\omega = 1.0$ and its own
+initial state $(x_0, v_0)$. Only position is measured, with light
+Gaussian noise. Velocity is part of the state the solver tracks and no
+instrument sees. The trainer has to recover $\omega$ from positions
+alone.
 
-## Step 1 — a one-leaf custom predictor
+## Step 1: a one-scalar custom predictor
 
-The "predictor" here is trivial: a single scalar wrapped in `BoundedPredictor` so we can sigmoid-bound it into `[0.5, 2.0]`. This shows the pattern for writing your own predictor — subclass [`Predictor`](/api/predictors#predictor) directly, no MLP needed.
+A **predictor** is any trainable module taking an array and returning an
+array. Here it is one scalar. Wrapping it in a `BoundedPredictor`
+confines that scalar to `[0.5, 2.0]`. This is the pattern for writing
+your own: subclass [`Predictor`](/api/predictors#predictor) directly, no
+network needed.
 
 ```python
 from hybridmodels.predictors.base import Predictor
@@ -38,7 +52,12 @@ class OmegaPredictor(Predictor):
         return OmegaPredictor(jr.normal(key))
 ```
 
-`initialized_with_key` is the [shared-tournament protocol](/guide/training#the-shared-tournament): if you turn on the tournament, this is what gets called per attempt to draw a fresh starting point. You can omit it; the framework's default `reinitialize_with_key` walks every inexact-float leaf with `jr.normal`.
+`initialized_with_key` is what the
+[tournament](/guide/training#the-shared-tournament) calls to draw a
+fresh starting point on each attempt. You can omit it. The default
+`reinitialize_with_key` then resamples every floating-point leaf from
+`jr.normal`, which is worse for a module that owns its own
+initialisation scheme.
 
 Wrap it in a `BoundedPredictor`:
 
@@ -54,9 +73,12 @@ predictor = BoundedPredictor(
 predictors = (predictor,)
 ```
 
-The `"dummy"` covariate is a single constant required by `BoundedPredictor` (cardinality of `in_scaler.bounds` must be ≥ 1), but the `OmegaPredictor` itself ignores its input — every experiment shares the same ground-truth $\omega$, so there is nothing to condition on.
+The `"dummy"` covariate exists only because `BoundedPredictor` requires
+at least one input; a predictor with none has no training signal.
+`OmegaPredictor` ignores the value. Every experiment shares the same
+true $\omega$, so there is nothing to condition on.
 
-## Step 2 — synthesise experiments
+## Step 2: generate the experiments
 
 ```python
 INITIAL_STATES = ((1.0, 0.0), (0.0, 1.0), (0.5, -0.5),
@@ -77,15 +99,20 @@ for i, (x0, v0) in enumerate(INITIAL_STATES):
     ))
 ```
 
-The `y0_fn` closure captures the ground-truth $(x_0, v_0)$ at synthesis time; the `_y0` default-argument trick is just Python's standard "early bind to the loop variable" pattern. In a real workflow, `y0_fn` would derive the initial state from raw covariates or from the first observation.
+**`y0_fn`** builds one experiment's full initial state. It runs once,
+here, and never during training. The `_y0` default argument is Python's
+standard trick for binding a loop variable early. In a real workflow
+`y0_fn` would derive the state from covariates or from the first
+observation.
 
-`T_MAX = 5.0` covers roughly $0.8$ of one period — enough phase coverage to fit $\omega$ without aliasing into the wrong basin of attraction.
+`T_MAX = 5.0` covers roughly 0.8 of one period, enough phase coverage to
+fit $\omega$ without aliasing into the wrong basin.
 
-## Step 3 — `state_to_output` and `simulate_fn`
+## Step 3: state_to_output and simulate_fn
 
 ```python
 def _state_to_output(state):
-    """[T, 2] -> [T, 1] — only position is observed."""
+    """[T, 2] -> [T, 1]. Only position is observed."""
     return state[..., :1]
 
 def _simulate_fn(predictor, ts, covariates, y0, solver):
@@ -97,16 +124,23 @@ def _simulate_fn(predictor, ts, covariates, y0, solver):
         diffrax.ODETerm(vector_field), solver.solver,
         t0=ts[0], t1=ts[-1], dt0=solver.dt0 or 0.05, y0=y0,
         saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+        stepsize_controller=solver.stepsize_controller(),
         max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
+        adjoint=solver.adjoint,
     )
     return jnp.asarray(sol.ys)
 ```
 
-Note the unpacking: `predictor(covariates)` returns shape `[1]`; `.reshape(())` makes it a scalar so the multiplication broadcasts cleanly. This is a common pattern — `BoundedPredictor` is array-shaped for uniformity, scalar problems just `.reshape(())` at the call site.
+`predictor(covariates)` returns shape `[1]`, and `.reshape(())` makes it
+a scalar so the multiplication broadcasts cleanly. `BoundedPredictor`
+always returns an array for uniformity, so scalar problems reshape at
+the call site.
 
-## Step 4 — train and read out $\omega$
+Note also that `predictor` is called above `diffeqsolve`, not inside the
+vector field. Its inputs are all covariates, so its value cannot change
+during the trajectory, and hoisting it keeps it off the solver tape.
+
+## Step 4: train and read out $\omega$
 
 ```python
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
@@ -140,19 +174,26 @@ recovered omega: 0.9986  (target: 1.0000, final loss: 0.000186)
 
 ## What this example exercises
 
-The same surface as the crystallisation example, on a problem with a known optimum:
+The same set of pieces as the crystallisation example, on a problem with
+a known answer.
 
 - [`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`make_dataset`](/api/data#make_dataset)
-- A custom [`Predictor`](/api/predictors#predictor) subclass plus [`BoundedPredictor`](/api/predictors#boundedpredictor) wrapping
+- A custom [`Predictor`](/api/predictors#predictor) subclass wrapped in a [`BoundedPredictor`](/api/predictors#boundedpredictor)
 - A user-written `simulate_fn` matching the [mandatory signature](/guide/concepts#simulate-fn)
 - [`SolverConfig`](/api/solver#solverconfig) with `diffrax.Tsit5`
 - [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig) and [`train_with_optax`](/api/training#train_with_optax)
-- The [shared-tournament re-init protocol](/guide/training#the-shared-tournament) via `OmegaPredictor.initialized_with_key`
+- The [tournament re-init hook](/guide/training#the-shared-tournament),
+  through `OmegaPredictor.initialized_with_key`
 
-If you want to verify a refactor of your physics, drop the `OmegaPredictor` into a fresh repo, train it, and check that the recovered $\omega$ is within ~1% of `OMEGA_TRUE`. If it isn't, the integrator/loss path has a wiring bug — usually in the `state_to_output` projector or the `y0_fn` hook.
+To check a refactor of your own physics, run this and confirm the
+recovered $\omega$ lands within about 1% of `OMEGA_TRUE`. If it does not,
+the integrator and loss path has a wiring bug, usually in
+`state_to_output` or in `y0_fn`.
 
 ## What's next
 
-- [Crystallisation walkthrough](/examples/crystallisation) — the canonical real-world problem.
-- [Concepts](/guide/concepts) — pytree conventions, predictor inputs vs covariates, and the shared-tournament pattern.
-- [API Reference](/api/) — full surface, by module.
+- [Crystallisation walkthrough](/examples/crystallisation). The real
+  problem.
+- [Concepts](/guide/concepts). Pytree conventions, predictor inputs
+  versus covariates, bound scaling.
+- [API reference](/api/). Every public symbol, by module.

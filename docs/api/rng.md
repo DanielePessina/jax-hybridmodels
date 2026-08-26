@@ -23,8 +23,8 @@ fold(root_key: 'Array', name: 'str') -> 'Array'
 Derive a stable subkey from ``root_key`` named ``name``.
 
 Equivalent to ``jr.fold_in(root_key, crc32(name.encode("utf-8")))``.
-Calling ``fold(root, "init")`` always yields the same key for the same
-root, and different names always yield different keys (collisions only
-on CRC32 collisions across the framework's small constant set of names).
+``fold(root, "init")`` always returns the same key for the same root,
+and two different names return different keys unless their CRC32 values
+collide, which none of the framework's fixed set of names do.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/rng.py#L29)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/rng.py#L31)</small>

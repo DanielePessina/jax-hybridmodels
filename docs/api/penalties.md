@@ -27,20 +27,20 @@ soft_inverse(
 
 ``inverse(s)``, extended linearly outside ``[eps, 1 - eps]``.
 
-The generalisation of :func:`soft_logit` to any squash's inverse. Every
-candidate inverse has a pole at each end of the unit interval, and the
-reason a hard clip is unacceptable there does not depend on which
-squash it is: a mid-graph zero derivative propagates to every upstream
-parameter and drops state-derived sensitivities from the ODE adjoint
-without raising (R-P2).
+Generalises :func:`soft_logit` to the inverse of any squashing
+function. Every such inverse has a pole at each end of the unit
+interval, and the reason a hard clip is unacceptable there is the same
+whichever squash it is. A zero derivative in the middle of the graph
+propagates back to every upstream parameter and drops state-derived
+sensitivities from the ODE adjoint without raising (R-P2).
 
 Exact in value and derivative inside the band, and C^1 across the
-junction because the continuation uses the inverse's own slope at the
+junction, because the continuation uses the inverse's own slope at the
 crossing. The ``stop_gradient`` on the clamp is load-bearing. Without
 it the correction term picks up a contribution through the clip and the
 interior derivative comes out wrong.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L90)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L97)</small>
 
 ---
 
@@ -56,6 +56,10 @@ soft_logit(s: 'Array', eps: 'float' = 0.001) -> 'Array'
 
 ``logit(s)``, extended linearly outside ``[eps, 1 - eps]``.
 
+``s`` is a physical value already normalised into ``[0, 1]`` across its
+declared box, and ``logit`` is the inverse of the sigmoid squash, so
+this is the step that turns a bounded quantity into an unbounded latent.
+
 Exact in value and derivative for ``s`` inside the band, and C^1 across
 the junction, since the continuation uses logit's own slope at the
 crossing. Outside the band the result grows linearly instead of blowing
@@ -66,10 +70,11 @@ derivative outside the band is exactly zero. The module docstring
 explains why that is a silent correctness bug.
 
 :func:`softclip` cannot do this job. Its interior error is
-``O(1 / beta)`` in the units of ``s``, and ``s`` is normalised to
-``[0, 1]``, so any ``beta`` gentle enough to keep gradient far outside
-the box also distorts the middle of it. Two regimes avoid the trade
-entirely, with no interior distortion at any threshold.
+``O(1 / beta)`` in the units of ``s``, and ``s`` spans only ``[0, 1]``,
+so any ``beta`` gentle enough to keep gradient far outside the box also
+distorts the middle of it. Splitting into an exact band and a linear
+continuation avoids that trade, with no interior distortion at any
+threshold.
 
 ``eps`` sets the continuation slope, ``1 / (eps * (1 - eps))``, roughly
 ``1 / eps``. It is the one tuning knob. At ``eps = 1e-6`` a 1% overshoot
@@ -78,7 +83,7 @@ Larger ``eps`` shrinks the exact band. The default 1e-3 maps a 1%
 overshoot to ``|z| ~ 10``, outside the sigmoid's linear region but still
 a number a network can consume.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L115)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L122)</small>
 
 ---
 
@@ -112,7 +117,7 @@ This repairs the near field only. Several widths out the derivative
 underflows just as a hard clip's does. Pair it with
 :func:`box_violation`, which supplies the unbounded push-back.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L146)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L158)</small>
 
 ---
 
@@ -128,17 +133,17 @@ clip_ste(x: 'Array', lo: 'float | Array', hi: 'float | Array') -> 'Array'
 
 Hard-clip on the forward pass, identity on the backward pass.
 
-The straight-through estimator: use it when downstream code genuinely
-requires a feasible number (a concentration that must not go negative
-before a ``log``, say) but the task loss should keep flowing as though
-the clip were not there.
+This is the straight-through estimator. Use it when downstream code
+genuinely requires a feasible number, say a concentration that must not
+go negative before a ``log``, while the task loss should keep flowing as
+though the clip were not there.
 
 The identity gradient is a deliberate fiction. It propagates whatever
 the data loss asks for, including "go further out of bounds", forever.
 A straight-through clip never pushes back on its own. Pair it with
 :func:`box_violation` on the pre-clip value for the restoring force.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L166)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L178)</small>
 
 ---
 
@@ -177,4 +182,4 @@ would let the widest channel dominate on units alone.
 | --- | --- | --- |
 | `Array` |  | Scalar sum of squared fractional violations. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L182)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L194)</small>

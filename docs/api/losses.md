@@ -32,20 +32,20 @@ masked_mse(
 Mean squared error reduced over a single global denominator.
 
 Computes ``sum(mask * weights * (pred - y_observed)**2) / max(mask.sum(), 1)``
-over the selected channels. Long-trajectory experiments contribute more
-terms to the numerator and the denominator proportionally — they do not
-receive an explicit per-experiment weighting (see ``bal_mse`` for that).
+over the selected channels. A long-trajectory experiment adds terms to
+the numerator and the denominator in proportion, and gets no explicit
+per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 
 **Parameters**
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `pred_obs` | `Float[Array, "N T D"]` | Predicted output (``state_to_output(simulate_fn(...))`` per experiment). |
-| `bp` | `BucketPayload` | Bucket data; ``mask`` and ``y_observed`` are read. |
+| `pred_obs` | `Float[Array, "N T D"]` | Predicted output channels, one ``[T, D]`` block per experiment in the bucket, from ``state_to_output(simulate_fn(...))``. |
+| `bp` | `BucketPayload` | Bucket data. Reads ``mask`` and ``y_observed``. |
 | `channel_idx` |  | Trailing-axis indices to keep. ``None`` keeps all ``D`` channels. |
 | `channel_weights` |  | Per-channel multipliers; length must match ``channel_idx`` (or ``D`` when ``channel_idx`` is ``None``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L94)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L101)</small>
 
 ---
 
@@ -66,14 +66,16 @@ masked_mle(
 
 Total Gaussian negative log-likelihood across the bucket.
 
-Sums the pointwise Gaussian NLL (variance from ``bp.yvar``) over the
-time axis to produce per-(experiment, channel) NLLs ``[N, D]``, then
-multiplies by per-channel ``weights`` and sums. **No averaging** is
-performed — this is a sum-of-likelihoods, scaling linearly with the
-number of observations. Use ``bal_mle`` for the per-experiment averaged
-counterpart.
+Sums the pointwise Gaussian negative log-likelihood (variance from
+``bp.yvar``) over the time axis, giving one NLL per experiment and
+channel, shape ``[N, D]``. Multiplies by the per-channel ``weights`` and
+sums those.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L135)</small>
+Nothing is averaged. The result is a sum of log-likelihoods and grows
+linearly with the number of observations. Use ``bal_mle`` for the
+per-experiment averaged version.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L143)</small>
 
 ---
 
@@ -92,19 +94,19 @@ bal_mse(
 ) -> Array
 ```
 
-Per-experiment-balanced MSE: average over time per experiment, then mean over experiments.
+MSE averaged over time within each experiment, then averaged over experiments.
 
-Reduction order is ``[N, T, D] -> [N, D] (per-channel time-average) ->
-[N] (channel-weighted sum) -> scalar (mean across N)``. This balances
-experiments regardless of how many observations each contributed,
-preventing long trajectories from dominating the gradient signal.
+Reduction order is ``[N, T, D] -> [N, D]`` (per-channel time average),
+then ``[N]`` (channel-weighted sum), then a scalar (mean across ``N``).
+Every experiment therefore counts the same, however many observations it
+contributed, so a long trajectory cannot dominate the gradient.
 
-Per-experiment, per-channel denominators are clamped to ``1`` (via
-``maximum(count, 1)``) so an experiment with zero observations on a
-channel does not divide by zero; the corresponding numerator is also
-zero in that case (mask gating), so the contribution is exactly ``0.0``.
+Per-experiment, per-channel denominators are clamped to ``1`` with
+``maximum(count, 1)``, so an experiment with zero observations on a
+channel does not divide by zero. Mask gating has already zeroed the
+matching numerator, so that contribution is exactly ``0.0``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L159)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L169)</small>
 
 ---
 
@@ -125,12 +127,12 @@ bal_mle(
 
 Per-experiment-balanced Gaussian NLL.
 
-Time-averages per experiment, then takes the mean over experiments.
-Same reduction skeleton as ``bal_mse`` but with ``_gaussian_nll_terms``
-(using ``bp.yvar``) replacing the pointwise squared error. Output is the
-bucket mean of per-experiment, channel-weighted, time-averaged NLLs.
+Averages over time within each experiment, then over experiments. Same
+reduction as ``bal_mse``, with ``_gaussian_nll_terms`` (which reads
+``bp.yvar``) in place of the pointwise squared error. Returns the bucket
+mean of the per-experiment, channel-weighted, time-averaged NLLs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L195)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L205)</small>
 
 ---
 
