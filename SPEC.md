@@ -46,7 +46,7 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-T2**: All phase-keyed config fields are required tuples of equal length (no scalar broadcast). Fields: `steps, lr, optimizer, reset_optimiser_state, length_schedule`.
 - **R-T3**: `length_schedule` (per-phase fraction in `(0, 1]`) is implemented as a runtime mask cutoff to avoid JIT recompile across phase boundaries.
 - **R-T4**: `reset_optimiser_state` per phase rebuilds the optimiser at that phase boundary. Default `(False,) * n_phases`.
-- **R-T5**: `make_step(predictors, opt_state, bucket_payload)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. Optimiser update is in a separate jitted `apply_update`.
+- **R-T5**: `make_step(predictors, bucket_payload, length_mask_fraction)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. It takes no `opt_state`: the optimiser update lives in a separate jitted `apply_update`, which is what the rest of this requirement already says. The bound penalty is *not* computed here; it is charged once per step by `_build_penalty_step`, outside the bucket loop.
 - **R-T6**: Shared tournament only ([ADR-0002](./docs/adr/0002-shared-tournament-only.md)). Implicitly enabled when `tournament_steps > 0 AND tournament_attempts > 1`. Reuses the main loop's compiled `make_step` and `apply_update`.
 - **R-T7**: Tournament failure handling: on per-attempt failure (diffrax error, non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original `predictors` pytree with a `RuntimeWarning`.
 - **R-T8**: `Predictor.initialized_with_key(key)` is a documented per-leaf protocol used by the tournament; default free-function implementation is `reinitialize_with_key(predictor, key)` for one Module. Across the `predictors` pytree, the tournament splits the per-attempt key by traversal order (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently. Identical-shape sibling predictors get *different* re-init weights.
@@ -322,7 +322,7 @@ from hybridmodels.predictors import (
 from hybridmodels.trainable import (
     default_trainable,           # leaf -> bool predicate (eqx.is_inexact_array)
     trainable_mask,              # (predictors, predicate=default_trainable) -> PyTree[bool]
-    freeze_paths,                # (mask, paths: tuple[str | int, ...]) -> mask  (int for tuple positions, str for dict keys / attr names)
+    freeze_paths,                # (mask, paths: tuple[str, ...]) -> mask  (dot-joined segments, e.g. "0.inner.mlp.layers.0.weight"; raises if a path matches nothing)
     freeze_modules_of_type,      # (mask, predictors, cls) -> mask
     freeze_where,                # (mask, predictors, fn) -> mask
 )
@@ -354,10 +354,11 @@ def train_with_optax(
     config: OptaxTrainingConfig,
     *,
     simulate_fn,
+    solver: SolverConfig,            # required
     trainable=None,                  # PyTree[bool] | None, same shape as predictors; None uses default_trainable
     key,                             # required
     ui=None,                         # TrainingUI | None, None picks Rich/Silent from config.verbose
-) -> tuple[list[float], "PyTree[eqx.Module]"]:
+) -> tuple[list[float], "PyTree[eqx.Module]"]:  # history is RAW per-step data loss
     ...
 
 def train_with_evosax(
@@ -366,10 +367,11 @@ def train_with_evosax(
     config: EvosaxTrainingConfig,
     *,
     simulate_fn,
+    solver: SolverConfig,            # required
     trainable=None,
     key,
     ui=None,
-) -> tuple[list[float], "PyTree[eqx.Module]"]:
+) -> tuple[list[float], "PyTree[eqx.Module]"]:  # history is BEST-SO-FAR, monotone
     ...
 ```
 
@@ -388,7 +390,7 @@ from hybridmodels.ui import TrainingUI, EvosaxUI, SilentUI, RichTrainingUI, Rich
 ### 4.10 Serialisation (last-shipped)
 
 ```python
-from hybridmodels import save_predictor, load_predictor, save_run, load_run
+from hybridmodels import save_predictors, load_predictors, save_run, load_run
 ```
 
 ---
@@ -553,7 +555,7 @@ def default_trainable(leaf) -> bool:
     return eqx.is_inexact_array(leaf)
 
 def trainable_mask(predictors, predicate=default_trainable) -> PyTree[bool]: ...
-def freeze_paths(mask, paths: tuple[str | int, ...]) -> PyTree[bool]: ...   # int for tuple-position, str for dict-key / attr
+def freeze_paths(mask, paths: tuple[str, ...]) -> PyTree[bool]: ...   # dot-joined segments; raises on a path that matches no leaf
 def freeze_modules_of_type(mask, predictors, cls) -> PyTree[bool]: ...
 def freeze_where(mask, predictors, fn: Callable[[eqx.Module], bool]) -> PyTree[bool]: ...
 ```
@@ -585,7 +587,7 @@ class OptaxTrainingConfig:
     restore_best: bool = True
     verbose: bool = True
 
-def train_with_optax(predictors, dataset, config, *, simulate_fn, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
+def train_with_optax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
 ```
 
 ### 5.8 `training/evosax.py`
@@ -605,7 +607,7 @@ class EvosaxTrainingConfig:
     log_every: int = 1
     verbose: bool = True
 
-def train_with_evosax(predictors, dataset, config, *, simulate_fn, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
+def train_with_evosax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
 ```
 
 ### 5.9 `ui/`
@@ -625,8 +627,8 @@ def predict_dataset(predictors, dataset, *, simulate_fn, solver) -> tuple[Float[
 ### 5.11 `serialise.py`
 
 ```python
-def save_predictor(path: str | Path, predictors) -> None: ...
-def load_predictor(path: str | Path, template) -> "PyTree[eqx.Module]": ...
+def save_predictors(path: str | Path, predictors) -> None: ...
+def load_predictors(path: str | Path, template) -> "PyTree[eqx.Module]": ...
 def save_run(directory: str | Path, *, predictors, solver, optax_config=None, evosax_config=None, loss_history=None, extras: dict | None = None) -> None: ...
 def load_run(directory: str | Path, *, predictors_template, optax_cls=None, evosax_cls=None) -> dict: ...
 ```
@@ -698,5 +700,5 @@ Implement in this order; each step ships green tests before the next begins.
 13. `ui/evosax.py`: `RichEvosaxUI`.
 14. `predictors/kan.py`: KAN via `jaxkan`. Serialisation test extended.
 15. `examples/crystallisation/`: port one thesis script end-to-end. This is the verification gate. The supersaturation-polynomial form is implemented as user vector-field code here (per §2.3), not as a framework class.
-16. `serialise.py`: `save_predictor` / `load_predictor` / `save_run` / `load_run`. Last shipped per R-A5.
+16. `serialise.py`: `save_predictors` / `load_predictors` / `save_run` / `load_run`. Last shipped per R-A5.
 17. `examples/pendulum/`: final deliverable proving domain-agnostic.

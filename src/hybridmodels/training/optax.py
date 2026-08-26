@@ -189,14 +189,12 @@ def _build_make_step(
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
     trainable: Any,
-    penalty_grids: tuple[Array, ...],
-) -> Callable[[Any, BucketPayload, Array, Array], tuple[Array, Array, Array, Any]]:
+) -> Callable[[Any, BucketPayload, Array], tuple[Array, Any]]:
     def loss_eval(
         diff_predictors: Any,
         static_predictors: Any,
         bp_masked: BucketPayload,
-        penalty_weight: Array,
-    ) -> tuple[Array, tuple[Array, Array]]:
+    ) -> Array:
         # ``predictors`` here is whatever pytree the user passed in
         # (typically a tuple of BoundedPredictor leaves; could also be a
         # dict, NamedTuple, single Module, ...). ``eqx.combine`` walks
@@ -211,24 +209,14 @@ def _build_make_step(
         pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
             bp_masked.ts, bp_masked.covariates, bp_masked.y0
         )
-        data = loss_fn(pred_obs, bp_masked)
-        # The penalty reads the recombined pytree, so it sees frozen and
-        # trainable leaves alike but only differentiates the former --
-        # exactly the split ``eqx.partition`` already established above.
-        # It does not depend on ``bp``: saturation is a property of the
-        # predictor over its declared input box, not of any one bucket.
-        penalty = bound_penalty(predictors, penalty_grids)
-        return data + penalty_weight * penalty, (data, penalty)
+        return loss_fn(pred_obs, bp_masked)
 
-    grad_fn = eqx.filter_value_and_grad(loss_eval, has_aux=True)
+    grad_fn = eqx.filter_value_and_grad(loss_eval)
 
     @eqx.filter_jit
     def make_step(
-        predictors: Any,
-        bp: BucketPayload,
-        length_mask_fraction: Array,
-        penalty_weight: Array,
-    ) -> tuple[Array, Array, Array, Any]:
+        predictors: Any, bp: BucketPayload, length_mask_fraction: Array
+    ) -> tuple[Array, Any]:
         T = bp.ts.shape[1]
         cutoff = jnp.maximum(
             jnp.ceil(jnp.float32(T) * length_mask_fraction).astype(jnp.int32),
@@ -237,10 +225,81 @@ def _build_make_step(
         sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
         bp_masked = bp._replace(mask=bp.mask & sched_mask)
         diff_part, static_part = eqx.partition(predictors, trainable)
-        (total, (data, penalty)), grads = grad_fn(diff_part, static_part, bp_masked, penalty_weight)
-        return total, data, penalty, grads
+        return grad_fn(diff_part, static_part, bp_masked)
 
     return make_step
+
+
+def _build_score_bucket(
+    *,
+    simulate_fn: Callable[..., Array],
+    state_to_output: Callable[[Array], Array],
+    solver: SolverConfig,
+    loss_fn: Callable[[Array, BucketPayload], Array],
+) -> Callable[[Any, BucketPayload, Array], Array]:
+    """Return a forward-only ``score_bucket(predictors, bp, fraction) -> loss``.
+
+    The tournament used ``make_step`` for scoring, which runs a full
+    ``value_and_grad`` and then discards the gradients, roughly tripling
+    the cost of every scoring sweep. Sharing the JIT cache is worth it for
+    the training steps inside an attempt; it is not worth it for the sweep
+    that only reads a number. This costs one extra compile per bucket
+    shape and pays for itself above two attempts.
+    """
+
+    @eqx.filter_jit
+    def score_bucket(predictors: Any, bp: BucketPayload, length_mask_fraction: Array) -> Array:
+        T = bp.ts.shape[1]
+        cutoff = jnp.maximum(
+            jnp.ceil(jnp.float32(T) * length_mask_fraction).astype(jnp.int32),
+            jnp.int32(1),
+        )
+        sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
+        bp_masked = bp._replace(mask=bp.mask & sched_mask)
+
+        def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
+            return state_to_output(simulate_fn(predictors, ts, covariates, y0, solver))
+
+        pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
+            bp_masked.ts, bp_masked.covariates, bp_masked.y0
+        )
+        return loss_fn(pred_obs, bp_masked)
+
+    return score_bucket
+
+
+def _build_penalty_step(
+    *, penalty_grids: tuple[Array, ...], trainable: Any
+) -> Callable[[Any, Array], tuple[Array, Any]]:
+    """Return ``penalty_step(predictors, weight) -> (penalty, weighted_grads)``.
+
+    Evaluated once per training step, outside the bucket loop. The penalty
+    reads only the predictors pytree, so computing it inside ``make_step``
+    meant ``B`` identical evaluations whose average is the same number, and
+    ``B`` identical backward passes whose average is the same gradient. The
+    extra ``B - 1`` bought nothing.
+
+    Returns the gradient of ``weight * penalty``, so callers add it
+    straight onto the averaged data gradient. ``penalty`` itself comes back
+    unweighted, since that is what gets reported.
+    """
+
+    def weighted(diff_predictors: Any, static_predictors: Any, weight: Array) -> Array:
+        predictors = eqx.combine(diff_predictors, static_predictors)
+        return weight * bound_penalty(predictors, penalty_grids)
+
+    grad_fn = eqx.filter_value_and_grad(weighted)
+
+    @eqx.filter_jit
+    def penalty_step(predictors: Any, weight: Array) -> tuple[Array, Any]:
+        diff_part, static_part = eqx.partition(predictors, trainable)
+        weighted_value, grads = grad_fn(diff_part, static_part, weight)
+        # Report the raw penalty; the weight is a scheduling choice and
+        # folding it into the number would make phases incomparable.
+        unweighted = jnp.where(weight > 0.0, weighted_value / jnp.maximum(weight, 1e-30), 0.0)
+        return unweighted, grads
+
+    return penalty_step
 
 
 def _build_apply_update(
@@ -259,47 +318,35 @@ def _build_apply_update(
 def _accumulate_step(
     predictors: Any,
     dataset: Dataset,
-    make_step: Callable[..., tuple[Array, Array, Array, Any]],
+    make_step: Callable[..., tuple[Array, Any]],
     length_mask_fraction: Array,
     trainable: Any,
-    penalty_weight: Array,
-) -> tuple[Array, Array, Array, Any]:
+) -> tuple[Array, Any]:
     """One training step: every bucket, gradients accumulated, then averaged.
 
-    Returns the total, data, and penalty terms separately. Keeping them
-    apart is not cosmetic: ``restore_best`` and ``losses_history`` track
-    the *data* loss, so that "best" cannot drift merely because the
-    penalty weight ramped between phases.
-
-    The penalty is bucket-independent, so averaging it over buckets
-    returns it unchanged; it is computed inside the per-bucket kernel
-    anyway because that is what lets its gradient ride the same
-    ``filter_value_and_grad`` as the data term instead of needing a second
-    pass over the pytree.
+    Returns the data term only. The bound penalty is bucket-independent
+    and is added once per step by the caller, via ``_build_penalty_step``.
     """
     zero_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, trainable))
     acc_grads = zero_grads
     total_loss = jnp.asarray(0.0)
-    total_data = jnp.asarray(0.0)
-    total_penalty = jnp.asarray(0.0)
     n_batches = 0
     for bp in dataset.bucket_payloads:
-        loss, data, penalty, grads = make_step(predictors, bp, length_mask_fraction, penalty_weight)
+        loss, grads = make_step(predictors, bp, length_mask_fraction)
         acc_grads = jax.tree.map(jnp.add, acc_grads, grads)
         total_loss = total_loss + loss
-        total_data = total_data + data
-        total_penalty = total_penalty + penalty
         n_batches += 1
     denom = float(max(n_batches, 1))
     avg_grads = jax.tree.map(lambda g: g / denom, acc_grads)
-    return total_loss / denom, total_data / denom, total_penalty / denom, avg_grads
+    return total_loss / denom, avg_grads
 
 
 def _shared_tournament(
     predictors: Any,
     dataset: Dataset,
     *,
-    make_step: Callable[..., tuple[Array, Array, Array, Any]],
+    make_step: Callable[..., tuple[Array, Any]],
+    score_bucket: Callable[..., Array],
     apply_update: Callable[..., tuple[Any, Any]],
     optimizer: optax.GradientTransformation,
     trainable: Any,
@@ -308,7 +355,6 @@ def _shared_tournament(
     tournament_lr: float,
     key: Array,
     length_mask_fraction: Array,
-    penalty_weight: Array,
 ) -> Any:
     last_error: BaseException | None = None
     for attempt in range(tournament_attempts):
@@ -324,24 +370,19 @@ def _shared_tournament(
             opt_state.hyperparams["learning_rate"] = jnp.asarray(tournament_lr)
 
             for _ in range(tournament_steps):
-                _total, _data, _pen, avg_grads = _accumulate_step(
-                    candidate,
-                    dataset,
-                    make_step,
-                    length_mask_fraction,
-                    trainable,
-                    penalty_weight,
+                _loss, avg_grads = _accumulate_step(
+                    candidate, dataset, make_step, length_mask_fraction, trainable
                 )
                 candidate, opt_state = apply_update(candidate, avg_grads, opt_state)
 
-            # Score on the DATA term alone. A candidate must win on fit,
-            # not by having drifted somewhere the penalty happens to like.
+            # Forward-only scorer, not make_step: reusing the training
+            # kernel here computed a full backward pass whose gradients were
+            # discarded, roughly tripling the cost of a scoring sweep.
+            # Scores on the data term alone, so a candidate wins on fit
+            # rather than by drifting somewhere the penalty happens to like.
             score = jnp.asarray(0.0)
             for bp in dataset.bucket_payloads:
-                _bucket_total, bucket_data, _bucket_pen, _g = make_step(
-                    candidate, bp, length_mask_fraction, penalty_weight
-                )
-                score = score + bucket_data
+                score = score + score_bucket(candidate, bp, length_mask_fraction)
             score_value = float(score)
             if not math.isfinite(score_value):
                 raise FloatingPointError(f"non-finite tournament loss: {score_value}")
@@ -410,11 +451,21 @@ def train_with_optax(
     Returns
     -------
     tuple[list[float], PyTree[eqx.Module]]
-        ``(loss_history, trained_predictors)``. ``loss_history`` is the
-        training loss recorded once per step across every phase;
-        ``trained_predictors`` is the predictors corresponding to the
-        best-loss step seen so far when ``config.restore_best=True``,
-        or to the final step otherwise.
+        ``(loss_history, trained_predictors)``.
+
+        ``loss_history`` is the **raw per-step data loss**, one entry per
+        step across every phase. It can go up. Note the difference from
+        :func:`~hybridmodels.training.evosax.train_with_evosax`, whose
+        history is best-so-far and therefore monotone: the two are the same
+        type and the same position in the return tuple, but plotting them
+        on one axis or feeding both to a shared stopping rule will mislead.
+
+        The penalty term is excluded. Including it would move the series
+        when only the penalty weight ramped between phases, and make runs
+        with different weights incomparable.
+
+        ``trained_predictors`` is the predictors at the best-loss step when
+        ``config.restore_best=True``, or at the final step otherwise.
     """
     if trainable is None:
         trainable = trainable_mask(predictors)
@@ -439,7 +490,13 @@ def train_with_optax(
         solver=solver,
         loss_fn=loss_fn,
         trainable=trainable,
-        penalty_grids=penalty_grids,
+    )
+    penalty_step = _build_penalty_step(penalty_grids=penalty_grids, trainable=trainable)
+    score_bucket = _build_score_bucket(
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
+        loss_fn=loss_fn,
     )
 
     n_phases = len(config.steps)
@@ -450,9 +507,7 @@ def train_with_optax(
     for idx, bp in enumerate(bucket_payloads):
         bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
         ui_.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
-        warm_loss, _d, _p, _g = make_step(
-            predictors, bp, full_mask, jnp.asarray(config.penalty_weight_for_phase(0))
-        )
+        warm_loss, _g = make_step(predictors, bp, full_mask)
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
         ui_.on_compile_done(bucket_idx=idx)
         ui_.on_compile_progress(bucket_idx=idx, total_buckets=len(bucket_payloads))
@@ -466,6 +521,7 @@ def train_with_optax(
             predictors,
             dataset,
             make_step=make_step,
+            score_bucket=score_bucket,
             apply_update=apply_update,
             optimizer=optimizer,
             trainable=trainable,
@@ -474,7 +530,6 @@ def train_with_optax(
             tournament_lr=config.tournament_lr,
             key=tournament_root,
             length_mask_fraction=full_mask,
-            penalty_weight=jnp.asarray(config.penalty_weight_for_phase(0)),
         )
 
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
@@ -499,6 +554,11 @@ def train_with_optax(
         # ``length_mask_fraction`` is passed rather than baked in.
         penalty_weight = jnp.asarray(config.penalty_weight_for_phase(phase_idx))
 
+        # Patience counts within a phase. A plateau at the end of one phase
+        # would otherwise carry over and kill the next after a single step,
+        # before its fresh learning rate had any chance to act.
+        steps_since_improvement = 0
+
         ui_.on_phase_start(
             phase_idx=phase_idx,
             phase_steps=int(n_steps),
@@ -507,14 +567,19 @@ def train_with_optax(
         )
 
         for step in range(int(n_steps)):
-            avg_total, avg_data, avg_penalty, avg_grads = _accumulate_step(
-                predictors,
-                dataset,
-                make_step,
-                length_mask_fraction,
-                trainable,
-                penalty_weight,
+            avg_data, avg_grads = _accumulate_step(
+                predictors, dataset, make_step, length_mask_fraction, trainable
             )
+            avg_penalty, penalty_grads = penalty_step(predictors, penalty_weight)
+            # Added after the bucket average, not inside it: the penalty is
+            # charged once per step, not once per bucket.
+            avg_grads = jax.tree.map(jnp.add, avg_grads, penalty_grads)
+            # Dispatch the update before blocking on the loss values. Both
+            # float() calls are host syncs; reading them first left the
+            # accelerator idle through the Python bookkeeping every step.
+            previous_predictors = predictors
+            predictors, opt_state = apply_update(predictors, avg_grads, opt_state)
+
             # History and early stopping follow the DATA term. Tracking the
             # combined objective would let "best" move when only the
             # penalty weight changed, and would make runs with different
@@ -525,12 +590,12 @@ def train_with_optax(
 
             if loss_value < best_loss:
                 best_loss = loss_value
-                best_predictors = predictors
+                # avg_data was measured at the pre-update parameters, so the
+                # snapshot has to be those, not the ones just produced.
+                best_predictors = previous_predictors
                 steps_since_improvement = 0
             else:
                 steps_since_improvement += 1
-
-            predictors, opt_state = apply_update(predictors, avg_grads, opt_state)
 
             ui_.on_step_end(
                 step_idx=step,

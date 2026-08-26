@@ -42,6 +42,7 @@ alternative path is to re-implement KAN directly on top of
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import equinox as eqx
@@ -71,6 +72,55 @@ def _seed_from_key(key: Array) -> int:
     is acceptable because predictor construction never happens inside JIT.
     """
     return int(jr.randint(key, (), 0, 2**31 - 1))
+
+
+def _build_kan(
+    in_size: int,
+    out_size: int,
+    hidden_widths: tuple[int, ...],
+    grid_size: int,
+    basis: str,
+    seed: int,
+) -> Any:
+    """Construct a ``jaxkan.models.KAN`` from the static architecture fields.
+
+    Module-level rather than a method so the cache below can key on the
+    fields alone. Keeps ``layer_dims`` and ``required_parameters`` in one
+    place for both the constructor and the forward pass.
+    """
+    return _JaxKAN(
+        layer_dims=[in_size, *hidden_widths, out_size],
+        layer_type=basis,
+        required_parameters={"k": _SPLINE_ORDER_K, "G": grid_size},
+        seed=seed,
+    )
+
+
+@functools.cache
+def _scaffold_parts(
+    in_size: int,
+    out_size: int,
+    hidden_widths: tuple[int, ...],
+    grid_size: int,
+    basis: str,
+    seed: int,
+) -> tuple[Any, tuple[Any, ...]]:
+    """Cached ``(graphdef, rest_states)`` for one KAN architecture.
+
+    Keyed on the static fields only, which is exactly what determines the
+    scaffold, so the cache can never return a mismatched graph. The result
+    holds no trainable parameters: ``nnx.split`` peels those off and
+    ``KANPredictor.__call__`` merges its own ``self.params`` back in.
+
+    Cached because a KAN evaluated inside a vector field is traced once per
+    solver stage, and rebuilding the jaxkan model in Python each time
+    dominated trace cost. The values are architecture-shaped and small, and
+    the number of distinct architectures in a run is tiny, so an unbounded
+    cache is not a leak in practice.
+    """
+    scaffold = _build_kan(in_size, out_size, hidden_widths, grid_size, basis, seed)
+    graphdef, _params, *rest_states = nnx.split(scaffold, nnx.Param, ...)
+    return graphdef, tuple(rest_states)
 
 
 class KANPredictor(Predictor):
@@ -156,20 +206,14 @@ class KANPredictor(Predictor):
         self.params = params
 
     def _build_model(self, seed: int) -> Any:
-        """Construct a fresh ``jaxkan.models.KAN`` matching this predictor's static config.
-
-        Used both at ``__init__`` (to obtain the initial Param state) and in
-        ``__call__`` (to recover the rng-state needed for ``nnx.merge``).
-        Centralising the construction here keeps ``layer_dims`` and
-        ``required_parameters`` in one place.
-        """
-        layer_dims = [self.in_size, *self.hidden_widths, self.out_size]
-        required_parameters = {"k": _SPLINE_ORDER_K, "G": self.grid_size}
-        return _JaxKAN(
-            layer_dims=layer_dims,
-            layer_type=self.basis,
-            required_parameters=required_parameters,
-            seed=seed,
+        """Construct a fresh ``jaxkan.models.KAN`` matching this predictor's static config."""
+        return _build_kan(
+            self.in_size,
+            self.out_size,
+            self.hidden_widths,
+            self.grid_size,
+            self.basis,
+            seed,
         )
 
     def __call__(self, x: Float[Array, " in_size"]) -> Float[Array, " out_size"]:
@@ -181,9 +225,21 @@ class KANPredictor(Predictor):
         ``self.params`` while the rng-state comes from a deterministic
         rebuild (so the forward pass is a pure function of static config and
         dynamic params).
+
+        The scaffold and its split are cached on the static architecture.
+        They are trace-time constants, so XLA folds them away, but the
+        Python-level jaxkan construction and ``nnx.split`` ran on every
+        retrace. A KAN called from inside a vector field is traced once per
+        solver stage, which made that a real compile-time cost.
         """
-        scaffold = self._build_model(self.seed)
-        graphdef, _, *rest_states = nnx.split(scaffold, nnx.Param, ...)
+        graphdef, rest_states = _scaffold_parts(
+            self.in_size,
+            self.out_size,
+            self.hidden_widths,
+            self.grid_size,
+            self.basis,
+            self.seed,
+        )
         merged = nnx.merge(graphdef, self.params, *rest_states)
         # Add/strip the batch axis required by jaxkan's per-layer matmuls.
         y = merged(x[None, :])

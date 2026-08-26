@@ -57,7 +57,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import equinox as eqx
 import jax
@@ -306,38 +306,6 @@ def _box_population(
     raise ValueError(f"_box_population called with non-box init {config.init!r}")
 
 
-def _initial_population(
-    predictor: Any,
-    config: EvosaxTrainingConfig,
-    *,
-    trainable: Any,
-    key: Array,
-) -> Array:
-    """Return the population evaluated in generation 0.
-
-    Exposed as a module-private helper rather than buried in
-    ``train_with_evosax`` so tests can pin the spread of each init
-    mode without driving a full training loop.
-
-    Shape: ``(config.population_size, n_params)`` where ``n_params``
-    is the flattened-trainable dimension.
-    """
-    params, _static = eqx.partition(predictor, trainable)
-    flat, _unflatten = jfu.ravel_pytree(params)
-
-    if config.init == "warm":
-        # CMA-ES's own first ask: mean=flat, std=sigma_init. The state must be
-        # initialised with the same std-overridden params or the first draw
-        # would silently use std=1.0.
-        strategy, params_ = _build_strategy(config=config, flat=flat)
-        init_key = fold(key, "evosax_init")
-        state = strategy.init(init_key, flat, params_)
-        ask_key = fold(key, "evosax_ask_0")
-        pop, _new_state = strategy.ask(ask_key, state, params_)
-        return cast(Array, pop)
-    return _box_population(flat=flat, config=config, key=fold(key, "evosax_init"))
-
-
 def _select_ui(ui: EvosaxUI | None, verbose: bool) -> EvosaxUI:
     """Pick the concrete UI: an explicit ``ui`` always wins; otherwise
     ``verbose`` toggles between ``RichEvosaxUI`` and ``SilentUI``."""
@@ -369,8 +337,14 @@ def train_with_evosax(
     Returns
     -------
     history : list[float]
-        Best-loss-so-far per generation
-        (length ``config.num_generations``).
+        **Best-loss-so-far** per generation, so the series is monotone
+        non-increasing (length ``config.num_generations``).
+
+        Note the difference from
+        :func:`~hybridmodels.training.optax.train_with_optax`, whose
+        history is the raw per-step loss and can go up. Same type, same
+        position in the return tuple, different meaning: plotting them
+        together or feeding both to a shared stopping rule will mislead.
     best_predictors : Any
         The reconstructed predictors pytree whose flat-parameter
         vector minimised the loss across every generation. Same

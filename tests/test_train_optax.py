@@ -9,6 +9,8 @@ be checked against the ground-truth ``omega = 1.0``.
 
 from __future__ import annotations
 
+import statistics
+
 import diffrax
 import equinox as eqx
 import jax.numpy as jnp
@@ -273,7 +275,7 @@ def test_missing_key_raises():
         )
 
 
-def test_tournament_finds_good_init_at_least_once():
+def test_tournament_reduces_across_seed_variance():
     seeds = (0, 1, 2, 3, 4)
     base_losses: list[float] = []
     tournament_losses: list[float] = []
@@ -321,7 +323,22 @@ def test_tournament_finds_good_init_at_least_once():
         )
         tournament_losses.append(history_tourn[0])
 
-    assert any(t <= b for t, b in zip(tournament_losses, base_losses, strict=True))
+    # The old assertion was "at least one of five seeds is no worse",
+    # which is near-certain under the null and so could not fail.
+    #
+    # The baseline here is seed-independent by construction: a fixed
+    # omega=2.0 start with lr=0.0 gives the same loss every time, which
+    # this pins first. That also rules out the obvious replacement claim,
+    # variance reduction: there is no baseline variance to reduce.
+    #
+    # What the tournament does claim is that restarting from several
+    # random inits beats the fixed start. A tournament that silently fell
+    # back to the original predictors would score exactly the baseline on
+    # every seed and fail both assertions below.
+    assert len(set(base_losses)) == 1, base_losses
+    baseline = base_losses[0]
+    assert statistics.median(tournament_losses) < baseline
+    assert sum(loss < baseline for loss in tournament_losses) >= 3
 
 
 def test_tournament_falls_back_when_all_attempts_fail():

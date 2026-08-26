@@ -99,9 +99,9 @@ training.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``. ``loss_history`` is the training loss recorded once per step across every phase; ``trained_predictors`` is the predictors corresponding to the best-loss step seen so far when ``config.restore_best=True``, or to the final step otherwise. |
+| `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step data loss**, one entry per step across every phase. It can go up. Note the difference from :func:`~hybridmodels.training.evosax.train_with_evosax`, whose history is best-so-far and therefore monotone: the two are the same type and the same position in the return tuple, but plotting them on one axis or feeding both to a shared stopping rule will mislead.<br><br>The penalty term is excluded. Including it would move the series when only the penalty weight ramped between phases, and make runs with different weights incomparable.<br><br>``trained_predictors`` is the predictors at the best-loss step when ``config.restore_best=True``, or at the final step otherwise. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L382)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L423)</small>
 
 ---
 
@@ -185,7 +185,7 @@ pytree (every inexact-array leaf).
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `history` | `list[float]` | Best-loss-so-far per generation (length ``config.num_generations``). |
+| `history` | `list[float]` | **Best-loss-so-far** per generation, so the series is monotone non-increasing (length ``config.num_generations``).<br><br>Note the difference from :func:`~hybridmodels.training.optax.train_with_optax`, whose history is the raw per-step loss and can go up. Same type, same position in the return tuple, different meaning: plotting them together or feeding both to a shared stopping rule will mislead. |
 | `best_predictors` | `Any` | The reconstructed predictors pytree whose flat-parameter vector minimised the loss across every generation. Same container shape as the input ``predictors``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L349)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L317)</small>

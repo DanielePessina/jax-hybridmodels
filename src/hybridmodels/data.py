@@ -164,9 +164,13 @@ class BucketPayload(NamedTuple):
     y0 : Float[Array, "N S"]
         Per-experiment full initial state, stacked.
     n_obs : Int[Array, ""]
-        Total observed-cell count for the bucket (``mask.sum()``). Used by
-        weighted reductions; not used by ``masked_*`` (which compute their
-        own denominators).
+        Total observed-cell count for the bucket (``mask.sum()``).
+
+        No shipped loss reads it, and none should: it counts across *all*
+        channels, while every loss here reduces over a selected subset and
+        needs its own denominator. It is kept because examples and smoke
+        scripts use it to report and assert dataset shape, which is a real
+        use even though it is not a training one (R-D4).
     """
 
     ts: Float[Array, "N T"]

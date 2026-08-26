@@ -81,13 +81,21 @@ def test_loss_signature_returns_scalar(loss_fn) -> None:
     assert out.shape == ()
 
 
-def test_loss_registry_keys_and_values() -> None:
-    assert LOSS_REGISTRY == {
-        "mse": masked_mse,
-        "mle": masked_mle,
-        "bal_mse": bal_mse,
-        "bal_mle": bal_mle,
-    }
+def test_loss_registry_keys_are_the_documented_set() -> None:
+    assert set(LOSS_REGISTRY) == {"mse", "mle", "bal_mse", "bal_mle"}
+
+
+@pytest.mark.parametrize(
+    ("name", "loss_fn"),
+    [("mse", masked_mse), ("mle", masked_mle), ("bal_mse", bal_mse), ("bal_mle", bal_mle)],
+)
+def test_registry_entries_compute_what_their_name_says(name, loss_fn) -> None:
+    # Asserting the dict equals a dict of the same objects only checks that
+    # the literal was typed twice. Run both and compare the numbers, so a
+    # mis-wired entry is caught even if the identity check would pass.
+    pred, y, mask = _baseline_fixture()
+    bp = _make_bp(y_observed=y, mask=mask)
+    assert jnp.allclose(LOSS_REGISTRY[name](pred, bp), loss_fn(pred, bp))
 
 
 @pytest.mark.parametrize("loss_fn", [masked_mse, masked_mle, bal_mse, bal_mle])
@@ -109,23 +117,45 @@ def test_loss_is_nan_safe_under_mask(loss_fn) -> None:
     assert jnp.isfinite(out)
 
 
-def test_masked_mse_channel_idx_matches_single_channel_slice() -> None:
+def test_masked_mse_channel_idx_and_weights_agree_up_to_the_denominator() -> None:
+    # Two independent API routes to the same numerator. channel_idx=(0,)
+    # divides by the channel-0 mask count; channel_weights=(1, 0) keeps the
+    # full-mask denominator. Relating them pins both without restating the
+    # implementation's arithmetic.
     pred, y, mask = _baseline_fixture()
     bp = _make_bp(y_observed=y, mask=mask)
-    restricted = masked_mse(pred, bp, channel_idx=(0,))
-    se0 = jnp.where(mask[..., 0], (pred[..., 0] - y[..., 0]) ** 2, 0.0)
-    expected = se0.sum() / jnp.maximum(mask[..., 0].sum(), 1)
-    assert jnp.allclose(restricted, expected, atol=1e-6, rtol=0)
+    via_idx = masked_mse(pred, bp, channel_idx=(0,))
+    via_weights = masked_mse(pred, bp, channel_weights=(1.0, 0.0))
+    n_channel_0 = jnp.maximum(mask[..., 0].sum(), 1)
+    n_all = jnp.maximum(mask.sum(), 1)
+    assert jnp.allclose(via_idx * n_channel_0, via_weights * n_all, atol=1e-6, rtol=0)
 
 
-def test_masked_mse_channel_weights_match_manual_formula() -> None:
+def test_masked_mse_is_homogeneous_in_channel_weights() -> None:
+    # Scaling every weight scales the loss by the same factor.
     pred, y, mask = _baseline_fixture()
     bp = _make_bp(y_observed=y, mask=mask)
-    weighted = masked_mse(pred, bp, channel_weights=(2.0, 1.0))
-    se = jnp.where(mask, (pred - y) ** 2, 0.0)
-    weights = jnp.asarray([2.0, 1.0])
-    expected = (se * weights[None, None, :]).sum() / jnp.maximum(mask.sum(), 1)
-    assert jnp.allclose(weighted, expected, atol=1e-6, rtol=0)
+    base = masked_mse(pred, bp, channel_weights=(1.0, 1.0))
+    scaled = masked_mse(pred, bp, channel_weights=(3.0, 3.0))
+    assert jnp.allclose(scaled, 3.0 * base, atol=1e-6, rtol=0)
+
+
+def test_masked_mse_channel_weights_are_additive() -> None:
+    # The weighted loss decomposes over channels, so a two-channel weight
+    # vector equals the weighted sum of its one-hot parts.
+    pred, y, mask = _baseline_fixture()
+    bp = _make_bp(y_observed=y, mask=mask)
+    both = masked_mse(pred, bp, channel_weights=(2.0, 1.0))
+    only_0 = masked_mse(pred, bp, channel_weights=(1.0, 0.0))
+    only_1 = masked_mse(pred, bp, channel_weights=(0.0, 1.0))
+    assert jnp.allclose(both, 2.0 * only_0 + 1.0 * only_1, atol=1e-6, rtol=0)
+
+
+def test_masked_mse_is_zero_for_a_perfect_fit_and_positive_otherwise() -> None:
+    _pred, y, mask = _baseline_fixture()
+    bp = _make_bp(y_observed=y, mask=mask)
+    assert float(masked_mse(y, bp)) == 0.0
+    assert float(masked_mse(y + 1.0, bp)) > 0.0
 
 
 def test_bal_mse_channel_weights_are_linear() -> None:

@@ -21,6 +21,7 @@ Each step returns a fresh mask of the same pytree shape.
 
 from __future__ import annotations
 
+import difflib
 from collections.abc import Callable
 from typing import Any
 
@@ -78,15 +79,31 @@ def freeze_paths(mask: Any, paths: tuple[str, ...]) -> Any:
     Each segment is the bare key produced by :func:`jax.tree_util.tree_flatten_with_path`:
     attribute names for ``eqx.Module`` fields, integer indices for tuples and
     lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
-    addresses ``mask.inner.mlp.layers[0].weight``. Unknown paths are silently
-    ignored.
+    addresses ``mask.inner.mlp.layers[0].weight``.
+
+    A path matching nothing raises. Silently ignoring it meant a typo left
+    a leaf the caller believed was frozen training normally, which shows up
+    as a wrong experiment rather than a wrong program. The error lists the
+    closest realised paths, since the usual cause is one wrong segment.
     """
     target = set(paths)
+    seen: set[str] = set()
 
     def _f(path: tuple[Any, ...], leaf: Any) -> Any:
-        return False if _path_to_dotted(path) in target else leaf
+        dotted = _path_to_dotted(path)
+        seen.add(dotted)
+        return False if dotted in target else leaf
 
-    return jtu.tree_map_with_path(_f, mask)
+    out = jtu.tree_map_with_path(_f, mask)
+
+    missing = sorted(target - seen)
+    if missing:
+        suggestions = difflib.get_close_matches(missing[0], sorted(seen), n=3, cutoff=0.4)
+        hint = f" Closest matches: {suggestions}." if suggestions else ""
+        raise ValueError(
+            f"freeze_paths: no leaf matches {missing}.{hint} The mask has {len(seen)} leaves."
+        )
+    return out
 
 
 def _zero_subtree(submask: Any) -> Any:

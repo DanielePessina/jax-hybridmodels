@@ -6,6 +6,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import pytest
 
 from hybridmodels.predictors import (
     BoundedPredictor,
@@ -48,6 +49,13 @@ def _leaves_equal(a, b) -> bool:
     if len(leaves_a) != len(leaves_b):
         return False
     return all(bool(x) is bool(y) for x, y in zip(leaves_a, leaves_b, strict=True))
+
+
+def _path_to_dotted_first_leaf(mask) -> str:
+    """First realised dotted path in a mask, for building a near-miss typo."""
+    from hybridmodels.trainable import _path_to_dotted
+
+    return _path_to_dotted(jtu.tree_flatten_with_path(mask)[0][0][0])
 
 
 class TestDefaultTrainable:
@@ -203,12 +211,29 @@ class TestFreezePaths:
         assert bool(new_mask.in_scaler.temperature) is False
         assert bool(new_mask.out_scaler.temperature) is False
 
-    def test_unknown_path_is_no_op(self):
+    def test_unknown_path_raises(self):
+        # A silent no-op meant a typo left a leaf the caller believed was
+        # frozen training normally: a wrong experiment, not a wrong program,
+        # and nothing to notice at the time.
         bp = _bounded()
         mask = trainable_mask(bp)
-        new_mask = freeze_paths(mask, ("does.not.exist",))
-        for o, n in zip(jtu.tree_leaves(mask), jtu.tree_leaves(new_mask), strict=True):
-            assert bool(o) is bool(n)
+        with pytest.raises(ValueError, match="no leaf matches"):
+            freeze_paths(mask, ("does.not.exist",))
+
+    def test_unknown_path_error_suggests_close_matches(self):
+        bp = _bounded()
+        mask = trainable_mask(bp)
+        real = _path_to_dotted_first_leaf(mask)
+        typo = real[:-1] + "X"
+        with pytest.raises(ValueError, match="Closest matches"):
+            freeze_paths(mask, (typo,))
+
+    def test_a_valid_path_alongside_an_invalid_one_still_raises(self):
+        bp = _bounded()
+        mask = trainable_mask(bp)
+        real = _path_to_dotted_first_leaf(mask)
+        with pytest.raises(ValueError, match="no leaf matches"):
+            freeze_paths(mask, (real, "nope.nope"))
 
     def test_empty_paths_is_no_op(self):
         bp = _bounded()

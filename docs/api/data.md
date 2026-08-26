@@ -120,7 +120,7 @@ derived from a covariate.
 | `y0_fn` |  | Hook ``(covariates, channels) -> [S]`` building the full initial state. |
 | `exp_id` |  | Optional human-readable id propagated to ``Experiment.exp_id``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L218)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L222)</small>
 
 ---
 
@@ -175,9 +175,13 @@ covariates : dict[str, Float[Array, "N"]]
 y0 : Float[Array, "N S"]
     Per-experiment full initial state, stacked.
 n_obs : Int[Array, ""]
-    Total observed-cell count for the bucket (``mask.sum()``). Used by
-    weighted reductions; not used by ``masked_*`` (which compute their
-    own denominators).
+    Total observed-cell count for the bucket (``mask.sum()``).
+
+    No shipped loss reads it, and none should: it counts across *all*
+    channels, while every loss here reduces over a selected subset and
+    needs its own denominator. It is kept because examples and smoke
+    scripts use it to report and assert dataset shape, which is a real
+    use even though it is not a training one (R-D4).
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L133)</small>
 
@@ -217,7 +221,7 @@ through every call site.
 | `covariate_names` | `tuple[str, ...]` | Sorted covariate keys (matches each ``Experiment.covariates`` key set; sorted for deterministic dict iteration). |
 | `_experiments` | `tuple[Experiment, ...]` | Source experiments, retained so ``split_dataset`` can re-bucket per-split subsets. Empty when a ``Dataset`` is constructed manually from raw payloads (in which case ``split_dataset`` will raise). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L181)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L185)</small>
 
 ---
 
@@ -264,7 +268,7 @@ Three things happen here, in order:
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``; ``_experiments`` retained so ``split_dataset`` can re-bucket subsets. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L329)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L333)</small>
 
 ---
 
@@ -310,4 +314,4 @@ be split again).
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L427)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L431)</small>

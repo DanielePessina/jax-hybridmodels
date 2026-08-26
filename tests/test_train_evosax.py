@@ -46,7 +46,8 @@ from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
 from hybridmodels.training.evosax import (
     EvosaxTrainingConfig,
-    _initial_population,
+    _box_population,
+    _build_strategy,
     train_with_evosax,
 )
 from hybridmodels.ui.testing import RecordingUI
@@ -192,6 +193,14 @@ def test_init_modes_change_population_spread() -> None:
         sigma_init=0.5,
         verbose=False,
     )
+    uniform_config = EvosaxTrainingConfig(
+        algorithm="CMA_ES",
+        population_size=24,
+        num_generations=1,
+        init="uniform_box",
+        init_box_extent=2.0,
+        verbose=False,
+    )
     lhs_config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=24,
@@ -201,15 +210,46 @@ def test_init_modes_change_population_spread() -> None:
         verbose=False,
     )
 
-    pop_warm = _initial_population(pred, warm_config, trainable=mask, key=key)
-    pop_lhs = _initial_population(pred, lhs_config, trainable=mask, key=key)
+    params, _static = eqx.partition(pred, mask)
+    flat, _unflatten = jfu.ravel_pytree(params)
+
+    # _box_population is what train_with_evosax actually calls at gen 0 for
+    # the box modes. The previous version of this test drove a helper the
+    # training loop never invoked, so it could pass with the real init path
+    # completely broken.
+    pop_uniform = _box_population(flat=flat, config=uniform_config, key=key)
+    pop_lhs = _box_population(flat=flat, config=lhs_config, key=key)
 
     def _max_pairwise(pop: Array) -> float:
         diffs = pop[:, None, :] - pop[None, :, :]
-        d = jnp.linalg.norm(diffs, axis=-1)
-        return float(d.max())
+        return float(jnp.linalg.norm(diffs, axis=-1).max())
+
+    # Both box modes must spread across the requested extent, and a warm
+    # CMA-ES draw at sigma_init=0.5 must be tighter than either.
+    strategy, strat_params = _build_strategy(config=warm_config, flat=flat)
+    state = strategy.init(key, flat, strat_params)
+    pop_warm, _ = strategy.ask(key, state, strat_params)
 
     assert _max_pairwise(pop_lhs) >= 1.5 * _max_pairwise(pop_warm)
+    assert _max_pairwise(pop_uniform) >= 1.5 * _max_pairwise(pop_warm)
+
+
+def test_box_population_respects_the_requested_extent() -> None:
+    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    mask = trainable_mask(pred)
+    params, _static = eqx.partition(pred, mask)
+    flat, _unflatten = jfu.ravel_pytree(params)
+    config = EvosaxTrainingConfig(
+        algorithm="CMA_ES",
+        population_size=32,
+        num_generations=1,
+        init="uniform_box",
+        init_box_extent=3.0,
+        verbose=False,
+    )
+    pop = _box_population(flat=flat, config=config, key=jr.PRNGKey(0))
+    assert pop.shape == (32, flat.size)
+    assert float(jnp.abs(pop - flat).max()) <= 3.0 + 1e-6
 
 
 def test_flatten_unflatten_round_trip() -> None:

@@ -268,6 +268,7 @@ def test_save_run_writes_expected_layout(tmp_path: Path) -> None:
         "optax_config",
         "evosax_config",
         "loss_history",
+        "loss_history_kind",
         "extras",
     }
     assert set(metadata.keys()) == expected_keys
@@ -341,6 +342,7 @@ def test_load_run_round_trips_predictors_solver_optax(tmp_path: Path) -> None:
         "optax_config",
         "evosax_config",
         "loss_history",
+        "loss_history_kind",
         "extras",
     }
     _assert_pytree_leaves_equal(predictors, loaded["predictors"])
@@ -544,3 +546,61 @@ def test_save_predictors_written_file_has_content(tmp_path: Path) -> None:
     assert len(leaves_orig) == len(leaves_back)
     for a, b in zip(leaves_orig, leaves_back, strict=True):
         assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_loss_history_kind_records_which_entry_point_produced_it(tmp_path: Path) -> None:
+    """Optax and Evosax histories are both list[float] and mean different things.
+
+    Optax returns the raw per-step loss, which can rise; Evosax returns
+    best-so-far, which cannot. A saved run that did not say which it held
+    could not be read back safely.
+    """
+    predictors = (_bounded(jr.PRNGKey(0)),)
+    solver = _solver()
+    history = [3.0, 2.0, 2.5]
+
+    save_run(
+        tmp_path / "optax_run",
+        predictors=predictors,
+        solver=solver,
+        optax_config=_optax_config(),
+        loss_history=history,
+    )
+    meta = json.loads((tmp_path / "optax_run" / "metadata.json").read_text())
+    assert meta["loss_history_kind"] == "per_step_data"
+
+    save_run(
+        tmp_path / "evosax_run",
+        predictors=predictors,
+        solver=solver,
+        evosax_config=_evosax_config(),
+        loss_history=history,
+    )
+    meta = json.loads((tmp_path / "evosax_run" / "metadata.json").read_text())
+    assert meta["loss_history_kind"] == "best_so_far"
+
+
+def test_loss_history_kind_is_none_without_a_history(tmp_path: Path) -> None:
+    save_run(
+        tmp_path / "run",
+        predictors=(_bounded(jr.PRNGKey(0)),),
+        solver=_solver(),
+        optax_config=_optax_config(),
+    )
+    meta = json.loads((tmp_path / "run" / "metadata.json").read_text())
+    assert meta["loss_history_kind"] is None
+
+
+def test_loss_history_kind_is_unknown_when_both_configs_are_saved(tmp_path: Path) -> None:
+    # A composed run: the caller stitched the two series, so the label
+    # cannot be inferred here without guessing.
+    save_run(
+        tmp_path / "run",
+        predictors=(_bounded(jr.PRNGKey(0)),),
+        solver=_solver(),
+        optax_config=_optax_config(),
+        evosax_config=_evosax_config(),
+        loss_history=[1.0],
+    )
+    meta = json.loads((tmp_path / "run" / "metadata.json").read_text())
+    assert meta["loss_history_kind"] == "unknown"

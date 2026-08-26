@@ -216,6 +216,26 @@ def _describe_predictors(predictors: Any) -> dict[str, Any]:
     }
 
 
+def _loss_history_kind(
+    optax_config: Any, evosax_config: Any, loss_history: list[float] | None
+) -> str | None:
+    """Name the semantics of ``loss_history`` from whichever config is present.
+
+    Optax returns the raw per-step data loss; Evosax returns best-so-far.
+    Both are ``list[float]``, so without this a reloaded run cannot tell
+    whether a rise in the series is a real regression or impossible.
+    """
+    if loss_history is None:
+        return None
+    if optax_config is not None and evosax_config is None:
+        return "per_step_data"
+    if evosax_config is not None and optax_config is None:
+        return "best_so_far"
+    # Both or neither: the caller composed the two runs, so the series
+    # cannot be labelled from here without guessing.
+    return "unknown"
+
+
 def save_run(
     directory: str | Path,
     *,
@@ -238,11 +258,18 @@ def save_run(
         ``predictors`` (``{tree_structure, leaves: [{path, class}, ...]}``
         per ``_describe_predictors``), ``solver`` (``solver.to_dict()``),
         ``optax_config`` / ``evosax_config`` (``dataclasses.asdict`` with
-        stringified ``loss`` — see module docstring), ``loss_history``,
+        stringified ``loss``, see module docstring), ``loss_history``,
         and ``extras``.
 
+        Which training entry point produced ``loss_history`` is recorded
+        alongside it as ``loss_history_kind``: ``"per_step_data"`` for
+        Optax (raw, can go up) or ``"best_so_far"`` for Evosax (monotone).
+        The two series are the same type and mean different things, so a
+        saved run that did not say which it held could not be read back
+        safely. Inferred from whichever config was passed.
+
     The directory is created (parents included) if missing. Pre-existing
-    files are overwritten — this is a save, not an append.
+    files are overwritten. This is a save, not an append.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -263,6 +290,7 @@ def save_run(
             _serialise_training_config(evosax_config) if evosax_config is not None else None
         ),
         "loss_history": list(loss_history) if loss_history is not None else None,
+        "loss_history_kind": _loss_history_kind(optax_config, evosax_config, loss_history),
         "extras": dict(extras) if extras is not None else {},
     }
 
@@ -373,6 +401,7 @@ def load_run(
         "optax_config": optax_config,
         "evosax_config": evosax_config,
         "loss_history": metadata.get("loss_history"),
+        "loss_history_kind": metadata.get("loss_history_kind"),
         "extras": metadata.get("extras", {}),
     }
 

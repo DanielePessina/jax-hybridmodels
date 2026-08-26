@@ -92,13 +92,20 @@ Persist a complete training run to ``directory``.
     ``predictors`` (``{tree_structure, leaves: [{path, class}, ...]}``
     per ``_describe_predictors``), ``solver`` (``solver.to_dict()``),
     ``optax_config`` / ``evosax_config`` (``dataclasses.asdict`` with
-    stringified ``loss`` — see module docstring), ``loss_history``,
+    stringified ``loss``, see module docstring), ``loss_history``,
     and ``extras``.
 
-The directory is created (parents included) if missing. Pre-existing
-files are overwritten — this is a save, not an append.
+    Which training entry point produced ``loss_history`` is recorded
+    alongside it as ``loss_history_kind``: ``"per_step_data"`` for
+    Optax (raw, can go up) or ``"best_so_far"`` for Evosax (monotone).
+    The two series are the same type and mean different things, so a
+    saved run that did not say which it held could not be read back
+    safely. Inferred from whichever config was passed.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L219)</small>
+The directory is created (parents included) if missing. Pre-existing
+files are overwritten. This is a save, not an append.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L239)</small>
 
 ---
 
@@ -143,4 +150,4 @@ failure modes.
 | --- | --- | --- |
 | `dict` |  | Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver`` (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` \| dict \| None), ``evosax_config`` (``EvosaxTrainingConfig`` \| dict \| None), ``loss_history`` (``list[float] \| None``), ``extras`` (``dict``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L325)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L353)</small>

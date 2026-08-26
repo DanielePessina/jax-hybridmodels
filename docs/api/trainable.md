@@ -31,7 +31,7 @@ leaf (ints, bools, Python scalars, static fields' frozen values) is
 treated as non-trainable. This matches what gradient-based optimisers
 can actually update.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L31)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L32)</small>
 
 ---
 
@@ -57,7 +57,7 @@ result is consumed unchanged by both Optax
 (``eqx.filter_value_and_grad(..., filter_spec=mask)``) and Evosax
 (``eqx.partition(predictors, mask)``).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L42)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L43)</small>
 
 ---
 
@@ -77,10 +77,14 @@ Path syntax is dot-joined segments addressing the mask PyTree from its root.
 Each segment is the bare key produced by :func:`jax.tree_util.tree_flatten_with_path`:
 attribute names for ``eqx.Module`` fields, integer indices for tuples and
 lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
-addresses ``mask.inner.mlp.layers[0].weight``. Unknown paths are silently
-ignored.
+addresses ``mask.inner.mlp.layers[0].weight``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L74)</small>
+A path matching nothing raises. Silently ignoring it meant a typo left
+a leaf the caller believed was frozen training normally, which shows up
+as a wrong experiment rather than a wrong program. The error lists the
+closest realised paths, since the usual cause is one wrong segment.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L75)</small>
 
 ---
 
@@ -104,7 +108,7 @@ every bound scaler's ``temperature`` leaf — the convention recommended
 for hybrid models where the scaler defines the activation shape and
 is not meant to drift during training.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L96)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L114)</small>
 
 ---
 
@@ -129,4 +133,4 @@ static-field inspection); applying it to leaf-value comparisons is
 undefined since the mask copy at a node carries boolean leaves while the
 predictors pytree carries arrays.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L119)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L137)</small>
