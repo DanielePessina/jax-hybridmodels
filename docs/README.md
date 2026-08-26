@@ -15,16 +15,16 @@ docs/
 ├── examples/                     # Hand-written walkthroughs
 │   ├── crystallisation.md        # Featured first; canonical end-to-end
 │   └── pendulum.md
-├── api/                          # AUTO-GENERATED — do not edit by hand
+├── api/                          # AUTO-GENERATED, do not edit by hand
 │   ├── index.md
 │   └── {data,predictors,solver,training,losses,trainable,prediction,serialise,ui,rng}.md
 ├── .vitepress/config.ts
 └── package.json
 ```
 
-The API reference under `docs/api/` is regenerated from docstrings by
-`scripts/gen_api_docs.py`; edit the docstrings in `src/hybridmodels/`,
-not the generated markdown.
+`scripts/gen_api_docs.py` regenerates the API reference under `docs/api/`
+from docstrings. Edit the docstrings in `src/hybridmodels/`, never the
+generated markdown.
 
 ## Local development
 

@@ -1,21 +1,21 @@
 # Training
 
-`hybridmodels` ships two training entry points with **the same signature**:
+`hybridmodels` ships two training entry points with the same signature:
 
 ```python
 history, trained = train_with_optax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None)
 history, trained = train_with_evosax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None)
 ```
 
-Both return `(loss_history, trained_predictors)`. Both demand a `key` — the framework never silently defaults to `jr.PRNGKey(0)`, so reproducibility is explicit.
+Both return `(loss_history, trained_predictors)`. Both demand a `key`; the framework never silently defaults to `jr.PRNGKey(0)`, so reproducibility is explicit.
 
 ## Optax: gradient-based, multi-phase
 
-[`train_with_optax`](/api/training#train_with_optax) runs an Optax loop with a **multi-phase schedule**. Each step is one full pass over all buckets, accumulating gradients across them, then one `optimizer.update`. (A step is *not* one bucket — see [Concepts → Bucket, step, phase](/guide/concepts#bucket-step-phase).)
+[`train_with_optax`](/api/training#train_with_optax) runs an Optax loop with a multi-phase schedule. Each step is one full pass over all buckets, accumulating gradients across them, then one `optimizer.update`. (A step is *not* one bucket. See [Concepts → Bucket, step, phase](/guide/concepts#bucket-step-phase).)
 
 ### Phases
 
-A phase is a contiguous block of N steps sharing the same hyperparameters. A run is a tuple of phases. Every phase-keyed field on [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig) is a **required tuple of equal length** — there is no scalar broadcast.
+A phase is a contiguous block of N steps sharing the same hyperparameters. A run is a tuple of phases. Every phase-keyed field on [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig) is a required tuple of equal length. There is no scalar broadcast.
 
 ```python
 from hybridmodels.training.optax import OptaxTrainingConfig
@@ -31,15 +31,15 @@ config = OptaxTrainingConfig(
 )
 ```
 
-This runs 200 warm-up steps at `lr=1e-2` on the **first half** of every trajectory (`length_schedule=0.5`), then 800 fine-tuning steps at `lr=1e-3` on the full trajectory.
+This runs 200 warm-up steps at `lr=1e-2` on the first half of every trajectory (`length_schedule=0.5`), then 800 fine-tuning steps at `lr=1e-3` on the full trajectory.
 
-`length_schedule` is a per-phase fraction in `(0, 1]` applied as a **runtime mask cutoff** — the loss simply ignores observations beyond `int(T * length_schedule[phase])`. There is **no JIT recompile across phase boundaries**; the same compiled `make_step` is reused.
+`length_schedule` is a per-phase fraction in `(0, 1]` applied as a runtime mask cutoff. The loss ignores observations beyond `int(T * length_schedule[phase])`. There is no JIT recompile across phase boundaries; the same compiled `make_step` is reused.
 
 `reset_optimiser_state=True` rebuilds the optimiser state at a phase boundary. Set it whenever you switch optimiser type or whenever a `length_schedule` jump invalidates the running momentum.
 
 ### The shared tournament
 
-Random init can be brutal — a bad omega draw can land the integrator in a stiff regime that `max_steps` cannot escape. The shared tournament runs N serial warm-up candidates, picks the one with the best loss, and continues normal training from there.
+Random init can be brutal. A bad omega draw can land the integrator in a stiff regime that `max_steps` cannot escape. The shared tournament runs N serial warm-up candidates, picks the one with the best loss, and continues normal training from there.
 
 ```python
 config = OptaxTrainingConfig(
@@ -54,12 +54,12 @@ config = OptaxTrainingConfig(
 
 Implementation notes:
 
-- **Shared** means it reuses the **main loop's compiled `make_step` and `apply_update`** — there is no extra JIT compile cost. (vmapped and serial-with-fresh-jit modes are explicitly out of scope; see ADR 0002.)
-- **Per-attempt failure** (diffrax error / non-finite loss) drops the candidate and tries a fresh RNG.
-- **All attempts failing** falls back to the original predictors with a `RuntimeWarning` rather than crashing.
-- **Re-init splits the key by traversal order**: identical-shape sibling predictors get *different* re-init weights, not the same ones.
+- Shared means it reuses the main loop's compiled `make_step` and `apply_update`, so there is no extra JIT compile cost. (vmapped and serial-with-fresh-jit modes are explicitly out of scope; see ADR 0002.)
+- Per-attempt failure (diffrax error / non-finite loss) drops the candidate and tries a fresh RNG.
+- All attempts failing falls back to the original predictors with a `RuntimeWarning` rather than crashing.
+- Re-init splits the key by traversal order, so identical-shape sibling predictors get *different* re-init weights.
 
-The tournament is enabled implicitly when `tournament_steps > 0 AND tournament_attempts > 1` — leave both at their defaults (`0`, `1`) for a single-shot run.
+The tournament is enabled implicitly when `tournament_steps > 0 AND tournament_attempts > 1`. Leave both at their defaults (`0`, `1`) for a single-shot run.
 
 ### Loss selection
 
@@ -83,7 +83,7 @@ config = OptaxTrainingConfig(
 
 ## Evosax: population-based search
 
-[`train_with_evosax`](/api/training#train_with_evosax) reaches into population-based optimisation when the loss landscape has many local minima or when the "predictor" is a small kinetic-parameter vector that gradient methods over-fit.
+[`train_with_evosax`](/api/training#train_with_evosax) runs population-based optimisation. Use it when the loss has many local minima, or when the "predictor" is a small kinetic-parameter vector that gradient methods over-fit.
 
 ```python
 from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
@@ -105,12 +105,12 @@ history, trained = train_with_evosax(
 
 Design notes:
 
-- **Targeted at small-parameter predictors** (~4-10 dims). Not optimised for NN-sized search in v1.
-- **Single-eval JIT boundary**: `population_eval = eqx.filter_jit(jax.vmap(single_eval))`. The bucket-dispatch Python loop unrolls inside the trace.
-- **Init modes**: `"warm"` (mean = current params, default), `"uniform_box"` (latent ±extent uniform), `"lhs_box"` (Latin Hypercube).
-- **Bounds during search are not enforced.** CMA_ES wanders latent space; `BoundedPredictor`'s sigmoid keeps physical outputs in range.
-- **Best-ever tracked host-side** (`jnp.argmin(fitnesses)` per generation), not via strategy-specific best-member fields.
-- **No graceful per-individual error handling.** A diffrax/non-finite individual crashes the generation; mitigation is conservative `sigma_init` and `init_box_extent`.
+- Targeted at small-parameter predictors (~4-10 dims). Not optimised for NN-sized search in v1.
+- Single-eval JIT boundary: `population_eval = eqx.filter_jit(jax.vmap(single_eval))`. The bucket-dispatch Python loop unrolls inside the trace.
+- Init modes: `"warm"` (mean = current params, default), `"uniform_box"` (latent ±extent uniform), `"lhs_box"` (Latin Hypercube).
+- Bounds during search are not enforced. CMA_ES wanders latent space; `BoundedPredictor`'s sigmoid keeps physical outputs in range.
+- Best-ever is tracked host-side (`jnp.argmin(fitnesses)` per generation), not via strategy-specific best-member fields.
+- No graceful per-individual error handling. A diffrax/non-finite individual crashes the generation; mitigation is conservative `sigma_init` and `init_box_extent`.
 
 ### Composing Optax + Evosax
 
@@ -129,7 +129,7 @@ Both calls accept the same `trainable=` mask, so freezing carries forward unchan
 
 ## Freezing leaves
 
-The `trainable=` keyword on both training functions accepts a boolean PyTree mask matching the predictors structure. Default behaviour (omit it) marks every inexact-float leaf trainable; pass a custom mask to hold subsets fixed.
+The `trainable=` keyword on both training functions accepts a boolean PyTree mask matching the predictors structure. Omit it and every inexact-float leaf is trainable. Pass a custom mask to hold subsets fixed.
 
 ```python
 from hybridmodels import (
@@ -146,7 +146,7 @@ history, trained = train_with_optax(
 )
 ```
 
-Compose freezers — they all return a new mask. See [Trainable Masks](/api/trainable).
+Compose freezers freely; they all return a new mask. See [Trainable Masks](/api/trainable).
 
 ## UIs and logging
 
@@ -156,17 +156,17 @@ Pass `ui=` to override the config's `verbose` flag:
 - `verbose=False` → [`SilentUI`](/api/ui#silentui).
 - `ui=YourUI()` → custom UI implementing the [`TrainingUI`](/api/ui#trainingui) protocol.
 
-Lifecycle hooks include compile-phase progress (`on_compile_start` / `on_compile_progress` / `on_compile_done`), so per-bucket-shape compile time is **visible**, not silent.
+Lifecycle hooks include compile-phase progress (`on_compile_start` / `on_compile_progress` / `on_compile_done`), so per-bucket-shape compile time is visible rather than silent.
 
 ## Reproducibility checklist
 
 - Seed your root key explicitly: `key = jr.PRNGKey(seed)`.
 - Pass `key=` to every `train_with_*` call.
 - Don't rely on dict ordering anywhere downstream of training (Python's insertion order saves you, but pin it explicitly when you can).
-- Use [`fold`](/api/rng#fold) — not `jr.split` — when you need named subkeys in your own code.
+- Use [`fold`](/api/rng#fold) rather than `jr.split` when you need named subkeys in your own code.
 
 ## What's next
 
-- [Recommendations](/guide/recommendations) — practical guidance for bounds, solver tolerances, and common pitfalls.
-- [Crystallisation walkthrough](/examples/crystallisation) — sees the multi-phase config in a real workflow.
-- [Training API](/api/training) — full reference for both configs and trainers.
+- [Recommendations](/guide/recommendations): practical guidance for bounds, solver tolerances, and common pitfalls.
+- [Crystallisation walkthrough](/examples/crystallisation): the multi-phase config in a real workflow.
+- [Training API](/api/training): full reference for both configs and trainers.

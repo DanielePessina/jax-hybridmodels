@@ -1,8 +1,8 @@
 # Getting Started
 
-`hybridmodels` is a JAX library for fitting **hybrid ODE models**: a user-supplied vector field whose unknown rate terms are produced by trainable predictors (MLP, KAN, a small bounded-parameter module, or a custom subclass). The framework owns the JAX plumbing — vectorisation across experiments, JIT compilation per bucket shape, and gradient propagation through the integrator. The user owns the physics: the vector field, the projection from full state to observed channels, and the choice of predictors.
+`hybridmodels` is a JAX library for fitting hybrid ODE models: a user-supplied vector field whose unknown rate terms are produced by trainable predictors (MLP, KAN, a small bounded-parameter module, or a custom subclass). The framework owns the JAX plumbing, meaning vectorisation across experiments, JIT compilation per bucket shape, and gradient propagation through the integrator. The user owns the physics: the vector field, the projection from full state to observed channels, and the choice of predictors.
 
-This page covers installation, the public API surface a typical model uses, and a minimal end-to-end example. For a full walkthrough on a real dataset see the [Crystallisation example](/examples/crystallisation); for a self-contained synthetic problem with a known optimum see the [Harmonic Oscillator](/examples/pendulum).
+This page covers installation, the public API a typical model uses, and a minimal end-to-end example. For a full walkthrough on a real dataset see the [Crystallisation example](/examples/crystallisation). For a self-contained synthetic problem with a known optimum see the [Harmonic Oscillator](/examples/pendulum).
 
 ## Installation
 
@@ -24,19 +24,19 @@ Either path installs `hybridmodels` together with its core dependencies (`jax`, 
 
 A working model brings together five components. The first three are user-written; the last two are framework-provided types the user instantiates.
 
-1. **Experiments** ([`Experiment`](/api/data#experiment), built via [`make_experiment`](/api/data#make_experiment)). One record per real run, holding constant-in-time covariates, an initial-state hook, and per-channel sparse observations ([`ChannelObs`](/api/data#channelobs)).
-2. **A `simulate_fn`** with the [mandatory signature](/guide/concepts#simulate-fn) `(predictors, ts, covariates, y0, solver) -> [T, S]`. Inside, the user constructs the vector field and calls `diffrax.diffeqsolve` with `adjoint=diffrax.DirectAdjoint()`.
-3. **A `state_to_output` projector**. A pure function `[T, S] -> [T, D]` that maps the full simulator state to the observed channels in a fixed order.
-4. **A predictors PyTree**. Conventionally a tuple of [`BoundedPredictor`](/api/predictors#boundedpredictor) leaves wrapping `MLPPredictor`, `KANPredictor`, or a custom [`Predictor`](/api/predictors#predictor) subclass. Models with no covariate dependence (a small set of global kinetic constants, for example) can use a minimal `eqx.Module` directly.
-5. **A [`SolverConfig`](/api/solver#solverconfig)**. A frozen container holding a `diffrax` solver instance and tolerances.
+1. Experiments ([`Experiment`](/api/data#experiment), built via [`make_experiment`](/api/data#make_experiment)). One record per real run, holding constant-in-time covariates, an initial-state hook, and per-channel sparse observations ([`ChannelObs`](/api/data#channelobs)).
+2. A `simulate_fn` with the [mandatory signature](/guide/concepts#simulate-fn) `(predictors, ts, covariates, y0, solver) -> [T, S]`. Inside, the user constructs the vector field and calls `diffrax.diffeqsolve` with `adjoint=diffrax.DirectAdjoint()`.
+3. A `state_to_output` projector. A pure function `[T, S] -> [T, D]` that maps the full simulator state to the observed channels in a fixed order.
+4. A predictors PyTree. Conventionally a tuple of [`BoundedPredictor`](/api/predictors#boundedpredictor) leaves wrapping `MLPPredictor`, `KANPredictor`, or a custom [`Predictor`](/api/predictors#predictor) subclass. Models with no covariate dependence (a small set of global kinetic constants, for example) can use a minimal `eqx.Module` directly.
+5. A [`SolverConfig`](/api/solver#solverconfig). A frozen container holding a `diffrax` solver instance and tolerances.
 
-[`make_dataset`](/api/data#make_dataset) packages experiments together with the projector into a [`Dataset`](/api/data#dataset), automatically aligning per-channel timestamps onto per-experiment union grids and grouping experiments by grid length into JIT-friendly buckets.
+[`make_dataset`](/api/data#make_dataset) packages experiments together with the projector into a [`Dataset`](/api/data#dataset). It aligns per-channel timestamps onto per-experiment union grids and groups experiments by grid length into JIT-friendly buckets.
 
 [`train_with_optax`](/api/training#train_with_optax) and [`train_with_evosax`](/api/training#train_with_evosax) both accept `(predictors, dataset, config)` together with `simulate_fn`, `solver`, and a JAX random key, and both return `(loss_history, trained_predictors)`.
 
 ## A minimal example
 
-A scalar harmonic oscillator with a single trainable parameter `omega`. The dataset is synthesised at runtime from the closed-form solution; the trainer is asked to recover `omega ≈ 1.0` from noisy position observations alone.
+A scalar harmonic oscillator with a single trainable parameter `omega`. The dataset is synthesised at runtime from the closed-form solution. The trainer has to recover `omega ≈ 1.0` from noisy position observations alone.
 
 ```python
 import diffrax
@@ -172,12 +172,12 @@ print(f"recovered omega: {recovered:.4f} (target: 1.0000)")
 
 Running the script with the seed above produces a final loss around `2e-4` and an `omega` estimate within roughly 1% of the target.
 
-The same surface scales up. Replacing `OmegaPredictor` with an `MLPPredictor` or a `KANPredictor`, adding real covariates and channels, and writing a population-balance vector field gives the [Crystallisation walkthrough](/examples/crystallisation). For models whose trainable component is a handful of global parameters rather than a function approximator — for example, four kinetic constants feeding a Classical Nucleation Theory rate law — the [mechanistic crystallisation example](/examples/crystallisation-mechanistic) shows the same training entry points used with [`train_with_evosax`](/api/training#train_with_evosax) and CMA-ES.
+The same API scales up. Replacing `OmegaPredictor` with an `MLPPredictor` or a `KANPredictor`, adding real covariates and channels, and writing a population-balance vector field gives the [Crystallisation walkthrough](/examples/crystallisation). Some models have a handful of global parameters as their trainable component rather than a function approximator, for example four kinetic constants feeding a Classical Nucleation Theory rate law. The [mechanistic crystallisation example](/examples/crystallisation-mechanistic) shows the same training entry points used with [`train_with_evosax`](/api/training#train_with_evosax) and CMA-ES.
 
 ## Next steps
 
-- [Crystallisation walkthrough](/examples/crystallisation) — a full end-to-end example on a real dataset, with two `BoundedPredictor` branches predicting growth and nucleation rates inside a method-of-moments ODE. Read this first; the rest of the documentation is easier with it as context.
-- [Concepts](/guide/concepts) — the package's vocabulary: `Predictor`, `BoundScaler`, `BoundedPredictor`, `Experiment`, `Dataset`, `BucketPayload`, `simulate_fn`, `state_to_output`, predictor inputs versus covariates.
-- [Training](/guide/training) — multi-phase Optax schedules, the shared-tournament restart loop, when to reach for `train_with_evosax`, and the named-fold RNG discipline that keeps runs reproducible.
-- [Recommendations](/guide/recommendations) — choosing bounds, solver tolerances, freezing patterns, and the autodiff-safe guards needed to keep gradients finite under JAX tracing.
-- [API Reference](/api/) — every public symbol with signature, parameters, and source link.
+- [Crystallisation walkthrough](/examples/crystallisation): a full end-to-end example on a real dataset, with two `BoundedPredictor` branches predicting growth and nucleation rates inside a method-of-moments ODE. Read this first; the rest of the documentation is easier with it as context.
+- [Concepts](/guide/concepts): the package's vocabulary. `Predictor`, `BoundScaler`, `BoundedPredictor`, `Experiment`, `Dataset`, `BucketPayload`, `simulate_fn`, `state_to_output`, predictor inputs versus covariates.
+- [Training](/guide/training): multi-phase Optax schedules, the shared-tournament restart loop, when to reach for `train_with_evosax`, and the named-fold RNG discipline that keeps runs reproducible.
+- [Recommendations](/guide/recommendations): choosing bounds, solver tolerances, freezing patterns, and the autodiff-safe guards needed to keep gradients finite under JAX tracing.
+- [API Reference](/api/): every public symbol with signature, parameters, and source link.

@@ -4,10 +4,10 @@ Trainable/frozen status is expressed as a boolean PyTree mask matching the predi
 
 ## Why this is non-obvious
 
-The source package had a 100+ line `_build_filter_spec` switch in `regressor_registry.py` that dispatched on model type to decide what was trainable. A future reader may try to add a `Predictor.trainable_filter` method on the abstract base. Don't: it violates Equinox's no-method-overriding pattern, scatters the freezing logic across N classes, and makes "freeze all `BoundScaler` instances regardless of where they appear" awkward to express. Free-function freezers compose cleanly, are easy to extend without touching predictor code, and produce an inspectable artifact (the mask itself).
+The source package had a 100+ line `_build_filter_spec` switch in `regressor_registry.py` that dispatched on model type to decide what was trainable. A future reader may try to add a `Predictor.trainable_filter` method on the abstract base. Don't. It violates Equinox's no-method-overriding pattern, scatters the freezing logic across N classes, and makes "freeze all `BoundScaler` instances regardless of where they appear" awkward to express. Free-function freezers compose cleanly, extend without touching predictor code, and produce an inspectable artifact (the mask itself).
 
 ## Considered alternatives
 
-- Per-class `trainable_filter` method on `Predictor` — rejected for the reasons above.
-- A `set_trainable(...)` mutator on the predictor — rejected because it feels mutable on a frozen pytree and breaks Equinox's "all init in `__init__`" rule.
-- Predicate-only API (no concrete mask materialised) — rejected because a materialised mask is inspectable and shape-checkable; predicates derive a mask anyway under the hood.
+- Per-class `trainable_filter` method on `Predictor`. Rejected for the reasons above.
+- A `set_trainable(...)` mutator on the predictor. Rejected because it feels mutable on a frozen pytree and breaks Equinox's "all init in `__init__`" rule.
+- Predicate-only API (no concrete mask materialised). Rejected because a materialised mask is inspectable and shape-checkable; predicates derive a mask anyway under the hood.
