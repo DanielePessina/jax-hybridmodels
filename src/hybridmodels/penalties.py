@@ -278,8 +278,7 @@ def bound_penalty(predictors: Any, grids: tuple[Array, ...]) -> Array:
     ``simulate_fn``, ``predict_bucket`` or the loss protocol, so none of
     their signatures change. It never observes the call site, so it behaves
     the same whether the predictor runs inside a vector field or above one.
-    It walks the pytree by leaf, so arbitrary nesting works for free
-    (ADR-0006).
+    It walks the pytree by leaf, so arbitrary nesting works for free.
 
     Trajectory-blindness cuts both ways. The penalty reports saturation
     anywhere in the declared box, including regions no training trajectory

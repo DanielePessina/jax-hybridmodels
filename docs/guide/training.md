@@ -126,8 +126,7 @@ It turns on implicitly when `tournament_steps > 0` and
 
 "Shared" means it reuses the main loop's already-compiled step function,
 so it costs no extra compilation. Only the shared mode exists;
-vmapped and separately-compiled serial modes are out of scope
-([ADR-0002](https://github.com/DanielePessina/jax-hybridmodels/blob/main/docs/adr/0002-shared-tournament-only.md)).
+vmapped and separately-compiled serial modes are out of scope.
 
 Only two failures are caught: a Diffrax runtime error and a non-finite
 loss. Anything else, a shape bug or a mistyped `input_keys`, reaches you

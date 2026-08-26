@@ -51,7 +51,7 @@ A covariate does not change during a trajectory, so anything depending only on c
 
 A trainable network inside a vector field is a neural ODE. [diffrax](https://docs.kidger.site/diffrax/) and [Equinox](https://docs.kidger.site/equinox/) document that technique; this example uses it in one line rather than explaining it.
 
-The library is not told which network is which. Both are ordinary calls, and you place them by writing the code. The two travel as a plain tuple, unpacked at the top of `simulate_fn`. The container is never inspected ([ADR-0006](https://github.com/DanielePessina/jax-hybridmodels/blob/main/docs/adr/0006-predictors-as-pytree.md)), so a dict or a NamedTuple works the same, and `--mechanistic-only` shortens the tuple to one entry with no other change.
+The library is not told which network is which. Both are ordinary calls, and you place them by writing the code. The two travel as a plain tuple, unpacked at the top of `simulate_fn`. The container is never inspected, so a dict or a NamedTuple works the same, and `--mechanistic-only` shortens the tuple to one entry with no other change.
 
 Since the residual runs inside the solve, `SolverConfig` gets a checkpointing adjoint. `DirectAdjoint`, the library default, stores the whole forward trajectory, and with a network in the vector field that is usually the memory bottleneck.
 
@@ -151,7 +151,7 @@ config = OptaxTrainingConfig(
 )
 ```
 
-The penalty is charged on the **latent**, not the physical output. A penalty written against the physical value would inherit the same $\sigma'(z/T)$ factor on its backward pass and die exactly where saturation is worst. See [ADR-0007](https://github.com/DanielePessina/jax-hybridmodels/blob/main/docs/adr/0007-collocation-bound-penalty.md).
+The penalty is charged on the **latent**, not the physical output. A penalty written against the physical value would inherit the same $\sigma'(z/T)$ factor on its backward pass and die exactly where saturation is worst.
 
 It is also evaluated on a **collocation grid** over each predictor's declared input box, not along the trajectories. The script prints the end-of-run value per leaf:
 

@@ -25,7 +25,7 @@ once per solver step. (A trainable network inside a vector field is a neural
 ODE; diffrax and Equinox document that technique, and this example assumes
 it rather than teaching it.) The two travel as a plain tuple and are
 unpacked at the top of ``simulate_fn``. The library never inspects the
-container (ADR-0006), so a dict or a NamedTuple works the same, and
+container, so a dict or a NamedTuple works the same, and
 ``--mechanistic-only`` shortens the tuple to one entry with no other change.
 
 **Bounds that hold by construction.** Both networks are wrapped in
