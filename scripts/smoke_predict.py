@@ -19,7 +19,6 @@ from hybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
-    CovariateSelector,
     MLPPredictor,
     SolverConfig,
     make_dataset,
@@ -119,7 +118,7 @@ def main() -> None:
         key=jr.PRNGKey(7),
     )
     predictor = BoundedPredictor(
-        selector=CovariateSelector(keys=("omega_input",)),
+        input_keys=("omega_input",),
         in_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
         inner=mlp,
         out_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),

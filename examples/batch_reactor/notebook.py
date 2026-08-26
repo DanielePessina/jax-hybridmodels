@@ -73,13 +73,13 @@ def _imports():
     import jax
     import jax.numpy as jnp
     import jax.random as jr
+    import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
     from jax import Array
     from jaxtyping import Float
     from scipy.stats import qmc
 
-    import marimo as mo
     from hybridmodels import (
         BoundedPredictor,
         BoundScaler,

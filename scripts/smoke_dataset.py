@@ -15,7 +15,6 @@ from hybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
-    CovariateSelector,
     Dataset,
     Experiment,
     MLPPredictor,
@@ -122,7 +121,7 @@ def main() -> None:
     print(f"MLP raw forward: in={raw_input} → out={mlp(raw_input)} (shape {mlp(raw_input).shape})")
 
     bounded = BoundedPredictor(
-        selector=CovariateSelector(keys=("temperature_C", "loading")),
+        input_keys=("temperature_C", "loading"),
         in_scaler=BoundScaler(bounds=((20.0, 40.0), (0.05, 0.30)), transform="sigmoid"),
         inner=mlp,
         out_scaler=BoundScaler(

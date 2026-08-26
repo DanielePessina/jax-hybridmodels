@@ -17,6 +17,13 @@
 # These mirror the suppressions we previously needed in mypy via
 # `ignore_missing_imports = true`.
 
+# marimo notebooks resolve names across cells at runtime, not lexically, so
+# every cross-cell reference reads as undefined to a static checker. They are
+# excluded wholesale rather than suppressed rule-by-rule: the file format is
+# not ordinary Python module scope and type-checking it proves nothing.
+[src]
+exclude = ["examples/**/notebook.py"]
+
 [rules]
 unresolved-attribute = "ignore"
 invalid-method-override = "ignore"

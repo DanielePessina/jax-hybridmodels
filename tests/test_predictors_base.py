@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -362,3 +363,90 @@ def test_jit_traces_through_bounded_predictor_array_input():
 
     out = call(bp, jnp.array([0.5, 0.3]))
     assert out.shape == (2,)
+
+
+class TestBoundScalerGradientSafety:
+    """``to_latent`` must stay differentiable for inputs outside the declared box.
+
+    The original implementation guarded ``logit`` with a hard
+    ``jnp.clip``. A hard clip has *exactly* zero derivative outside the
+    box, so an out-of-range input silently severed every upstream
+    gradient on that path. That matters because predictor inputs are
+    routinely *state-derived* (supersaturation in the crystallisation
+    example): the input is a traced quantity, and a zero derivative
+    there drops a real sensitivity from the ODE adjoint without raising
+    anything.
+    """
+
+    def test_to_latent_gradient_is_finite_and_nonzero_above_box(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        g = jax.grad(lambda x: scaler.to_latent(x).sum())(jnp.array([12.0]))
+        assert jnp.all(jnp.isfinite(g))
+        assert jnp.all(g > 0.0)
+
+    def test_to_latent_gradient_is_finite_and_nonzero_below_box(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        g = jax.grad(lambda x: scaler.to_latent(x).sum())(jnp.array([-3.0]))
+        assert jnp.all(jnp.isfinite(g))
+        assert jnp.all(g > 0.0)
+
+    def test_to_latent_is_finite_far_outside_the_box(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        z = scaler.to_latent(jnp.array([-1e4, 1e4]))
+        assert jnp.all(jnp.isfinite(z))
+
+    def test_interior_round_trip_is_unaffected(self):
+        # The softclip must be a no-op well inside the box, so existing
+        # models keep their numerics where it matters.
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        x = jnp.array([2.5])
+        assert jnp.allclose(scaler.from_latent(scaler.to_latent(x)), x, atol=1e-4)
+
+
+class TestBoundScalerPenalties:
+    """``input_violation`` and ``saturation`` are pure, side-effect-free queries."""
+
+    def test_input_violation_is_zero_inside_box(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0), (-1.0, 1.0)), transform="sigmoid")
+        assert float(scaler.input_violation(jnp.array([5.0, 0.0]))) == 0.0
+
+    def test_input_violation_grows_with_overshoot(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        near = scaler.input_violation(jnp.array([11.0]))
+        far = scaler.input_violation(jnp.array([20.0]))
+        assert 0.0 < float(near) < float(far)
+
+    def test_input_violation_is_width_normalised(self):
+        # Same fractional overshoot on boxes of very different widths must
+        # score identically, so one penalty weight works across channels.
+        narrow = BoundScaler(bounds=((0.0, 1.0),), transform="sigmoid")
+        wide = BoundScaler(bounds=((0.0, 1000.0),), transform="sigmoid")
+        a = narrow.input_violation(jnp.array([1.5]))
+        b = wide.input_violation(jnp.array([1500.0]))
+        assert jnp.allclose(a, b)
+
+    def test_input_violation_gradient_is_nonzero_outside(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        g = jax.grad(lambda x: scaler.input_violation(x))(jnp.array([13.0]))
+        assert float(g[0]) > 0.0
+
+    def test_saturation_is_zero_below_the_knee(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        assert float(scaler.saturation(jnp.array([0.0, 1.0, -2.0]))) == 0.0
+
+    def test_saturation_gradient_survives_deep_saturation(self):
+        # The whole point: at |z| = 40 the physical-space derivative has
+        # underflowed to exactly zero, but the latent-space penalty must
+        # still push back.
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        g = jax.grad(lambda z: scaler.saturation(z))(jnp.array([40.0]))
+        assert float(g[0]) > 0.0
+        physical_grad = jax.grad(lambda z: scaler.from_latent(z).sum())(jnp.array([40.0]))
+        assert float(physical_grad[0]) == 0.0
+
+    def test_penalties_are_jit_and_vmap_safe(self):
+        scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
+        xs = jnp.array([[5.0], [12.0], [-4.0]])
+        out = eqx.filter_jit(jax.vmap(scaler.input_violation))(xs)
+        assert out.shape == (3,)
+        assert jnp.all(jnp.isfinite(out))

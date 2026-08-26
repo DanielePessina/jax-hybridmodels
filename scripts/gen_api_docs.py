@@ -68,6 +68,16 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "penalties",
+        "Penalties: Gradient-Safe Bound Handling",
+        (
+            "soft_logit",
+            "softclip",
+            "clip_ste",
+            "box_violation",
+        ),
+    ),
+    (
         "solver",
         "Solver: ODE Integration",
         (

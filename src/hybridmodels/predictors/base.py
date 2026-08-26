@@ -51,6 +51,8 @@ import jax.random as jr
 import jax.tree_util as jtu
 from jaxtyping import Array
 
+from hybridmodels.penalties import box_violation, soft_logit
+
 # Public re-export surface from this module.
 __all__ = (
     "Predictor",
@@ -94,9 +96,18 @@ class BoundScaler(eqx.Module):
     inverse is
     ``latent -> physical = low + (high - low) * sigmoid(z / T)``.
     Composing inverse with forward is the identity strictly inside the
-    open box ``(low, high)``; values at or near the closed endpoints
-    are clipped inside ``to_latent`` (see method doc) so the round trip
-    can deviate by up to one clip width at the extremes.
+    open box ``(low, high)``; outside a narrow band at the endpoints
+    ``to_latent`` switches to a linear continuation (see method doc), so
+    the round trip deviates there rather than saturating.
+
+    Bounds are enforced by *construction* — the inner predictor emits an
+    unbounded latent and ``from_latent`` squashes it — so a physical
+    violation is unrepresentable and there is nothing to clip. What that
+    costs is gradient: the squash derivative decays exponentially, so a
+    predictor pinned against a bound has no signal left to pull it back.
+    :meth:`saturation` and :meth:`input_violation` are the optional
+    penalty queries that repair the two ends of that problem; both are
+    pure and neither is invoked by ``__call__``.
 
     Sigmoid is the only transform supported here; alternative transforms
     can be introduced by extending ``_SUPPORTED_TRANSFORMS`` and adding
@@ -120,17 +131,28 @@ class BoundScaler(eqx.Module):
     temperature : Array
         Scalar (or per-component) sharpness multiplier in latent space.
         ``T = 1.0`` recovers the standard logit/sigmoid pair.
+    logit_eps : float
+        Static. Half-width of the band at each end of ``[0, 1]`` outside
+        which ``to_latent`` continues linearly instead of running into
+        ``logit``'s pole. Sets the continuation slope (``~1 / logit_eps``).
+    z_knee : float
+        Static. Latent magnitude past which :meth:`saturation` starts
+        charging. ``3.0`` is the outer 5% of the physical box.
     """
 
     bounds: tuple[tuple[float, float], ...] = eqx.field(static=True)
     transform: str = eqx.field(static=True)
     temperature: Array
+    logit_eps: float = eqx.field(static=True)
+    z_knee: float = eqx.field(static=True)
 
     def __init__(
         self,
         bounds: tuple[tuple[float, float], ...],
         transform: str = "sigmoid",
         temperature: Any = 1.0,
+        logit_eps: float = 1e-3,
+        z_knee: float = 3.0,
     ) -> None:
         if transform not in _SUPPORTED_TRANSFORMS:
             raise ValueError(
@@ -140,6 +162,8 @@ class BoundScaler(eqx.Module):
         self.bounds = tuple((float(low), float(high)) for low, high in bounds)
         self.transform = transform
         self.temperature = jnp.asarray(temperature)
+        self.logit_eps = float(logit_eps)
+        self.z_knee = float(z_knee)
 
     def _lows_highs(self) -> tuple[Array, Array]:
         """Return ``bounds`` as two parallel ``[len(bounds)]`` arrays of lows and highs."""
@@ -150,16 +174,76 @@ class BoundScaler(eqx.Module):
     def to_latent(self, x: Array) -> Array:
         """Map a physical-space value to its latent representative.
 
-        Steps: normalise to ``[0, 1]`` against ``bounds``, clip to
-        ``[1e-6, 1 - 1e-6]`` (so ``logit`` does not produce ``±inf`` at the
-        closed endpoints), apply ``logit``, scale by ``temperature``. The
-        clip is the only source of round-trip error; for inputs strictly
-        inside the box it is a no-op.
+        Steps: normalise to ``[0, 1]`` against ``bounds``, apply
+        :func:`~hybridmodels.penalties.soft_logit`, scale by ``temperature``.
+
+        The ``logit`` pole guard is a linear continuation, not a hard
+        ``jnp.clip``. A hard clip has *exactly* zero derivative outside the
+        box, and because this guard sits mid-graph that zero propagates to
+        every upstream parameter on the path. Predictor inputs are
+        routinely state-derived — supersaturation in the crystallisation
+        example is a traced function of the ODE state — so a clipped input
+        silently drops a real sensitivity out of the ODE adjoint with
+        nothing raised and nothing logged.
+
+        Inside ``[logit_eps, 1 - logit_eps]`` the map is *exactly* the old
+        ``logit``, value and derivative both, so models trained before this
+        change keep their numerics wherever they were behaving. Outside it,
+        the map continues linearly at ``logit``'s own slope at the
+        crossing: finite values, constant non-zero gradient, ``C^1`` across
+        the junction so an adaptive ODE controller sees no kink.
+
+        The continuation still only reports *direction*, not magnitude —
+        it cannot tell a small excursion from a catastrophic one in a way a
+        loss can act on. Pair it with :meth:`input_violation` when an input
+        can leave its declared box.
         """
         lows, highs = self._lows_highs()
         normalized = (x - lows) / (highs - lows)
-        clipped = jnp.clip(normalized, 1e-6, 1.0 - 1e-6)
-        return jax.scipy.special.logit(clipped) * self.temperature
+        return soft_logit(normalized, self.logit_eps) * self.temperature
+
+    def input_violation(self, x: Array) -> Array:
+        """Scalar squared hinge on how far ``x`` fell outside ``bounds``.
+
+        Zero in value *and* gradient strictly inside the box, so adding it
+        to a loss never perturbs the feasible interior. Outside, it grows
+        quadratically in the width-normalised overshoot.
+
+        This is the push-back half of the pair whose forward half is the
+        softclip in :meth:`to_latent`: the softclip keeps the forward pass
+        finite and differentiable near the box, this term supplies a
+        restoring force that keeps working arbitrarily far from it.
+
+        Pure and side-effect free — emitting a penalty is a separate query,
+        never a side effect of calling the scaler, which is what lets the
+        caller decide whether and where to pay for it.
+        """
+        lows, highs = self._lows_highs()
+        return box_violation(x, lows, highs)
+
+    def saturation(self, z: Array) -> Array:
+        """Scalar squared overshoot of ``|z / temperature|`` past ``z_knee``.
+
+        Measures how hard the output squash is pinned against its bound.
+        ``z_knee`` defaults to ``3.0``, i.e. ``sigmoid(3) ~ 0.953`` — the
+        outer 5% of the physical box on each side.
+
+        Deliberately a function of the *latent*, not of the physical value
+        it maps to. ``from_latent``'s derivative carries a ``sigma'(z / T)``
+        factor that decays to ``4.5e-5`` by ``|z / T| = 10`` and underflows
+        to exactly ``0.0`` past roughly ``15``; a penalty written against
+        the physical output inherits that factor on the backward pass and
+        so dies exactly where saturation is worst. Reading ``|z| / T``
+        directly gives a gradient linear in the overshoot that never
+        underflows.
+
+        Reduced with ``mean`` rather than ``sum`` so the term does not
+        scale with the number of output components — one penalty weight
+        then means the same thing for a one-output and a six-output
+        predictor.
+        """
+        u = jnp.abs(z / self.temperature)
+        return jnp.mean(jnp.maximum(u - self.z_knee, 0.0) ** 2)
 
     def from_latent(self, z: Array) -> Array:
         """Map a latent value back into the physical box ``[low, high]``.

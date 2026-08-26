@@ -51,3 +51,11 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# marimo notebooks are not ordinary modules. A bare expression on the last
+# line of a cell IS the cell's rendered output (B018), names are resolved
+# across cells by the marimo runtime rather than lexically (F821), and the
+# markdown tables embedded in prose cells carry alignment that reflowing to
+# 100 columns would destroy (E501).
+"examples/**/notebook.py" = ["B018", "F821", "E501"]

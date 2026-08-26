@@ -10,6 +10,10 @@ The public surface is split across ten pages, grouped by concern. Every symbol b
 
 [`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
 
+## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
+
+[`soft_logit`](/api/penalties#soft_logit), [`softclip`](/api/penalties#softclip), [`clip_ste`](/api/penalties#clip_ste), [`box_violation`](/api/penalties#box_violation)
+
 ## [Solver: ODE Integration](/api/solver)
 
 [`SolverConfig`](/api/solver#solverconfig), [`SOLVER_REGISTRY`](/api/solver#solver_registry), [`register_solver`](/api/solver#register_solver)

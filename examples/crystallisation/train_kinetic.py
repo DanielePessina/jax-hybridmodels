@@ -477,7 +477,8 @@ def main() -> None:
         print(f"  {len(history)} steps; final loss {history[-1]:.6f}")
         sample_every = max(1, len(history) // 10)
         print(
-            f"  loss every ~{sample_every} steps: {[f'{loss:.4f}' for loss in history[::sample_every]]}"
+            f"  loss every ~{sample_every} steps: "
+            f"{[f'{loss:.4f}' for loss in history[::sample_every]]}"
         )
 
         trained_growth, trained_nucleation = trained_predictors

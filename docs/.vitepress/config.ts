@@ -48,6 +48,7 @@ export default defineConfig({
         { text: 'Overview', link: '/api/' },
         { text: 'Data', link: '/api/data' },
         { text: 'Predictors', link: '/api/predictors' },
+        { text: 'Penalties', link: '/api/penalties' },
         { text: 'Solver', link: '/api/solver' },
         { text: 'Training', link: '/api/training' },
         { text: 'Losses', link: '/api/losses' },

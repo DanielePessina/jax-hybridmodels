@@ -162,6 +162,10 @@ class TestWithZeroFinalHead:
         predictor = _mlp(in_size=3, out_size=2, width_size=8, depth=2)
         zeroed = predictor.with_zero_final_head()
         final = zeroed.mlp.layers[-1]
+        # eqx.nn.Linear.bias is Optional (use_bias=False leaves it None);
+        # this predictor always builds with a bias, and asserting that
+        # states the invariant instead of hiding it from the type checker.
+        assert final.bias is not None
         assert jnp.array_equal(final.weight, jnp.zeros_like(final.weight))
         assert jnp.array_equal(final.bias, jnp.zeros_like(final.bias))
 

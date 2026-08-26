@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import jax.random as jr
 import numpy as np
+from jax.typing import ArrayLike
 
 from hybridmodels import fold
 
 NAMES = ("init", "tournament", "phase_0", "phase_1", "evosax_init", "evosax_ask_0")
 
 
-def _hex(key: np.ndarray) -> str:
+def _hex(key: ArrayLike) -> str:
     return np.asarray(key).astype(np.uint32).tobytes().hex()
 
 

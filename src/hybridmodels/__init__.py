@@ -18,6 +18,12 @@ if TYPE_CHECKING:
         masked_mle,
         masked_mse,
     )
+    from hybridmodels.penalties import (
+        box_violation,
+        clip_ste,
+        soft_logit,
+        softclip,
+    )
     from hybridmodels.prediction import predict_bucket, predict_dataset
     from hybridmodels.predictors import (
         BoundedPredictor,
@@ -60,8 +66,10 @@ if TYPE_CHECKING:
 __all__: list[str] = [
     "BoundedPredictor",
     "BoundScaler",
+    "box_violation",
     "BucketPayload",
     "ChannelObs",
+    "clip_ste",
     "Dataset",
     "EvosaxTrainingConfig",
     "EvosaxUI",
@@ -97,6 +105,8 @@ __all__: list[str] = [
     "reinitialize_with_key",
     "save_predictors",
     "save_run",
+    "soft_logit",
+    "softclip",
     "split_dataset",
     "train_with_evosax",
     "train_with_optax",
@@ -106,8 +116,10 @@ __all__: list[str] = [
 _EXPORTS: dict[str, str] = {
     "BoundedPredictor": "hybridmodels.predictors",
     "BoundScaler": "hybridmodels.predictors",
+    "box_violation": "hybridmodels.penalties",
     "BucketPayload": "hybridmodels.data",
     "ChannelObs": "hybridmodels.data",
+    "clip_ste": "hybridmodels.penalties",
     "Dataset": "hybridmodels.data",
     "EvosaxTrainingConfig": "hybridmodels.training",
     "EvosaxUI": "hybridmodels.ui",
@@ -143,6 +155,8 @@ _EXPORTS: dict[str, str] = {
     "reinitialize_with_key": "hybridmodels.predictors",
     "save_predictors": "hybridmodels.serialise",
     "save_run": "hybridmodels.serialise",
+    "soft_logit": "hybridmodels.penalties",
+    "softclip": "hybridmodels.penalties",
     "split_dataset": "hybridmodels.data",
     "train_with_evosax": "hybridmodels.training",
     "train_with_optax": "hybridmodels.training",

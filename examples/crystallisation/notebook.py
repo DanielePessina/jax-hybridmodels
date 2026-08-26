@@ -98,12 +98,12 @@ def _imports():
     import equinox as eqx
     import jax.numpy as jnp
     import jax.random as jr
+    import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
     from jax import Array
     from jaxtyping import Float
 
-    import marimo as mo
     from hybridmodels import (
         BoundedPredictor,
         BoundScaler,
@@ -1395,7 +1395,7 @@ def _parity_overlay(diag_mech, diag_mlp, plt):
     fig_par, axes_par = plt.subplots(
         1, len(_channels), figsize=(4 * len(_channels), 4), squeeze=False
     )
-    for _ax, _name in zip(axes_par.flatten(), _channels):
+    for _ax, _name in zip(axes_par.flatten(), _channels, strict=True):
         _smlp = diag_mlp[_name]
         _smech = diag_mech[_name]
         _ax.scatter(

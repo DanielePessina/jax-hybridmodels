@@ -49,9 +49,7 @@ def main() -> None:
     out_text = captured_out.getvalue()
     err_text = captured_err.getvalue()
     if out_text or err_text:
-        raise SystemExit(
-            f"SilentUI emitted output. stdout={out_text!r}, stderr={err_text!r}"
-        )
+        raise SystemExit(f"SilentUI emitted output. stdout={out_text!r}, stderr={err_text!r}")
 
     print(f"SilentUI silent on stdout/stderr: stdout={out_text!r}, stderr={err_text!r}")
     print(f"isinstance(SilentUI(), TrainingUI) = {isinstance(silent, TrainingUI)}")

@@ -40,6 +40,7 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 from jax import Array
+from jax.typing import ArrayLike
 from jaxtyping import Float
 from scipy.stats import qmc
 
@@ -133,7 +134,7 @@ def _k_sat_from_ph(pH: Array | float) -> Array:
     )
 
 
-def _k_true(temperature_C: Array | float, pH: Array | float) -> Array:
+def _k_true(temperature_C: ArrayLike, pH: ArrayLike) -> Array:
     """Ground-truth rate constant: pH saturation × Arrhenius centred at T_REF."""
     T_K = jnp.asarray(temperature_C) + 273.15
     arrhenius = jnp.exp(-EA_TRUE / R_GAS * (1.0 / T_K - 1.0 / T_REF))
