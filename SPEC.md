@@ -127,7 +127,6 @@ This section is the contract. Implementation is judged against these line by lin
 - Builder registry for serialisable predictor reconstruction without templates.
 - Sub-batching across population / within-bucket for memory-bound workloads.
 - Time-varying covariate hooks.
-- `tanh` bound-scaling option.
 - Trajectory-dependent penalties. The collocation penalty is trajectory-blind by construction: it reports saturation anywhere in the declared box, not whether a particular solve pushed an input out of range. Answering the latter means widening `simulate_fn` to return `(states, penalty)`, an ADR-0005 change, gated behind an explicit opt-in flag rather than auto-detected. Deferred to post-v1 pending a case that needs it.
 - Non-crystallisation example (pendulum), the last deliverable of v1, gating the "domain-agnostic" claim.
 - Builder/loader registries for `state_to_output` / `simulate_fn` to enable Dataset round-trip.
@@ -159,6 +158,7 @@ jax-hybridmodels/                      (repo)
 │   └── hybridmodels/
 │       ├── __init__.py                 (lazy public API re-exports)
 │       ├── data.py                     (Experiment, ChannelObs, Dataset, BucketPayload, make_dataset, split_dataset)
+│       ├── transforms.py                (BOUND_TRANSFORMS, WARPS, register_bound_transform, register_warp)
 │       ├── penalties.py                (soft_logit, softclip, clip_ste, box_violation, collocation_grids, bound_penalty)
 │       ├── solver.py                   (SolverConfig, SOLVER_REGISTRY, register_solver)
 │       ├── losses.py                   (masked_mse, masked_mle, bal_mse, bal_mle)

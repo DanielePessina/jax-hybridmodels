@@ -9,11 +9,21 @@ A narrow trainable `eqx.Module` whose `__call__` is `Array → Array`. Knows not
 _Avoid_: Regressor (the previous package's overloaded term, which bundled bound-scaling, rate-pair semantics, and trainable weights together).
 
 **BoundScaler**:
-An `eqx.Module` providing bidirectional sigmoid scaling between physical `[low, high]` and a latent space. Sigmoid only for v1; tanh deferred. Carries a `temperature` leaf (frozen by convention) plus two static knobs, `logit_eps` and `z_knee`.
+An `eqx.Module` mapping a physical box onto an unbounded latent. Two independent axes, both name-keyed registries in `transforms.py`, both stored as static strings so the scaler still round-trips through `eqx.tree_serialise_leaves`.
 
-`to_latent` guards `logit` against its poles with a linear continuation (`soft_logit`) rather than a hard clip. The clip it replaced had exactly zero derivative outside the box; sitting mid-graph, that zero propagated to every upstream parameter, so a state-derived input straying out of range silently dropped a real sensitivity from the ODE adjoint. Inside `[logit_eps, 1-logit_eps]` the map is exactly the old one, value and derivative both.
+**warp** decides what "halfway between the bounds" means. `"linear"` (default), `"log"`, `"log10"`. A rate constant bounded by `(1e-6, 1e2)` spans eight decades; a linear warp puts its midpoint at 50 and collapses the whole low end into a sliver. `log10` puts the midpoint at `1e-2`. Bounds stay in physical units whichever warp is chosen. Log warps reject non-positive bounds at construction.
 
-Two pure penalty queries hang off it. `input_violation` reports how far a physical input fell outside its box; `saturation` reports how hard the output squash is pinned. Neither is called by `__call__`; emitting a penalty is a query, never a side effect.
+**transform** decides how the squash saturates, and therefore how fast gradient dies once a predictor pushes against a bound. `"sigmoid"` (default), `"algebraic"`, `"softsign"`. Measured float32 gradient death: sigmoid at `z=16.8`, algebraic at `z~3e3` (180x the runway), softsign at `z~1.1e7`. `algebraic` is the recommended alternative and is C-infinity; `softsign` buys more runway but is not C^2 and its kink sits at the box midpoint, which solver steps straddle routinely.
+
+`tanh` is deliberately absent. `(1+tanh z)/2` is exactly `sigmoid(2z)`, so it would be the sigmoid entry at half temperature.
+
+`to_latent` guards the squash inverse against its poles with a **linear continuation** (`soft_inverse`), not a hard clip. The clip it replaced had exactly zero derivative outside the box; sitting mid-graph, that zero propagated to every upstream parameter, so a state-derived input straying out of range silently dropped a real sensitivity from the ODE adjoint. Inside `[logit_eps, 1-logit_eps]` the map is exactly the old one, value and derivative both.
+
+`z_knee` is derived from the transform, not shared. It encodes a physical criterion, the outer 5% of the box; sigmoid's 2.944 means 12.5% from the bound on softsign, so a shared constant would charge 2.7x too aggressively.
+
+Two pure penalty queries hang off it: `input_violation` (how far a physical input fell outside its box) and `saturation` (how hard the output squash is pinned). Neither is called by `__call__`; emitting a penalty is a query, never a side effect.
+
+Bounds must be finite and ordered `low < high`. Infinite bounds used to construct silently and then fail three ways: every finite input mapped to one latent, `from_latent` returned `inf`, and `input_violation` returned `nan`.
 
 **BoundedPredictor**:
 A composition wrapper: `input_keys (named-input order) → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). `input_keys` is a static `tuple[str, ...]` that names each input slot in declared order; cardinality must match `in_scaler.bounds` and be ≥ 1. Auto-fills to `("x1", ..., "xN")` when omitted, so the saved predictor is always self-describing. `__call__` accepts either `dict[str, Array]` (subset extraction in `input_keys` order, extra keys allowed, missing keys raise) or rank-1 `Array` (passed through). Penalties are opt-in and default to zero. See "Bound penalty" below.

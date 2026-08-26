@@ -45,13 +45,13 @@ from __future__ import annotations
 from typing import Any, cast
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 from jaxtyping import Array
 
-from hybridmodels.penalties import box_violation, soft_logit
+from hybridmodels.penalties import box_violation, soft_inverse
+from hybridmodels.transforms import BOUND_TRANSFORMS, WARPS, check_bounds, warp_bounds
 
 # Public re-export surface from this module.
 __all__ = (
@@ -61,8 +61,6 @@ __all__ = (
     "reinitialize_with_key",
     "reinitialize_pytree_with_key",
 )
-
-_SUPPORTED_TRANSFORMS: tuple[str, ...] = ("sigmoid",)
 
 
 class Predictor(eqx.Module):
@@ -142,6 +140,8 @@ class BoundScaler(eqx.Module):
     bounds: tuple[tuple[float, float], ...] = eqx.field(static=True)
     transform: str = eqx.field(static=True)
     temperature: Array
+    warp: str = eqx.field(static=True)
+    warped_bounds: tuple[tuple[float, float], ...] = eqx.field(static=True)
     logit_eps: float = eqx.field(static=True)
     z_knee: float = eqx.field(static=True)
 
@@ -150,24 +150,46 @@ class BoundScaler(eqx.Module):
         bounds: tuple[tuple[float, float], ...],
         transform: str = "sigmoid",
         temperature: Any = 1.0,
+        warp: str = "linear",
         logit_eps: float = 1e-3,
-        z_knee: float = 3.0,
+        z_knee: float | None = None,
     ) -> None:
-        if transform not in _SUPPORTED_TRANSFORMS:
+        if transform not in BOUND_TRANSFORMS:
             raise ValueError(
-                f"Unsupported transform {transform!r}; "
-                f"supported transforms: {list(_SUPPORTED_TRANSFORMS)}"
+                f"Unknown transform {transform!r}; available: "
+                f"{sorted(BOUND_TRANSFORMS)}. Register custom squashes via "
+                "register_bound_transform(name, transform)."
             )
-        self.bounds = tuple((float(low), float(high)) for low, high in bounds)
+        if warp not in WARPS:
+            raise ValueError(
+                f"Unknown warp {warp!r}; available: {sorted(WARPS)}. "
+                "Register custom warps via register_warp(name, warp)."
+            )
+        bounds = tuple((float(low), float(high)) for low, high in bounds)
+        check_bounds(bounds, warp)
+        self.bounds = bounds
         self.transform = transform
+        self.warp = warp
+        # Resolved once here, not per call: jnp ops inside a jit trace are
+        # staged out, so warping the edges lazily would hand back tracers.
+        self.warped_bounds = warp_bounds(bounds, warp)
         self.temperature = jnp.asarray(temperature)
         self.logit_eps = float(logit_eps)
-        self.z_knee = float(z_knee)
+        # Resolved to a float now, not looked up per call. The static field
+        # stays JSON-friendly, and a saved scaler keeps the knee it trained
+        # with even if the registry default later changes.
+        self.z_knee = float(BOUND_TRANSFORMS[transform].knee) if z_knee is None else float(z_knee)
 
     def _lows_highs(self) -> tuple[Array, Array]:
-        """Return ``bounds`` as two parallel ``[len(bounds)]`` arrays of lows and highs."""
+        """Box edges in *physical* units, as two ``[len(bounds)]`` arrays."""
         lows = jnp.asarray([b[0] for b in self.bounds])
         highs = jnp.asarray([b[1] for b in self.bounds])
+        return lows, highs
+
+    def _warped_edges(self) -> tuple[Array, Array]:
+        """Box edges in *warped* coordinates, as two ``[len(bounds)]`` arrays."""
+        lows = jnp.asarray([b[0] for b in self.warped_bounds])
+        highs = jnp.asarray([b[1] for b in self.warped_bounds])
         return lows, highs
 
     def to_latent(self, x: Array) -> Array:
@@ -195,9 +217,13 @@ class BoundScaler(eqx.Module):
         small excursion from a catastrophic one in a way a loss can act on.
         Pair it with :meth:`input_violation` when an input can leave its box.
         """
-        lows, highs = self._lows_highs()
-        normalized = (x - lows) / (highs - lows)
-        return soft_logit(normalized, self.logit_eps) * self.temperature
+        warp = WARPS[self.warp]
+        lows, highs = self._warped_edges()
+        normalized = (warp.forward(x) - lows) / (highs - lows)
+        t = BOUND_TRANSFORMS[self.transform]
+        return soft_inverse(normalized, t.inverse, t.inverse_slope, self.logit_eps) * (
+            self.temperature
+        )
 
     def input_violation(self, x: Array) -> Array:
         """Scalar squared hinge on how far ``x`` fell outside ``bounds``.
@@ -245,8 +271,10 @@ class BoundScaler(eqx.Module):
         rescale to ``[low, high]``. The output is finite for any finite ``z``
         (no clipping required on the inverse direction).
         """
-        lows, highs = self._lows_highs()
-        return lows + (highs - lows) * jax.nn.sigmoid(z / self.temperature)
+        warp = WARPS[self.warp]
+        lows, highs = self._warped_edges()
+        squashed = BOUND_TRANSFORMS[self.transform].forward(z / self.temperature)
+        return warp.inverse(lows + (highs - lows) * squashed)
 
 
 class BoundedPredictor(Predictor):

@@ -3,8 +3,10 @@ def test_package_imports() -> None:
 
     expected = {
         "ADJOINT_REGISTRY",
+        "BOUND_TRANSFORMS",
         "BoundedPredictor",
         "BoundScaler",
+        "BoundTransform",
         "box_violation",
         "BucketPayload",
         "ChannelObs",
@@ -45,12 +47,17 @@ def test_package_imports() -> None:
         "save_predictors",
         "save_run",
         "register_adjoint",
+        "register_bound_transform",
+        "register_warp",
+        "soft_inverse",
         "soft_logit",
         "softclip",
         "split_dataset",
         "train_with_evosax",
         "train_with_optax",
         "trainable_mask",
+        "Warp",
+        "WARPS",
     }
     assert set(hybridmodels.__all__) == expected
     for name in expected:

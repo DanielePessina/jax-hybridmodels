@@ -39,7 +39,7 @@ predictors compose as a tuple at the ``simulate_fn`` boundary and
 the user unpacks them at the top of the vector field, naming each
 one in their own code (``rate_growth, rate_nucleation = predictors``).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L68)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L65)</small>
 
 ---
 
@@ -54,8 +54,9 @@ BoundScaler(
     bounds: 'tuple[tuple[float, float], ...]',
     transform: 'str' = 'sigmoid',
     temperature: 'Any' = 1.0,
+    warp: 'str' = 'linear',
     logit_eps: 'float' = 0.001,
-    z_knee: 'float' = 3.0,
+    z_knee: 'float | None' = None,
 ) -> None
 ```
 
@@ -103,7 +104,7 @@ the scaler and the inner predictor and tends to slow convergence.
 | `logit_eps` | `float` | Static. Half-width of the band at each end of ``[0, 1]`` outside which ``to_latent`` continues linearly instead of running into ``logit``'s pole. Sets the continuation slope (``~1 / logit_eps``). |
 | `z_knee` | `float` | Static. Latent magnitude past which :meth:`saturation` starts charging. ``3.0`` is the outer 5% of the physical box. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L87)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L84)</small>
 
 #### `BoundScaler.from_latent()`
 
@@ -117,7 +118,7 @@ Apply ``sigmoid(z / temperature)`` to land in ``(0, 1)``, then affine
 rescale to ``[low, high]``. The output is finite for any finite ``z``
 (no clipping required on the inverse direction).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L241)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L268)</small>
 
 #### `BoundScaler.input_violation()`
 
@@ -138,7 +139,7 @@ supplies a restoring force that keeps working far outside it.
 Pure and side-effect free. Emitting a penalty is a separate query,
 so the caller decides whether and where to pay for it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L202)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L229)</small>
 
 #### `BoundScaler.saturation()`
 
@@ -164,7 +165,7 @@ Reduced with ``mean``, not ``sum``, so the term does not scale with
 output width. One weight then means the same for a one-output and a
 six-output predictor.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L219)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L246)</small>
 
 #### `BoundScaler.to_latent()`
 
@@ -196,7 +197,7 @@ The continuation reports direction, not magnitude. It cannot tell a
 small excursion from a catastrophic one in a way a loss can act on.
 Pair it with :meth:`input_violation` when an input can leave its box.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L173)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L196)</small>
 
 ---
 
@@ -255,7 +256,7 @@ self-describing — the user can still call it with a positional
 | `inner` | `Predictor` | Trainable Array -> Array module operating in latent space. |
 | `out_scaler` | `BoundScaler` | Maps the inner network's latent output back to physical units. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L252)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L281)</small>
 
 #### `BoundedPredictor.initialized_with_key()`
 
@@ -282,7 +283,7 @@ about.
 The scalers hold the bound geometry, not learned state, so a restart
 has no reason to touch them.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L355)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L384)</small>
 
 ---
 
@@ -471,7 +472,7 @@ For re-initialising a *pytree* of predictors (the convention at the
 use :func:`reinitialize_pytree_with_key` so each ``eqx.Module`` leaf
 gets its own independently-derived key.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L382)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L411)</small>
 
 ---
 
@@ -514,4 +515,4 @@ one-leaf pytree, equivalent to calling
 Returns a structurally identical pytree with fresh weights on every
 ``eqx.Module`` leaf.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L413)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L442)</small>

@@ -35,6 +35,7 @@ pole, so it needs none of the double-``where`` guarding that
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import jax
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from hybridmodels.predictors import BoundedPredictor
 
 __all__ = (
+    "soft_inverse",
     "soft_logit",
     "softclip",
     "clip_ste",
@@ -85,6 +87,31 @@ def _bounded_leaves(predictors: Any) -> list[BoundedPredictor]:
     return found
 
 
+def soft_inverse(
+    s: Array,
+    inverse: Callable[[Array], Array],
+    inverse_slope: Callable[[Array], Array],
+    eps: float = 1e-3,
+) -> Array:
+    """``inverse(s)``, extended linearly outside ``[eps, 1 - eps]``.
+
+    The generalisation of :func:`soft_logit` to any squash's inverse. Every
+    candidate inverse has a pole at each end of the unit interval, and the
+    reason a hard clip is unacceptable there does not depend on which
+    squash it is: a mid-graph zero derivative propagates to every upstream
+    parameter and drops state-derived sensitivities from the ODE adjoint
+    without raising (R-P2).
+
+    Exact in value and derivative inside the band, and C^1 across the
+    junction because the continuation uses the inverse's own slope at the
+    crossing. The ``stop_gradient`` on the clamp is load-bearing. Without
+    it the correction term picks up a contribution through the clip and the
+    interior derivative comes out wrong.
+    """
+    s_clamped = jax.lax.stop_gradient(jnp.clip(s, eps, 1.0 - eps))
+    return inverse(s_clamped) + inverse_slope(s_clamped) * (s - s_clamped)
+
+
 def soft_logit(s: Array, eps: float = 1e-3) -> Array:
     """``logit(s)``, extended linearly outside ``[eps, 1 - eps]``.
 
@@ -110,14 +137,10 @@ def soft_logit(s: Array, eps: float = 1e-3) -> Array:
     overshoot to ``|z| ~ 10``, outside the sigmoid's linear region but still
     a number a network can consume.
     """
-    s_clamped = jax.lax.stop_gradient(jnp.clip(s, eps, 1.0 - eps))
-    value = jax.scipy.special.logit(s_clamped)
-    slope = 1.0 / (s_clamped * (1.0 - s_clamped))
-    # Inside the band ``s - s_clamped`` is zero, so this reduces to
-    # ``logit(s)`` with its true derivative; ``stop_gradient`` on the clamp
-    # is what keeps the correction term's derivative equal to ``slope``
-    # rather than picking up a spurious contribution through the clip.
-    return value + slope * (s - s_clamped)
+    from hybridmodels.transforms import BOUND_TRANSFORMS
+
+    t = BOUND_TRANSFORMS["sigmoid"]
+    return soft_inverse(s, t.inverse, t.inverse_slope, eps)
 
 
 def softclip(x: Array, lo: float | Array, hi: float | Array, beta: float = 20.0) -> Array:

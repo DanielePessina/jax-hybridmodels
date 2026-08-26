@@ -12,7 +12,11 @@ The public surface is split across ten pages, grouped by concern. Every symbol b
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 
-[`soft_logit`](/api/penalties#soft_logit), [`softclip`](/api/penalties#softclip), [`clip_ste`](/api/penalties#clip_ste), [`box_violation`](/api/penalties#box_violation)
+[`soft_inverse`](/api/penalties#soft_inverse), [`soft_logit`](/api/penalties#soft_logit), [`softclip`](/api/penalties#softclip), [`clip_ste`](/api/penalties#clip_ste), [`box_violation`](/api/penalties#box_violation)
+
+## [Transforms: Squash Shapes and Axis Warps](/api/transforms)
+
+[`BoundTransform`](/api/transforms#boundtransform), [`BOUND_TRANSFORMS`](/api/transforms#bound_transforms), [`register_bound_transform`](/api/transforms#register_bound_transform), [`Warp`](/api/transforms#warp), [`WARPS`](/api/transforms#warps), [`register_warp`](/api/transforms#register_warp)
 
 ## [Solver: ODE Integration](/api/solver)
 

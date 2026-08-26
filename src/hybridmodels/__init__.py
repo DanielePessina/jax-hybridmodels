@@ -61,6 +61,14 @@ if TYPE_CHECKING:
         train_with_evosax,
         train_with_optax,
     )
+    from hybridmodels.transforms import (
+        BOUND_TRANSFORMS,
+        WARPS,
+        BoundTransform,
+        Warp,
+        register_bound_transform,
+        register_warp,
+    )
     from hybridmodels.ui import (
         EvosaxUI,
         RichEvosaxUI,
@@ -71,8 +79,10 @@ if TYPE_CHECKING:
 
 __all__: list[str] = [
     "ADJOINT_REGISTRY",
+    "BOUND_TRANSFORMS",
     "BoundedPredictor",
     "BoundScaler",
+    "BoundTransform",
     "box_violation",
     "BucketPayload",
     "ChannelObs",
@@ -113,16 +123,23 @@ __all__: list[str] = [
     "save_predictors",
     "save_run",
     "register_adjoint",
+    "register_bound_transform",
+    "register_warp",
+    "soft_inverse",
     "soft_logit",
     "softclip",
     "split_dataset",
     "train_with_evosax",
     "train_with_optax",
     "trainable_mask",
+    "Warp",
+    "WARPS",
 ]
 
 _EXPORTS: dict[str, str] = {
     "ADJOINT_REGISTRY": "hybridmodels.solver",
+    "BOUND_TRANSFORMS": "hybridmodels.transforms",
+    "BoundTransform": "hybridmodels.transforms",
     "BoundedPredictor": "hybridmodels.predictors",
     "BoundScaler": "hybridmodels.predictors",
     "box_violation": "hybridmodels.penalties",
@@ -165,12 +182,17 @@ _EXPORTS: dict[str, str] = {
     "save_predictors": "hybridmodels.serialise",
     "save_run": "hybridmodels.serialise",
     "register_adjoint": "hybridmodels.solver",
+    "register_bound_transform": "hybridmodels.transforms",
+    "register_warp": "hybridmodels.transforms",
+    "soft_inverse": "hybridmodels.penalties",
     "soft_logit": "hybridmodels.penalties",
     "softclip": "hybridmodels.penalties",
     "split_dataset": "hybridmodels.data",
     "train_with_evosax": "hybridmodels.training",
     "train_with_optax": "hybridmodels.training",
     "trainable_mask": "hybridmodels.trainable",
+    "Warp": "hybridmodels.transforms",
+    "WARPS": "hybridmodels.transforms",
 }
 
 

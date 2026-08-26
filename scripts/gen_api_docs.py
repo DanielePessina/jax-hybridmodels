@@ -71,10 +71,23 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "penalties",
         "Penalties: Gradient-Safe Bound Handling",
         (
+            "soft_inverse",
             "soft_logit",
             "softclip",
             "clip_ste",
             "box_violation",
+        ),
+    ),
+    (
+        "transforms",
+        "Transforms: Squash Shapes and Axis Warps",
+        (
+            "BoundTransform",
+            "BOUND_TRANSFORMS",
+            "register_bound_transform",
+            "Warp",
+            "WARPS",
+            "register_warp",
         ),
     ),
     (

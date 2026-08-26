@@ -2,10 +2,45 @@
 
 ## Quick links
 
+- [`soft_inverse`](#soft_inverse)
 - [`soft_logit`](#soft_logit)
 - [`softclip`](#softclip)
 - [`clip_ste`](#clip_ste)
 - [`box_violation`](#box_violation)
+
+---
+
+<a id="soft_inverse"></a>
+
+### `soft_inverse()`
+
+<small>`from hybridmodels.penalties import soft_inverse` &nbsp;·&nbsp; also re-exported as `hybridmodels.soft_inverse`</small>
+
+```python
+soft_inverse(
+    s: 'Array',
+    inverse: 'Callable[[Array], Array]',
+    inverse_slope: 'Callable[[Array], Array]',
+    eps: 'float' = 0.001,
+) -> Array
+```
+
+``inverse(s)``, extended linearly outside ``[eps, 1 - eps]``.
+
+The generalisation of :func:`soft_logit` to any squash's inverse. Every
+candidate inverse has a pole at each end of the unit interval, and the
+reason a hard clip is unacceptable there does not depend on which
+squash it is: a mid-graph zero derivative propagates to every upstream
+parameter and drops state-derived sensitivities from the ODE adjoint
+without raising (R-P2).
+
+Exact in value and derivative inside the band, and C^1 across the
+junction because the continuation uses the inverse's own slope at the
+crossing. The ``stop_gradient`` on the clamp is load-bearing. Without
+it the correction term picks up a contribution through the clip and the
+interior derivative comes out wrong.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L90)</small>
 
 ---
 
@@ -43,7 +78,7 @@ Larger ``eps`` shrinks the exact band. The default 1e-3 maps a 1%
 overshoot to ``|z| ~ 10``, outside the sigmoid's linear region but still
 a number a network can consume.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L88)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L115)</small>
 
 ---
 
@@ -77,7 +112,7 @@ This repairs the near field only. Several widths out the derivative
 underflows just as a hard clip's does. Pair it with
 :func:`box_violation`, which supplies the unbounded push-back.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L123)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L146)</small>
 
 ---
 
@@ -103,7 +138,7 @@ the data loss asks for, including "go further out of bounds", forever.
 A straight-through clip never pushes back on its own. Pair it with
 :func:`box_violation` on the pre-clip value for the restoring force.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L143)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L166)</small>
 
 ---
 
@@ -142,4 +177,4 @@ would let the widest channel dominate on units alone.
 | --- | --- | --- |
 | `Array` |  | Scalar sum of squared fractional violations. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L159)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L182)</small>
