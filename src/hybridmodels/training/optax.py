@@ -483,6 +483,144 @@ def _shared_tournament(
     return predictors
 
 
+def _tournament_enabled(config: OptaxTrainingConfig) -> bool:
+    """The tournament is enabled implicitly, never by its own flag (ADR-0002).
+
+    One attempt has nothing to choose between, and zero steps trains no
+    candidate, so either alone makes it a no-op.
+    """
+    return config.tournament_attempts > 1 and config.tournament_steps > 0
+
+
+def _horizon_changed(config: OptaxTrainingConfig, phase_idx: int) -> bool:
+    """Does this phase score a different slice of each trajectory than the last?
+
+    ``length_schedule`` masks the loss to a prefix, so a change here means
+    the losses either side of the boundary measure different quantities.
+    Phase 0 has no predecessor and so never counts as a change.
+    """
+    if phase_idx == 0:
+        return False
+    return config.length_schedule[phase_idx] != config.length_schedule[phase_idx - 1]
+
+
+def _warmup_compile(
+    predictors: Any,
+    bucket_payloads: tuple[BucketPayload, ...],
+    *,
+    bucket_step: Callable[..., tuple[Array, Any]],
+    ui: TrainingUI,
+    length_mask_fraction: Array,
+) -> None:
+    """Force one trace per bucket shape before the run proper starts.
+
+    Compilation dominates the first steps and can take tens of seconds per
+    shape. Paying it here, bracketed by the compile events, is what stops a
+    progress bar sitting at zero and making the run look hung. The warm-up
+    loss is discarded; only the populated jit cache matters.
+    """
+    total_buckets = len(bucket_payloads)
+    for idx, bp in enumerate(bucket_payloads):
+        bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
+        ui.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
+        warm_loss, _grads = bucket_step(predictors, bp, length_mask_fraction)
+        jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
+        ui.on_compile_done(bucket_idx=idx)
+        ui.on_compile_progress(bucket_idx=idx, total_buckets=total_buckets)
+
+
+def _begin_phase(
+    phase_idx: int,
+    predictors: Any,
+    optimizer: optax.GradientTransformation,
+    apply_update: Callable[..., tuple[Any, Any]],
+    opt_state: Any,
+    *,
+    config: OptaxTrainingConfig,
+    trainable: Any,
+) -> tuple[optax.GradientTransformation, Callable[..., tuple[Any, Any]], Any]:
+    """Apply the phase-boundary optimiser policy and return the trio to run with.
+
+    A phase either rebuilds the optimiser and discards its state, or keeps the
+    live state and pushes the new learning rate into it. Phase 0 passes
+    through untouched: its optimiser was built by the caller, and the
+    tournament may already have trained against it.
+
+    All three of ``(optimizer, apply_update, opt_state)`` come back together
+    because a reset invalidates all three at once: ``apply_update`` closes
+    over the optimiser, and the state belongs to the optimiser that built it.
+    """
+    if phase_idx == 0:
+        return optimizer, apply_update, opt_state
+
+    if config.reset_optimiser_state[phase_idx]:
+        optimizer = _build_optimizer(config.optimizer[phase_idx], config.lr[phase_idx])
+        apply_update = _build_apply_update(optimizer, trainable)
+        return optimizer, apply_update, optimizer.init(eqx.filter(predictors, trainable))
+
+    # No reset, so only the learning rate moves. ``__post_init__`` has already
+    # refused a phase that changes the optimiser name without a reset, so the
+    # live state still belongs to the optimiser this phase names.
+    opt_state.hyperparams["learning_rate"] = jnp.asarray(config.lr[phase_idx])
+    return optimizer, apply_update, opt_state
+
+
+class _BestTracker:
+    """Lowest-data-loss snapshot and the patience counter, held together.
+
+    Host-side only. Never pass this into a jitted function: ``eqx.filter_jit``
+    would treat it as a static argument and hash it by identity, retracing
+    once per instance.
+
+    It replaces three loop variables that always had to move together and
+    carried two invariants between them that previously lived only in
+    comments: the snapshot must be the parameters the loss was measured at,
+    and both the minimum and the counter are scoped to a horizon rather than
+    to the whole run.
+    """
+
+    def __init__(self, predictors: Any) -> None:
+        self.best_loss = float("inf")
+        self.best_predictors = predictors
+        self.steps_since_improvement = 0
+
+    def begin_phase(self, predictors: Any, *, horizon_changed: bool) -> None:
+        """Phase-boundary bookkeeping for both pieces of state.
+
+        The patience counter always resets. A plateau at the end of one phase
+        would otherwise carry over and kill the next after a single step,
+        before its fresh learning rate had any chance to act.
+
+        The running minimum resets only when the scored horizon changed.
+        Losses over a prefix and losses over the full window are not
+        comparable, and a single minimum across both lands in the shortest
+        phase, so ``restore_best`` would hand back the least-trained model in
+        the run.
+        """
+        self.steps_since_improvement = 0
+        if horizon_changed:
+            self.best_loss = float("inf")
+            self.best_predictors = predictors
+
+    def update(self, loss: float, predictors: Any) -> None:
+        """Record ``loss``, which must have been measured at ``predictors``.
+
+        Pass the **pre-update** parameters. Passing the ones the optimiser
+        just produced hands back a model whose loss is not the reported
+        minimum, and ``loss_history`` then describes a different model.
+        """
+        if loss < self.best_loss:
+            self.best_loss = loss
+            self.best_predictors = predictors
+            self.steps_since_improvement = 0
+        else:
+            self.steps_since_improvement += 1
+
+    def out_of_patience(self, patience: int) -> bool:
+        """``patience`` consecutive steps with no new minimum. ``0`` disables it."""
+        return patience > 0 and self.steps_since_improvement >= patience
+
+
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
     # An explicit ``ui=`` always wins, so a caller can swap in a custom UI
     # (a TensorBoard logger, say) without changing the loop.
@@ -573,24 +711,21 @@ def train_with_optax(
         loss_fn=loss_fn,
     )
 
-    n_phases = len(config.steps)
-    total_steps = int(sum(config.steps))
-    ui_.on_run_start(total_steps=total_steps, num_phases=n_phases)
+    ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
 
     full_mask = jnp.asarray(1.0)
-    for idx, bp in enumerate(bucket_payloads):
-        bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
-        ui_.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
-        warm_loss, _g = bucket_step(predictors, bp, full_mask)
-        jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
-        ui_.on_compile_done(bucket_idx=idx)
-        ui_.on_compile_progress(bucket_idx=idx, total_buckets=len(bucket_payloads))
+    _warmup_compile(
+        predictors,
+        bucket_payloads,
+        bucket_step=bucket_step,
+        ui=ui_,
+        length_mask_fraction=full_mask,
+    )
 
     optimizer = _build_optimizer(config.optimizer[0], config.lr[0])
     apply_update = _build_apply_update(optimizer, trainable)
 
-    if config.tournament_attempts > 1 and config.tournament_steps > 0:
-        tournament_root = fold(key, "tournament")
+    if _tournament_enabled(config):
         predictors = _shared_tournament(
             predictors,
             dataset,
@@ -602,25 +737,25 @@ def train_with_optax(
             tournament_attempts=config.tournament_attempts,
             tournament_steps=config.tournament_steps,
             tournament_lr=config.tournament_lr,
-            key=tournament_root,
+            key=fold(key, "tournament"),
             length_mask_fraction=full_mask,
         )
 
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
 
     losses_history: list[float] = []
-    best_loss = float("inf")
-    best_predictors = predictors
-    steps_since_improvement = 0
+    best = _BestTracker(predictors)
 
     for phase_idx, n_steps in enumerate(config.steps):
-        if phase_idx > 0:
-            if config.reset_optimiser_state[phase_idx]:
-                optimizer = _build_optimizer(config.optimizer[phase_idx], config.lr[phase_idx])
-                apply_update = _build_apply_update(optimizer, trainable)
-                opt_state = optimizer.init(eqx.filter(predictors, trainable))
-            else:
-                opt_state.hyperparams["learning_rate"] = jnp.asarray(config.lr[phase_idx])
+        optimizer, apply_update, opt_state = _begin_phase(
+            phase_idx,
+            predictors,
+            optimizer,
+            apply_update,
+            opt_state,
+            config=config,
+            trainable=trainable,
+        )
 
         length_mask_fraction = jnp.asarray(config.length_schedule[phase_idx])
         # Traced, not closed over: a Python float that changed per phase
@@ -628,20 +763,7 @@ def train_with_optax(
         # ``length_mask_fraction`` is passed rather than baked in.
         penalty_weight = jnp.asarray(config.penalty_weight_for_phase(phase_idx))
 
-        # Patience counts within a phase. A plateau at the end of one phase
-        # would otherwise carry over and kill the next after a single step,
-        # before its fresh learning rate had any chance to act.
-        steps_since_improvement = 0
-
-        # "Best" only means something among losses over the same horizon. A
-        # phase with length_schedule=0.2 scores a fifth of each trajectory,
-        # so carried across the boundary its minimum wins every time and
-        # restore_best hands back the least-trained model in the run.
-        if phase_idx > 0 and (
-            config.length_schedule[phase_idx] != config.length_schedule[phase_idx - 1]
-        ):
-            best_loss = float("inf")
-            best_predictors = predictors
+        best.begin_phase(predictors, horizon_changed=_horizon_changed(config, phase_idx))
 
         ui_.on_phase_start(
             phase_idx=phase_idx,
@@ -670,15 +792,9 @@ def train_with_optax(
             loss_value = float(avg_data)
             penalty_value = float(avg_penalty)
             losses_history.append(loss_value)
-
-            if loss_value < best_loss:
-                best_loss = loss_value
-                # avg_data was measured at the pre-update parameters, so the
-                # snapshot has to be those, not the ones just produced.
-                best_predictors = previous_predictors
-                steps_since_improvement = 0
-            else:
-                steps_since_improvement += 1
+            # ``previous_predictors``, not ``predictors``: avg_data was
+            # measured before the update was applied.
+            best.update(loss_value, previous_predictors)
 
             ui_.on_step_end(
                 step_idx=step,
@@ -687,12 +803,12 @@ def train_with_optax(
                 penalty=penalty_value,
             )
 
-            if config.patience > 0 and steps_since_improvement >= config.patience:
+            if best.out_of_patience(config.patience):
                 break
 
         ui_.on_phase_end(phase_idx=phase_idx)
 
-    final_predictors = best_predictors if config.restore_best else predictors
+    final_predictors = best.best_predictors if config.restore_best else predictors
     final_loss = losses_history[-1] if losses_history else float("nan")
     ui_.on_run_end(final_loss=final_loss)
     return losses_history, final_predictors
