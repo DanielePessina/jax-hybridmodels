@@ -228,3 +228,38 @@ LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
     "bal_mle": bal_mle,
 }
 """Short name to loss function, so a training config can name its loss as a string."""
+
+
+def _resolve_loss_fn(
+    loss: Callable[..., Array] | str,
+    channel_idx: tuple[int, ...] | None,
+    channel_weights: tuple[float, ...] | None,
+) -> Callable[[Array, BucketPayload], Array]:
+    """Turn a training config's ``loss`` field into a ``(pred_obs, bp) -> scalar``.
+
+    ``loss`` is either a ``LOSS_REGISTRY`` key, matched case- and
+    whitespace-insensitively, or a callable already in the right shape.
+
+    With neither ``channel_idx`` nor ``channel_weights`` the resolved
+    function is returned as-is rather than wrapped. That identity matters: a
+    user loss written to the bare ``(pred_obs, bp)`` signature would raise
+    ``TypeError`` on the unexpected keywords if it were wrapped
+    unconditionally.
+
+    Lives here rather than in the training modules because it is registry
+    lookup and channel binding, not training logic, and both loops need it.
+    """
+    if isinstance(loss, str):
+        key = loss.lower().strip()
+        if key not in LOSS_REGISTRY:
+            raise ValueError(f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}")
+        base = LOSS_REGISTRY[key]
+    else:
+        base = loss
+    if channel_idx is None and channel_weights is None:
+        return base
+
+    def loss_fn(pred_obs: Array, bp: BucketPayload) -> Array:
+        return base(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
+
+    return loss_fn

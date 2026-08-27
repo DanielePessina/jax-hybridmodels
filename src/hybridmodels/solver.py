@@ -73,6 +73,34 @@ def register_solver(name: str, cls: type[diffrax.AbstractSolver[Any]]) -> None:
     SOLVER_REGISTRY[name] = cls
 
 
+def _registry_name(
+    registry: dict[str, Any],
+    instance: Any,
+    *,
+    kind: str,
+    registry_name: str,
+    register_fn: str,
+) -> str:
+    """Reverse-lookup ``instance``'s class in ``registry`` and return its name.
+
+    Matches on exact type rather than ``isinstance``. A subclass of a
+    registered solver is a different solver, and serialising it under the
+    parent's name would make ``from_dict`` silently hand back the wrong
+    class.
+
+    Raises rather than guessing at a name. A config that does not round trip
+    is worse than a refusal at save time, when the caller can still fix it
+    with ``register_solver`` or ``register_adjoint``.
+    """
+    for name, cls in registry.items():
+        if type(instance) is cls:
+            return name
+    raise ValueError(
+        f"{kind} class {type(instance).__name__!r} is not in {registry_name}; "
+        f"register it via {register_fn}(name, cls) before calling to_dict."
+    )
+
+
 class SolverConfig(eqx.Module):
     """Everything the ODE solve needs, held as static configuration.
 
@@ -144,32 +172,23 @@ class SolverConfig(eqx.Module):
         tuple ``atol`` becomes a list. An unregistered class raises rather
         than being guessed at.
         """
-        solver_name: str | None = None
-        for name, cls in SOLVER_REGISTRY.items():
-            if type(self.solver) is cls:
-                solver_name = name
-                break
-        if solver_name is None:
-            raise ValueError(
-                f"Solver class {type(self.solver).__name__!r} is not in SOLVER_REGISTRY; "
-                "register it via register_solver(name, cls) before calling to_dict."
-            )
-        atol_serialised: float | list[float]
-        if isinstance(self.atol, tuple):
-            atol_serialised = list(self.atol)
-        else:
-            atol_serialised = self.atol
-        adjoint_name: str | None = None
-        for name, adjoint_cls in ADJOINT_REGISTRY.items():
-            if type(self.adjoint) is adjoint_cls:
-                adjoint_name = name
-                break
-        if adjoint_name is None:
-            raise ValueError(
-                f"Adjoint class {type(self.adjoint).__name__!r} is not in "
-                "ADJOINT_REGISTRY; register it via register_adjoint(name, cls) "
-                "before calling to_dict."
-            )
+        solver_name = _registry_name(
+            SOLVER_REGISTRY,
+            self.solver,
+            kind="Solver",
+            registry_name="SOLVER_REGISTRY",
+            register_fn="register_solver",
+        )
+        adjoint_name = _registry_name(
+            ADJOINT_REGISTRY,
+            self.adjoint,
+            kind="Adjoint",
+            registry_name="ADJOINT_REGISTRY",
+            register_fn="register_adjoint",
+        )
+        atol_serialised: float | list[float] = (
+            list(self.atol) if isinstance(self.atol, tuple) else self.atol
+        )
         return {
             "solver": solver_name,
             "rtol": self.rtol,

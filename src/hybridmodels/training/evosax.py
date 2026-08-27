@@ -70,7 +70,7 @@ from jax import Array
 from scipy.stats import qmc
 
 from hybridmodels.data import BucketPayload, Dataset
-from hybridmodels.losses import LOSS_REGISTRY
+from hybridmodels.losses import _resolve_loss_fn
 from hybridmodels.penalties import bound_penalty, collocation_grids
 from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
@@ -161,32 +161,6 @@ class EvosaxTrainingConfig:
             raise ValueError("EvosaxTrainingConfig.population_size must be > 0")
         if self.num_generations <= 0:
             raise ValueError("EvosaxTrainingConfig.num_generations must be > 0")
-
-
-def _resolve_loss_fn(
-    loss: Callable[..., Array] | str,
-    channel_idx: tuple[int, ...] | None,
-    channel_weights: tuple[float, ...] | None,
-) -> Callable[[Array, BucketPayload], Array]:
-    """Resolve a string-or-callable loss spec into a ``(pred_obs, bp) -> scalar``.
-
-    Copy of the same-named helper in ``training/optax.py``, duplicated
-    rather than extracted because there are only two call sites.
-    """
-    if isinstance(loss, str):
-        key = loss.lower().strip()
-        if key not in LOSS_REGISTRY:
-            raise ValueError(f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}")
-        base = LOSS_REGISTRY[key]
-    else:
-        base = loss
-    if channel_idx is None and channel_weights is None:
-        return base
-
-    def loss_fn(pred_obs: Array, bp: BucketPayload) -> Array:
-        return base(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
-
-    return loss_fn
 
 
 def _build_single_eval(

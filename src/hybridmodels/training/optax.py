@@ -37,7 +37,7 @@ import optax
 from jaxtyping import Array
 
 from hybridmodels.data import BucketPayload, Dataset
-from hybridmodels.losses import LOSS_REGISTRY
+from hybridmodels.losses import _resolve_loss_fn
 from hybridmodels.penalties import bound_penalty, collocation_grids
 from hybridmodels.predictors.base import reinitialize_pytree_with_key
 from hybridmodels.rng import fold
@@ -274,25 +274,52 @@ def _build_optimizer(name: str, lr: float) -> optax.GradientTransformation:
     )
 
 
-def _resolve_loss_fn(
-    loss: Callable[..., Array] | str,
-    channel_idx: tuple[int, ...] | None,
-    channel_weights: tuple[float, ...] | None,
-) -> Callable[[Array, BucketPayload], Array]:
-    if isinstance(loss, str):
-        key = loss.lower().strip()
-        if key not in LOSS_REGISTRY:
-            raise ValueError(f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}")
-        base = LOSS_REGISTRY[key]
-    else:
-        base = loss
-    if channel_idx is None and channel_weights is None:
-        return base
+def _apply_length_mask(bp: BucketPayload, length_mask_fraction: Array) -> BucketPayload:
+    """Narrow the bucket's mask to the first ``fraction`` of its timestamps.
 
-    def loss_fn(pred_obs: Array, bp: BucketPayload) -> Array:
-        return base(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
+    This masks the **loss**, never the integration: the solver still runs the
+    full trajectory, and only the leading prefix of the observation times is
+    scored. That is what keeps a long-horizon divergence from drowning the
+    gradient early in a run.
 
-    return loss_fn
+    ``length_mask_fraction`` stays traced rather than becoming a Python
+    branch, so a phase that changes the fraction costs no recompile.
+
+    The cutoff is clamped at 1. A fraction small enough to floor to zero
+    would otherwise give an all-false mask, and every loss here divides by a
+    count clamped at 1, so the step would silently score nothing.
+    """
+    T = bp.ts.shape[1]
+    cutoff = jnp.maximum(
+        jnp.ceil(jnp.float32(T) * length_mask_fraction).astype(jnp.int32),
+        jnp.int32(1),
+    )
+    sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
+    return bp._replace(mask=bp.mask & sched_mask)
+
+
+def _predict_bucket_obs(
+    predictors: Any,
+    bp: BucketPayload,
+    *,
+    simulate_fn: Callable[..., Array],
+    state_to_output: Callable[[Array], Array],
+    solver: SolverConfig,
+) -> Array:
+    """Simulate every experiment in the bucket and project to ``[N, T, D]``.
+
+    Deliberately not :func:`hybridmodels.prediction.predict_bucket`, which
+    does the same thing. That one is ``eqx.filter_jit``-decorated, so calling
+    it from here would put training and prediction on one jit cache, which
+    R-J1 separates and ``test_prediction_and_training_kernels_do_not_share_a_cache``
+    asserts against. This body is uncompiled and gets traced into whichever
+    training kernel calls it.
+    """
+
+    def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
+        return state_to_output(simulate_fn(predictors, ts, covariates, y0, solver))
+
+    return jax.vmap(per_experiment, in_axes=(0, 0, 0))(bp.ts, bp.covariates, bp.y0)
 
 
 def _build_bucket_step(
@@ -303,6 +330,14 @@ def _build_bucket_step(
     loss_fn: Callable[[Array, BucketPayload], Array],
     trainable: Any,
 ) -> Callable[[Any, BucketPayload, Array], tuple[Array, Any]]:
+    """Return a jitted ``bucket_step(predictors, bp, fraction) -> (loss, grads)``.
+
+    One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
+    update lives in a separate jitted ``apply_update``, and the bound penalty
+    is charged once per step by ``_build_penalty_step``, outside the bucket
+    loop.
+    """
+
     def loss_eval(
         diff_predictors: Any,
         static_predictors: Any,
@@ -311,13 +346,12 @@ def _build_bucket_step(
         # ``eqx.combine`` walks any pytree shape, so the container is never
         # inspected before the recombined tree goes to simulate_fn.
         predictors = eqx.combine(diff_predictors, static_predictors)
-
-        def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
-            full_state = simulate_fn(predictors, ts, covariates, y0, solver)
-            return state_to_output(full_state)
-
-        pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
-            bp_masked.ts, bp_masked.covariates, bp_masked.y0
+        pred_obs = _predict_bucket_obs(
+            predictors,
+            bp_masked,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
         )
         return loss_fn(pred_obs, bp_masked)
 
@@ -327,13 +361,7 @@ def _build_bucket_step(
     def bucket_step(
         predictors: Any, bp: BucketPayload, length_mask_fraction: Array
     ) -> tuple[Array, Any]:
-        T = bp.ts.shape[1]
-        cutoff = jnp.maximum(
-            jnp.ceil(jnp.float32(T) * length_mask_fraction).astype(jnp.int32),
-            jnp.int32(1),
-        )
-        sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
-        bp_masked = bp._replace(mask=bp.mask & sched_mask)
+        bp_masked = _apply_length_mask(bp, length_mask_fraction)
         diff_part, static_part = eqx.partition(predictors, trainable)
         return grad_fn(diff_part, static_part, bp_masked)
 
@@ -357,19 +385,13 @@ def _build_score_bucket(
 
     @eqx.filter_jit
     def score_bucket(predictors: Any, bp: BucketPayload, length_mask_fraction: Array) -> Array:
-        T = bp.ts.shape[1]
-        cutoff = jnp.maximum(
-            jnp.ceil(jnp.float32(T) * length_mask_fraction).astype(jnp.int32),
-            jnp.int32(1),
-        )
-        sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
-        bp_masked = bp._replace(mask=bp.mask & sched_mask)
-
-        def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
-            return state_to_output(simulate_fn(predictors, ts, covariates, y0, solver))
-
-        pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
-            bp_masked.ts, bp_masked.covariates, bp_masked.y0
+        bp_masked = _apply_length_mask(bp, length_mask_fraction)
+        pred_obs = _predict_bucket_obs(
+            predictors,
+            bp_masked,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
         )
         return loss_fn(pred_obs, bp_masked)
 
