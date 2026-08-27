@@ -134,7 +134,7 @@ freezing ``BoundScaler`` leaves is the common case.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step data loss**, one entry per step, concatenated across phases. It can go up. The bound penalty is excluded, so a ramping penalty weight cannot move the series and runs with different weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from :func:`~hybridmodels.training.evosax.train_with_evosax`, whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever ``length_schedule`` changes, so the returned model always comes from the last horizon trained on. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L677)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L699)</small>
 
 ---
 
@@ -226,4 +226,4 @@ least one scalar.
 | `history` | `list[float]` | **Best loss so far** at the end of each generation, so the series is monotone non-increasing. Length ``config.num_generations``.<br><br>It differs from :func:`~hybridmodels.training.optax.train_with_optax`, whose history is the raw per-step loss and can go up. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>When ``config.penalty_weight > 0`` the recorded value is the combined objective, since evosax ranks by one scalar. The optax history excludes its penalty. |
 | `best_predictors` | `Any` | Predictors rebuilt from the lowest-loss flat vector seen in any generation, the warm-up evaluation of the input predictors included. Same container shape as the input. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L308)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L282)</small>

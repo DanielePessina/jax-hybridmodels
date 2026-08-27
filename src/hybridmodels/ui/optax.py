@@ -25,7 +25,6 @@ import time
 from collections import deque
 from typing import Any
 
-from rich.align import Align
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
@@ -39,10 +38,15 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-
-def _format_loss(loss: float) -> str:
-    """Format a loss value to four decimal places."""
-    return f"{float(loss):.4f}"
+from hybridmodels.ui._rich import (
+    format_value,
+    half_width,
+    render_compile_panel,
+    render_footer,
+    render_message_log,
+    safe_stop,
+    safe_update,
+)
 
 
 class RichTrainingUI:
@@ -209,9 +213,9 @@ class RichTrainingUI:
             try:
                 # Penalty is appended only when it is actually charged,
                 # so runs that never enable it read exactly as before.
-                text = _format_loss(loss)
+                text = format_value(loss)
                 if penalty > 0.0:
-                    text = f"{text} +pen {_format_loss(penalty)}"
+                    text = f"{text} +pen {format_value(penalty)}"
                 self._phase_progress_bar.update(
                     self._phase_task_id,
                     advance=1,
@@ -240,25 +244,11 @@ class RichTrainingUI:
     # ------------------------------------------------------------------
 
     def _safe_stop_live(self) -> None:
-        if self._live is not None:
-            try:
-                self._live.update(self._render())
-            except Exception:
-                pass
-            try:
-                self._live.stop()
-            except Exception:
-                pass
-            self._live = None
+        safe_stop(self._live, self._render)
+        self._live = None
 
     def _refresh(self) -> None:
-        if self._live is not None:
-            try:
-                self._live.update(self._render())
-            except Exception:
-                # Rendering errors must never propagate into the training
-                # loop. UI is best-effort.
-                pass
+        safe_update(self._live, self._render)
 
     def _render(self) -> RenderableType:
         children: list[RenderableType] = [
@@ -271,16 +261,7 @@ class RichTrainingUI:
         # on this ordering).
         if self._final_loss is not None:
             children.append(self._render_footer())
-        # Constrain to half the current terminal width. Rich panels default
-        # to ``expand=True`` and the dashboard otherwise sprawls across the
-        # full terminal, which both wastes horizontal space and overflows
-        # the buffer when the terminal is resized narrower mid-run. Wrapping
-        # in ``Align.left`` with an explicit width pins the dashboard to
-        # half-width regardless of terminal size; the value is recomputed on
-        # each refresh so it tracks live resizes. ``max(40, …)`` keeps
-        # contents legible on very narrow terminals.
-        target_width = max(40, self._console.width // 2)
-        return Align.left(Group(*children), width=target_width)
+        return half_width(self._console, children)
 
     def _render_header(self) -> Panel:
         elapsed = 0.0
@@ -301,7 +282,7 @@ class RichTrainingUI:
         if self._final_loss is not None:
             # The header shows the final-loss summary once the run is over.
             # The word "final" here is what the rendered-output test pins on.
-            body.add_row("final loss", _format_loss(self._final_loss))
+            body.add_row("final loss", format_value(self._final_loss))
 
         title = "training run" if self._run_active else "training run (finished)"
         return Panel(body, title=title, border_style="cyan")
@@ -315,20 +296,12 @@ class RichTrainingUI:
         return self._render_phase_progress()
 
     def _render_compile_panel(self) -> Panel:
-        if self._compile_bucket_idx is None:
-            body: RenderableType = Text("waiting for first compile…", style="dim")
-        else:
-            shape_repr = (
-                "x".join(str(d) for d in self._compile_bucket_shape)
-                if self._compile_bucket_shape is not None
-                else "?"
-            )
-            status = "compiling" if self._compile_active else "compiled"
-            label = f"{status} bucket {self._compile_bucket_idx} (shape {shape_repr})"
-            if self._compile_total_buckets is not None:
-                label += f" of {self._compile_total_buckets}"
-            body = Text(label)
-        return Panel(body, title="compile", border_style="magenta")
+        return render_compile_panel(
+            bucket_idx=self._compile_bucket_idx,
+            bucket_shape=self._compile_bucket_shape,
+            total_buckets=self._compile_total_buckets,
+            active=self._compile_active,
+        )
 
     def _render_phase_progress(self) -> RenderableType:
         if self._phase_progress_bar is None:
@@ -350,23 +323,10 @@ class RichTrainingUI:
         )
 
     def _render_footer(self) -> Panel:
-        # Final-loss summary at the bottom of the dashboard.
-        final = _format_loss(self._final_loss) if self._final_loss is not None else "-"
-        body = Text.assemble(("final loss ", "bold"), final)
-        return Panel(body, title="run summary", border_style="cyan")
+        return render_footer("final loss", self._final_loss)
 
     def _render_message_log(self) -> Panel:
-        if not self._messages:
-            body: RenderableType = Text("(no messages)", style="dim")
-        else:
-            lines = Text()
-            for i, (level, text) in enumerate(self._messages):
-                if i:
-                    lines.append("\n")
-                lines.append(f"[{level}] ", style="bold")
-                lines.append(text)
-            body = lines
-        return Panel(body, title="messages", border_style="blue")
+        return render_message_log(self._messages)
 
     # Defensive cleanup: if the user discards the instance mid-run we don't
     # want the Live thread to hang the interpreter. ``__del__`` is best

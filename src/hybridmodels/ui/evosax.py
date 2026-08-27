@@ -28,8 +28,7 @@ import time
 from collections import deque
 from typing import Any
 
-from rich.align import Align
-from rich.console import Console, Group, RenderableType
+from rich.console import Console, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
@@ -42,15 +41,15 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-
-def _format_fitness(value: float) -> str:
-    """Format a fitness value to four decimal places.
-
-    Same convention as ``hybridmodels.ui.optax._format_loss``, so the
-    rendered-output tests for both UIs can share one ``\\d\\.\\d{4,}``
-    regex.
-    """
-    return f"{float(value):.4f}"
+from hybridmodels.ui._rich import (
+    format_value,
+    half_width,
+    render_compile_panel,
+    render_footer,
+    render_message_log,
+    safe_stop,
+    safe_update,
+)
 
 
 class RichEvosaxUI:
@@ -251,25 +250,11 @@ class RichEvosaxUI:
     # ------------------------------------------------------------------
 
     def _safe_stop_live(self) -> None:
-        if self._live is not None:
-            try:
-                self._live.update(self._render())
-            except Exception:
-                pass
-            try:
-                self._live.stop()
-            except Exception:
-                pass
-            self._live = None
+        safe_stop(self._live, self._render)
+        self._live = None
 
     def _refresh(self) -> None:
-        if self._live is not None:
-            try:
-                self._live.update(self._render())
-            except Exception:
-                # Rendering errors must never propagate into the training
-                # loop. UI is best-effort.
-                pass
+        safe_update(self._live, self._render)
 
     def _render(self) -> RenderableType:
         children: list[RenderableType] = [
@@ -283,11 +268,7 @@ class RichEvosaxUI:
         # on this ordering).
         if self._final_fitness is not None:
             children.append(self._render_footer())
-        # Constrain to half the current terminal width. The matching
-        # comment in ``hybridmodels.ui.optax.RichTrainingUI._render`` has
-        # the reasoning: sprawling panels and resize-time overflow.
-        target_width = max(40, self._console.width // 2)
-        return Align.left(Group(*children), width=target_width)
+        return half_width(self._console, children)
 
     def _render_header(self) -> Panel:
         elapsed = 0.0
@@ -301,11 +282,11 @@ class RichEvosaxUI:
         body.add_row("population", str(self._population_size))
         body.add_row("elapsed", f"{elapsed:.2f}s")
         if self._best_so_far is not None:
-            body.add_row("best so far", _format_fitness(self._best_so_far))
+            body.add_row("best so far", format_value(self._best_so_far))
         if self._final_fitness is not None:
             # The header shows the final fitness once the run is over. The
             # word "final" here is what the rendered-output test pins on.
-            body.add_row("final fitness", _format_fitness(self._final_fitness))
+            body.add_row("final fitness", format_value(self._final_fitness))
 
         title = "evosax run" if self._run_active else "evosax run (finished)"
         return Panel(body, title=title, border_style="cyan")
@@ -319,20 +300,12 @@ class RichEvosaxUI:
         return self._render_generation_progress()
 
     def _render_compile_panel(self) -> Panel:
-        if self._compile_bucket_idx is None:
-            body: RenderableType = Text("waiting for first compile…", style="dim")
-        else:
-            shape_repr = (
-                "x".join(str(d) for d in self._compile_bucket_shape)
-                if self._compile_bucket_shape is not None
-                else "?"
-            )
-            status = "compiling" if self._compile_active else "compiled"
-            label = f"{status} bucket {self._compile_bucket_idx} (shape {shape_repr})"
-            if self._compile_total_buckets is not None:
-                label += f" of {self._compile_total_buckets}"
-            body = Text(label)
-        return Panel(body, title="compile", border_style="magenta")
+        return render_compile_panel(
+            bucket_idx=self._compile_bucket_idx,
+            bucket_shape=self._compile_bucket_shape,
+            total_buckets=self._compile_total_buckets,
+            active=self._compile_active,
+        )
 
     def _render_generation_progress(self) -> RenderableType:
         if self._gen_progress_bar is None:
@@ -353,32 +326,19 @@ class RichEvosaxUI:
         for gen_idx, best, mean, best_so_far in self._generations:
             table.add_row(
                 str(gen_idx),
-                _format_fitness(best),
-                _format_fitness(mean),
-                _format_fitness(best_so_far),
+                format_value(best),
+                format_value(mean),
+                format_value(best_so_far),
             )
         if not self._generations:
             table.add_row("-", "-", "-", "-")
         return Panel(table, title="recent generations", border_style="yellow")
 
     def _render_message_log(self) -> Panel:
-        if not self._messages:
-            body: RenderableType = Text("(no messages)", style="dim")
-        else:
-            lines = Text()
-            for i, (level, text) in enumerate(self._messages):
-                if i:
-                    lines.append("\n")
-                lines.append(f"[{level}] ", style="bold")
-                lines.append(text)
-            body = lines
-        return Panel(body, title="messages", border_style="blue")
+        return render_message_log(self._messages)
 
     def _render_footer(self) -> Panel:
-        # Final-fitness summary at the bottom of the dashboard.
-        final = _format_fitness(self._final_fitness) if self._final_fitness is not None else "-"
-        body = Text.assemble(("final fitness ", "bold"), final)
-        return Panel(body, title="run summary", border_style="cyan")
+        return render_footer("final fitness", self._final_fitness)
 
     # Defensive cleanup: if the user discards the instance mid-run we don't
     # want the Live thread to hang the interpreter. ``__del__`` is best

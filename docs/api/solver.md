@@ -52,7 +52,7 @@ tolerance change must change the compiled solve.
 | `adjoint` | `diffrax.AbstractAdjoint` | How gradients are taken back through the solve. See ``ADJOINT_REGISTRY`` for what each choice costs. |
 | `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See :meth:`stepsize_controller`. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L76)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L104)</small>
 
 #### `SolverConfig.stepsize_controller()`
 
@@ -72,7 +72,7 @@ I-control, so this reproduces the ``PIDController(rtol, atol)`` the
 examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L118)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L146)</small>
 
 #### `SolverConfig.to_dict()`
 
@@ -86,7 +86,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L140)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L168)</small>
 
 ---
 

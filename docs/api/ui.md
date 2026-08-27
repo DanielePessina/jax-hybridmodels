@@ -307,7 +307,7 @@ window updates the model only; the next ``on_run_start`` rebuilds Live
 afresh, so a single ``RichTrainingUI`` instance can be reused for
 sequential runs (used in tests).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/optax.py#L48)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/optax.py#L52)</small>
 
 ---
 
@@ -344,4 +344,4 @@ The instance carries one :class:`rich.live.Live` between
 ``on_run_start`` so a single instance can be reused across sequential
 runs (used in tests).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/evosax.py#L56)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/evosax.py#L55)</small>
