@@ -1,6 +1,6 @@
 # Hybrid ODE: keep the physics, learn the gaps
 
-One script, `examples/hybrid_ode/train_hybrid_ode.py`. A mechanistic model with two holes in it, both filled by trainable networks, with every physical quantity held inside a declared range and the measurements sampled irregularly per channel.
+One script, `examples/hybrid_ode/train_hybrid_ode.py`: a mechanistic model with two holes, both filled by trainable networks, every physical quantity held inside a declared range, and the measurements sampled irregularly per channel.
 
 ```bash
 uv run python examples/hybrid_ode/train_hybrid_ode.py
@@ -47,11 +47,11 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
     ...
 ```
 
-A covariate does not change during a trajectory, so anything depending only on covariates is computed before `diffeqsolve` and closed over as a constant. Its cost is then independent of how many solver steps run, and it never appears on the tape the backward pass walks. A term depending on the state has to run inside.
+A covariate does not change during a trajectory, so anything depending only on covariates is computed before `diffeqsolve` and closed over as a constant. Its cost is then independent of the step count, and it never appears on the tape the backward pass walks. A term depending on the state has to run inside.
 
 A trainable network inside a vector field is a neural ODE. [diffrax](https://docs.kidger.site/diffrax/) and [Equinox](https://docs.kidger.site/equinox/) document that technique; this example uses it in one line rather than explaining it.
 
-The library is not told which network is which. Both are ordinary calls, and you place them by writing the code. The two travel as a plain tuple, unpacked at the top of `simulate_fn`. The container is never inspected, so a dict or a NamedTuple works the same, and `--mechanistic-only` shortens the tuple to one entry with no other change.
+The library is never told which is which. Both are ordinary calls, placed by writing the code. They travel as a plain tuple, unpacked at the top of `simulate_fn`, and the container is never inspected, so `--mechanistic-only` just shortens the tuple.
 
 Since the residual runs inside the solve, `SolverConfig` gets a checkpointing adjoint. `DirectAdjoint`, the library default, stores the whole forward trajectory, and with a network in the vector field that is usually the memory bottleneck.
 
@@ -67,7 +67,7 @@ solver = SolverConfig(..., adjoint=diffrax.RecursiveCheckpointAdjoint())
 out_scaler=BoundScaler(bounds=((1e-3, 1.0),), transform="sigmoid", warp="log10")
 ```
 
-Under the default linear normalisation the midpoint of that box is 0.5, so every rate in the data sits in the bottom 3% of the range, where the sigmoid is steepest and the network has to emit large negative latents to reach anything. A **warp** reparameterises the physical axis before normalising. It changes what "halfway between the bounds" means without changing which physical values are reachable. Under `log10` the midpoint is 0.032 and the data covers the middle of the box.
+Under linear normalisation that box has midpoint 0.5, so every rate in the data sits in the bottom 3% of the range, where the sigmoid is steepest and only large negative latents reach. A **warp** reparameterises the physical axis before normalising: it changes what "halfway between the bounds" means without changing which values are reachable. Under `log10` the midpoint is 0.032 and the data covers the middle of the box.
 
 The check that this worked is the fitted rate against the law it never saw:
 
@@ -113,7 +113,7 @@ register_warp(
 )
 ```
 
-`forward(0) = 0`, so the box midpoint stays at zero and a freshly initialised residual produces a correction near zero rather than at some arbitrary interior point. [`register_bound_transform`](/api/transforms) is the same idea on the squash axis.
+`forward(0) = 0`, so the box midpoint stays at zero and a fresh residual starts near no correction rather than at some arbitrary interior point. [`register_bound_transform`](/api/transforms) is the same idea on the squash axis.
 
 A scaler stores its warp by name, which is what keeps a saved model a small JSON sidecar plus an array file. A custom warp therefore has to be registered before a model referencing it can be loaded.
 
@@ -161,7 +161,7 @@ It is also evaluated on a **collocation grid** over each predictor's declared in
     residual_net  0.0000e+00
 ```
 
-The residual sits at exactly zero. The rate network does not, and that is the penalty doing its job: `rate_net` is declared valid over 270 to 350 K, the data only reaches 340 K, and the fitted network extrapolates hard enough at the warm end to press against the top of its $k$ box. The training loss cannot see that, because no experiment is there. The trade runs the other way too: a trajectory-blind penalty cannot tell you whether one particular solve pushed an input out of range.
+The residual sits at exactly zero. The rate network does not, and that is the penalty working: `rate_net` is declared valid over 270 to 350 K, the data only reaches 340 K, and the fitted network extrapolates hard enough at the warm end to press against the top of its $k$ box. The training loss cannot see that, because no experiment is there. The trade runs both ways: a trajectory-blind penalty cannot say whether one particular solve pushed an input out of range.
 
 Run with `--penalty-weight 0` to see the term switched off.
 
@@ -176,10 +176,10 @@ Default settings, one CPU, seeds fixed.
 | `--mechanistic-only`, irregular | 0.662 | 0.702 | **32.6x** | n/a |
 | `--inner kan`, irregular | 0.990 | 0.992 | 6.40x | 37% |
 
-The third row is the argument for hybrid models, and it is not the $R^2$ column that makes it. Dropping the residual leaves the rate network as the only flexible thing in the model, so it absorbs the missing cubic term into $k$, and the recovered rate goes from 1.41 times the truth at 280 K to 32.6 times. An unmodelled term does not stay politely in its own residual. It contaminates whichever parameter is flexible enough to absorb it, which is usually the one you built the experiment to measure.
+The third row is the argument for hybrid models, and it is not the $R^2$ column that makes it. Dropping the residual leaves the rate network as the only flexible thing in the model, so it absorbs the missing cubic term into $k$ and the recovered rate goes from 1.41 times the truth at 280 K to 32.6 times. An unmodelled term does not stay in its own residual; it contaminates whichever parameter is flexible enough to absorb it, usually the one you built the experiment to measure.
 
 The fourth row is the same effect running the other way. A KAN residual is more expressive, fits the trajectories slightly better, recovers the residual better, and recovers $k$ considerably worse, because it can absorb part of the damping too. If a fitted parameter is what you came for, the residual wants to be the least expressive thing that closes the gap.
 
-The two data layouts reach the same trajectory accuracy, which is the point of the bucketing. Half a mask is not a handicap. Their rate laws differ at the cold end because the irregular set draws end times up to 9 while the rectangular set stops at 8, and a cold experiment barely decays inside either window.
+Both data layouts reach the same trajectory accuracy, which is the point of the bucketing: half a mask is not a handicap. Their rate laws differ at the cold end because the irregular set draws end times up to 9 where the rectangular set stops at 8, and a cold experiment barely decays inside either window.
 
 The residual RMS is measured on a grid over the data range against a true residual RMS of 0.249. It is only identifiable where trajectories went, and the grid includes corners none of them visited, so the number overstates the error the trajectory fit sees.

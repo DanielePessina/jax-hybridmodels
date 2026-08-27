@@ -80,14 +80,12 @@ def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
     """Pointwise Gaussian NLL ``0.5 * (log(2*pi*var) + (p-y)**2/var)`` with mask gating.
 
     Every input that could be NaN at a masked-out cell is replaced with a
-    benign value before any arithmetic, and only then is the term multiplied
-    by the mask. ``var_safe`` swaps masked variance for ``1.0``, so the
-    following ``log`` and division stay finite even if the simulator wrote a
-    NaN there. ``var_stable`` clips at ``1e-12``, which keeps ``log`` and
-    division finite when a real but tiny variance was supplied.
+    benign value before any arithmetic, and only then gated by the mask.
+    ``var_safe`` swaps masked variance for ``1.0``; ``var_stable`` clips at
+    ``1e-12`` so a real but tiny variance still gives finite ``log`` and
+    division.
 
-    The result has the same ``[N, T, D]`` shape as the inputs and is exactly
-    zero at masked-out positions.
+    Same ``[N, T, D]`` shape as the inputs, exactly zero where masked out.
     """
     var_safe = jnp.where(m, var, 1.0)
     var_stable = jnp.maximum(var_safe, 1e-12)
@@ -128,10 +126,8 @@ def masked_mse(
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
     # Sanitise the inputs before squaring, then gate the output. Gating only
-    # the output leaves a bug, because jnp.where evaluates both branches and
-    # still computes the dead branch's local derivative, so a NaN or inf in a
-    # masked cell reaches the backward pass as 0 * nan = nan. This is the same
-    # double-where discipline _gaussian_nll_terms uses.
+    # the output is not enough: jnp.where still computes the dead branch's
+    # local derivative, so a NaN in a masked cell returns as 0 * nan = nan.
     p_safe = jnp.where(m, p, 0.0)
     y_safe = jnp.where(m, y, 0.0)
     se = jnp.where(m, (p_safe - y_safe) ** 2, 0.0)
@@ -188,10 +184,8 @@ def bal_mse(
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
     # Sanitise the inputs before squaring, then gate the output. Gating only
-    # the output leaves a bug, because jnp.where evaluates both branches and
-    # still computes the dead branch's local derivative, so a NaN or inf in a
-    # masked cell reaches the backward pass as 0 * nan = nan. This is the same
-    # double-where discipline _gaussian_nll_terms uses.
+    # the output is not enough: jnp.where still computes the dead branch's
+    # local derivative, so a NaN in a masked cell returns as 0 * nan = nan.
     p_safe = jnp.where(m, p, 0.0)
     y_safe = jnp.where(m, y, 0.0)
     se = jnp.where(m, (p_safe - y_safe) ** 2, 0.0)

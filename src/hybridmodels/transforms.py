@@ -1,34 +1,27 @@
 """The two independent choices behind a bound scaler, each a named registry.
 
 ``BoundScaler`` maps a bounded physical quantity onto an unbounded
-*latent* coordinate, the number a neural network can produce freely
-without ever leaving the box. It does this in two steps, and each step
-answers a different question.
+*latent* coordinate in two steps, and each step answers a different
+question.
 
-The *warp* decides what "halfway between the bounds" means. Take a rate
-constant bounded by ``(1e-6, 1e2)``. Its plausible values are spread over
-eight decades, and a linear warp puts 99.999% of the latent range above
-``1e-2``, collapsing the whole low end into a sliver you cannot resolve.
-``"log10"`` puts the midpoint at ``1e-2`` instead of ``50``, which is what
-anyone fitting kinetics means by the middle of that range.
+The *warp* decides what "halfway between the bounds" means. For a rate
+constant bounded by ``(1e-6, 1e2)``, a linear warp puts 99.999% of the
+latent range above ``1e-2`` and collapses the low end into an unresolvable
+sliver. ``"log10"`` puts the midpoint at ``1e-2`` instead of ``50``.
 
-The *transform* is the squashing function that folds the infinite latent
-line into the unit interval. It decides how the squash saturates near the
-bounds, and therefore how fast the gradient dies once a predictor pushes
-against one.
+The *transform* is the squash that folds the latent line into the unit
+interval. It decides how fast the gradient dies once a predictor pushes
+against a bound.
 
-The two compose freely, and bounds are always declared in physical units
-whichever warp is chosen.
+The two compose freely, and bounds are declared in physical units either
+way.
 
-Both are name-keyed registries, matching ``SOLVER_REGISTRY`` in
-``solver.py`` and ``LOSS_REGISTRY`` in ``losses.py``. A scaler stores only
-the name, so it stays JSON-friendly and round-trips through
-``eqx.tree_serialise_leaves`` without changing its leaf structure. That is
-also why these are plain ``NamedTuple`` records rather than modules. They
-hold no arrays, so composing one into ``BoundScaler`` would add a pytree
-node that serialises to nothing and could only be rebuilt from the
-load-side template.
-
+Both are name-keyed registries, matching ``SOLVER_REGISTRY`` and
+``LOSS_REGISTRY``. A scaler stores only the name, so it stays
+JSON-friendly and round-trips through ``eqx.tree_serialise_leaves``
+without changing its leaf structure. That is also why these are plain
+``NamedTuple`` records: holding no arrays, composing one into
+``BoundScaler`` would add a pytree node that serialises to nothing.
 Register your own with :func:`register_bound_transform` and
 :func:`register_warp`.
 
@@ -41,15 +34,13 @@ exactly ``0.0``:
     softsign   |z|^-2 / 2    4.1e-3 at z=10,  dead at z~1.1e7
 
 Sigmoid's last usable gradient (3.6e-7, at z=15) is matched by algebraic
-at z~110 and by softsign at z~1178. Polynomial decay still does not
-remove the need for the saturation penalty. Escape time under a gradient
-of c/z^2 scales as z^3, so recovering from z=100 is 1e6 times slower than
-from z=1. Picking a slower-decaying transform turns an impossible
+at z~110 and by softsign at z~1178. Polynomial decay does not remove the
+need for the saturation penalty: escape time under a gradient of c/z^2
+scales as z^3, so a slower-decaying transform turns an impossible
 recovery into a slow one.
 
 ``tanh`` is absent on purpose. ``(1 + tanh z) / 2`` is exactly
-``sigmoid(2z)``, so it would be the sigmoid entry at half temperature and
-nothing else.
+``sigmoid(2z)``, the sigmoid entry at half temperature.
 """
 
 from __future__ import annotations
@@ -87,12 +78,11 @@ class BoundTransform(NamedTuple):
         ``d(inverse)/ds``. Builds the linear continuation that keeps
         ``to_latent`` differentiable for inputs that fall outside the box.
     knee : float
-        The latent at which ``forward`` reaches 0.95, that is, the point
-        where the physical value enters the outer 5% of its box. Default for
-        ``BoundScaler.z_knee``, which is where the saturation penalty starts
-        charging. It must come from the transform. Reusing sigmoid's 2.944
-        for softsign would start charging at 12.5% from the bound instead of
-        5%, roughly 2.7 times more aggressive in physical terms.
+        The latent at which ``forward`` reaches 0.95, where the physical
+        value enters the outer 5% of its box. Default for
+        ``BoundScaler.z_knee``. It must come from the transform: reusing
+        sigmoid's 2.944 for softsign would start charging at 12.5% from the
+        bound instead of 5%.
     """
 
     forward: Callable[[Array], Array]
@@ -106,8 +96,6 @@ class Warp(NamedTuple):
 
     The warp runs first, then the box is normalised to ``[0, 1]`` in warped
     coordinates, then the transform's inverse takes it to the latent.
-    Choosing ``log10`` is what makes a bound spanning decades resolvable at
-    its low end.
 
     Attributes
     ----------
@@ -120,9 +108,8 @@ class Warp(NamedTuple):
         on the declared box.
     requires_positive : bool
         Whether the warp is undefined at or below zero. Checked against the
-        declared bounds at construction, where it can raise a useful error,
-        rather than during a compiled solve where it would appear as a
-        silent nan.
+        declared bounds at construction, where it raises a useful error
+        rather than a silent nan inside a compiled solve.
     """
 
     forward: Callable[[ArrayLike], Array]
@@ -180,12 +167,12 @@ BOUND_TRANSFORMS: dict[str, BoundTransform] = {
 }
 """Name to :class:`BoundTransform`. Extend via :func:`register_bound_transform`.
 
-``algebraic`` is the recommended alternative to ``sigmoid``. It gives 180
-times the latent range before the gradient dies, and it is smooth to all
-orders. ``softsign`` gives far more range again, but it is C^1 and not
-C^2, and its second-derivative jump sits at the box midpoint, a point
-solver steps straddle routinely. Pick it when a predictor is expected to
-live near its bounds and the dynamics are not stiff.
+``algebraic`` is the recommended alternative to ``sigmoid``: 180 times the
+latent range before the gradient dies, and smooth to all orders.
+``softsign`` gives far more range again, but it is C^1 and not C^2, with
+its second-derivative jump at the box midpoint, which solver steps
+straddle routinely. Pick it when a predictor is expected to live near its
+bounds and the dynamics are not stiff.
 """
 
 
@@ -203,11 +190,10 @@ WARPS: dict[str, Warp] = {
 }
 """Name to :class:`Warp`. Extend via :func:`register_warp`.
 
-``log10`` is usually the one you want for a quantity quoted in decades.
-The latent then reads in decades too, and a bound of ``(1e-6, 1e2)`` has a
-midpoint of ``1e-2``. ``log`` is the same change of coordinate in nats. It
-rescales the latent axis and leaves the reachable physical values
-unchanged.
+``log10`` is usually the one you want for a quantity quoted in decades: a
+bound of ``(1e-6, 1e2)`` then has a midpoint of ``1e-2``. ``log`` is the
+same change of coordinate in nats, which rescales the latent axis and
+leaves the reachable physical values unchanged.
 """
 
 
@@ -238,15 +224,12 @@ def warp_bounds(
     """Map each ``(low, high)`` pair into warped coordinates, as Python floats.
 
     Call this once when a scaler is constructed and keep the result in a
-    static field. Doing it per call breaks under ``jit``. Inside a compiled
-    function every ``jnp`` operation is recorded rather than executed, so
-    ``jnp.log(1e-6)`` returns a placeholder (a tracer) that ``float()``
-    cannot read. Bounds are static anyway, so the warped edges are
-    compile-time constants with nothing to recompute.
+    static field. Per call it breaks under ``jit``: inside a trace
+    ``jnp.log(1e-6)`` returns a tracer that ``float()`` cannot read. Bounds
+    are static anyway, so the warped edges are compile-time constants.
 
     A custom warp's ``forward`` therefore has to accept a Python float and
-    return something ``float()`` can read. Outside a compiled function,
-    every array library's elementwise function does.
+    return something ``float()`` can read.
     """
     forward = WARPS[warp_name].forward
     return tuple((float(forward(low)), float(forward(high))) for low, high in bounds)
@@ -255,19 +238,16 @@ def warp_bounds(
 def check_bounds(bounds: tuple[tuple[float, float], ...], warp_name: str) -> None:
     """Validate a bounds tuple against a warp, raising with the offending pair.
 
-    Catching these at construction is worth it, because each one otherwise
-    produces wrong numbers during a compiled solve without raising.
+    Each of these otherwise produces wrong numbers during a compiled solve
+    without raising:
 
-    Non-finite edges make the box width ``inf``. Every finite input then
-    normalises to 0, so the predictor sees one constant, ``from_latent``
-    returns ``inf``, and ``box_violation`` divides by ``inf`` and returns
-    ``nan``.
-
-    A non-positive edge under ``log`` or ``log10`` gives ``-inf`` or ``nan``
-    edges, just as quietly.
-
-    ``low >= high`` gives a zero or negative width, so the normalisation
-    divides by zero or flips orientation.
+    - Non-finite edges make the box width ``inf``. Every finite input
+      normalises to 0, ``from_latent`` returns ``inf``, and
+      ``box_violation`` returns ``nan``.
+    - A non-positive edge under ``log`` or ``log10`` gives ``-inf`` or
+      ``nan`` edges, just as quietly.
+    - ``low >= high`` gives a zero or negative width, so the normalisation
+      divides by zero or flips orientation.
     """
     warp = WARPS[warp_name]
     for low, high in bounds:

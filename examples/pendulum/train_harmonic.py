@@ -1,43 +1,15 @@
-"""Harmonic-oscillator hybrid training (single-file end-to-end example).
+"""Recover the frequency of a harmonic oscillator from noisy positions.
 
-Overview
---------
-A minimal, pure-physics counterpart to the crystallisation example: the
-"hidden physics" is a single trainable scalar — the angular frequency
-``omega`` of a 1-D harmonic oscillator. The ODE is the textbook system::
+The hidden physics is one trainable scalar, the angular frequency ``omega``
+of ``dx/dt = v``, ``dv/dt = -omega^2 x``. Each experiment is one oscillator
+with a different ``(x0, v0)`` and the same true ``omega = 1.0``. Only
+position is observed; velocity is latent state. A ``BoundedPredictor``
+confines ``omega`` to ``[0.5, 2.0]`` and training has to find it.
 
-    dx/dt = v
-    dv/dt = -omega^2 * x
+Because the answer is known, this is the example to run to check the
+pipeline is wired correctly rather than whether a model is any good.
 
-Each experiment in the synthetic dataset is one oscillator with a known
-ground-truth ``omega = 1.0`` and a different initial state ``(x0, v0)``.
-Only the position channel is observed (with light Gaussian noise on top of
-the closed-form solution); velocity is part of the latent state.
-
-A ``BoundedPredictor`` wraps a single-leaf ``OmegaPredictor`` and bounds
-``omega`` into ``[0.5, 2.0]``. The trainer is invited to recover ``omega ≈ 1.0``
-from positions alone.
-
-Initial state convention
-------------------------
-``y0 = [x0, v0]`` is constructed by ``_y0_fn`` from a ground-truth tuple
-synthesised at dataset-build time. Both components are needed because the
-ODE is second-order and the predictor only owns ``omega``.
-
-Phase status
-------------
-Same surface as ``train_kinetic.py``: phases 1-9. The synthetic dataset
-exercises ``ChannelObs`` / ``Experiment`` / ``make_dataset`` / ``BoundedPredictor``
-/ ``train_with_optax`` end-to-end on a problem with a known optimum, which
-makes it useful both as documentation and as a quick sanity check that
-training is wired correctly.
-
-How to run
-----------
-``uv run python examples/pendulum/train_harmonic.py``
-
-No external data — the dataset is synthesised on every run from the closed
-form ``x(t) = x0 cos(omega t) + (v0 / omega) sin(omega t)``.
+Run: ``uv run python examples/pendulum/train_harmonic.py``
 """
 
 # ruff: noqa: F722
@@ -67,9 +39,8 @@ from hybridmodels import (
 from hybridmodels.predictors.base import Predictor
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
-# ``examples/_shared`` is a sibling of this scenario directory; add the
-# parent of this file to sys.path so the helpers import as a top-level
-# package without requiring any install step.
+# ``examples/_shared`` is a sibling directory; put it on sys.path so the
+# helpers import without an install step.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402
     apply_default_style,
@@ -79,16 +50,8 @@ from _shared import (  # noqa: E402
     trajectory_plot,
 )
 
-# --------------------------------------------------------------------------- #
-# Constants                                                                   #
-# --------------------------------------------------------------------------- #
-
 OMEGA_TRUE: float = 1.0
-"""Ground-truth angular frequency. Training should recover this from data."""
-
 OMEGA_BOUNDS: tuple[float, float] = (0.5, 2.0)
-"""Search box for the recovered ``omega``; ``BoundScaler`` keeps the latent
-parameter inside this interval via the sigmoid transform."""
 
 INITIAL_STATES: tuple[tuple[float, float], ...] = (
     (1.0, 0.0),
@@ -98,41 +61,21 @@ INITIAL_STATES: tuple[tuple[float, float], ...] = (
     (-0.7, 0.4),
     (0.3, 0.9),
 )
-"""Per-experiment ``(x0, v0)`` initial conditions."""
 
+# Five time units is about 0.8 of a period at omega=1, enough phase coverage
+# to fit omega without aliasing into the wrong basin.
 T_MAX: float = 5.0
-"""Final observation time, in oscillator units (omega=1 -> period 2π ~ 6.28).
-
-Five units cover roughly 0.8 of one period — enough phase coverage to fit
-``omega`` without aliasing into the wrong basin of attraction."""
-
 N_TIMESTEPS: int = 12
-"""Per-experiment number of evenly-spaced observations on ``[0, T_MAX]``."""
-
 NOISE_STD: float = 0.02
-"""Gaussian noise standard deviation applied to observed positions."""
-
 OUTPUT_CHANNELS: tuple[str, ...] = ("position",)
-"""Only the first state component (``x``) is observable."""
-
-
-# --------------------------------------------------------------------------- #
-# Predictor — a single-leaf scalar bounded into [0.5, 2.0]                    #
-# --------------------------------------------------------------------------- #
 
 
 class OmegaPredictor(Predictor):
-    """Trivial predictor whose only trainable parameter is a scalar ``omega``.
+    """One trainable scalar, ignoring its input.
 
-    Wrapped by ``BoundedPredictor`` in ``_build_predictor``; the wrapper's
-    ``out_scaler`` maps the unbounded latent value to the physical box
-    ``OMEGA_BOUNDS``. The predictor's ``__call__`` ignores the input — it
-    returns the same scalar regardless of the covariate it receives, since
-    every experiment shares the same ground-truth ``omega``.
-
-    Implementing ``initialized_with_key`` lets ``reinitialize_with_key`` /
-    the optax tournament re-init the leaf with a fresh standard-normal
-    sample rather than re-running the abstract default.
+    Every experiment shares the same ground-truth ``omega``, so the same
+    value comes back whatever covariate arrives. ``initialized_with_key``
+    is what the tournament calls to draw a fresh starting point.
     """
 
     omega_lat: Array
@@ -148,20 +91,12 @@ class OmegaPredictor(Predictor):
 
 
 def _build_predictor(key: Array) -> BoundedPredictor:
-    """Construct ``BoundedPredictor`` wrapping the ``OmegaPredictor``.
+    """Wrap ``OmegaPredictor`` so its latent scalar lands in ``OMEGA_BOUNDS``.
 
-    Pipeline ``dict[str, Array] -> [omega]``::
-
-        BoundedPredictor.input_keys : ("dummy",) -> [1]
-        in_scaler                   : [1] physical -> [1] latent (no-op in practice
-                                      because the inner predictor ignores its input)
-        OmegaPredictor              : Array -> [1]   (returns the bounded latent omega)
-        out_scaler                  : [1] latent -> [1] physical (sigmoid into OMEGA_BOUNDS)
-
-    ``BoundedPredictor`` needs at least one input slot (cardinality of
-    ``in_scaler.bounds``); we use a constant ``"dummy"`` covariate to
-    satisfy the framework's named-input contract without leaking
-    experiment-specific information.
+    ``BoundedPredictor`` needs at least one input slot, so a constant
+    ``"dummy"`` covariate satisfies the named-input contract. The
+    ``in_scaler`` is a no-op in practice, since the inner predictor ignores
+    what it receives.
     """
     in_scaler = BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid")
     inner = OmegaPredictor(jr.normal(key))
@@ -174,17 +109,11 @@ def _build_predictor(key: Array) -> BoundedPredictor:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Hooks: y0_fn, state_to_output                                               #
-# --------------------------------------------------------------------------- #
-
-
 def _y0_fn_factory(initial_state: Float[Array, " 2"]):
     """Per-experiment closure returning the closed-over ``[x0, v0]``.
 
-    ``y0_fn`` must accept ``(covariates, channels)``; both are unused here
-    because the ground-truth state is captured at synthesis time, not
-    derived from the observations.
+    ``y0_fn`` must accept ``(covariates, channels)``, both unused here: the
+    initial state is captured at synthesis time, not read off the data.
     """
 
     def _y0_fn(_cov: dict[str, Array], _channels: dict[str, ChannelObs]) -> Array:
@@ -194,16 +123,8 @@ def _y0_fn_factory(initial_state: Float[Array, " 2"]):
 
 
 def _state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
-    """Project full state ``[x, v]`` to the observed channel ``[x]``.
-
-    Channel order matches ``OUTPUT_CHANNELS = ("position",)``.
-    """
+    """Project full state ``[x, v]`` to the observed channel ``[x]``."""
     return state[..., :1]
-
-
-# --------------------------------------------------------------------------- #
-# simulate_fn — second-order linear ODE                                       #
-# --------------------------------------------------------------------------- #
 
 
 def _simulate_fn(
@@ -215,24 +136,10 @@ def _simulate_fn(
 ) -> Float[Array, "T 2"]:
     """Integrate the harmonic oscillator for one experiment.
 
-    Conforms to the framework's ``simulate_fn`` signature
-    ``(predictor, ts, covariates, y0, solver) -> [T, S]`` — i.e. it
-    returns the full simulator state for every timestamp in ``ts``.
-    The user owns the physics (the vector field built below); the
-    framework owns the surrounding ``vmap`` / ``jit`` / ``grad``
-    plumbing.
-
-    Pipeline
-    --------
-    1. Evaluate ``predictor(covariates) -> [omega]`` (bounded, physical units).
-    2. Build the linear vector field ``f(t, [x, v]) = [v, -omega^2 x]``.
-    3. ``diffrax.diffeqsolve`` over ``ts``.
-
-    Shape conventions
-    -----------------
-    ``ts``: ``[T]`` — observation times.
-    ``y0``: ``[2] = [x0, v0]`` from ``_y0_fn``.
-    Returns ``[T, 2]`` aligned with ``ts``.
+    The framework's ``simulate_fn`` contract:
+    ``(predictor, ts, covariates, y0, solver) -> [T, S]``. Read ``omega``
+    from the predictor in physical units, build the vector field
+    ``f(t, [x, v]) = [v, -omega^2 x]``, and solve it over ``ts``.
     """
     omega = predictor(covariates).reshape(())
     omega_sq = omega * omega
@@ -256,26 +163,16 @@ def _simulate_fn(
     return jnp.asarray(sol.ys)
 
 
-# --------------------------------------------------------------------------- #
-# Synthetic dataset                                                           #
-# --------------------------------------------------------------------------- #
-
-
 def _true_position(omega: float, t: Array, x0: float, v0: float) -> Array:
     """Closed-form solution ``x(t) = x0 cos(ωt) + (v0/ω) sin(ωt)``."""
     return x0 * jnp.cos(omega * t) + (v0 / omega) * jnp.sin(omega * t)
 
 
 def _build_experiments(noise_key: Array) -> list[Experiment]:
-    """Synthesise the harmonic-oscillator dataset.
+    """Synthesise one ``Experiment`` per entry in ``INITIAL_STATES``.
 
-    For each ``(x0, v0)`` in ``INITIAL_STATES`` we sample ``N_TIMESTEPS`` evenly
-    on ``[0, T_MAX]``, evaluate the closed-form position, add Gaussian noise of
-    standard deviation ``NOISE_STD``, and bundle the result into an
-    ``Experiment`` whose ``y0_fn`` returns the ground-truth initial state.
-
-    A single trivial covariate ``"dummy"`` is added so the predictor's
-    ``input_keys`` tuple has a slot to pull on.
+    Positions come from the closed form, sampled evenly on ``[0, T_MAX]``
+    and perturbed by ``NOISE_STD`` Gaussian noise.
     """
     ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
     experiments: list[Experiment] = []
@@ -301,11 +198,6 @@ def _build_experiments(noise_key: Array) -> list[Experiment]:
             )
         )
     return experiments
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                        #
-# --------------------------------------------------------------------------- #
 
 
 def _read_omega(predictor: BoundedPredictor) -> float:
@@ -389,8 +281,8 @@ def main() -> None:
     print(f"\n  recovered omega = {final_omega:.4f} (target {OMEGA_TRUE})")
     print(f"  absolute error  = {abs(final_omega - OMEGA_TRUE):.4f}")
 
-    # Diagnostics + default plots: predict_dataset returns one [N, T, D]
-    # array per bucket; the helpers walk it in lockstep with the dataset.
+    # predict_dataset returns one [N, T, D] array per bucket; the helpers
+    # walk it in lockstep with the dataset.
     print("\n[diagnostics] per-channel parity stats over the training set")
     predictions = predict_dataset(trained, dataset, simulate_fn=_simulate_fn, solver=solver)
     diag = compute_diagnostics(predictions, dataset)

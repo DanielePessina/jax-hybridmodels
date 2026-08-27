@@ -19,11 +19,10 @@ timestamp-axis length so JAX can compile one kernel per bucket shape.
 evolutionary search, and both take the same boolean mask saying which
 parameters may move. ``save_run`` writes the result to disk.
 
-Every public name below is imported lazily. The ``TYPE_CHECKING`` block
-gives type checkers and IDEs the real symbols, while ``__getattr__``
-resolves a name to its module only when someone actually reads it. That
-keeps ``import hybridmodels`` from pulling in diffrax, optax, evosax, and
-rich on a run that needs none of them.
+Every public name below is imported lazily: the ``TYPE_CHECKING`` block
+gives type checkers the real symbols, and ``__getattr__`` resolves a name
+to its module only when read. That keeps ``import hybridmodels`` from
+pulling in diffrax, optax, evosax and rich on a run that needs none.
 """
 
 from importlib import import_module

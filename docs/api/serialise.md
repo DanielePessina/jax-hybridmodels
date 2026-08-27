@@ -25,13 +25,11 @@ save_predictors(path: 'str | Path', predictors: 'Any') -> 'None'
 
 Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 
-``predictors`` is a pytree of ``eqx.Module`` leaves in any container
-shape (tuple, list, dict, NamedTuple, or a bare Module).
-``eqx.tree_serialise_leaves`` walks the leaves the same way whatever the
-container is, writing a flat binary stream of ``np.save``-encoded
-leaves. The caller picks the file extension. ``save_run`` uses ``.eqx``.
+``eqx.tree_serialise_leaves`` walks the leaves the same way whatever
+the container shape, writing a flat binary stream of ``np.save``-encoded
+leaves. The caller picks the file extension; ``save_run`` uses ``.eqx``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L80)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L66)</small>
 
 ---
 
@@ -48,15 +46,12 @@ load_predictors(path: 'str | Path', predictors_template: 'Any') -> 'Any'
 Restore a ``predictors`` pytree from ``path`` using ``predictors_template`` as the skeleton.
 
 ``predictors_template`` must share the saved pytree's container shape
-and per-leaf static configuration, for example the same
-``MLPPredictor`` ``in_size``, ``out_size``, ``width_size``, and
-``depth`` on every predictor leaf. The file's values overwrite the
-template's array leaves. Its static fields stay as they are and supply
-the structure ``equinox`` needs to rebuild the tree.
+and per-leaf static configuration, such as the same ``in_size`` and
+``depth`` on every ``MLPPredictor`` leaf. The file's values overwrite
+the template's array leaves; its static fields supply the structure
+``equinox`` needs. The template is not mutated.
 
-Returns the restored pytree. ``predictors_template`` is not mutated.
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L93)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L77)</small>
 
 ---
 
@@ -93,17 +88,16 @@ Persist a complete training run to ``directory``.
     stringified ``loss``, see module docstring), ``loss_history``,
     and ``extras``.
 
-    ``loss_history_kind`` records which training entry point produced
-    ``loss_history``. It is ``"per_step_data"`` for Optax (the raw
-    value, which can go up) or ``"best_so_far"`` for Evosax (monotone).
-    The two series have the same type and mean different things, so a
-    saved run that did not say which it held could not be read back
-    safely. It is inferred from whichever config was passed.
+    ``loss_history_kind``, inferred from whichever config was passed,
+    records which entry point produced ``loss_history``:
+    ``"per_step_data"`` for Optax (can go up) or ``"best_so_far"`` for
+    Evosax (monotone). The two series share a type and mean different
+    things.
 
-The directory is created, parents included, if it does not exist.
-Existing files are overwritten. This saves rather than appends.
+The directory is created, parents included. Existing files are
+overwritten: this saves rather than appends.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L236)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L198)</small>
 
 ---
 
@@ -124,24 +118,18 @@ load_run(
 
 Reconstruct a run from ``directory``.
 
-Inverse of :func:`save_run`. ``predictors_template`` is required,
-because the framework owns no builder registry (see the module
-docstring), and it must share the saved pytree's container shape and
-per-leaf static configuration.
+Inverse of :func:`save_run`. ``predictors_template`` is required, since
+the framework owns no builder registry, and must share the saved
+pytree's container shape and per-leaf static configuration.
 
-``optax_cls`` and ``evosax_cls`` are optional. Pass them to get the
-metadata's ``optax_config`` and ``evosax_config`` dicts rebuilt as typed
-dataclass instances. Leave them out and the raw dicts come back.
+Pass ``optax_cls`` / ``evosax_cls`` to get the saved config dicts
+rebuilt as typed dataclass instances; leave them out and the raw dicts
+come back.
 
-Loss-field policy
------------------
-A ``loss`` field that was a callable at save time arrives here as the
-string ``"{module}.{qualname}"``. The dataclass field type
-(``Callable | str``) accepts that string as it stands, and no implicit
-re-import happens. Turning it back into a function is the caller's job,
-usually ``importlib.import_module(module).qualname``. That boundary
-stays explicit because dynamic imports inside a load helper fail in
-confusing ways.
+A ``loss`` field that was a callable at save time arrives as the string
+``"{module}.{qualname}"`` and is returned as it stands. Turning it back
+into a function is the caller's job, usually
+``importlib.import_module(module).qualname``.
 
 **Returns**
 
@@ -149,4 +137,4 @@ confusing ways.
 | --- | --- | --- |
 | `dict` |  | Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver`` (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` \| dict \| None), ``evosax_config`` (``EvosaxTrainingConfig`` \| dict \| None), ``loss_history`` (``list[float] \| None``), ``loss_history_kind`` (``str \| None``), ``extras`` (``dict``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L350)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L307)</small>

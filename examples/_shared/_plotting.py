@@ -1,24 +1,12 @@
-"""Default plotting routines for the example scripts.
+"""Default plots for the example scripts.
 
-Two plot kinds are exposed:
+``parity_plot`` scatters predicted against observed, one subplot per
+channel. ``trajectory_plot`` draws per-experiment time series, one row per
+experiment and one column per channel.
 
-* ``parity_plot``: predicted-vs-observed scatter, one subplot per channel,
-  with the ``y = x`` identity line and per-panel R^2/RMSE in the title.
-* ``trajectory_plot``: per-experiment time-series, one row per
-  experiment, one column per channel — predicted curve plus observed
-  scatter under the channel's mask.
-
-Both functions accept a ``save_path`` and return the matplotlib
-``Figure`` so the caller can show, save, or further customise. Callers
-are expected to have applied :func:`apply_default_style` upstream — the
-helpers do not force-apply rcParams (they would otherwise stomp on a
-caller that passes their own ``ax``).
-
-Extension pattern
------------------
-Both helpers are deliberately small and side-effect-light: they only
-read from the diagnostics/dataset and call ``plt`` primitives. To extend,
-copy a function and tweak — composition over a config-bag.
+Both take a ``save_path`` and return the ``Figure``. Neither applies
+rcParams, which would stomp on a caller passing their own ``ax``, so call
+:func:`apply_default_style` first. To extend either, copy and tweak.
 """
 
 from __future__ import annotations
@@ -44,24 +32,20 @@ def parity_plot(
 ) -> Figure:
     """Predicted-vs-observed scatter, one subplot per channel.
 
-    Each subplot draws (a) the observed/predicted scatter and (b) the
-    identity ``y = x`` reference line spanning the union range. Title
-    carries the per-channel R^2 and RMSE so a single glance catches
-    bias/spread.
+    Each subplot carries the identity ``y = x`` line and the channel's R^2
+    and RMSE in its title, so bias and spread read at a glance.
 
     Parameters
     ----------
     diagnostics : dict[str, ChannelDiagnostics]
-        Output of :func:`compute_diagnostics`. The ``obs``/``pred``
-        arrays inside each entry are what gets scattered.
+        Output of :func:`compute_diagnostics`.
     channels : list[str], optional
-        Subset and order of channels to plot. Defaults to every channel
-        in the diagnostics dict (insertion order = dataset order).
+        Subset and order to plot. Defaults to every channel, in dataset
+        order.
     title : str, optional
-        Figure suptitle. Pass ``None`` to skip.
+        Figure suptitle; ``None`` skips it.
     save_path : str | Path, optional
-        If given, the figure is written there with the active
-        ``savefig.dpi``. The figure is still returned.
+        Where to write the figure. It is returned either way.
 
     Returns
     -------
@@ -81,12 +65,12 @@ def parity_plot(
             ax.set_ylabel("predicted")
             continue
         ax.scatter(s.obs, s.pred, s=12, alpha=0.6)
-        # Identity line spans the combined min/max of obs and pred so
-        # bias is visible even when the cloud is far from x = y.
+        # Span the combined min/max, so bias shows even when the cloud is
+        # far from x = y.
         lo = float(min(s.obs.min(), s.pred.min()))
         hi = float(max(s.obs.max(), s.pred.max()))
         if lo == hi:
-            # Degenerate: nothing useful to draw, but still mark the point.
+            # Degenerate, but still mark the point.
             pad = 1.0 if lo == 0.0 else abs(lo) * 0.1
             lo, hi = lo - pad, hi + pad
         ax.plot([lo, hi], [lo, hi], color="black", linestyle="--", linewidth=0.8)
@@ -115,59 +99,44 @@ def trajectory_plot(
     title: str | None = "Trajectories",
     save_path: str | Path | None = None,
 ) -> Figure:
-    """Per-experiment predicted-vs-observed time series, one row per experiment.
+    """Per-experiment predicted-vs-observed time series.
 
-    Layout: ``rows = min(max_experiments, total_experiments)``,
-    ``cols = D`` (one per output channel). Observed values are scattered
-    at the bucket's union timestamps where ``mask`` is True. The
-    predicted curve is drawn either:
+    One row per experiment, one column per channel. Observations are
+    scattered at the bucket's union timestamps where ``mask`` is True.
+    The predicted curve is drawn one of two ways:
 
-    * on the dataset's union timestamp axis (using the pre-computed
-      ``predictions`` argument) — the default when ``predictors`` /
-      ``simulate_fn`` / ``solver`` are not all supplied; or
-    * on a per-experiment dense grid (sorted unique union of the
-      experiment's measured timestamps and ``n_dense_points`` linearly
-      spaced samples between ``t0`` and ``t1``), re-simulated on the fly
-      via ``simulate_fn`` and projected through
-      ``dataset.state_to_output``. Activated when all three model
-      components are passed; this is the recommended path because
-      diffrax adaptive steps in the original ``predictions`` produce
-      visibly piecewise-linear curves between sparse measurement times.
-
-    The dense path runs ``simulate_fn`` eagerly (one call per plotted
-    experiment, no jit). At ``max_experiments=6`` and a few hundred dense
-    points this is cheap; if you bump either dramatically, expect a
-    proportional cost.
+    * on the union timestamp axis, straight from ``predictions``. The
+      fallback when the model trio is not supplied, and visibly
+      piecewise-linear between sparse measurement times.
+    * on a per-experiment dense grid, re-simulated through
+      ``simulate_fn``. Preferred, and active when ``predictors``,
+      ``simulate_fn`` and ``solver`` are all passed. It runs eagerly
+      without jit, one call per plotted experiment, which is cheap at the
+      default caps and scales linearly if you raise them.
 
     Parameters
     ----------
     predictions : tuple of arrays
-        Output of ``predict_dataset``; one ``[N_b, T_b, D]`` entry per
-        bucket. Used as the curve when the dense path is inactive, and
-        always as the source of bucket-walk order so ``max_experiments``
-        picks the same first ``k`` rows in either mode.
+        Output of ``predict_dataset``, one ``[N_b, T_b, D]`` entry per
+        bucket. Always sets the bucket-walk order, so ``max_experiments``
+        picks the same rows in either mode.
     dataset : hybridmodels.Dataset
-        Used for ``output_channel_names``, ``state_to_output`` (dense
-        path), and to walk the bucket-payload list in lockstep with
-        ``predictions``.
+        Read for ``output_channel_names``, ``state_to_output``, and the
+        bucket payloads.
     predictors, simulate_fn, solver : optional
-        Trio that triggers the dense-grid re-simulation. Pass the same
-        objects used for ``predict_dataset``. If any is omitted the
-        helper falls back to plotting ``predictions`` as-is.
+        The trio that turns on dense re-simulation. Pass the same objects
+        used for ``predict_dataset``; omitting any one falls back.
     n_dense_points : int, optional
-        Target size of the linspace component of the dense grid. The
-        actual per-experiment grid is the sorted-unique union of this
-        linspace and the experiment's measured timestamps, so the
-        plotted ts always passes through every measurement. Set to ``0``
-        to disable the dense path even when the model trio is provided.
+        Size of the linspace part of the dense grid. The grid itself is
+        that linspace unioned with the measured timestamps, so the curve
+        always passes through every observation. ``0`` disables the dense
+        path.
     max_experiments : int, optional
-        Upper cap on rows so a 50-experiment dataset doesn't render a
-        gigantic figure by default. Experiments are walked in
-        bucket-payload order.
+        Row cap, so a 50-experiment dataset does not render a giant figure.
     title : str, optional
-        Figure suptitle. Pass ``None`` to skip.
+        Figure suptitle; ``None`` skips it.
     save_path : str | Path, optional
-        If given, the figure is written there.
+        Where to write the figure.
 
     Returns
     -------
@@ -175,10 +144,8 @@ def trajectory_plot(
     """
     channels = list(dataset.output_channel_names)
     state_to_output = dataset.state_to_output
-    # Bundle the dense-path trio into a single optional so type narrowing
-    # propagates from "is not None" into the loop body — keeping the three
-    # individual args nullable (so callers can opt out by omission) while
-    # giving the type checker a single witness to refine on.
+    # Bundled into one optional so the type checker narrows once here
+    # rather than three times inside the loop.
     dense_bundle: tuple[Any, Callable[..., Any], Any] | None = (
         (predictors, simulate_fn, solver)
         if (
@@ -205,11 +172,8 @@ def trajectory_plot(
                 "y_pred": np.asarray(pred[i]),
             }
             if dense_bundle is not None and ts_obs.size >= 2:
-                # Union of measured ts and a uniform linspace, deduped.
-                # Including the measured ts guarantees the plotted curve
-                # passes through every observation; the linspace fills
-                # in the gaps so curvature between sparse measurements is
-                # visible. ``np.unique`` also sorts.
+                # Measured ts keep the curve on every observation, the
+                # linspace fills the gaps. ``np.unique`` also sorts.
                 preds_d, sim_fn_d, solver_d = dense_bundle
                 t0, t1 = float(ts_obs[0]), float(ts_obs[-1])
                 dense_grid = np.linspace(t0, t1, n_dense_points)

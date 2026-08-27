@@ -1,21 +1,16 @@
 """Saying which parameters train and which stay fixed.
 
-Trainability is a boolean *mask*. The mask is a pytree (a nested
-container of leaves that JAX can flatten and rebuild) with exactly the
-structure of the ``predictors`` pytree, but with a ``bool`` wherever the
-predictors have a parameter array. ``True`` means the optimiser may
-update that leaf, ``False`` freezes it. Any container shape works: tuple,
-dict, NamedTuple, or a single Module.
+Trainability is a boolean *mask*: a pytree with exactly the structure of
+``predictors``, holding a ``bool`` wherever the predictors have a
+parameter array. ``True`` means the optimiser may update that leaf.
 
-Both optimisers take the mask directly. Optax reads it through
-``eqx.filter_value_and_grad(..., filter_spec=mask)``. Evosax reads it
-through ``eqx.partition(predictors, mask)``, which splits the pytree into
-a trainable half and a frozen half.
+Both optimisers take the mask directly, Optax through
+``eqx.filter_value_and_grad(..., filter_spec=mask)`` and Evosax through
+``eqx.partition(predictors, mask)``.
 
 The default predicate marks every inexact (floating-point) array leaf as
-trainable. The freezers here are free functions of the form
-``(mask, predictors) -> mask``. None of them mutates its input, so masks
-compose by chaining. A typical pipeline reads:
+trainable. The freezers here are free functions ``(mask, predictors) ->
+mask`` that never mutate their input, so masks compose by chaining:
 
     mask = trainable_mask(predictors)
     mask = freeze_modules_of_type(mask, predictors, BoundScaler)
@@ -37,10 +32,9 @@ import jax.tree_util as jtu
 def default_trainable(leaf: Any) -> bool:
     """Default trainability rule. ``True`` only for inexact-array leaves.
 
-    "Inexact" means a JAX array with a float or complex dtype. Every other
-    leaf is treated as fixed, including ints, bools, Python scalars, and
-    the frozen values of static fields. That matches what a gradient-based
-    optimiser can actually update.
+    "Inexact" means a JAX array with a float or complex dtype. Everything
+    else is fixed, including ints, bools, Python scalars and static-field
+    values, which is what a gradient-based optimiser can actually update.
     """
     return bool(eqx.is_inexact_array(leaf))
 
@@ -51,11 +45,8 @@ def trainable_mask(
 ) -> Any:
     """Build a boolean mask matching the structure of ``predictors``.
 
-    Applies ``predicate`` to every leaf of the ``predictors`` pytree,
-    returning a tree of the same shape whose leaves are ``bool``. Any
-    container shape works (tuple, dict, NamedTuple, single ``eqx.Module``).
-    Both Optax (``eqx.filter_value_and_grad(..., filter_spec=mask)``) and
-    Evosax (``eqx.partition(predictors, mask)``) take the result unchanged.
+    Applies ``predicate`` to every leaf, returning a tree of the same shape
+    whose leaves are ``bool``. Both optimisers take the result unchanged.
     """
     return jtu.tree_map(predicate, predictors)
 
@@ -85,10 +76,9 @@ def freeze_paths(mask: Any, paths: tuple[str, ...]) -> Any:
     lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
     addresses ``mask.inner.mlp.layers[0].weight``.
 
-    A path matching nothing raises. Ignoring it quietly meant a typo left a
-    leaf the caller believed was frozen training as normal, and that shows
-    up as a wrong experiment rather than a wrong program. The error lists
-    the closest real paths, since the usual cause is one wrong segment.
+    A path matching nothing raises, listing the closest real paths. Ignoring
+    it quietly would leave a leaf the caller believed frozen training as
+    normal, which shows up as a wrong experiment, not a wrong program.
     """
     target = set(paths)
     seen: set[str] = set()
@@ -123,9 +113,8 @@ def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
 
     The common use is
     ``freeze_modules_of_type(mask, predictors, BoundScaler)``, which freezes
-    every bound scaler's ``temperature`` leaf. Every example does this,
-    because the temperature sets how sharply the scaler's squash saturates
-    and is not meant to drift while the model trains.
+    every scaler's ``temperature``. The temperature sets how sharply the
+    squash saturates and is not meant to drift while the model trains.
     """
 
     def _is_target(node: Any) -> bool:

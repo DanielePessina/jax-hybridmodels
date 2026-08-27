@@ -1,16 +1,14 @@
 """UI lifecycle protocols and the no-op ``SilentUI``.
 
 Progress reporting is callback-based, not log-based. A training loop
-calls lifecycle methods on the UI object it was handed, at fixed points
-in the run, and the UI decides what to do with them. Writing your own
-means implementing the methods below; nothing needs to inherit from
-anything.
+calls lifecycle methods on the UI object it was handed, and the UI
+decides what to do with them. Writing your own means implementing the
+methods below; nothing inherits from anything.
 
-Two protocols live here. ``TrainingUI`` is what the Optax loop calls and
-``EvosaxUI`` is what the Evosax loop calls. Several event names are
-shared, but the arguments differ enough that a merged supertype would
-only confuse, so they stay separate. A UI that wants to serve both loops
-implements both protocols, as ``SilentUI`` does.
+``TrainingUI`` is what the Optax loop calls, ``EvosaxUI`` what the Evosax
+loop calls. Several event names are shared, but the arguments differ
+enough that a merged supertype would only confuse. A UI serving both
+loops implements both protocols, as ``SilentUI`` does.
 
 UI selection
 ------------
@@ -22,10 +20,9 @@ An explicit ``ui=...`` argument to ``train_with_optax`` /
 Compile events
 --------------
 JIT compilation, once per bucket shape, dominates the first epoch and
-can take tens of seconds. ``on_compile_start``,
-``on_compile_progress`` and ``on_compile_done`` exist so the user sees
-something during that wait. Without them a progress bar sits at zero on
-the first bucket and the run looks hung.
+can take tens of seconds. ``on_compile_start``, ``on_compile_progress``
+and ``on_compile_done`` exist so a progress bar does not sit at zero
+through it and make the run look hung.
 """
 
 from typing import Any, Protocol, runtime_checkable
@@ -35,9 +32,8 @@ from typing import Any, Protocol, runtime_checkable
 class TrainingUI(Protocol):
     """Callback protocol for ``train_with_optax``.
 
-    Implementations are duck-typed (``@runtime_checkable``), so a custom
-    UI just defines the methods and never inherits from this class. The
-    shipped implementations are ``RichTrainingUI`` in ``ui/optax.py`` and
+    Duck-typed (``@runtime_checkable``), so a custom UI just defines the
+    methods. Shipped: ``RichTrainingUI`` in ``ui/optax.py`` and
     ``SilentUI`` below.
 
     Event order during a typical run::
@@ -86,13 +82,12 @@ class TrainingUI(Protocol):
     ) -> None:
         """Fires after each training step. ``step_idx`` counts within the phase.
 
-        ``loss`` is the **data** term alone, never the combined
-        objective. It is the series ``restore_best`` and early stopping
-        act on, and mixing in a penalty whose weight ramps between phases
-        would make successive values incomparable. ``penalty`` reports
-        the unweighted bound penalty next to it. It defaults to ``0.0``
-        so a UI written against the earlier signature still satisfies
-        this protocol.
+        ``loss`` is the **data** term alone, the series ``restore_best``
+        and early stopping act on; a penalty whose weight ramps between
+        phases would make successive values incomparable. ``penalty``
+        reports the unweighted bound penalty next to it, defaulting to
+        ``0.0`` so a UI written against the earlier signature still
+        satisfies this protocol.
         """
         ...
 
@@ -153,9 +148,9 @@ class EvosaxUI(Protocol):
 class SilentUI:
     """No-op UI satisfying both ``TrainingUI`` and ``EvosaxUI``.
 
-    Selected when ``config.verbose=False``, and used in tests where
-    stdout would pollute captured logs. Every method takes ``**kwargs``
-    and returns ``None``, so a new event argument never breaks it.
+    Selected when ``config.verbose=False``, and used in tests where stdout
+    would pollute captured logs. Every method takes ``**kwargs``, so a new
+    event argument never breaks it.
     """
 
     def on_run_start(self, **kwargs: Any) -> None:

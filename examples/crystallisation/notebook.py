@@ -22,45 +22,30 @@ def _intro(mo):
     mo.md(r"""
     # Crystallisation: a hybrid and a mechanistic model, side by side
 
-    This notebook demonstrates how the `hybridmodels` library can be
-    used to fit two different kinetic models of a batch crystallisation
-    process to the same dataset. *Crystallisation* is the process by
-    which a dissolved solute leaves solution and forms a solid
-    crystalline phase; the two phenomena that drive it are *nucleation*
-    (the appearance of new crystals) and *growth* (the enlargement of
-    existing ones). Quantitative models of these two rates are central
-    to the design and control of pharmaceutical and fine-chemical
-    processes.
+    Two kinetic models of the same batch crystallisation, fitted to the
+    same four experiments. *Crystallisation* is a dissolved solute leaving
+    solution as a solid phase, driven by *nucleation*, new crystals
+    appearing, and *growth*, existing ones enlarging. Models of those two
+    rates are central to designing and controlling pharmaceutical and
+    fine-chemical processes.
 
-    The aim of *hybrid modelling* is to combine first-principles
-    mechanistic structure (here, the conservation laws governing the
-    crystal population) with data-driven components (here, neural
-    networks that learn the rate laws from data). The framework allows
-    the same physical backbone, numerical solver, and diagnostics to be
-    reused while the trainable component is swapped. In what follows we
-    consider a synthetic dataset of four batch experiments and fit two
-    models:
+    *Hybrid modelling* combines mechanistic structure, here the conservation
+    laws governing the crystal population, with data-driven components, here
+    networks that learn the rate laws. The backbone, solver and diagnostics
+    stay fixed while the trainable component is swapped:
 
-    1. **Hybrid MLP model.** Two small multi-layer perceptrons emit the
-       logarithms of the growth and nucleation rates as functions of
-       temperature and supersaturation. Each network is wrapped in a
-       `BoundedPredictor` so that its output is constrained to a
-       physically plausible range. Training uses the Adam optimiser
-       through `train_with_optax`.
-    2. **Mechanistic model.** The two rate functions are replaced by
-       Classical Nucleation Theory (CNT) for the nucleation rate and a
-       power law for the growth rate. The model has only four scalar
-       parameters and no explicit dependence on the input covariates;
-       these parameters are estimated by Covariance Matrix Adaptation
-       Evolution Strategy (CMA-ES) through `train_with_evosax`.
+    1. **Hybrid MLP model.** Two small networks emit the logarithms of the
+       growth and nucleation rates from temperature and supersaturation,
+       each in a `BoundedPredictor` that confines the output to a plausible
+       range. Trained with Adam through `train_with_optax`.
+    2. **Mechanistic model.** Classical Nucleation Theory for nucleation and
+       a power law for growth: four scalar parameters, no covariate
+       dependence, fitted with CMA-ES through `train_with_evosax`.
 
-    Both models share the same dynamical backbone: a six-state
-    *population balance* described by the *method of moments*. In a
-    population balance, the distribution of crystal sizes is tracked by
-    its first few statistical moments $\mu_k(t)$, where $\mu_k$ is the
-    integral of $L^k n(L,t)$ over crystal size $L$, with $n$ the number
-    density. Together with the solute concentration this yields the
-    following system of ordinary differential equations:
+    Both share a six-state *population balance* in the *method of moments*,
+    which tracks the crystal size distribution by its first few moments
+    $\mu_k(t)$, the integral of $L^k n(L,t)$ over size $L$. With the solute
+    concentration that gives:
 
     $$
     \begin{aligned}
@@ -70,17 +55,13 @@ def _intro(mo):
     \end{aligned}
     $$
 
-    Here $G(t)$ is the linear growth velocity (m/s), $J(t)$ is the
-    nucleation rate (number of new crystals per cubic metre per
-    second), $K_v$ is a volumetric shape factor relating crystal volume
-    to the cube of a characteristic length, and $\rho_c$ is the crystal
-    density. The two rates $G$ and $J$ are the unknown functions to be
-    learned (or specified mechanistically). The observable quantities
-    are the solute concentration, sampled densely in time, and the
-    *volume-weighted mean diameter* $d_{43} = (\mu_4 / \mu_3) \cdot
-    10^{6}$ in micrometres, which characterises the average size of
-    the crystals produced and is observed only at the end of each
-    experiment.
+    $G(t)$ is the linear growth velocity in m/s, $J(t)$ the nucleation rate
+    in crystals per cubic metre per second, $K_v$ a volumetric shape factor
+    and $\rho_c$ the crystal density. $G$ and $J$ are the unknowns, learned
+    or specified mechanistically. Two quantities are observed: solute
+    concentration, sampled densely, and the volume-weighted mean diameter
+    $d_{43} = (\mu_4 / \mu_3) \cdot 10^{6}$ in micrometres, measured only at
+    the end of each experiment.
     """)
     return
 
@@ -155,19 +136,15 @@ def _dataset_md(mo):
     mo.md(r"""
     ## The dataset
 
-    A synthetic dataset of four experiments is provided, consisting of
-    two replicates at each of two operating temperatures (17 °C and
-    21 °C). Each experiment records solute concentration at a sequence
-    of sampling times together with a single volume-weighted mean
-    diameter $d_{43}$ measurement at the end of the run. This sampling
-    pattern reflects common laboratory practice, in which concentration
-    is monitored continuously by a spectroscopic probe whereas particle
-    size is measured offline only on the final slurry.
+    Four experiments, two replicates at each of 17 °C and 21 °C. Each
+    records solute concentration at a series of times plus one
+    volume-weighted mean diameter $d_{43}$ at the end of the run, the usual
+    laboratory pattern: concentration monitored continuously by a
+    spectroscopic probe, particle size measured offline on the final slurry.
 
-    The concentration channel is assigned a uniform observation
-    variance of $0.1$ (broadcast across every time point), while the
-    $d_{43}$ channel carries its own per-experiment variance reflecting
-    the measurement uncertainty of the offline sizing instrument.
+    The concentration channel gets a uniform observation variance of $0.1$;
+    the $d_{43}$ channel carries its own per-experiment variance from the
+    offline sizing instrument.
 
     | `exp_id` | T (°C) | n conc | n d43 | t span (min) | terminal d43 (µm) |
     |----------|-------:|-------:|------:|--------------|------------------:|
@@ -176,13 +153,10 @@ def _dataset_md(mo):
     | `E3`     | 21.0   | 7      | 1     | 0 → 360      | 10.5              |
     | `E4`     | 21.0   | 7      | 1     | 0 → 375      | 11.9              |
 
-    The four experiments do not share a common time grid. The
-    `make_dataset` helper handles this by forming a union of the
-    sampling times for each experiment and grouping experiments of
-    matching length into *buckets* that can be vectorised together at
-    training time. With this dataset two buckets are produced, one
-    containing the two experiments at 17 °C and one containing the two
-    at 21 °C.
+    The four do not share a time grid. `make_dataset` forms a union of each
+    experiment's sampling times and groups matching lengths into *buckets*
+    that vectorise together at training time, here two: the pair at 17 °C
+    and the pair at 21 °C.
     """)
     return
 
@@ -261,40 +235,12 @@ def _y0_md(mo):
     mo.md(r"""
     ## Initial conditions and `Experiment` construction
 
-    Each experiment is represented as an `Experiment` object that
-    bundles together its observations, covariates, and a function
-    `y0_fn` returning the initial state of the ODE system. The latter
-    is evaluated once per experiment when the dataset is built. Here
-    the five population-balance moments $\mu_0, \dots, \mu_4$ are
-    initialised to zero, reflecting the assumption that the suspension
-    contains no crystals at the start of the run; the concentration
-    state is initialised from the first observed value of the `conc`
-    channel. Temperature is the only experimental covariate.
-
-    ```python
-    def y0_fn(covariates, channels):
-        # [mu0..mu4, conc]: moments at zero, conc at first observation.
-        init_conc = jnp.asarray(channels["conc"].values[0])
-        return jnp.concatenate([jnp.zeros(5, dtype=init_conc.dtype), init_conc[None]])
-
-    experiments = []
-    for data in EXPERIMENTS_DATA:
-        time_min = jnp.asarray(data["time_min"], dtype=float)
-        conc     = jnp.asarray(data["conc"], dtype=float)
-        d43_ts   = jnp.asarray((data["d43_time_min"],), dtype=float)
-        d43_vals = jnp.asarray((data["d43"],), dtype=float)
-        d43_var  = jnp.asarray((data["d43_var"],), dtype=float)
-        experiments.append(make_experiment(
-            covariates={"temperature_C": float(data["temperature_C"])},
-            channels={
-                "conc": ChannelObs(ts=time_min, values=conc,
-                                   variance=jnp.full_like(conc, CONC_VAR)),
-                "d43":  ChannelObs(ts=d43_ts,   values=d43_vals, variance=d43_var),
-            },
-            y0_fn=y0_fn,
-            exp_id=str(data["exp_id"]),
-        ))
-    ```
+    An `Experiment` bundles the observations, the covariates, and a `y0_fn`
+    returning the ODE's initial state, evaluated once per experiment when
+    the dataset is built. The five moments $\mu_0, \dots, \mu_4$ start at
+    zero, since the suspension holds no crystals at the start, and the
+    concentration starts at its first observed value. Temperature is the
+    only covariate.
     """)
     return
 
@@ -357,45 +303,18 @@ def _projector_md(mo):
     mo.md(r"""
     ## Mapping the ODE state to observable quantities
 
-    The integrator returns the full six-state trajectory containing
-    the five moments and the concentration. The observable channels
-    are concentration and the volume-weighted mean diameter
-    $d_{43} = \mu_4 / \mu_3$. A *projector* function
-    `state_to_output` is therefore required to map the integrator
-    output to the observed channels.
+    The integrator returns all six states, the five moments and the
+    concentration, while the observed channels are concentration and the
+    volume-weighted mean diameter $d_{43} = \mu_4 / \mu_3$. The projector
+    `state_to_output` maps one to the other.
 
-    Computing $d_{43}$ requires care because $\mu_3$ vanishes whenever
-    no crystals have yet nucleated, so an unguarded division would
-    produce non-finite values. A naive guard of the form
-    `jnp.where(mu3 > eps, mu4 / mu3, 0.0)` is not sufficient: although
-    JAX selects the safe branch in the forward pass, the unsafe branch
-    is still traced for the gradient, where the division by zero
-    yields NaN values that propagate through reverse-mode
-    differentiation and corrupt the loss. The standard remedy in JAX
-    is a *double-`where*` pattern: the denominator is first replaced
-    by a safe value (`safe_mu3`) before the division is performed, and
-    a second `where` then selects between the safe ratio and a zero
-    output. This ensures that both the value and its gradient are
-    well-defined everywhere.
-
-    ```python
-    D43_MU3_EPS = 1e-6
-    D43_MAX = 55.0
-
-    def state_to_output(state):
-        # Maps [T, 6] -> [T, 2] in OUTPUT_CHANNELS = ('conc', 'd43') order.
-        mu3 = state[..., 3]
-        mu4 = state[..., 4]
-        conc = state[..., 5]
-        safe_mu3 = jnp.where(mu3 > D43_MU3_EPS, mu3, 1.0)
-        ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
-        d43 = jnp.clip(
-            jnp.where(jnp.isfinite(ratio) & (ratio > 0.0), ratio, 0.0),
-            0.0,
-            D43_MAX,
-        )
-        return jnp.stack([conc, d43], axis=-1)
-    ```
+    $d_{43}$ needs care, because $\mu_3$ vanishes before anything has
+    nucleated. A naive `jnp.where(mu3 > eps, mu4 / mu3, 0.0)` is not enough:
+    JAX takes the safe branch forwards but still traces the unsafe one for
+    the gradient, where the division by zero returns NaN that propagates
+    back into the loss. The remedy is the *double-`where`*: replace the
+    denominator with a safe value first, divide, then select. Value and
+    gradient are then both well-defined everywhere.
     """)
     return
 
@@ -442,16 +361,6 @@ def _dataset_step_md(mo):
     the training step is compiled once per bucket and then reused
     across every gradient update, which amortises the compilation cost
     across the optimisation loop.
-
-    ```python
-    OUTPUT_CHANNELS = ("conc", "d43")
-
-    dataset = make_dataset(
-        experiments,
-        state_to_output=state_to_output,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    ```
     """)
     return
 
@@ -500,17 +409,6 @@ def _solver_md(mo):
     `Tsit5` is suitable for both models in this notebook. If the CNT
     exponent stiffens the system substantially during training, an
     implicit method such as `Kvaerno3` may be used instead.
-
-    ```python
-    solver = SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-4,
-        # per-state floor at ~9 decades below natural magnitude
-        atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),
-        max_steps=500_000,
-        dt0=None,
-    )
-    ```
     """)
     return
 
@@ -533,65 +431,26 @@ def _mlp_section_md(mo):
     mo.md(r"""
     # Part 1: the hybrid MLP model
 
-    In the hybrid formulation, the two unknown rate functions $G$ and
-    $J$ are represented by separate multi-layer perceptrons (MLPs)
-    that take temperature and supersaturation as inputs and return
-    the base-ten logarithm of the rate. *Supersaturation* $S$ is the
-    ratio of the current solute concentration to its equilibrium
-    solubility at the current temperature, $S = c / c_{\text{sat}}(T)$;
-    it is the thermodynamic driving force of the process and is the
-    natural argument for both rate laws.
+    Here the two unknown rate functions $G$ and $J$ are separate MLPs
+    taking temperature and supersaturation and returning the base-ten
+    logarithm of the rate. *Supersaturation* $S = c / c_{\text{sat}}(T)$ is
+    the ratio of solute concentration to its equilibrium solubility, the
+    thermodynamic driving force and the natural argument for both laws.
 
-    Two predictors are constructed and grouped into a tuple
-    `(growth_bp, nucleation_bp)`. Each is a `BoundedPredictor`, which
-    wraps an `MLPPredictor` together with two `BoundScaler` objects.
-    The input scaler maps the physical input variables to the unit
-    interval through a sigmoid transform, ensuring that the network
-    operates on inputs of comparable magnitude. The output scaler maps
-    the unconstrained network output through a sigmoid into a
-    user-specified physical range. Both predictors expect a dictionary
-    keyed by covariate name; the `input_keys` field selects the
-    relevant subset for each predictor.
+    The two predictors travel as a tuple `(growth_bp, nucleation_bp)`. Each
+    is a `BoundedPredictor` wrapping an `MLPPredictor` between two
+    `BoundScaler`s: the input scaler maps the physical variables into the
+    unit interval so the network sees comparable magnitudes, the output
+    scaler squashes its output into a physical range. Both take a dictionary
+    keyed by covariate name, and `input_keys` selects the subset each one
+    reads.
 
-    The choice of output bounds has a significant effect on
-    optimisation. The growth rate is bounded to $[10^{-15}, 10^{-5}]$
-    m/s, which places the midpoint of the sigmoid (the value attained
-    by an unconstrained zero output) near $10^{-10}$ m/s. This is
-    physically plausible for early-stage crystal growth and yields ODE
-    trajectories that the solver can integrate within its step budget
-    from random initial weights. Looser bounds that place the midpoint
-    several orders of magnitude higher tend to produce stiff ODEs at
-    initialisation and prevent training from making progress.
-
-    ```python
-    INPUT_KEYS              = ("temperature_C", "supersaturation")
-    TEMPERATURE_BOUNDS      = (13.0, 27.0)        # °C, slightly wider than data span
-    SUPERSATURATION_BOUNDS  = (0.0, 12.0)         # S = conc / conc_sat
-    LOG10_GROWTH_BOUNDS     = (-15.0, -5.0)       # log10(G [m/s])
-    LOG10_NUCLEATION_BOUNDS = (-6.5, 20.0)        # log10(J [#/(m^3·s)])
-
-    in_scaler = BoundScaler(
-        bounds=(TEMPERATURE_BOUNDS, SUPERSATURATION_BOUNDS),
-        transform="sigmoid",
-    )
-    k_growth, k_nucleation = jr.split(jr.PRNGKey(0), 2)
-
-    growth_bp = BoundedPredictor(
-        input_keys=INPUT_KEYS,
-        in_scaler=in_scaler,
-        inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
-                           depth=1, activation_name="relu", key=k_growth),
-        out_scaler=BoundScaler(bounds=(LOG10_GROWTH_BOUNDS,), transform="sigmoid"),
-    )
-    nucleation_bp = BoundedPredictor(
-        input_keys=INPUT_KEYS,
-        in_scaler=in_scaler,
-        inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
-                           depth=1, activation_name="relu", key=k_nucleation),
-        out_scaler=BoundScaler(bounds=(LOG10_NUCLEATION_BOUNDS,), transform="sigmoid"),
-    )
-    mlp_predictors = (growth_bp, nucleation_bp)
-    ```
+    Output bounds matter a great deal to optimisation. Growth is bounded to
+    $[10^{-15}, 10^{-5}]$ m/s, putting the sigmoid midpoint, the value a
+    zero output gives, near $10^{-10}$ m/s. That is plausible for
+    early-stage growth and integrable within the solver's step budget from
+    random weights. Looser bounds put the midpoint decades higher, making
+    the ODE stiff at initialisation and stalling training.
     """)
     return
 
@@ -648,76 +507,20 @@ def _mlp_vector_field_md(mo):
     mo.md(r"""
     ### Vector field for the hybrid MLP model
 
-    The user supplies a `simulate_fn` that takes the trainable
-    component, a time vector, the experimental covariates, the initial
-    state, and a `SolverConfig`, and returns the integrated state
-    trajectory. The signature is fixed by the library so that training
-    and prediction utilities can call it generically; the body is
-    free.
+    The user supplies a `simulate_fn` taking the trainable component, a time
+    vector, the covariates, the initial state and a `SolverConfig`, and
+    returning the state trajectory. The library fixes the signature so
+    training and prediction can call it generically; the body is free.
 
-    Two implementation details are worth highlighting. First, both
-    rate functions are gated by a *metastable mask*
-    `(S > 1 + 1e-5)`. The *metastable limit* is the supersaturation
-    boundary below which neither nucleation nor growth occurs; below
-    this limit the solute is effectively in equilibrium or
-    undersaturated, and the ODE state should remain stationary. Casting
-    the mask to a float and multiplying both rates by it forces the
-    derivatives to vanish in this regime, preventing spurious
-    dissolution dynamics from being modelled by rates that are intended
-    to describe nucleation and growth only.
+    Two details. Both rates are gated by a *metastable mask*
+    `(S > 1 + 1e-5)`. Below the metastable limit the solute is at
+    equilibrium or undersaturated and neither nucleation nor growth occurs,
+    so multiplying by the mask makes the derivatives vanish there rather
+    than letting rate laws meant for growth model dissolution.
 
-    Second, the dataset records time in minutes whereas the rate
-    constants are expressed in SI seconds. The conversion is performed
-    at the boundary of the simulator by multiplying the time vector by
-    sixty before passing it to the integrator, keeping the vector
-    field itself free of unit conversions.
-
-    ```python
-    RHO_C    = 1370.0  # crystal density [kg/m^3]
-    K_V      = 0.81    # volumetric shape factor
-    META_EPS = 1e-5    # supersaturation must exceed 1 + eps for nucleation/growth
-
-    def simulate_fn_mlp(predictors, ts, covariates, y0, solver):
-        growth_bp, nucleation_bp = predictors
-        temperature_C = covariates["temperature_C"]
-        # Empirical solubility polynomial in °C.
-        conc_sat = (0.3705
-                    + 7.171e-2 * temperature_C
-                    - 1.924e-3 * temperature_C**2
-                    + 17.97e-5 * temperature_C**3)
-
-        def vector_field(t, y, args):
-            mu0, mu1, mu2, mu3, _mu4, conc = y
-            S = conc / conc_sat
-            meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
-
-            inputs = {"temperature_C": temperature_C, "supersaturation": S}
-            log10_G = jnp.squeeze(growth_bp(inputs))
-            log10_J = jnp.squeeze(nucleation_bp(inputs))
-            G = meta_mask * jnp.power(10.0, log10_G)
-            J = meta_mask * jnp.power(10.0, log10_J)
-
-            return jnp.stack([
-                J,
-                G * mu0,
-                2.0 * G * mu1,
-                3.0 * G * mu2,
-                4.0 * G * mu3,
-                -3.0 * K_V * RHO_C * G * mu2,
-            ])
-
-        times_sec = ts * 60.0  # dataset stores minutes; rate constants are in seconds
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(vector_field),
-            solver.solver,
-            t0=times_sec[0], t1=times_sec[-1], dt0=solver.dt0, y0=y0,
-            saveat=diffrax.SaveAt(ts=times_sec),
-            stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-            max_steps=solver.max_steps,
-            adjoint=diffrax.DirectAdjoint(),
-        )
-        return sol.ys
-    ```
+    And the dataset records minutes while the rate constants are in SI
+    seconds. The conversion happens at the simulator boundary, so the vector
+    field itself carries no unit conversions.
     """)
     return
 
@@ -813,25 +616,6 @@ def _mlp_train_md(mo):
     through the `train_with_optax` driver. The first iteration incurs
     a one-time just-in-time compilation cost per bucket shape;
     subsequent iterations run at the full speed of compiled JAX code.
-
-    ```python
-    config_mlp = OptaxTrainingConfig(
-        steps=(300,),
-        lr=(1e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-    )
-    history_mlp, trained_mlp = train_with_optax(
-        mlp_predictors,
-        dataset,
-        config_mlp,
-        simulate_fn=simulate_fn_mlp,
-        solver=solver,
-        key=jr.PRNGKey(0),
-    )
-    ```
     """)
     return
 
@@ -906,15 +690,11 @@ def _mech_section_md(mo):
     mo.md(r"""
     # Part 2: the mechanistic model (CNT and power-law growth)
 
-    The same dataset, ODE backbone, projector, and solver are now
-    paired with a fully mechanistic specification of the rate laws.
-    Classical Nucleation Theory (CNT) provides a physically motivated
-    expression for the nucleation rate $J$ as a function of
-    supersaturation, temperature, and the interfacial energy of the
-    solid-liquid interface. The growth rate $G$ is described by a
-    power law in the supersaturation excess. Together these introduce
-    only four scalar parameters and no explicit dependence on
-    experimental covariates beyond temperature and supersaturation.
+    The same dataset, backbone, projector and solver, now with fully
+    mechanistic rate laws. Classical Nucleation Theory gives the nucleation
+    rate $J$ from supersaturation, temperature and the interfacial energy of
+    the solid-liquid interface; growth follows a power law in the
+    supersaturation excess. Four scalar parameters in total.
 
     The rate laws are
 
@@ -938,42 +718,13 @@ def _mech_section_md(mo):
     | `Ag`    | $\log_{10}$ growth pre-factor [m/s]    | (-20.0, -5.0)   |
     | `g`     | power-law growth exponent              | (1.0, 3.5)      |
 
-    The `BoundedPredictor` class assumes a callable signature of the
-    form `(dict | Array) -> Array`, intended for predictors that
-    consume covariates. The four mechanistic parameters here are
-    global, in the sense that they do not depend on any covariate, so
-    a custom `eqx.Module` named `KineticParameters` is defined
-    instead. It contains a four-element vector of unconstrained latent
-    parameters and a `BoundScaler` that maps these onto the physical
-    bounds of each parameter. Using the same `BoundScaler` primitive
-    employed by the hybrid model ensures that the optimiser operates
-    in an unbounded latent space while the simulator receives
-    parameters in physical units.
-
-    ```python
-    LOGA_BOUNDS  = (20.0, 65.0)
-    GAMMA_BOUNDS = (0.15, 1.0)
-    AG_BOUNDS    = (-20.0, -5.0)
-    G_BOUNDS     = (1.0, 3.5)
-
-    class KineticParameters(eqx.Module):
-        # Four global mechanistic kinetic constants [logA, gamma, Ag, g].
-
-        latent: Float[Array, " 4"]
-        out_scaler: BoundScaler
-
-        def __init__(self, *, key):
-            self.latent = jr.normal(key, (4,)) * 0.1
-            self.out_scaler = BoundScaler(
-                bounds=(LOGA_BOUNDS, GAMMA_BOUNDS, AG_BOUNDS, G_BOUNDS),
-                transform="sigmoid",
-            )
-
-        def __call__(self):
-            return self.out_scaler.from_latent(self.latent)
-
-    mech_predictor = KineticParameters(key=jr.PRNGKey(0))
-    ```
+    `BoundedPredictor` is built for predictors that consume covariates,
+    with a `(dict | Array) -> Array` signature. These four parameters are
+    global, so a small `eqx.Module` called `KineticParameters` takes its
+    place: a four-element latent vector and a `BoundScaler` mapping it onto
+    each parameter's physical bounds. Reusing the same scaler primitive
+    keeps the optimiser in an unbounded space while the simulator receives
+    physical units.
     """)
     return
 
@@ -1021,64 +772,18 @@ def _mech_vector_field_md(mo):
     mo.md(r"""
     ### Vector field for the mechanistic model
 
-    Because the four mechanistic parameters are global, the predictor
-    is evaluated once at the top of the simulator and the resulting
-    physical-units values are closed over by the inner vector field.
-    The metastable mask `(S > 1 + 1e-5)` again zeroes both rates below
-    the metastable limit.
+    The four parameters are global, so the predictor is evaluated once at
+    the top of the simulator and its physical-units values are closed over
+    by the vector field. The metastable mask `(S > 1 + 1e-5)` again zeroes
+    both rates below the metastable limit.
 
-    The mechanistic vector field differs from the hybrid one in one
-    important respect, namely the protective clipping of the
-    supersaturation before it enters the logarithm in the CNT
-    expression. When $S \leq 1$ the unguarded $\log(S)$ is non-finite,
-    and although the metastable mask would set the rates to zero in
-    the forward pass, the gradient of $\log$ through this branch
-    remains undefined and propagates as NaN values during reverse-mode
-    differentiation. Replacing $S$ by $\max(S, 1 + 10^{-12})$ inside
-    the logarithm ensures a well-defined gradient even though
-    population-level training of this model uses CMA-ES rather than
-    gradient descent. The same clipping practice is recommended
-    whenever the same simulator is reused with a gradient-based
-    optimiser.
-
-    ```python
-    M_V = 2.97e-26          # molecular volume [m^3]
-    K_B = 1.38064852e-23    # Boltzmann constant [J/K]
-
-    def simulate_fn_mech(predictor, ts, covariates, y0, solver):
-        params = predictor()                   # [4] in physical units
-        logA       = params[0]
-        gamma_J_m2 = params[1] * 1e-3          # bounds [mJ/m^2]; CNT in [J/m^2]
-        Ag         = params[2]
-        g_exp      = params[3]
-
-        T_K = covariates["temperature_C"] + 273.15
-        # ... conc_sat polynomial as in the hybrid simulator ...
-
-        def vector_field(t, y, args):
-            mu0, mu1, mu2, mu3, _mu4, conc = y
-            S = conc / conc_sat
-            meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
-
-            # Clip S inside log so the gradient stays finite when meta_mask
-            # is zero. log(S) for S <= 1 still produces a NaN gradient
-            # otherwise, which propagates regardless of the mask.
-            S_safe = jnp.clip(S, min=1.0 + 1e-12)
-            logS   = jnp.log(S_safe)
-            cnt_exp = (-16.0 * jnp.pi * gamma_J_m2**3 * M_V**2
-                       / (3.0 * (K_B * T_K)**3 * logS**2))
-            J = meta_mask * jnp.exp(logA) * S_safe * jnp.exp(cnt_exp)
-
-            growth_drive = jnp.maximum(S - 1.0, 0.0)
-            G = (meta_mask * jnp.power(10.0, Ag) / 60.0
-                 * jnp.power(growth_drive, g_exp))
-
-            return jnp.stack([
-                J, G * mu0, 2.0 * G * mu1, 3.0 * G * mu2, 4.0 * G * mu3,
-                -3.0 * K_V * RHO_C * G * mu2,
-            ])
-        # ... diffeqsolve call identical to the hybrid simulator ...
-    ```
+    One difference from the hybrid field: the supersaturation is clipped
+    before it enters the CNT logarithm. At $S \leq 1$ an unguarded
+    $\log(S)$ is non-finite, and while the mask zeroes the rates going
+    forwards, the gradient through that branch is undefined and propagates
+    as NaN. Replacing $S$ by $\max(S, 1 + 10^{-12})$ inside the logarithm
+    keeps it well-defined. CMA-ES takes no gradients here, but the same
+    clipping is what makes the simulator safe to reuse with one that does.
     """)
     return
 
@@ -1176,14 +881,10 @@ def _mech_train_md(mo):
     mo.md(r"""
     ### Training the mechanistic model with CMA-ES
 
-    The mechanistic model is fitted by Covariance Matrix Adaptation
-    Evolution Strategy (CMA-ES), a derivative-free optimiser that
-    maintains a population of candidate parameter vectors and
-    iteratively updates a sampling distribution to favour
-    well-performing candidates. CMA-ES is well suited to small,
-    bounded, possibly non-smooth objective surfaces of the kind
-    arising here, and it sidesteps the need for backpropagation
-    through the ODE solver.
+    CMA-ES is derivative-free: it keeps a population of candidate parameter
+    vectors and moves its sampling distribution towards the good ones. That
+    suits a small, bounded, possibly non-smooth surface like this one, and
+    it sidesteps backpropagation through the solver entirely.
 
     The initial population of 32 individuals is drawn by Latin
     hypercube sampling across the full bound box, which provides
@@ -1192,26 +893,6 @@ def _mech_train_md(mo):
     `sigma_init=0.5` in the latent space. Population evaluation is
     vectorised through `jax.vmap` so that every individual is
     simulated against every bucket within a single compiled kernel.
-
-    ```python
-    config_mech = EvosaxTrainingConfig(
-        algorithm="CMA_ES",
-        population_size=32,
-        num_generations=30,
-        init="lhs_box",          # space-filling Latin-hypercube init
-        init_box_extent=2.0,
-        sigma_init=0.5,
-        loss="mse",
-    )
-    history_mech, trained_mech = train_with_evosax(
-        mech_predictor,
-        dataset,
-        config_mech,
-        simulate_fn=simulate_fn_mech,
-        solver=solver,
-        key=jr.PRNGKey(0),
-    )
-    ```
     """)
     return
 
@@ -1548,16 +1229,12 @@ def _outro(mo):
     mo.md(r"""
     ## Inspecting the trained rates
 
-    Once training has completed, both predictors can be queried
-    directly. The hybrid MLP predictors are callables that accept a
-    dictionary of covariates and return the bounded logarithm of the
-    corresponding rate, so any operating point
-    $(T, S)$ can be evaluated. The mechanistic predictor takes no
-    arguments and, when called, returns the four fitted physical
-    parameters. Comparing these readouts side by side at a
-    representative operating point is a useful sanity check on the
-    learned rate laws and provides a starting point for any subsequent
-    physical interpretation or extrapolation.
+    Both trained predictors can be queried directly. The MLP predictors take
+    a dictionary of covariates and return the bounded log-rate, so any
+    operating point $(T, S)$ can be evaluated; the mechanistic predictor
+    takes no arguments and returns its four fitted parameters. Comparing the
+    two at a representative operating point is a quick sanity check and the
+    starting point for any physical interpretation.
 
     ```python
     # Hybrid MLP: query at any (T, S) operating point.

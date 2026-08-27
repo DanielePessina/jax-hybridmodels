@@ -37,10 +37,9 @@ SolverConfig(
 Everything the ODE solve needs, held as static configuration.
 
 Every field is ``eqx.field(static=True)``, so the config carries no JAX
-array leaves. Compiled training and prediction functions close over it,
-which means changing a value recompiles rather than silently reusing the
-old kernel. That is the intended behaviour, since a tolerance change
-must change the compiled solve.
+array leaves. Compiled functions close over it, so changing a value
+recompiles rather than reusing the old kernel. That is intended: a
+tolerance change must change the compiled solve.
 
 **Attributes**
 
@@ -53,7 +52,7 @@ must change the compiled solve.
 | `adjoint` | `diffrax.AbstractAdjoint` | How gradients are taken back through the solve. See ``ADJOINT_REGISTRY`` for what each choice costs. |
 | `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See :meth:`stepsize_controller`. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L81)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L76)</small>
 
 #### `SolverConfig.stepsize_controller()`
 
@@ -63,20 +62,17 @@ stepsize_controller(self) -> 'diffrax.PIDController'
 
 Build the adaptive step-size controller this config describes.
 
-Exists to remove a coercion every caller had to remember. Diffrax
-broadcasts ``atol`` against the state pytree, and a Python tuple is
-not an array, so per-state tolerances raised or misbehaved unless
-the caller wrapped them in ``jnp.asarray`` first. Two of the four
-example scripts did. The other two could not use tuple tolerances at
-all.
+Removes a coercion every caller had to remember: diffrax broadcasts
+``atol`` against the state pytree, and a Python tuple is not an
+array, so per-state tolerances misbehaved unless the caller wrapped
+them in ``jnp.asarray`` first.
 
-The ``pcoeff``, ``icoeff``, and ``dcoeff`` defaults of ``(0, 1, 0)``
-are diffrax's own, that is, plain I-control, so calling this
-reproduces the ``PIDController(rtol=..., atol=...)`` the examples
-wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp step-size
-oscillation on stiff problems.
+The ``(0, 1, 0)`` coefficient defaults are diffrax's own plain
+I-control, so this reproduces the ``PIDController(rtol, atol)`` the
+examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
+step-size oscillation on stiff problems.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L124)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L118)</small>
 
 #### `SolverConfig.to_dict()`
 
@@ -86,12 +82,11 @@ to_dict(self) -> 'dict[str, Any]'
 
 Serialise to a JSON-compatible dict via the two registries.
 
-The solver and adjoint instances are replaced by their registered
-names. A tuple ``atol`` becomes a list, since JSON has no tuple. An
-unregistered class raises rather than being guessed at, so users
-register custom classes explicitly.
+Solver and adjoint instances become their registered names, and a
+tuple ``atol`` becomes a list. An unregistered class raises rather
+than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L149)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L140)</small>
 
 ---
 
@@ -140,7 +135,7 @@ After registration, ``SolverConfig(solver=cls(), ...).to_dict()`` emits
 Re-registering an existing name overwrites without warning. Calling code
 owns the naming.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L70)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L65)</small>
 
 ---
 
@@ -187,4 +182,4 @@ Register a diffrax adjoint class under ``name`` for round-trip serialisation.
 Same contract as :func:`register_solver`. Re-registering an existing
 name overwrites without warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L61)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L56)</small>

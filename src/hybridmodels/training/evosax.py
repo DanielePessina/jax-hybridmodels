@@ -1,38 +1,30 @@
 """Gradient-free training loop for small-parameter predictors, driven by evosax.
 
 Evolutionary search instead of gradient descent. Each generation samples
-a *population* of candidate parameter vectors, scores every one of them,
-and lets the strategy (CMA-ES) move its sampling distribution towards
-the good ones. No derivative of the loss is ever taken, which is what
-makes it useful when the ODE adjoint is unreliable or the loss surface
-is full of local minima.
+a *population* of candidate parameter vectors, scores them all, and lets
+CMA-ES move its sampling distribution towards the good ones. No
+derivative is ever taken, which is what makes it useful when the ODE
+adjoint is unreliable or the loss surface is full of local minima.
 
-The cost is that the number of evaluations needed grows quickly with the
-number of parameters. This loop targets small kinetic predictors, a
-handful of trainable scalars, roughly 4 to 10 dimensions. Use the Optax
-loop in ``hybridmodels.training.optax`` for neural-network-sized fits,
-or use this first and polish with Optax afterwards.
+The cost is that evaluations needed grow quickly with parameter count.
+This loop targets small kinetic predictors, roughly 4 to 10 trainable
+scalars. Use ``hybridmodels.training.optax`` for network-sized fits, or
+run this first and polish with Optax afterwards.
 
-There are no phases here. The run is ``num_generations`` iterations over
-a population of ``population_size`` individuals.
+There are no phases. The run is ``num_generations`` iterations over a
+population of ``population_size`` individuals.
 
 JIT boundary
 ------------
-The trainable parameters are first ravelled to a single flat vector
-``flat`` (via ``jax.flatten_util.ravel_pytree``). The per-individual
-loss callable ``single_eval(flat) -> scalar`` then:
-
-1. ``unflatten(flat)`` rebuilds the dynamic part of the predictor pytree;
-2. ``eqx.combine(params, static)`` glues it back to the static part
-   (closed over at construction time, since callables and static
-   fields cannot pass through ``vmap``);
-3. the bucket dispatch loop (Python ``for`` over
-   ``dataset.bucket_payloads``) runs inside the traced region, so the
-   whole multi-bucket forward pass becomes a single fused kernel
-   after ``vmap`` and ``jit``.
-
-``population_eval = eqx.filter_jit(jax.vmap(single_eval))`` then
-evaluates the entire population in parallel.
+The trainable parameters are ravelled to one flat vector via
+``jax.flatten_util.ravel_pytree``. The per-individual loss
+``single_eval(flat) -> scalar`` unflattens it, glues it back to the
+static part with ``eqx.combine`` (closed over, since callables and
+static fields cannot pass through ``vmap``), and runs the bucket
+dispatch loop inside the trace, so the whole multi-bucket forward pass
+becomes one fused kernel. ``population_eval =
+eqx.filter_jit(jax.vmap(single_eval))`` evaluates the population in
+parallel.
 
 Initial-population modes
 ------------------------
@@ -48,18 +40,15 @@ Initial-population modes
 ``"lhs_box"``
     Same shape as ``uniform_box`` with offsets from
     ``scipy.stats.qmc.LatinHypercube``, computed host-side (``scipy`` is
-    a hard dependency). Skipping the first ``ask`` is required here, not
-    just convenient. A prescribed LHS pattern reaches generation 0 only
-    by direct injection; handing LHS samples to ``tell`` alone would let
-    the next ``ask`` overwrite them silently.
+    a hard dependency). Skipping the first ``ask`` is required here: a
+    prescribed LHS pattern reaches generation 0 only by direct injection.
 
 Best-ever tracking
 ------------------
 Each generation's ``argmin(fitness)`` is compared host-side against the
-running best loss. The winning flat-parameter vector is kept and turned
-back into predictors only at run end. CMA-ES's own
-``state.best_solution`` field is deliberately unused, so the contract
-stays the same whichever strategy is plugged in.
+running best. The winning flat vector is turned back into predictors only
+at run end. CMA-ES's own ``state.best_solution`` is deliberately unused,
+so the contract stays the same whichever strategy is plugged in.
 """
 
 # ruff: noqa: F722
@@ -97,10 +86,9 @@ _SUPPORTED_ALGORITHMS: tuple[str, ...] = ("CMA_ES",)
 class EvosaxTrainingConfig:
     """Configuration for :func:`train_with_evosax`.
 
-    There are no phase-keyed tuples here, unlike
-    :class:`~hybridmodels.training.optax.OptaxTrainingConfig`. The run is
-    a flat loop of ``num_generations`` over a population of
-    ``population_size`` individuals, so every field is a scalar.
+    Unlike :class:`~hybridmodels.training.optax.OptaxTrainingConfig` there
+    are no phase-keyed tuples: the run is a flat loop, so every field is a
+    scalar.
 
     Attributes
     ----------
@@ -182,9 +170,8 @@ def _resolve_loss_fn(
 ) -> Callable[[Array, BucketPayload], Array]:
     """Resolve a string-or-callable loss spec into a ``(pred_obs, bp) -> scalar``.
 
-    Copy of the same-named helper in ``training/optax.py``. Kept
-    duplicated rather than extracted, because there are only two call
-    sites.
+    Copy of the same-named helper in ``training/optax.py``, duplicated
+    rather than extracted because there are only two call sites.
     """
     if isinstance(loss, str):
         key = loss.lower().strip()
@@ -216,18 +203,15 @@ def _build_single_eval(
 ) -> Callable[[Array], Array]:
     """Return the per-individual loss closure ``single_eval(flat) -> scalar``.
 
-    Closes over everything that cannot pass through ``vmap`` cleanly.
-    That is the static partition of the predictor, the unflatten function
-    (a Python closure produced by ``ravel_pytree``), the bucket payloads,
-    the user-written ``simulate_fn`` and ``state_to_output``, the solver
-    config, and the resolved loss. The bucket dispatch loop unrolls
-    inside the trace, so the whole multi-bucket forward pass becomes one
-    fused kernel after ``vmap`` and ``jit``.
+    Closes over everything that cannot pass through ``vmap``: the static
+    partition, the ``ravel_pytree`` unflatten closure, the bucket
+    payloads, ``simulate_fn`` and ``state_to_output``, the solver config
+    and the resolved loss. The bucket loop unrolls inside the trace, so
+    the multi-bucket forward pass becomes one fused kernel.
 
-    Loss aggregation across buckets is a **simple sum**, so a bucket
-    holding more experiments weighs more in an individual's fitness. That
-    matches how the same dataset scores end to end, which keeps the
-    ranking of individuals honest.
+    Loss aggregation across buckets is a **simple sum**, so a bucket with
+    more experiments weighs more. That matches how the same dataset scores
+    end to end, which keeps the ranking honest.
     """
 
     def single_eval(flat: Array) -> Array:
@@ -244,19 +228,15 @@ def _build_single_eval(
             total = total + loss_fn(pred_obs, bp)
         if penalty_weight > 0.0:
             # CMA-ES searches the latent space with nothing holding it in
-            # range. BoundedPredictor's squash keeps the *physical* output
-            # legal however far the latent drifts, so an individual parked
-            # deep in saturation just looks mediocre rather than broken.
-            # Charging saturation gives the search a reason to prefer
-            # individuals that still have gradient left, which matters when
-            # the result is later polished with optax.
+            # range, and the squash keeps the physical output legal however
+            # far the latent drifts, so an individual parked deep in
+            # saturation looks mediocre rather than broken. Charging
+            # saturation makes the search prefer individuals with gradient
+            # left, which matters if optax polishes the result later.
             #
-            # Folded into the fitness rather than reported next to it,
-            # because evosax ranks individuals by one scalar and there is
-            # no aux channel to separate the terms into. The weight is a
-            # closed-over Python float rather than a traced value: it never
-            # changes within a run, and closing over it keeps it out of the
-            # vmap.
+            # Folded into the fitness because evosax ranks by one scalar
+            # with no aux channel. The weight is a closed-over Python float,
+            # never traced, so it stays out of the vmap.
             total = total + penalty_weight * bound_penalty(predictor, penalty_grids)
         return total
 
@@ -270,10 +250,8 @@ def _build_strategy(
 ) -> tuple[Any, Any]:
     """Instantiate the evosax strategy and return ``(strategy, params)``.
 
-    Only ``CMA_ES`` is wired in. A new algorithm slots in as another
-    branch, or a small registry, once a use case calls for one. The
-    returned ``params`` are CMA-ES's frozen hyperparameters with
-    ``std_init`` overridden to ``config.sigma_init``.
+    Only ``CMA_ES`` is wired in. The returned ``params`` are CMA-ES's
+    frozen hyperparameters with ``std_init`` set to ``config.sigma_init``.
     """
     if config.algorithm != "CMA_ES":  # defensive; __post_init__ rejects others
         raise ValueError(f"Unsupported algorithm: {config.algorithm!r}")
@@ -291,14 +269,11 @@ def _box_population(
     """Build the gen-0 population for ``"uniform_box"`` / ``"lhs_box"`` init modes.
 
     Both modes return ``flat[None, :] + offsets`` of shape
-    ``(population_size, n_params)``. ``"uniform_box"`` draws each offset
-    i.i.d. from ``Uniform(-extent, +extent)``. ``"lhs_box"`` uses
-    ``scipy.stats.qmc.LatinHypercube`` and rescales its ``[0, 1]``
-    samples to ``[-extent, +extent]``. That runs host-side because JAX
-    has no LHS sampler, which makes SciPy a hard dependency of this mode.
-
-    The LHS seed is derived from ``key`` via a 32-bit unsigned hash so
-    the same root key reproduces the same LHS sample across runs.
+    ``(population_size, n_params)``. ``"uniform_box"`` draws offsets
+    i.i.d. from ``Uniform(-extent, +extent)``; ``"lhs_box"`` rescales
+    ``scipy.stats.qmc.LatinHypercube`` samples to the same range,
+    host-side because JAX has no LHS sampler. Its seed is derived from
+    ``key``, so the same root key reproduces the same sample.
     """
     n_params = int(flat.shape[0])
     extent = float(config.init_box_extent)
@@ -344,17 +319,14 @@ def train_with_evosax(
     """Train ``predictors`` against ``dataset`` with an evolutionary strategy.
 
     Runs ``config.num_generations`` generations of CMA-ES over a
-    population of ``config.population_size`` candidate parameter vectors.
-    No gradient of the loss is taken. See the module docstring for the
-    JIT boundary and the initial-population modes.
+    population of ``config.population_size`` candidates, taking no
+    gradient. See the module docstring for the JIT boundary and the
+    initial-population modes.
 
-    ``predictors`` is a ``PyTree[eqx.Module]``. The convention is a tuple
-    of ``BoundedPredictor`` leaves, but any pytree shape works. ``key``
-    is keyword-only and required; calling without it raises
-    ``TypeError`` before any work happens. ``trainable`` defaults to
-    :func:`hybridmodels.trainable.trainable_mask` over the supplied
-    pytree, marking every inexact-array leaf trainable. The mask has to
-    select at least one scalar.
+    ``predictors`` is a ``PyTree[eqx.Module]`` in any shape. ``key`` is
+    keyword-only and required. ``trainable`` defaults to
+    :func:`hybridmodels.trainable.trainable_mask`, and must select at
+    least one scalar.
 
     Returns
     -------
@@ -362,22 +334,18 @@ def train_with_evosax(
         **Best loss so far** at the end of each generation, so the series
         is monotone non-increasing. Length ``config.num_generations``.
 
-        This differs from
+        It differs from
         :func:`~hybridmodels.training.optax.train_with_optax`, whose
         history is the raw per-step loss and can go up. Same type, same
-        position in the return tuple, different meaning. Plotting the two
-        together, or feeding both to a shared stopping rule, will
-        mislead.
+        position, different meaning: plotting both on one axis misleads.
 
         When ``config.penalty_weight > 0`` the recorded value is the
-        combined objective, because evosax ranks individuals by one
-        scalar and the terms are never separated. The optax history
-        excludes its penalty.
+        combined objective, since evosax ranks by one scalar. The optax
+        history excludes its penalty.
     best_predictors : Any
-        The predictors rebuilt from the flat parameter vector with the
-        lowest loss seen in any generation, including the warm-up
-        evaluation of the input predictors. Same container shape as the
-        input ``predictors``.
+        Predictors rebuilt from the lowest-loss flat vector seen in any
+        generation, the warm-up evaluation of the input predictors
+        included. Same container shape as the input.
     """
     if trainable is None:
         trainable = trainable_mask(predictors)
@@ -416,12 +384,10 @@ def train_with_evosax(
     )
     population_eval = eqx.filter_jit(jax.vmap(single_eval))
 
-    # The Optax loop's UI sees one compile span per bucket shape. Here
-    # ``population_eval`` is a single fused vmap+jit callable across all
-    # buckets, so there is no per-bucket span to emit. Emit one synthetic
-    # span over a "union" shape instead, so the Rich UI's progress bars
-    # still render and the on_compile_start / on_compile_done contract
-    # stays symmetric with the Optax loop.
+    # ``population_eval`` is one fused vmap+jit callable across all buckets,
+    # so there is no per-bucket compile span to emit as the Optax loop does.
+    # One synthetic span over a "union" shape keeps the UI contract
+    # symmetric and the Rich progress bars rendering.
     union_shape = (int(config.population_size), int(flat0.shape[0]))
     ui_.on_compile_start(bucket_idx=0, bucket_shape=union_shape)
     warm_pop = jnp.broadcast_to(flat0[None, :], (config.population_size, flat0.shape[0]))
@@ -433,10 +399,8 @@ def train_with_evosax(
     init_key = fold(key, "evosax_init")
     state = strategy.init(init_key, flat0, strat_params)
 
-    # Best-ever bookkeeping starts from the warm-up evaluation, so the
-    # user-supplied predictor stays in contention even if every sampled
-    # individual turns out worse. Without that, an unlucky initial
-    # population would replace a perfectly good seed.
+    # Best-ever bookkeeping starts from the warm-up evaluation, so an
+    # unlucky initial population cannot replace a perfectly good seed.
     best_idx = int(jnp.argmin(warm_fitness))
     best_loss = float(warm_fitness[best_idx])
     best_flat = jnp.asarray(warm_pop[best_idx])
@@ -446,21 +410,17 @@ def train_with_evosax(
     for gen in range(int(config.num_generations)):
         ask_key = fold(key, f"evosax_ask_{gen}")
         if gen == 0 and config.init in ("uniform_box", "lhs_box"):
-            # Inject the box-init population directly. CMA-ES's first
-            # ``ask`` is skipped, but the strategy's ``tell`` still
-            # consumes the same population below, so its mean and
-            # covariance update from the prescribed sample rather than
-            # from a Gaussian draw the user did not request.
+            # Inject the box-init population directly, skipping CMA-ES's
+            # first ``ask``. ``tell`` still consumes it below, so mean and
+            # covariance update from the prescribed sample.
             population = _box_population(flat=flat0, config=config, key=fold(key, "evosax_init"))
         else:
             population, state = strategy.ask(ask_key, state, strat_params)
 
         fitness = population_eval(population)
-        # CMA-ES tolerates NaN in the fitness vector, so nothing scrubs or
-        # replaces it here. A NaN just makes that individual the worst in
-        # the generation. Per-individual error recovery, such as catching
-        # exceptions raised inside simulate_fn, is deliberately absent; a
-        # user who wants it wraps their own simulator.
+        # CMA-ES tolerates NaN in the fitness vector: a NaN just makes that
+        # individual the worst in the generation. Per-individual error
+        # recovery is deliberately absent; wrap your own simulator for it.
         tell_key = fold(key, f"evosax_tell_{gen}")
         state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)
 

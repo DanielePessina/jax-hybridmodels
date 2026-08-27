@@ -1,16 +1,13 @@
 """How the ODE gets integrated, in a form that can be saved to JSON.
 
-``SolverConfig`` holds the settings handed to diffrax, the ODE solver
-library this package integrates with. Every field is declared
-``eqx.field(static=True)``, so the config holds no JAX arrays. Compiled
-training and prediction kernels close over it as configuration rather
-than take it as data, and it can round-trip through plain JSON.
+``SolverConfig`` holds the settings handed to diffrax. Every field is
+``eqx.field(static=True)``, so the config carries no JAX arrays: compiled
+kernels close over it as configuration, and it round-trips through JSON.
 
-The JSON round-trip has one cost. A solver is a Python object, and JSON
-cannot hold one, so the concrete diffrax class must be findable by name.
-``SOLVER_REGISTRY`` and ``ADJOINT_REGISTRY`` are those name tables. Add a
-custom class with :func:`register_solver` or :func:`register_adjoint`
-before saving a config that references it.
+JSON cannot hold a Python object, so the concrete diffrax class must be
+findable by name. ``SOLVER_REGISTRY`` and ``ADJOINT_REGISTRY`` are those
+name tables. Add a custom class with :func:`register_solver` or
+:func:`register_adjoint` before saving a config that references it.
 """
 
 from __future__ import annotations
@@ -39,10 +36,8 @@ ADJOINT_REGISTRY: dict[str, type[diffrax.AbstractAdjoint]] = {
 """Name to diffrax adjoint class. Extend via :func:`register_adjoint`.
 
 An *adjoint* is the method used to get gradients back through an ODE
-solve. The forward solve takes many small steps, and the backward pass
-has to recover the sensitivity of the loss to the parameters through all
-of them. The choices below trade memory against recomputation and
-accuracy, and for a neural ODE memory is usually the binding constraint.
+solve. The choices trade memory against recomputation and accuracy, and
+for a neural ODE memory is usually the binding constraint.
 
 - ``Direct`` stores the whole forward tape. Cheapest to differentiate,
   most memory. The default here because every example wrote it by hand
@@ -82,10 +77,9 @@ class SolverConfig(eqx.Module):
     """Everything the ODE solve needs, held as static configuration.
 
     Every field is ``eqx.field(static=True)``, so the config carries no JAX
-    array leaves. Compiled training and prediction functions close over it,
-    which means changing a value recompiles rather than silently reusing the
-    old kernel. That is the intended behaviour, since a tolerance change
-    must change the compiled solve.
+    array leaves. Compiled functions close over it, so changing a value
+    recompiles rather than reusing the old kernel. That is intended: a
+    tolerance change must change the compiled solve.
 
     Attributes
     ----------
@@ -124,18 +118,15 @@ class SolverConfig(eqx.Module):
     def stepsize_controller(self) -> diffrax.PIDController:
         """Build the adaptive step-size controller this config describes.
 
-        Exists to remove a coercion every caller had to remember. Diffrax
-        broadcasts ``atol`` against the state pytree, and a Python tuple is
-        not an array, so per-state tolerances raised or misbehaved unless
-        the caller wrapped them in ``jnp.asarray`` first. Two of the four
-        example scripts did. The other two could not use tuple tolerances at
-        all.
+        Removes a coercion every caller had to remember: diffrax broadcasts
+        ``atol`` against the state pytree, and a Python tuple is not an
+        array, so per-state tolerances misbehaved unless the caller wrapped
+        them in ``jnp.asarray`` first.
 
-        The ``pcoeff``, ``icoeff``, and ``dcoeff`` defaults of ``(0, 1, 0)``
-        are diffrax's own, that is, plain I-control, so calling this
-        reproduces the ``PIDController(rtol=..., atol=...)`` the examples
-        wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp step-size
-        oscillation on stiff problems.
+        The ``(0, 1, 0)`` coefficient defaults are diffrax's own plain
+        I-control, so this reproduces the ``PIDController(rtol, atol)`` the
+        examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
+        step-size oscillation on stiff problems.
         """
         atol = jnp.asarray(self.atol) if isinstance(self.atol, tuple) else self.atol
         return diffrax.PIDController(
@@ -149,10 +140,9 @@ class SolverConfig(eqx.Module):
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a JSON-compatible dict via the two registries.
 
-        The solver and adjoint instances are replaced by their registered
-        names. A tuple ``atol`` becomes a list, since JSON has no tuple. An
-        unregistered class raises rather than being guessed at, so users
-        register custom classes explicitly.
+        Solver and adjoint instances become their registered names, and a
+        tuple ``atol`` becomes a list. An unregistered class raises rather
+        than being guessed at.
         """
         solver_name: str | None = None
         for name, cls in SOLVER_REGISTRY.items():
@@ -196,11 +186,10 @@ class SolverConfig(eqx.Module):
     def from_dict(cls, d: dict[str, Any]) -> SolverConfig:
         """Reconstruct a ``SolverConfig`` from ``to_dict`` output.
 
-        Looks ``d["solver"]`` up in ``SOLVER_REGISTRY`` and instantiates the
-        class with no arguments, so a solver that needs constructor
-        arguments cannot round-trip this way. A list-valued ``atol`` is
-        coerced back to a tuple to match the static-field type. An unknown
-        name raises, listing what is currently registered.
+        Instantiates the registered class with no arguments, so a solver
+        that needs constructor arguments cannot round-trip this way. A
+        list-valued ``atol`` is coerced back to a tuple. An unknown name
+        raises, listing what is registered.
         """
         name = d["solver"]
         if name not in SOLVER_REGISTRY:

@@ -1,21 +1,20 @@
-"""Crystallisation mechanistic-only training example (CNT + power-law growth).
+"""Fit four mechanistic kinetic constants with CMA-ES, no networks.
 
-Same hardcoded LowData4 cut and method-of-moments backbone as
-``train_kinetic.py``, but the two MLP rate predictors are replaced by a
-four-scalar mechanistic kinetic law that is global across experiments:
+Same data and method-of-moments backbone as ``train_kinetic.py``, with the
+two rate networks replaced by a kinetic law that is global across
+experiments:
 
 * CNT nucleation:    ``J = exp(logA) * S * exp(-16π γ³ v² / (3 (k_B T)³ ln²S))``
 * Power-law growth:  ``G = (10**Ag / 60) * max(S - 1, 0)**g``
 
-The four trainable scalars ``(logA, gamma, Ag, g)`` are stored in latent space
-inside a small :class:`KineticParameters` eqx.Module and pushed through a
-sigmoid :class:`BoundScaler` so the optimiser sees an unconstrained problem
-while the simulator always receives parameters inside the physical box.
+The four scalars ``(logA, gamma, Ag, g)`` live in latent space inside a small
+``KineticParameters`` module and pass through a sigmoid ``BoundScaler``, so
+the optimiser sees an unconstrained problem while the simulator always gets
+parameters inside the physical box.
 
-Optimisation uses ``train_with_evosax`` (CMA-ES). Four parameters is the
-regime the evosax loop was sized for; gradient-based optimisation is overkill
-and the population-based search avoids the local minima that the CNT
-exponential creates near the metastable limit.
+Four parameters is the regime ``train_with_evosax`` was sized for, and the
+population search avoids the local minima the CNT exponential creates near
+the metastable limit.
 
 Run: ``uv run python examples/crystallisation/train_crystallisation_mechanistic.py``
 """
@@ -31,9 +30,8 @@ from pathlib import Path
 import equinox as eqx
 import jax
 
-# x64 must be enabled before any other JAX-touching import. The population-
-# balance moments span ~18 decades during integration; float32 mass balance
-# drifts visibly within a single experiment.
+# Before any other JAX-touching import. The moments span ~18 decades during
+# integration, and a float32 mass balance drifts visibly within one run.
 jax.config.update("jax_enable_x64", True)
 
 import diffrax  # noqa: E402
@@ -62,16 +60,8 @@ from _shared import (  # noqa: E402
     trajectory_plot,
 )
 
-# --------------------------------------------------------------------------- #
-# Constants                                                                   #
-# --------------------------------------------------------------------------- #
-
-# Four hardcoded experiments from the thesis ``Unseeded_LowData4`` sheet,
-# identical to the dataset used by ``train_kinetic.py`` so the two scripts are
-# directly comparable. Conc and d43 rounded to 1 dp; d43 variance to 3 dp;
-# concentration variance is a single made-up scalar (``CONC_VAR``) applied per
-# row. The thesis ``Loading`` column is uniformly zero across LowData4 and is
-# intentionally omitted as a covariate.
+# Identical to the dataset in ``train_kinetic.py``, so the two scripts are
+# directly comparable. Values rounded from the thesis sheet.
 EXPERIMENTS_DATA: tuple[dict[str, object], ...] = (
     {
         "exp_id": "LowData4_3",
@@ -110,13 +100,10 @@ EXPERIMENTS_DATA: tuple[dict[str, object], ...] = (
         "d43_var": 0.267,
     },
 )
-# Made-up uniform concentration variance, broadcast across every row.
-CONC_VAR = 0.1
+CONC_VAR = 0.1  # made up; the thesis per-row variances are noisy and unneeded
 
-# Bounds for the four mechanistic kinetic parameters. Reproduced from the
-# original thesis-package bounds in ``hybridcrystals/regressor_constants.py``
-# so the trained scalars sit in the same physical box as the source-package
-# runs. ``out_scaler`` interprets these as ``(low, high)`` per-component.
+# Reproduced from the thesis package, so the trained scalars sit in the same
+# physical box as the source-package runs.
 LOGA_BOUNDS = (20.0, 65.0)  # ln(A) for CNT pre-exponential
 GAMMA_BOUNDS = (0.15, 1.0)  # interfacial energy [mJ/m^2]
 AG_BOUNDS = (-20.0, -5.0)  # log10 of growth pre-factor [m/s]
@@ -134,37 +121,24 @@ META_EPS = 1e-5  # supersaturation must exceed 1 + eps for nucleation/growth
 OUTPUT_CHANNELS = ("conc", "d43")
 
 
-# --------------------------------------------------------------------------- #
-# Trainable component: four mechanistic kinetic scalars                       #
-# --------------------------------------------------------------------------- #
-
-
 class KineticParameters(eqx.Module):
     """Four global mechanistic kinetic constants ``[logA, gamma, Ag, g]``.
 
-    The framework's ``BoundedPredictor`` is built around a covariate-keyed
-    ``__call__(dict | Array) -> Array`` and requires at least one input;
-    here the parameters are *global* (no covariate dependence at all), so we
-    sidestep ``BoundedPredictor`` and define a minimal ``eqx.Module`` whose
-    only inexact-array leaf is the four-vector latent. The :class:`BoundScaler`
-    output mapping is the same primitive the MLP-based predictor uses, so the
-    optimiser still operates in an unbounded latent space and the simulator
-    still sees physical-units parameters.
-
-    Calling produces ``[logA, gamma, Ag, g]`` in physical units. CMA-ES sees
-    a four-dimensional unbounded search; the sigmoid in ``out_scaler`` keeps
-    every candidate inside the physical box no matter how wide the search
-    spreads.
+    ``BoundedPredictor`` is keyed on covariates and needs at least one
+    input, but these parameters are global, so this is a minimal
+    ``eqx.Module`` whose only array leaf is the four-vector latent. The
+    ``BoundScaler`` is the same primitive the network predictors use: CMA-ES
+    searches four unbounded dimensions and the sigmoid keeps every candidate
+    inside the physical box however wide the search spreads.
     """
 
     latent: Float[Array, " 4"]
     out_scaler: BoundScaler
 
     def __init__(self, *, key: Array) -> None:
-        # Small Gaussian init in latent space puts the physical parameters
-        # near the centre of each bound at gen 0; CMA-ES expands from there
-        # under ``sigma_init``. Zero init would also work but a tiny noise
-        # break ties between identical re-init seeds in tests.
+        # Small Gaussian latent init puts the physical parameters near the
+        # centre of each bound at gen 0, and CMA-ES expands from there. Zero
+        # would work too; the noise breaks ties between re-init seeds.
         self.latent = jr.normal(key, (4,)) * 0.1
         self.out_scaler = BoundScaler(
             bounds=(LOGA_BOUNDS, GAMMA_BOUNDS, AG_BOUNDS, G_BOUNDS),
@@ -176,12 +150,8 @@ class KineticParameters(eqx.Module):
         return self.out_scaler.from_latent(self.latent)
 
 
-# --------------------------------------------------------------------------- #
-# Hook callables consumed by the framework                                    #
-# --------------------------------------------------------------------------- #
-# These three functions are passed into ``make_experiment``, ``make_dataset``,
-# and ``train_with_evosax`` respectively. They have to live at module level so
-# their identities are stable across calls.
+# The three framework hooks, at module level so their identities are stable
+# across calls: y0_fn, state_to_output, simulate_fn.
 
 
 def y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Float[Array, " 6"]:
@@ -195,9 +165,8 @@ def state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
     mu3 = state[..., 3]
     mu4 = state[..., 4]
     conc = state[..., 5]
-    # d43 = (mu4 / mu3) * 1e6 [um], guarded against the early-time near-zero-
-    # moments regime. The double-``where`` pattern is the canonical JAX-grad-
-    # safe guarded division.
+    # d43 = (mu4 / mu3) * 1e6 [um], guarded for the early near-zero moments.
+    # The double-``where`` is the grad-safe form of the division.
     safe_mu3 = jnp.where(mu3 > D43_MU3_EPS, mu3, 1.0)
     ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
     d43 = jnp.clip(jnp.where(jnp.isfinite(ratio) & (ratio > 0.0), ratio, 0.0), 0.0, D43_MAX)
@@ -213,10 +182,10 @@ def simulate_fn(
 ) -> Float[Array, "T 6"]:
     """Integrate the method-of-moments ODE with CNT nucleation + power-law growth.
 
-    The four physical parameters ``[logA, gamma, Ag, g]`` are evaluated once
-    at the top of the call (they are global, not state-dependent) and closed
-    over by the vector field. The ``(S > 1 + eps)`` mask gates both rates so
-    the ODE stops moving below the metastable limit.
+    The four parameters are global rather than state-dependent, so they are
+    read once at the top and closed over by the vector field. The
+    ``(S > 1 + eps)`` mask gates both rates, so the ODE stops moving below
+    the metastable limit.
     """
     params = predictor()  # [4] in physical units, sigmoid-bounded
     logA = params[0]
@@ -240,25 +209,22 @@ def simulate_fn(
         S = conc / conc_sat
         meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
 
-        # CNT nucleation J = exp(logA) * S * exp(-16π γ³ v² / (3 (k_B T)³ ln²S)).
-        # Clip S to a hair above 1 inside the log so the exponent stays finite
-        # when meta_mask is zero — the mask wipes the contribution out anyway,
-        # but the gradient through the clipped log must stay finite or autodiff
-        # will return NaN at every ODE step on a sub-saturated trajectory.
+        # Clip S to a hair above 1 inside the log so the exponent stays
+        # finite when meta_mask is zero. The mask wipes the contribution out
+        # either way, but a NaN gradient there reaches every ODE step of a
+        # sub-saturated trajectory.
         S_safe = jnp.clip(S, min=1.0 + 1e-12)
         logS = jnp.log(S_safe)
         cnt_exp = -16.0 * jnp.pi * gamma_J_m2**3 * M_V**2 / (3.0 * (K_B * T_K) ** 3 * logS**2)
         J = meta_mask * jnp.exp(logA) * S_safe * jnp.exp(cnt_exp)
 
-        # Power-law growth G = (10**Ag / 60) * max(S - 1, 0)**g. The /60 maps
-        # the per-minute pre-factor convention in the source package onto the
-        # per-second SI integration.
+        # The /60 maps the source package's per-minute pre-factor convention
+        # onto the per-second SI integration.
         growth_drive = jnp.maximum(S - 1.0, 0.0)
         G = meta_mask * jnp.power(10.0, Ag) / 60.0 * jnp.power(growth_drive, g_exp)
 
-        # Hulburt-Katz form for size-independent nucleation at zero size and
-        # pure linear growth, plus a mass balance: solute lost equals crystal
-        # volume gained.
+        # Hulburt-Katz form for nucleation at zero size and linear growth,
+        # plus a mass balance: solute lost equals crystal volume gained.
         dmu0 = J
         dmu1 = G * mu0
         dmu2 = 2.0 * G * mu1
@@ -270,15 +236,15 @@ def simulate_fn(
     # Dataset stores time in minutes; rate constants are SI-second-based.
     times_sec = ts * 60.0
     if solver.dt0 is None:
-        # 1/1000 of the full span, floored at 1 s so the first step doesn't
-        # underflow on short trajectories.
+        # 1/1000 of the span, floored at 1 s so short trajectories do not
+        # underflow on the first step.
         span = times_sec[-1] - times_sec[0]
         dt0 = jnp.maximum(span / 1000.0, jnp.asarray(1.0, dtype=times_sec.dtype))
     else:
         dt0 = jnp.asarray(solver.dt0, dtype=times_sec.dtype)
 
-    # diffrax.PIDController needs atol as a scalar/array — tuples don't
-    # broadcast against the y_error PyTree leaves.
+    # PIDController needs atol as a scalar or array; a tuple does not
+    # broadcast against the y_error pytree leaves.
     atol = (
         jnp.asarray(solver.atol, dtype=times_sec.dtype)
         if isinstance(solver.atol, tuple)
@@ -298,11 +264,6 @@ def simulate_fn(
         adjoint=diffrax.DirectAdjoint(),
     )
     return jnp.asarray(sol.ys)
-
-
-# --------------------------------------------------------------------------- #
-# Script body                                                                 #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:
@@ -329,13 +290,9 @@ def main() -> None:
     apply_default_style()
     k_init, k_train = jr.split(jr.PRNGKey(args.seed), 2)
 
-    # ---- Build experiments from the hardcoded LowData4 cut ----------------- #
-    # Each entry in ``EXPERIMENTS_DATA`` is converted into one
-    # ``hybridmodels.Experiment`` carrying two channels with their own ``ts``
-    # axes — the d43 channel has a single terminal observation, so
-    # ``make_dataset`` will form per-experiment union axes and bucket on
-    # length parity. ``CONC_VAR`` is broadcast to a per-row variance vector;
-    # the d43 variance is scalar (one observation per experiment).
+    # One Experiment per entry, each with two channels on their own ``ts``
+    # axes. ``CONC_VAR`` broadcasts to a per-row vector; d43 has a single
+    # terminal observation and a scalar variance.
     experiments: list[Experiment] = []
     for data in EXPERIMENTS_DATA:
         time_min = jnp.asarray(data["time_min"], dtype=float)
@@ -368,7 +325,6 @@ def main() -> None:
             f"d43 obs={exp.channels['d43'].values.shape[0]}"
         )
 
-    # ---- Build dataset (bucket + union-axis logic) ------------------------ #
     print("\n[build] dataset")
     dataset = make_dataset(
         experiments,
@@ -383,14 +339,10 @@ def main() -> None:
             f"mask={tuple(bp.mask.shape)}, n_obs={int(bp.n_obs)}"
         )
 
-    # ---- Solver ----------------------------------------------------------- #
-    # Per-state atol matched to the natural moment magnitudes (``mu0 ~ 1e11``,
-    # ``mu1 ~ 1e6``, ..., ``mu4 ~ 1e-7``, ``conc ~ 1``). A uniform atol
-    # forces the PIDController to over-resolve small components and
-    # under-resolve large ones, and the integrator hits ``max_steps`` before
-    # finishing one trajectory. Setting atol per-component ~9 decades below
-    # each natural magnitude lets ``rtol`` dominate once values are
-    # appreciable, with atol acting as a near-zero floor.
+    # Per-state atol matched to the natural moment magnitudes (``mu0 ~ 1e11``
+    # down to ``mu4 ~ 1e-7``, ``conc ~ 1``). A uniform atol over-resolves the
+    # small components and under-resolves the large ones, and the integrator
+    # hits ``max_steps`` before finishing one trajectory.
     solver = SolverConfig(
         solver=diffrax.Kvaerno3(),
         rtol=1e-4,
@@ -399,11 +351,9 @@ def main() -> None:
         dt0=None,
     )
 
-    # ---- Build the four-scalar mechanistic predictor ---------------------- #
     predictor = KineticParameters(key=k_init)
 
-    # Sanity-check evaluation. Same call shape ``simulate_fn`` makes inside
-    # the trace.
+    # Sanity check, in the call shape ``simulate_fn`` makes inside the trace.
     init_params = predictor()
     print(
         f"\n[init] logA={float(init_params[0]):.2f}, "
@@ -412,7 +362,6 @@ def main() -> None:
         f"g={float(init_params[3]):.2f}"
     )
 
-    # ---- Train ------------------------------------------------------------ #
     print("\n[train] evosax (CMA-ES, 4 parameters)")
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
@@ -447,9 +396,8 @@ def main() -> None:
         f"g={float(final_params[3]):.2f}"
     )
 
-    # ---- Diagnostics + plots --------------------------------------------- #
-    # ``predict_dataset`` returns one ``[N, T, D]`` array per bucket; the
-    # helpers walk it in lockstep with the dataset.
+    # predict_dataset returns one [N, T, D] array per bucket; the helpers
+    # walk it in lockstep with the dataset.
     print("\n[diagnostics] per-channel parity stats over the training set")
     predictions = predict_dataset(
         trained_predictor,

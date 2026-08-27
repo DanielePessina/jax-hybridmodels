@@ -35,52 +35,47 @@ def _intro(mo):
     \frac{dy}{dt} = f(y, t; \theta)
     $$
 
-    Some of $f$ comes from conservation laws or a reaction mechanism you
-    trust. Some of it does not. A rate constant varies with temperature
-    in a way nobody has written down. A term is missing altogether. You
-    want to learn the missing parts from data without throwing away the
-    parts you already know.
+    Some of $f$ comes from conservation laws or a mechanism you trust. Some
+    does not: a rate constant varies with temperature in a way nobody has
+    written down, or a term is missing altogether. You want the missing
+    parts learned from data without discarding the parts you know.
 
-    That is a **hybrid model**: mechanistic structure kept in closed
-    form, unknown pieces replaced by trainable networks. It is worth the
-    trouble because a model that keeps its structure extrapolates, and
-    because the parameters inside that structure keep their physical
-    meaning after fitting. The last section of this notebook shows what
-    happens to a fitted rate constant when you skip the correction and
-    let the mechanistic parameter absorb the error instead.
+    That is a **hybrid model**: mechanistic structure in closed form,
+    unknown pieces replaced by trainable networks. It is worth the trouble
+    because a model that keeps its structure extrapolates, and because its
+    parameters keep their physical meaning after fitting. The last section
+    shows what a fitted rate constant becomes when you skip the correction
+    and let the mechanistic parameter absorb the error instead.
 
     ## What this library provides
 
-    Three things, and they are all awkward to do by hand.
+    Three things, all awkward by hand.
 
-    **Physical quantities stay inside their ranges.** A rate constant
-    cannot be negative. A mole fraction lives in $[0, 1]$. An optimiser
-    that does not know this proposes values that make the solver
-    diverge. Clipping the output looks like the fix and is not: a clip
-    has zero derivative outside the range, so it destroys the gradient
-    that would pull the parameter back, exactly when that gradient is
-    needed. This library instead reparameterises, so an out-of-range
+    **Physical quantities stay inside their ranges.** A rate constant cannot
+    be negative; a mole fraction lives in $[0, 1]$. An optimiser that does
+    not know this proposes values that make the solver diverge, and clipping
+    is not the fix: a clip has zero derivative outside the range, so it
+    destroys the gradient that would pull the parameter back, exactly when
+    it is needed. This library reparameterises instead, so an out-of-range
     value cannot be represented at all.
 
-    **Irregular measurements are handled without padding or
-    interpolation.** Two instruments sampling one experiment rarely
-    agree on when. Solvers want rectangular arrays. The library builds
-    a per-experiment union of timestamps, marks the holes with a mask,
-    and groups experiments by length so each group is one compiled
-    solve.
+    **Irregular measurements need no padding or interpolation.** Two
+    instruments rarely agree on when they sampled, and solvers want
+    rectangular arrays. The library takes a per-experiment union of
+    timestamps, marks the holes with a mask, and groups experiments by
+    length so each group is one compiled solve.
 
-    **Trainable pieces compose with mechanistic terms.** A network can
-    sit above the solver, or inside the vector field, or both, and the
-    training loop does not need to be told which.
+    **Trainable pieces compose with mechanistic terms.** A network can sit
+    above the solver, inside the vector field, or both, and the training
+    loop is never told which.
 
     ## What this library is not
 
-    It is not a neural ODE library. A trainable network inside a vector
-    field is one of the things you can build here, and
+    Not a neural ODE library. A trainable network inside a vector field is
+    one thing you can build here, and
     [diffrax](https://docs.kidger.site/diffrax/) and
     [Equinox](https://docs.kidger.site/equinox/) already document that
-    technique well. This notebook uses it in one line and does not
-    explain it.
+    technique. This notebook uses it in one line without explaining it.
 
     Assumed: Python, and some experience fitting models to data. Not
     assumed: JAX, Equinox, diffrax, or the chemistry.
@@ -155,12 +150,11 @@ def _system_md(mo):
     \qquad \omega = 1
     $$
 
-    The model will keep the rotation and treat $\omega$ as known. Two
-    things it will not know:
+    The model keeps the rotation and treats $\omega$ as known. Two things it
+    will not know:
 
-    **The damping rate depends on temperature.** Each experiment runs at
-    one of six temperature levels, and the true rate follows an
-    Arrhenius law:
+    **The damping rate depends on temperature.** Each experiment runs at one
+    of six temperature levels, and the true rate follows Arrhenius:
 
     $$
     k(T) = k_{\mathrm{ref}} \exp\!\left(
@@ -168,16 +162,16 @@ def _system_md(mo):
     \right)
     $$
 
-    Across the six levels this makes $k$ run from 0.0063 to 0.276, a
-    factor of 44. Remember that number; it is why the model needs a
-    logarithmic axis for $k$ in section 3.
+    Across the six levels $k$ runs from 0.0063 to 0.276, a factor of 44.
+    Remember that number: it is why $k$ needs a logarithmic axis in
+    section 3.
 
-    **The cubic coupling is missing entirely.** $C y^3$ has no
-    counterpart in the model, and a network has to reproduce its effect
-    from trajectories alone.
+    **The cubic coupling is missing entirely.** $C y^3$ has no counterpart
+    in the model, so a network has to reproduce its effect from
+    trajectories alone.
 
-    In a real problem you would not know either of these. Here they are
-    synthesised so there is something to check the fit against.
+    In a real problem you would know neither. Here they are synthesised so
+    there is something to check the fit against.
     """)
     return
 
@@ -261,36 +255,30 @@ def _data_md(mo):
       full state can be larger than what you measure. Here both
       components are measured, so it reads them off the first sample.
 
-    `make_dataset` then does the bookkeeping this library is built
-    around. For each experiment it takes the **union** of its channels'
-    timestamps, writes each channel's values into the rows of that union
-    where it was actually measured, and records a boolean **mask**
-    marking which cells are real. Experiments whose union has the same
-    length are stacked into one **bucket**.
+    `make_dataset` then does the bookkeeping this library is built around.
+    Per experiment it takes the **union** of its channels' timestamps,
+    writes each channel's values into the rows where it was measured, and
+    records a boolean **mask** marking the real cells. Experiments whose
+    union has the same length stack into one **bucket**.
 
-    Buckets are what the solver sees. One bucket is one vectorised,
-    compiled solve. JAX compiles a function once per distinct input
-    shape, so the number of distinct union lengths in your data is the
-    number of times training compiles. Grouping by length avoids padding
-    everything out to the longest experiment, and nothing is
-    interpolated to fill a hole.
+    Buckets are what the solver sees: one bucket is one vectorised compiled
+    solve. JAX compiles once per distinct input shape, so the number of
+    distinct union lengths is the number of compilations. Nothing is padded
+    out to the longest experiment and nothing is interpolated into a hole.
 
     ## Two sampling layouts
 
-    The same physics, sampled two ways, so the difference the library
-    actually makes is visible.
+    The same physics sampled two ways, so the difference the library makes
+    is visible.
 
     **Rectangular.** Every experiment on the same 20-point grid, both
     channels measured every time.
 
-    **Irregular.** Every experiment gets its own end time in $[6, 9]$,
-    its own randomly drawn sample times, and each channel thinned
-    independently to 8 or 12 samples. Two instruments sampling at their
-    own rates is the normal situation in a laboratory.
-
-    Since the union length is `n1 + n2 - 1` (the shared $t = 0$ counts
-    once) and each count is 8 or 12, there are three possible lengths:
-    15, 19 and 23.
+    **Irregular.** Each experiment gets its own end time in $[6, 9]$, its
+    own drawn sample times, and each channel thinned independently to 8 or
+    12 samples, which is the normal laboratory situation. The union length
+    is `n1 + n2 - 1`, the shared $t = 0$ counting once, so there are three
+    possible lengths: 15, 19 and 23.
 
     $t = 0$ stays in every channel in both layouts, so `y0_fn` can read
     the initial state off the first observation. Relaxing that needs an
@@ -530,47 +518,45 @@ def _bounds_md(mo):
     ## Why not just clip
 
     Suppose you constrain a rate constant to $(10^{-3}, 1)$ by clipping
-    whatever the network emits. The forward pass is now correct. The
-    backward pass is broken: a clip has derivative zero outside the
-    range, so once the network proposes 1.5 the gradient telling it to
-    come down is multiplied by zero. The parameter is stuck at its
-    bound, and nothing raises.
+    whatever the network emits. The forward pass is right and the backward
+    pass is broken: a clip has zero derivative outside the range, so once
+    the network proposes 1.5 the gradient telling it to come down is
+    multiplied by zero. The parameter sticks at its bound, and nothing
+    raises.
 
-    `BoundScaler` reparameterises instead. It composes with a network
-    like this:
+    `BoundScaler` reparameterises instead, composing with a network like
+    this:
 
     ```
     physical input -> to_latent -> network -> from_latent -> physical output
     ```
 
-    The network in the middle sees normalised, unbounded numbers, has no
-    idea a bound exists, and never has to clamp itself. `from_latent`
-    maps an unbounded $z$ into $[\ell, u]$ by squashing:
+    The network in the middle sees normalised, unbounded numbers and never
+    has to clamp itself. `from_latent` squashes an unbounded $z$ into
+    $[\ell, u]$:
 
     $$
     x = \ell + (u - \ell)\,\sigma(z / T)
     $$
 
-    Since $\sigma$ lands in $(0, 1)$, an out-of-range value is not
-    representable. There is nothing to clip and nothing to check.
+    $\sigma$ lands in $(0, 1)$, so an out-of-range value is not
+    representable: nothing to clip, nothing to check.
 
-    `to_latent` is the inverse, used on inputs. Its logit has poles at
-    the ends of the box, so a value at or past a bound would give
-    infinity. Clipping there would reintroduce the original disease, so
-    the library continues the logit linearly outside a narrow band
-    instead. Values stay finite, the gradient stays non-zero and points
-    the right way, and the join is smooth enough that an adaptive solver
-    notices nothing.
+    `to_latent` is the inverse, used on inputs. Its logit has poles at the
+    ends of the box, and clipping there would bring back the original
+    disease, so the library continues the logit linearly outside a narrow
+    band. Values stay finite, the gradient stays non-zero and points the
+    right way, and the join is smooth enough that an adaptive solver notices
+    nothing.
 
     ## The cost, and the choice of squash
 
-    Reparameterising is not free. The derivative of `from_latent`
-    carries a factor $\sigma'(z/T)$, and for a logistic sigmoid in
-    float32 that factor **underflows to exactly zero** past
-    $|z/T| \approx 15$. A network pushed hard against a bound stops
-    receiving any signal to come back, permanently.
+    Reparameterising is not free. The derivative of `from_latent` carries a
+    factor $\sigma'(z/T)$, and for a logistic sigmoid in float32 that
+    **underflows to exactly zero** past $|z/T| \approx 15$. A network pushed
+    hard against a bound stops receiving any signal to come back, for good.
 
-    The library therefore offers a choice of squash, by name:
+    Hence a choice of squash, by name:
 
     | name | tail of $\lvert du/dz \rvert$ | dead at |
     |---|---|---|
@@ -578,13 +564,12 @@ def _bounds_md(mo):
     | `algebraic` | $\lvert z \rvert^{-3}/2$ | $z \approx 3 \times 10^{3}$ |
     | `softsign` | $\lvert z \rvert^{-2}/2$ | $z \approx 10^{7}$ |
 
-    Polynomial decay does not make saturation free. Escaping from
-    $z = 100$ under a $c/z^2$ gradient takes $10^6$ times as long as
-    from $z = 1$. It turns an impossible recovery into a slow one.
+    Polynomial decay does not make saturation free: escaping $z = 100$ under
+    a $c/z^2$ gradient takes $10^6$ times as long as escaping $z = 1$. It
+    turns an impossible recovery into a slow one.
 
-    The left panel below is what the model can express, the right panel
-    is whether it can still learn once it is out there. Note the log
-    scale.
+    Below, the left panel is what the model can express, the right is
+    whether it can still learn once it is out there. Note the log scale.
     """)
     return
 
@@ -618,22 +603,19 @@ def _warp_md(mo):
     mo.md(r"""
     ## Choosing the axis: warps
 
-    The rates in this problem run from 0.0063 to 0.276. Give the rate
-    network an output box of $(10^{-3}, 1)$ with the default linear
-    normalisation and the midpoint of that box is $0.5$. Every rate in
-    the data then sits in the bottom 3% of the range, where the sigmoid
-    is steepest and where the network must emit large negative latents
-    to reach anything at all.
+    The rates here run from 0.0063 to 0.276. Give the rate network an output
+    box of $(10^{-3}, 1)$ under linear normalisation and its midpoint is
+    $0.5$, so every rate in the data sits in the bottom 3% of the range,
+    where the sigmoid is steepest and only large negative latents reach.
 
     A **warp** reparameterises the physical axis before normalising. It
-    changes what "halfway between the bounds" means without changing
-    which physical values are reachable. With `warp="log10"` the
-    midpoint becomes $10^{-2}$ and the data covers the middle of the
-    box.
+    changes what "halfway between the bounds" means without changing which
+    values are reachable: under `warp="log10"` the midpoint is $10^{-2}$ and
+    the data covers the middle of the box.
 
-    Warp and squash are independent. The warp decides how the box is
-    laid out; the squash decides how the model behaves near an edge.
-    Shipped warps are `linear`, `log` and `log10`.
+    Warp and squash are independent. The warp lays out the box, the squash
+    decides what happens near an edge. Shipped warps: `linear`, `log`,
+    `log10`.
     """)
     return
 
@@ -665,28 +647,27 @@ def _symlog_md(mo):
     mo.md(r"""
     ## Registering a warp of your own
 
-    The residual's output box straddles zero, so `log10` is unusable. A
-    linear box works but spends resolution evenly, including on large
-    corrections that should never happen: if the mechanistic part is any
-    good, the residual is small.
+    The residual's output box straddles zero, so `log10` is unusable, and a
+    linear box spends resolution evenly, including on large corrections that
+    should never happen if the mechanistic part is any good.
 
-    What is wanted is an axis linear near zero and logarithmic in the
-    tails. That is not shipped, so register it. Warps and squashes both
-    live in name-keyed registries and adding one is a function call.
+    What is wanted is an axis linear near zero and logarithmic in the tails.
+    That is not shipped, so register it: warps and squashes live in
+    name-keyed registries and adding one is a function call.
 
     $$
     \mathrm{forward}(x) = \operatorname{sign}(x)\,
       \log\!\left(1 + \frac{|x|}{\varepsilon}\right)
     $$
 
-    `forward(0) = 0`, so the box midpoint stays at zero and a freshly
-    initialised residual network produces a correction near zero rather
-    than at some arbitrary interior point.
+    `forward(0) = 0`, so the box midpoint stays at zero and a fresh residual
+    network starts near no correction rather than at some arbitrary interior
+    point.
 
-    A scaler stores its warp **by name**, which is what keeps a saved
-    model a small JSON sidecar plus an array file. The consequence: a
-    custom warp must be registered before a model referencing it can be
-    loaded. `register_bound_transform` is the same idea for squashes.
+    A scaler stores its warp **by name**, which is what keeps a saved model
+    to a JSON sidecar plus an array file. So a custom warp must be
+    registered before a model referencing it can load.
+    `register_bound_transform` is the same idea for squashes.
     """)
     return
 
@@ -721,23 +702,20 @@ def _model_md(mo):
     | `rate_net` | $T \mapsto k$ | once per experiment | no |
     | `residual_net` | $y \mapsto \text{correction}$ | once per solver step | yes |
 
-    A covariate does not change during a trajectory, so anything
-    depending only on covariates can be computed **before** the solve
-    and closed over as a constant. Its cost is then independent of how
-    many solver steps run, and it never appears on the tape the backward
-    pass walks. A term depending on the state has no choice but to run
-    inside. (A trainable network inside a vector field is a neural ODE.
-    diffrax and Equinox document that technique; this notebook uses it
-    and moves on.)
+    A covariate does not change during a trajectory, so anything depending
+    only on covariates is computed **before** the solve and closed over as a
+    constant. Its cost is then independent of the step count and it never
+    appears on the tape the backward pass walks. A term depending on the
+    state has to run inside. (That is a neural ODE, which diffrax and
+    Equinox document; this notebook uses it and moves on.)
 
-    The library is not told which is which. Both are ordinary calls; you
-    place them by writing the code.
+    The library is never told which is which. Both are ordinary calls, and
+    you place them by writing the code.
 
-    `BoundedPredictor` bundles each network with its two scalers.
-    `input_keys` says how the covariate dict becomes a vector, in a
-    declared order that travels with the saved model, so a reload site
-    knows what the predictor expects without consulting the code that
-    built it.
+    `BoundedPredictor` bundles each network with its two scalers, and
+    `input_keys` says how the covariate dict becomes a vector. That declared
+    order travels with the saved model, so a reload site knows what the
+    predictor expects without consulting the code that built it.
     """)
     return
 
@@ -806,20 +784,18 @@ def _simulate_md(mo):
     simulate_fn(predictors, ts, covariates, y0, solver) -> [T, S]
     ```
 
-    Given the trainable object, one experiment's timestamps, its
-    covariates and its initial state, return the full state at every
-    timestamp. Everything inside is yours. The library never inspects
-    the physics; it vectorises, compiles and differentiates this call.
+    Given the trainable object, one experiment's timestamps, covariates and
+    initial state, return the full state at every timestamp. Everything
+    inside is yours: the library never inspects the physics, it vectorises,
+    compiles and differentiates this call. The two placements are visible in
+    the first four lines.
 
-    The two placements are visible in the first four lines.
-
-    `SolverConfig` collects the numerical choices so they can be saved
-    with the model. `adjoint` picks how gradients are taken through the
-    solve. `DirectAdjoint`, the library default, stores the whole
-    forward trajectory. With a network in the vector field that is
-    usually the memory bottleneck, so this example uses
-    `RecursiveCheckpointAdjoint`, which stores $O(\log n)$ checkpoints
-    and recomputes the rest.
+    `SolverConfig` collects the numerical choices so they save with the
+    model. `adjoint` picks how gradients come back through the solve.
+    `DirectAdjoint`, the default, stores the whole forward trajectory, which
+    is usually the memory bottleneck once a network sits in the vector
+    field, so this example uses `RecursiveCheckpointAdjoint` and its
+    $O(\log n)$ checkpoints instead.
     """)
     return
 
@@ -881,14 +857,13 @@ def _train_md(mo):
 
     ## Phases
 
-    Fitting a trajectory model over a long window is hard for a reason
-    unrelated to the optimiser. Early on the model is wrong, so the
-    predicted trajectory leaves the data almost immediately, and the
-    loss at late times is dominated by that divergence rather than by
-    anything the parameters can fix locally.
+    Fitting a trajectory over a long window is hard for a reason unrelated
+    to the optimiser: early on the model is wrong, the predicted trajectory
+    leaves the data almost immediately, and the late-time loss is dominated
+    by that divergence rather than anything the parameters can fix locally.
 
-    The fix is a curriculum: fit the first part of every trajectory,
-    then all of it. Here that is `length_schedule`, one entry per phase.
+    The fix is a curriculum. Fit the first part of every trajectory, then
+    all of it, which is `length_schedule`, one entry per phase.
 
     ```python
     OptaxTrainingConfig(
@@ -904,42 +879,37 @@ def _train_md(mo):
     rather than broadcast, so a schedule cannot be silently truncated.
 
     `length_schedule` masks the **loss** to the first fraction of each
-    trajectory. It does not shorten the integration, so an early step
-    costs the same as a late one. What changes is which residuals the
-    optimiser is allowed to see.
+    trajectory. It does not shorten the integration, so an early step costs
+    the same as a late one; what changes is which residuals the optimiser
+    sees.
 
-    One consequence worth knowing. A phase at 0.4 and a phase at 1.0
-    measure different quantities, so their loss values are not
-    comparable. `restore_best`, which returns the best model rather than
-    the last one, resets its running minimum whenever `length_schedule`
-    changes. Without that reset the minimum lands in the shortest phase
-    every time and you get back the least-trained point in the run.
+    One consequence. A phase at 0.4 and a phase at 1.0 measure different
+    quantities, so their losses are not comparable, and `restore_best`
+    resets its running minimum whenever `length_schedule` changes. Without
+    that reset the minimum lands in the shortest phase every time and you
+    get back the least-trained point in the run.
 
     ## The saturation penalty
 
-    Bounds hold by construction, so a violation cannot be represented.
-    The failure mode that remains is the opposite one: a network
-    **pinned** against a bound, where the squash derivative has decayed
-    and the gradient that would pull it back has gone.
+    Bounds hold by construction, so a violation cannot be represented. The
+    remaining failure mode is the opposite one: a network **pinned** against
+    a bound, where the squash derivative has decayed and the gradient that
+    would pull it back is gone.
 
-    Two details make the penalty work.
+    Two details make the penalty work. It is charged on the **latent**, not
+    the physical output, which would inherit the same $\sigma'(z/T)$ factor
+    on its backward pass and die exactly where saturation is worst. Reading
+    $|z|/T$ gives a gradient linear in the overshoot that never underflows.
 
-    It is charged on the **latent**, not the physical output. A penalty
-    written against the physical value would inherit the same
-    $\sigma'(z/T)$ factor on its backward pass and die exactly where
-    saturation is worst. Reading $|z|/T$ gives a gradient linear in the
-    overshoot that never underflows.
+    And it is evaluated on a **collocation grid** over each predictor's
+    declared input box rather than along the trajectories. That
+    trajectory-blindness cuts both ways: it reports saturation anywhere in
+    the box the model claims to be valid on, catching extrapolation trouble
+    before deployment, but it cannot say whether one particular solve pushed
+    an input out of range.
 
-    It is evaluated on a **collocation grid** over each predictor's
-    declared input box, not along the trajectories. That makes it
-    trajectory-blind, which cuts both ways. It reports saturation
-    anywhere in the box the model claims to be valid on, including
-    regions no training run visited, so it catches extrapolation trouble
-    before deployment. It cannot tell you whether one particular solve
-    pushed an input out of range.
-
-    `penalty_weight` is a length-1 tuple, which broadcasts across every
-    phase. Give it one entry per phase to ramp it.
+    `penalty_weight` is a length-1 tuple and broadcasts across every phase;
+    give it one entry per phase to ramp it.
 
     Move the controls and everything downstream recomputes.
     """)
@@ -1279,37 +1249,33 @@ def _closing_md(mo):
     ## Reading the two tables
 
     The fit numbers say the expected thing: a model that keeps its known
-    structure and corrects it beats one that keeps the structure and
-    cannot correct it.
+    structure and corrects it beats one that keeps the structure and cannot.
 
-    The two data layouts reach the same trajectory accuracy, which is
-    the point of the bucketing. Half a mask is not a handicap. Their
-    recovered rate laws do differ at the cold end, and that is about
-    which trajectories were sampled rather than about the machinery: the
-    irregular set draws end times up to 9 while the rectangular set
-    stops at 8, and a cold experiment barely decays inside either
-    window, so an extra unit of time is worth more there than extra
-    points are.
+    Both data layouts reach the same trajectory accuracy, which is the point
+    of the bucketing: half a mask is not a handicap. Their recovered rate
+    laws do differ at the cold end, and that is about which trajectories
+    were sampled, not the machinery. The irregular set draws end times up to
+    9 where the rectangular set stops at 8, and a cold experiment barely
+    decays inside either window, so an extra unit of time is worth more
+    there than extra points are.
 
-    The rate table is the more important one. Removing the residual
-    costs more than accuracy. The rate network is now the only flexible
-    thing left in the model, so it absorbs the missing cubic term into
-    $k$ and the recovered rate law comes out badly wrong. It is worst at
-    the cold end, where the true damping is smallest and the cubic term
-    is proportionally largest.
+    The rate table matters more. Removing the residual costs more than
+    accuracy: the rate network is then the only flexible thing left, so it
+    absorbs the missing cubic term into $k$ and the recovered rate law comes
+    out badly wrong, worst at the cold end where the true damping is
+    smallest and the cubic term proportionally largest.
 
-    That is the case for hybrid models stated precisely. An unmodelled
-    term does not stay politely in its own residual. It contaminates
-    whichever parameter is flexible enough to absorb it, which is
-    usually the one you built the experiment to measure.
+    That is the case for hybrid models, precisely. An unmodelled term does
+    not stay in its own residual; it contaminates whichever parameter is
+    flexible enough to absorb it, usually the one you built the experiment
+    to measure.
 
-    The same effect runs the other way. Make the residual *more*
-    expressive (swap `MLPPredictor` for `KANPredictor` in the two
-    builders above, nothing else) and it fits the trajectories slightly
-    better while recovering $k$ noticeably worse, because a more
-    flexible residual can absorb part of the damping too. If a fitted
-    parameter is what you came for, the residual wants to be the least
-    expressive thing that closes the gap.
+    It runs the other way too. Make the residual *more* expressive, swapping
+    `MLPPredictor` for `KANPredictor` in the two builders and nothing else,
+    and it fits the trajectories slightly better while recovering $k$
+    noticeably worse, because it can absorb part of the damping as well. If
+    a fitted parameter is what you came for, the residual wants to be the
+    least expressive thing that closes the gap.
 
     ## Where to go next
 

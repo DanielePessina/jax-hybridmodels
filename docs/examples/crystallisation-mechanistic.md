@@ -8,11 +8,10 @@ that drive Classical Nucleation Theory and a power-law growth term
 inside the vector field.
 
 **Classical Nucleation Theory** (CNT) is the standard closed-form
-expression for how fast new crystals appear as a function of
-supersaturation and temperature. It has two free constants. Using it
-means committing to that mechanism, which is exactly what the hybrid
-model avoids and exactly what makes this the right baseline to measure
-the hybrid model against.
+expression for how fast new crystals appear, given supersaturation and
+temperature, with two free constants. Using it means committing to that
+mechanism, which is what the hybrid model avoids and what makes this the
+right baseline to measure it against.
 
 The full script lives at `examples/crystallisation/train_crystallisation_mechanistic.py`. Run it with:
 
@@ -26,14 +25,13 @@ dataset, the moment ODE, the projector, and bucketing.
 
 ## Why a separate example
 
-It is the parametric baseline. Knowing what four fitted scalars achieve
-on this dataset is the yardstick any hybrid model trained on it has to
-beat.
+It is the parametric baseline: what four fitted scalars achieve on this
+dataset is the yardstick any hybrid model has to beat.
 
 It is also the canonical use for `train_with_evosax`. Population search
-is sized for handful-of-scalar problems where gradients are overkill,
-and CMA-ES steps past the local minima the CNT exponential creates near
-the metastable limit.
+is sized for handful-of-scalar problems where gradients are overkill, and
+CMA-ES steps past the local minima the CNT exponential creates near the
+metastable limit.
 
 Everything else (dataset loading, `y0_fn`, `state_to_output`, the moment
 ODE, the solver) is identical.
@@ -78,16 +76,15 @@ runs.
 
 ## Step 2: the KineticParameters module
 
-`BoundedPredictor` requires at least one input, because a predictor with
-no inputs has no training signal. These four parameters are global, with
-no covariate dependence at all, so we skip `BoundedPredictor` and write
-a minimal `eqx.Module` whose only trainable array is the four-vector
-latent.
+`BoundedPredictor` requires at least one input, since a predictor with
+none has no training signal. These four parameters are global, so it is
+skipped here in favour of a minimal `eqx.Module` whose only trainable
+array is the four-vector latent.
 
-It still uses `BoundScaler` for the output map, so the optimiser works
-in an unbounded space and the simulator still sees physical-units
-parameters inside the declared box. The predictors pytree can be any
-container the user likes; the library never inspects it.
+It still uses `BoundScaler` for the output map, so the optimiser works in
+an unbounded space while the simulator sees physical units inside the
+declared box. The predictors pytree can be any container; the library
+never inspects it.
 
 ```python
 import equinox as eqx
@@ -118,8 +115,8 @@ class KineticParameters(eqx.Module):
 ```
 
 CMA-ES sees an unconstrained four-dimensional search. The squash in
-`out_scaler` keeps every candidate inside the physical box no matter how
-wide the search spreads, which is why bounds are not enforced during the
+`out_scaler` keeps every candidate inside the physical box however wide
+the search spreads, which is why nothing enforces bounds during the
 search itself.
 
 ## Step 3: the vector field
@@ -205,14 +202,10 @@ print(f"final best loss: {history[-1]:.6f}")
 ```
 
 `init="lhs_box"` seeds generation 0 with a Latin hypercube, so every
-corner of the four-parameter box is touched on the first evaluation.
-CMA-ES then adapts the step size from `sigma_init=0.5`. The population
-is evaluated in parallel: 64 individuals across 4 buckets and 4
-experiments fuse into one compiled kernel after the first generation.
-
-The progress table shows five rows total, one every
-`num_generations // 5` generations, so it grows over the run rather than
-sliding past a window that never settles.
+corner of the four-parameter box is touched on the first evaluation, and
+CMA-ES adapts the step size from `sigma_init=0.5`. The population is
+evaluated in parallel: 64 individuals across 4 buckets and 4 experiments
+fuse into one compiled kernel after the first generation.
 
 ## Step 5: read the trained constants
 
@@ -226,9 +219,8 @@ print(
 )
 ```
 
-These four scalars are the whole trained model. Evaluation uses the same
-`predict_dataset` call and the same parity and trajectory plots as the
-hybrid example.
+These four scalars are the whole trained model. Evaluation is the same
+`predict_dataset` call and the same plots as the hybrid example.
 
 ## Comparing against the hybrid model
 

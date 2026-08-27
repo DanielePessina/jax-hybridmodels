@@ -1,27 +1,22 @@
 """Rich-based ``TrainingUI`` for ``train_with_optax``.
 
-A single :class:`rich.live.Live` is started in
-:meth:`RichTrainingUI.on_run_start` and stopped in
-:meth:`RichTrainingUI.on_run_end`. The live renderable is a
+One :class:`rich.live.Live` runs between
+:meth:`RichTrainingUI.on_run_start` and
+:meth:`RichTrainingUI.on_run_end`, rendering a
 :class:`rich.console.Group` that swaps panels as the run progresses:
 
-* a header :class:`rich.panel.Panel` with run-level info (total steps,
-  number of phases, elapsed wall-clock);
-* a per-phase :class:`rich.progress.Progress` bar showing per-step
-  advancement inside the active phase (rebuilt on every
-  ``on_phase_start`` so the bar resets cleanly between phases);
-* a compile-progress panel shown only between ``on_compile_start`` and
-  the matching ``on_compile_done``; once the *first* bucket finishes
-  compiling this slot is replaced by the phase progress bar
-  permanently;
-* a message-log panel showing the most recent ``recent_messages``
-  lines fired through :meth:`RichTrainingUI.on_message`.
+* a header panel with total steps, phase count, and elapsed wall-clock;
+* a per-phase progress bar, rebuilt on every ``on_phase_start`` so it
+  resets cleanly between phases;
+* a compile-progress panel, shown between ``on_compile_start`` and
+  ``on_compile_done`` and replaced permanently by the phase bar once the
+  first bucket finishes compiling;
+* a message-log panel with the most recent ``recent_messages`` lines.
 
-The class is deliberately defensive about event ordering. An event that
-arrives before the state it references, ``on_phase_end`` with no active
-phase for instance, becomes a no-op rather than an assertion. Tournament
-restarts and graceful-abort paths can legitimately fire events out of
-order, and a rendering failure must never take down a training run.
+Event ordering is handled defensively: an event arriving before the state
+it references, ``on_phase_end`` with no active phase say, is a no-op
+rather than an assertion. Tournament restarts and graceful aborts fire
+events out of order, and a rendering failure must never take down a run.
 """
 
 from __future__ import annotations

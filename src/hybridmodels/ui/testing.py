@@ -12,11 +12,10 @@ from typing import Any
 class RecordingUI:
     """Test spy implementing both ``TrainingUI`` and ``EvosaxUI``.
 
-    Every lifecycle method appends ``(name, kwargs_copy)`` to ``self.events``.
-    Tests can then assert on the sequence of names, the count of a particular
-    event, or the kwargs of a specific call. ``kwargs`` are shallow-copied so
-    later mutation of the caller's argument dict does not retroactively
-    change recorded values.
+    Every lifecycle method appends ``(name, kwargs_copy)`` to ``self.events``,
+    so tests can assert on the sequence, the count, or one call's kwargs.
+    ``kwargs`` are shallow-copied, so later mutation of the caller's dict
+    does not change recorded values.
 
     Attributes
     ----------

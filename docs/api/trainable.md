@@ -26,12 +26,11 @@ default_trainable(leaf: 'Any') -> 'bool'
 
 Default trainability rule. ``True`` only for inexact-array leaves.
 
-"Inexact" means a JAX array with a float or complex dtype. Every other
-leaf is treated as fixed, including ints, bools, Python scalars, and
-the frozen values of static fields. That matches what a gradient-based
-optimiser can actually update.
+"Inexact" means a JAX array with a float or complex dtype. Everything
+else is fixed, including ints, bools, Python scalars and static-field
+values, which is what a gradient-based optimiser can actually update.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L37)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L32)</small>
 
 ---
 
@@ -50,13 +49,10 @@ trainable_mask(
 
 Build a boolean mask matching the structure of ``predictors``.
 
-Applies ``predicate`` to every leaf of the ``predictors`` pytree,
-returning a tree of the same shape whose leaves are ``bool``. Any
-container shape works (tuple, dict, NamedTuple, single ``eqx.Module``).
-Both Optax (``eqx.filter_value_and_grad(..., filter_spec=mask)``) and
-Evosax (``eqx.partition(predictors, mask)``) take the result unchanged.
+Applies ``predicate`` to every leaf, returning a tree of the same shape
+whose leaves are ``bool``. Both optimisers take the result unchanged.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L48)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L42)</small>
 
 ---
 
@@ -78,12 +74,11 @@ attribute names for ``eqx.Module`` fields, integer indices for tuples and
 lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
 addresses ``mask.inner.mlp.layers[0].weight``.
 
-A path matching nothing raises. Ignoring it quietly meant a typo left a
-leaf the caller believed was frozen training as normal, and that shows
-up as a wrong experiment rather than a wrong program. The error lists
-the closest real paths, since the usual cause is one wrong segment.
+A path matching nothing raises, listing the closest real paths. Ignoring
+it quietly would leave a leaf the caller believed frozen training as
+normal, which shows up as a wrong experiment, not a wrong program.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L79)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L70)</small>
 
 ---
 
@@ -105,11 +100,10 @@ replaced wholesale by an all-``False`` subtree.
 
 The common use is
 ``freeze_modules_of_type(mask, predictors, BoundScaler)``, which freezes
-every bound scaler's ``temperature`` leaf. Every example does this,
-because the temperature sets how sharply the scaler's squash saturates
-and is not meant to drift while the model trains.
+every scaler's ``temperature``. The temperature sets how sharply the
+squash saturates and is not meant to drift while the model trains.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L117)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L107)</small>
 
 ---
 
@@ -134,4 +128,4 @@ look at a static field. It must not compare leaf values. The walk pairs
 a mask node, whose leaves are booleans, with a predictors node, whose
 leaves are arrays, so a value comparison has no defined meaning here.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L142)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L131)</small>

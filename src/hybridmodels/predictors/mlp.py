@@ -84,11 +84,10 @@ class MLPPredictor(Predictor):
     ) -> None:
         """Build the MLP, materialising the activation callable from its name.
 
-        ``key`` is required and threaded into ``eqx.nn.MLP`` for layer
-        weight initialisation. The framework refuses silent default keys,
-        so reproducibility never rests on a hidden global RNG.
-        ``activation_name`` must be a key of ``_ACTIVATION_MAP``. An
-        unknown name raises, listing the supported set.
+        ``key`` is required, not defaulted, so reproducibility never rests
+        on a hidden global RNG. ``activation_name`` must be a key of
+        ``_ACTIVATION_MAP``; an unknown name raises, listing the supported
+        set.
         """
         activation = _resolve_activation(activation_name)
         self.in_size = int(in_size)
@@ -108,22 +107,20 @@ class MLPPredictor(Predictor):
     def __call__(self, x: Float[Array, " in_size"]) -> Float[Array, " out_size"]:
         """Forward pass: ``[in_size] -> [out_size]``.
 
-        ``jnp.asarray`` ensures the return type is a concrete ``jax.Array``;
-        ``eqx.nn.MLP.__call__`` returns ``Any`` in some Equinox versions and
-        the cast keeps the public type signature clean.
+        ``jnp.asarray`` pins the return type: ``eqx.nn.MLP.__call__``
+        returns ``Any`` in some Equinox versions.
         """
         return jnp.asarray(self.mlp(x))
 
     def initialized_with_key(self, key: Array) -> MLPPredictor:
         """Return a fresh ``MLPPredictor`` with the same architecture, new weights.
 
-        Implements the re-init protocol consumed by
-        :func:`reinitialize_with_key` and by the training tournament loop
-        when it restarts a stalled attempt. Re-instantiating the whole
-        module beats reinitialising leaves in place, because
-        ``eqx.nn.MLP`` owns its per-layer init logic (LeCun-uniform
-        weights scaled by fan-in, zero biases). Leaf-level standard-normal
-        sampling would replace that scheme with a badly scaled one.
+        The re-init protocol consumed by :func:`reinitialize_with_key` and
+        by the tournament when it restarts a stalled attempt.
+        Re-instantiating beats reinitialising leaves in place because
+        ``eqx.nn.MLP`` owns its per-layer init (LeCun-uniform weights
+        scaled by fan-in, zero biases), which leaf-level normal sampling
+        would replace with a badly scaled scheme.
         """
         return MLPPredictor(
             in_size=self.in_size,
@@ -137,25 +134,20 @@ class MLPPredictor(Predictor):
     def with_zero_final_head(self) -> MLPPredictor:
         """Return a copy whose final ``Linear`` layer's weight and bias are zero.
 
-        Hidden layers keep their LeCun-uniform random init, so the input
-        feature transformation stays non-degenerate. Only the readout is
-        forced to zero. Composed inside a ``BoundedPredictor``, the zero
-        latent produced for every input maps through
-        ``out_scaler.from_latent(0)`` to the *exact midpoint* of the
-        physical output box, a known-good starting value independent of
-        the key. That matters when the rate bounds span many decades: an
-        unlucky readout draw can place the initial output several decades
-        off midpoint, far enough that the ODE solver stalls or fails on
-        step one.
+        Hidden layers keep their LeCun-uniform init, so the feature
+        transformation stays non-degenerate; only the readout is zeroed.
+        Inside a ``BoundedPredictor`` the resulting zero latent maps
+        through ``out_scaler.from_latent(0)`` to the exact midpoint of the
+        physical output box, a known-good start independent of the key.
+        That matters when rate bounds span decades, where an unlucky
+        readout draw can stall the solver on step one.
 
-        Returns a structurally identical predictor. Only the trailing
-        ``eqx.nn.Linear``'s ``weight`` and ``bias`` arrays change.
+        Structurally identical predictor; only the trailing
+        ``eqx.nn.Linear``'s ``weight`` and ``bias`` change.
         """
         final = self.mlp.layers[-1]
-        # ``eqx.nn.Linear.bias`` is ``Array | None`` because
-        # ``use_bias=False`` is allowed. ``eqx.nn.MLP`` defaults to
-        # ``use_final_bias=True``, so in practice there is a bias here, but
-        # narrowing the where-tuple covers the no-bias case for free.
+        # ``eqx.nn.Linear.bias`` is ``Array | None``: MLP defaults to
+        # ``use_final_bias=True``, but narrowing covers the no-bias case.
         if final.bias is None:
             zeroed = eqx.tree_at(
                 lambda layer: layer.weight,

@@ -1,14 +1,10 @@
-"""Batch reactor walkthrough — evosax → optax hybrid pipeline.
+"""Batch reactor walkthrough: the evosax then optax hybrid pipeline.
 
-Walks through the same physics as ``examples/batch_reactor/train_hybrid.py``
-in narrative form: a first-order ``A -> B`` batch reactor whose true rate
-constant ``k(T, pH)`` has a known temperature law (Arrhenius) and an unknown
-pH dependence (a saturation curve hidden from the predictor). Two-phase fit:
-
-* **Phase 1 (evosax/CMA-ES)** — fits a deliberately too-simple parametric
-  trunk (centred Arrhenius, pH-blind), 2 scalars.
-* **Phase 2 (optax/AdamW)** — adds a small residual MLP that captures the pH
-  shape the parametric cannot represent.
+The physics of ``examples/batch_reactor/train_hybrid.py`` in narrative
+form. A first-order ``A -> B`` reactor whose rate constant ``k(T, pH)``
+has a known Arrhenius temperature law and a pH dependence hidden from the
+predictor. CMA-ES fits a two-scalar pH-blind trunk, then AdamW adds a
+residual MLP for the pH shape the trunk cannot represent.
 
 Run interactively: ``uv run marimo edit examples/batch_reactor/notebook.py``
 Run as script:     ``uv run python examples/batch_reactor/notebook.py``
@@ -29,39 +25,29 @@ def _intro(mo):
 
     ## Problem
 
-    A first-order reaction $A \to B$ in a closed batch reactor has a
-    rate constant $k(T, \mathrm{pH})$ whose temperature dependence
-    is well described by Arrhenius but whose pH dependence has *no
-    first-principles form*. The available data is a handful of
-    noisy concentration trajectories collected at a small set of
-    operating conditions, and the task is to build a model that
-    predicts $k$ at new conditions — including pH values not seen
-    during training.
+    A first-order reaction $A \to B$ in a closed batch reactor has a rate
+    constant $k(T, \mathrm{pH})$. Arrhenius describes the temperature
+    dependence well; the pH dependence has no first-principles form. From a
+    handful of noisy concentration trajectories, predict $k$ at new
+    conditions, pH values included that were never sampled.
 
-    The classical approach is to retain the Arrhenius temperature
-    law and estimate parameters $(\log k_{\mathrm{ref}}, E_a)$
-    separately on each pH of interest. That works as long as one
-    stays inside a fitted bin, but it produces a *dictionary* of
-    parameters, one per pH, with no functional pH dependence and
-    no extrapolation capability. To predict at an unsampled pH the
-    practitioner is forced to choose between bins (and accept the
-    bias) or interpolate between them by hand.
+    The classical answer keeps the Arrhenius law and estimates
+    $(\log k_{\mathrm{ref}}, E_a)$ separately at each pH of interest. That
+    holds inside a fitted bin, but it produces a *dictionary* of parameters
+    with no functional pH dependence: to predict at an unsampled pH you must
+    pick a bin and accept the bias, or interpolate by hand.
 
     ## Contribution
 
-    We compare this baseline against a *hybrid* model that retains
-    the Arrhenius trunk and adds a small neural residual on top. The
-    residual takes $(T, \mathrm{pH}, C_{A,0})$ as input and emits a
-    log-additive correction $\Delta\log_{10}k$, allowing one
-    coherent model to be trained on data spanning every sampled pH
-    at once and to interpolate continuously between them.
+    The alternative here is a *hybrid* that keeps the Arrhenius trunk and
+    adds a small neural residual taking $(T, \mathrm{pH}, C_{A,0})$ and
+    emitting a log-additive correction $\Delta\log_{10}k$. One model trains
+    on every sampled pH at once and interpolates continuously between them.
 
-    Both models are trained on the *same* dataset of twelve
-    synthetic experiments at three discrete pH values, so the
-    comparison is on methodology rather than data. The hybrid model
-    is evaluated by leave-one-out cross-validation across all
-    twelve experiments and by leave-one-pH-out cross-validation on
-    the four held-out experiments at the intermediate pH = 5.85.
+    Both models see the *same* twelve synthetic experiments at three pH
+    values, so the comparison is on methodology, not data. The hybrid is
+    scored by leave-one-out cross-validation across all twelve and by
+    leave-one-pH-out on the four at the intermediate pH = 5.85.
     """)
     return
 
@@ -145,12 +131,12 @@ def _truth_md(mo):
     $$
 
     with $C_A(0) = C_{A,0}$ and $C_B(0) = 0$. Mass conservation gives
-    $C_A(t) + C_B(t) = C_{A,0}$ for all $t$, so observing $C_A$ alone is
-    sufficient and the closed-form solution is a pure exponential decay
+    $C_A(t) + C_B(t) = C_{A,0}$, so observing $C_A$ alone is enough and the
+    solution is the exponential decay
     $C_A(t) = C_{A,0}\,e^{-k(T,\mathrm{pH})\,t}$.
 
-    The hidden rate constant factorises as Arrhenius in temperature
-    times a Hill-type saturation in pH:
+    The hidden rate constant is Arrhenius in temperature times a Hill-type
+    saturation in pH:
 
     $$
     k(T, \mathrm{pH}) = k_{\mathrm{sat}}(\mathrm{pH}) \cdot
@@ -159,25 +145,21 @@ def _truth_md(mo):
     k_{\mathrm{sat}}(\mathrm{pH}) = b + \frac{a}{1 + (\mathrm{pH}/\mathrm{pH}_{50})^{n}}.
     $$
 
-    Numerical values: baseline $b = 0.14$, amplitude $a = 1.05$,
-    half-saturation $\mathrm{pH}_{50} = 5.85$, Hill coefficient $n = 5$,
-    activation energy $E_a^{\mathrm{true}} = 30\,\mathrm{kJ/mol}$, and
-    centring temperature $T_{\mathrm{ref}} = 298.15\,\mathrm{K}$. The
-    Arrhenius factor is centred so that
-    $k(T_{\mathrm{ref}}, \mathrm{pH}) = k_{\mathrm{sat}}(\mathrm{pH})$
-    exactly. Together this gives a smooth roll-off from a maximum rate
-    near $\mathrm{pH} = 4$ to a plateau near $\mathrm{pH} = 8$, with
-    roughly a two-fold rate change per ten Kelvin around
-    $T_{\mathrm{ref}}$.
+    With $b = 0.14$, $a = 1.05$, $\mathrm{pH}_{50} = 5.85$, $n = 5$,
+    $E_a^{\mathrm{true}} = 30\,\mathrm{kJ/mol}$ and
+    $T_{\mathrm{ref}} = 298.15\,\mathrm{K}$. Centring the Arrhenius factor
+    makes $k(T_{\mathrm{ref}}, \mathrm{pH}) = k_{\mathrm{sat}}(\mathrm{pH})$
+    exactly. The result rolls off smoothly from a maximum near
+    $\mathrm{pH} = 4$ to a plateau near $\mathrm{pH} = 8$, with about a
+    two-fold rate change per ten Kelvin.
     """)
     return
 
 
 @app.cell
 def _truth(jnp):
-    # Truth and physics constants. Used only for synthetic data generation
-    # and overlay curves in the plots; never imported into the predictor
-    # code path.
+    # Truth and physics constants, for data generation and plot overlays
+    # only. Never reachable from the predictor code path.
     T_REF = 298.15  # K (25 °C); centring temperature for Arrhenius
     R_GAS = 8.314e-3  # kJ/(mol·K); pair with Ea in kJ/mol
     EA_TRUE = 30.0  # kJ/mol; rate doubles ~per 10 °C around T_REF
@@ -232,28 +214,23 @@ def _proposed_md(mo):
     \Big),
     $$
 
-    with two trainable scalars $(\log k_{\mathrm{ref}},\,E_a)$ and
-    *no pH input*. The pure mechanistic baseline uses this trunk on
-    its own: $\hat{k}(T) = k_{\mathrm{param}}(T)$. Because the trunk
-    has no pH input, it cannot be fitted across pH bins without
-    averaging over pH-dependent rate shifts; it must be refit *per
-    pH bin*.
+    with two trainable scalars $(\log k_{\mathrm{ref}},\,E_a)$ and *no pH
+    input*. The mechanistic baseline is this trunk alone,
+    $\hat{k}(T) = k_{\mathrm{param}}(T)$, and without a pH input it has to
+    be refit *per pH bin* or else average over the pH-dependent rate shifts.
 
-    **Hybrid extension.** The hybrid retains the trunk and adds a
-    log-additive neural residual $\Delta\log_{10}$ that takes
-    $(T,\mathrm{pH},C_{A,0})$ as input:
+    **Hybrid extension.** The trunk plus a log-additive neural residual
+    $\Delta\log_{10}$ taking $(T,\mathrm{pH},C_{A,0})$:
 
     $$
     \log_{10}\hat{k}(T,\mathrm{pH},C_{A,0})
     = \log_{10} k_{\mathrm{param}}(T) + \Delta\log_{10}(T,\mathrm{pH},C_{A,0}).
     $$
 
-    The residual is a small MLP whose role is to absorb whatever the
-    trunk cannot represent — here, the unknown pH dependence.
-    $C_{A,0}$ is included as a third input as a *red-herring
-    covariate*: first-order kinetics depend only on $T$ and
-    $\mathrm{pH}$, so a well-trained residual should learn to give
-    $C_{A,0}$ negligible influence on $\Delta\log_{10}k$.
+    The residual is a small MLP absorbing whatever the trunk cannot
+    represent, here the unknown pH dependence. $C_{A,0}$ is a *red-herring
+    covariate*: first-order kinetics depend only on $T$ and $\mathrm{pH}$,
+    so a well-trained residual should give it negligible influence.
     """)
     return
 
@@ -263,39 +240,27 @@ def _doe_md(mo):
     mo.md(r"""
     ## Synthetic data
 
-    Both the pure mechanistic baseline and the hybrid model are
-    evaluated on the same dataset, so the comparison is on the
-    methodology — not the data. We generate twelve batch-reactor
-    experiments at three discrete pH values,
-    $\mathrm{pH} \in \{5.0, 5.85, 7.0\}$, chosen to bracket the
-    saturation curve below the knee, at the knee, and above the
-    knee. Within each pH bin, four operating points are drawn by
-    two-dimensional Latin hypercube sampling over
-    $T \in [15, 35]\,°\mathrm{C}$ and $C_{A,0} \in [0.75, 1.5]$.
+    Twelve experiments at three pH values,
+    $\mathrm{pH} \in \{5.0, 5.85, 7.0\}$, bracketing the saturation curve
+    below the knee, at it, and above it. Four operating points per bin come
+    from a Latin hypercube over $T \in [15, 35]\,°\mathrm{C}$ and
+    $C_{A,0} \in [0.75, 1.5]$. Both models see this same dataset.
 
-    The disjoint-pH layout is what makes the comparison sharp.
-    The pure mechanistic baseline has no pH input, so it must be
-    fitted separately on each bin and produces a dictionary of three
-    parameter pairs $(\log k_{\mathrm{ref}}^{(b)}, E_a^{(b)})$ — one
-    per bin — with no functional pH dependence between them. The
-    hybrid model, by contrast, trains on all twelve experiments at
-    once and learns a continuous $\Delta\log_{10}k(T, \mathrm{pH}, C_{A,0})$
-    correction.
+    The disjoint-pH layout is what sharpens the comparison. The mechanistic
+    baseline has no pH input, so it is fitted per bin and yields three
+    parameter pairs with no functional pH dependence between them. The
+    hybrid trains on all twelve at once and learns a continuous
+    $\Delta\log_{10}k(T, \mathrm{pH}, C_{A,0})$.
 
-    The initial concentration $C_{A,0}$ enters every experiment as
-    the IC of the ODE *and* as a third named input to the residual
-    MLP. Because first-order kinetics depend only on $T$ and
-    $\mathrm{pH}$, $C_{A,0}$ is a *red-herring covariate*: the MLP
-    sees it but should learn to assign it negligible influence on
-    $\Delta\log_{10}k$.
+    $C_{A,0}$ enters each experiment as the ODE's initial condition and as
+    the residual's third input, where it is the red-herring covariate the
+    MLP should learn to ignore.
 
-    Each experiment is integrated for $t \in [0, 5]$ (dimensionless
-    units; one e-folding occurs around $t \approx 1/k$) and sampled
-    at twelve evenly-spaced timestamps. Heteroscedastic Gaussian
-    noise with $\sigma = 0.03 \cdot \max(|C_A|, 0.02)$ is added to
-    each observation; the per-observation variance is recorded on
-    each `ChannelObs` so the framework's MLE-style losses could
-    consume it later if desired.
+    Each run is integrated over $t \in [0, 5]$ (dimensionless; one e-folding
+    near $t \approx 1/k$) and sampled at twelve evenly spaced times, with
+    heteroscedastic noise $\sigma = 0.03 \cdot \max(|C_A|, 0.02)$. The
+    per-observation variance is recorded on each `ChannelObs`, so the
+    framework's MLE losses could use it later.
     """)
     return
 
@@ -385,17 +350,12 @@ def _experiment_md(mo):
     mo.md(r"""
     ### Experiments and dataset
 
-    Each experiment is encapsulated in a `hybridmodels.Experiment` —
-    a container for the per-experiment covariates
-    $(T, \mathrm{pH}, C_{A,0})$, the noisy observations on each
-    measured channel, and an `y0_fn` that constructs the initial ODE
-    state from the covariates and the first observation. The state
-    here is two-dimensional, $y = [C_A, C_B]$, so $y_0 = [C_{A,0}, 0]$.
-    A small `state_to_output` projector picks the observed channel
-    $C_A$ out of the full state. Calling `make_dataset` on the list
-    of experiments stacks them into buckets by union-timestep length
-    and produces the observation-mask pytree consumed by the
-    framework's losses.
+    Each experiment is a `hybridmodels.Experiment`: its covariates
+    $(T, \mathrm{pH}, C_{A,0})$, its noisy observations, and a `y0_fn`
+    building the initial ODE state. The state is $y = [C_A, C_B]$, so
+    $y_0 = [C_{A,0}, 0]$, and `state_to_output` picks $C_A$ back out.
+    `make_dataset` then stacks the experiments into buckets by union-axis
+    length and builds the observation mask the losses read.
     """)
     return
 
@@ -537,10 +497,9 @@ def _solver_md(mo):
     mo.md(r"""
     ### Solver
 
-    The first-order kinetics are non-stiff, so we integrate with the
-    explicit Tsit5 scheme at relative tolerance $10^{-5}$ and absolute
-    tolerance $10^{-7}$ — the same defaults used elsewhere in the
-    framework's smooth-ODE examples.
+    First-order kinetics are non-stiff, so Tsit5 at $10^{-5}$ relative and
+    $10^{-7}$ absolute tolerance, the same defaults as the framework's other
+    smooth-ODE examples.
     """)
     return
 
@@ -562,28 +521,21 @@ def _predictor_md(mo):
     mo.md(r"""
     ### Implementation
 
-    The hybrid model is realised as a two-leaf pytree
-    `(parametric_trunk, residual_bp)` consumed by the framework's
-    `simulate_fn`.
+    The model is a two-leaf pytree `(parametric_trunk, residual_bp)` that
+    the framework's `simulate_fn` consumes.
 
-    The trunk `ArrheniusKinetics` is a tiny `eqx.Module` holding two
-    trainable scalars $(\log k_{\mathrm{ref}}, E_a)$ in latent space,
-    mapped onto interpretable physical bounds through a sigmoid
-    `BoundScaler` so optimisation in latent space corresponds to a
-    bounded search in parameter space. The centring at
-    $T_{\mathrm{ref}}$ keeps $\log k_{\mathrm{ref}}$ directly
-    comparable to $\ln k(T_{\mathrm{ref}}, \cdot)$ in physical units.
+    The trunk `ArrheniusKinetics` is a small `eqx.Module` holding
+    $(\log k_{\mathrm{ref}}, E_a)$ in latent space, mapped onto physical
+    bounds by a sigmoid `BoundScaler`, so an unbounded search corresponds to
+    a bounded one in parameter space. Centring at $T_{\mathrm{ref}}$ keeps
+    $\log k_{\mathrm{ref}}$ comparable to $\ln k(T_{\mathrm{ref}}, \cdot)$.
 
-    The residual is a 16-neuron one-hidden-layer `MLPPredictor` with
-    ReLU activation, wrapped in a `BoundedPredictor` that maps the
-    three named inputs $(T, \mathrm{pH}, C_{A,0})$ into the MLP's
-    feature space through a sigmoid input scaler and projects the
-    scalar output through a *symmetric-around-zero* output scaler
-    onto $\Delta\log_{10}k \in [-2, +2]$ decades. The symmetric
-    output bound matters: a freshly-initialised MLP sits near the
-    sigmoid midpoint, which under symmetric bounds maps to exactly
-    zero decades — so phase 2 starts the residual at no correction
-    without any explicit zeroing.
+    The residual is a 16-neuron ReLU `MLPPredictor` inside a
+    `BoundedPredictor` that scales the three named inputs in and projects
+    the output onto $\Delta\log_{10}k \in [-2, +2]$ decades. That symmetry
+    matters: a fresh MLP sits near the sigmoid midpoint, which under
+    symmetric bounds is exactly zero decades, so phase 2 starts from no
+    correction without any explicit zeroing.
     """)
     return
 
@@ -669,16 +621,12 @@ def _simulate_md(mo):
     \log_{10} k = \log_{10} k_{\mathrm{param}}(T) + \Delta\log_{10}(T, \mathrm{pH}, C_{A,0}),
     $$
 
-    while `simulate_fn_baseline` is identical except the residual
-    term is dropped. The pure mechanistic baseline must use
-    `simulate_fn_baseline` because the residual MLP at random init
-    is *not* identically zero and would otherwise inject a spurious
-    T-dependence into the rate constant during baseline fits — making
-    the trunk's $E_a$ unidentifiable. Both functions are pure JAX
-    functions of `predictors` (the trunk-plus-residual pytree),
-    `covariates` (the per-experiment $T, \mathrm{pH}, C_{A,0}$),
-    and the solver-config; the framework owns vmap, jit and
-    autodiff around them.
+    while `simulate_fn_baseline` drops the residual term. The mechanistic
+    baseline needs that second version: a randomly initialised MLP is not
+    identically zero, and it would inject a spurious $T$-dependence that
+    makes the trunk's $E_a$ unidentifiable. Both are pure functions of the
+    predictors pytree, the covariates and the solver config; the framework
+    owns the vmap, jit and autodiff around them.
     """)
     return
 
@@ -803,24 +751,19 @@ def _phase1_md(mo):
     mo.md(r"""
     ### Training masks
 
-    Selectively freezing parts of the predictors pytree is what lets
-    the same model class drive both the pure mechanistic baseline
-    and the hybrid pipeline. The framework's `trainable_mask` builds
-    a boolean pytree of the same shape as `predictors_init` with
-    every leaf marked trainable; `freeze_modules_of_type` then
-    zeroes the mask under any submodule of a given class. The
-    *trunk-only mask* (`mask_p1`) freezes every leaf inside a
-    `BoundedPredictor` (removing the residual MLP) and every leaf
-    inside a `BoundScaler` (bound geometry is fixed by convention),
-    leaving the two-element `latent` of `ArrheniusKinetics` as the
-    only trainable degrees of freedom. The *residual-only mask*
-    (`mask_p2`, defined later) flips this: the `ArrheniusKinetics`
-    submodule is frozen at the phase-1 endpoint, the residual MLP
-    is left trainable.
+    Freezing parts of the predictors pytree is what lets one model class
+    drive both the mechanistic baseline and the hybrid pipeline.
+    `trainable_mask` marks every leaf trainable, then
+    `freeze_modules_of_type` zeroes the mask under a given class.
 
-    `mask_p1` is reused unchanged across the pure mechanistic
-    baseline (per-bin and per-bin-LOO-CV fits) and as phase 1 of
-    the hybrid pipeline below.
+    The trunk-only mask `mask_p1` freezes everything inside a
+    `BoundedPredictor`, removing the residual MLP, and everything inside a
+    `BoundScaler`, since bound geometry is fixed by convention. That leaves
+    the trunk's two-element `latent` as the only free parameters. The
+    residual-only mask `mask_p2` below flips it.
+
+    `mask_p1` is reused unchanged for the baseline's per-bin and
+    leave-one-out fits and for phase 1 of the hybrid.
     """)
     return
 
@@ -863,21 +806,16 @@ def _baseline_md(mo):
     mo.md(r"""
     # A pure mechanistic baseline
 
-    The simplest model that respects the known temperature physics
-    is the parametric trunk on its own — a centred Arrhenius rate
-    constant in $T$ with two scalar parameters
-    $(\log k_{\mathrm{ref}}, E_a)$ and *no pH input*. Because the
-    trunk has no pH input, it cannot be fitted across pH bins
-    without averaging over pH-dependent rate shifts. The classical
-    workaround is to fit one set of parameters per pH bin: three
-    independent CMA-ES runs, three independent parameter pairs, no
-    functional pH dependence between them.
+    The simplest model respecting the known temperature physics is the
+    trunk alone: centred Arrhenius in $T$, two scalars, no pH input.
+    Without a pH input it cannot be fitted across bins without averaging
+    over the pH-dependent rate shifts, so the classical workaround is one
+    fit per bin. Three CMA-ES runs, three parameter pairs, no functional pH
+    dependence between them.
 
-    Implementing this on top of the framework requires no new model
-    code: the trunk is already part of the predictors pytree, and
-    the trainable mask `mask_p1` already freezes everything except
-    its two scalars. We simply run `train_with_evosax` once per
-    bin, on the four in-bin experiments.
+    This needs no new model code: the trunk is already in the predictors
+    pytree and `mask_p1` already freezes everything else. Run
+    `train_with_evosax` once per bin on its four experiments.
     """)
     return
 
@@ -952,11 +890,10 @@ def _per_bin_summary_md(mo):
     mo.md(r"""
     ### Per-bin parameter recovery
 
-    The recovered $\log k_{\mathrm{ref}}^{(b)}$ varies systematically
-    across bins — exactly tracking the hidden $\ln k_{\mathrm{sat}}(\mathrm{pH}_b)$
-    — while $E_a^{(b)}$ stays close to the true 30 kJ/mol in every
-    bin. The pH dependence is real and structural; the trunk
-    cannot represent it, but it *can* absorb it into a different
+    The recovered $\log k_{\mathrm{ref}}^{(b)}$ tracks the hidden
+    $\ln k_{\mathrm{sat}}(\mathrm{pH}_b)$ across bins, while $E_a^{(b)}$
+    stays near the true 30 kJ/mol in each. The pH dependence is structural:
+    the trunk cannot represent it, but it can absorb it into a different
     prefactor every time it is refit.
     """)
     return
@@ -1024,14 +961,11 @@ def _per_bin_loocv_md(mo):
     mo.md(r"""
     ### Per-bin LOO-CV
 
-    Within each pH bin we leave one of the four $(T, C_{A,0})$
-    points out at a time, refit Arrhenius on the remaining three,
-    and predict the held-out one. Twelve cheap evosax fits in
-    total. Because Arrhenius captures pure-temperature
-    extrapolation correctly at fixed pH, the per-bin OOF parity
-    should sit tight on the diagonal — confirming that the
-    classical mechanistic *does* generalise as long as one stays
-    inside its trained pH bin.
+    Leave one of each bin's four $(T, C_{A,0})$ points out, refit Arrhenius
+    on the other three, predict the held-out one: twelve cheap evosax fits.
+    Arrhenius extrapolates correctly in temperature at fixed pH, so the
+    out-of-fold parity should sit tight on the diagonal. The classical model
+    does generalise, as long as you stay inside its trained bin.
     """)
     return
 
@@ -1155,21 +1089,16 @@ def _transfer_md(mo):
     mo.md(r"""
     ### Inter-bin transfer
 
-    Within-bin generalisation is the easy half of the story. The
-    hard half is *transfer*: what happens when the practitioner
-    tries to use one bin's fit at a different pH? Below we take
-    the parameters fitted on the pH = 5.0 data and use them — with
-    no modification, no re-fit — to predict the four pH = 7.0
-    trajectories. The trunk has no pH input, so it returns the
-    same $\log_{10}k(T)$ regardless of pH; the predicted decay
-    rate is therefore far too fast at pH = 7.0, and the predicted
-    trajectories badly overshoot the slow observed decay.
+    Within-bin generalisation is the easy half. The hard half is
+    *transfer*: using one bin's fit at a different pH. Below, the parameters
+    fitted on pH = 5.0 predict the four pH = 7.0 trajectories with no refit.
+    The trunk has no pH input, so it returns the same $\log_{10}k(T)$ either
+    way, the decay comes out far too fast, and the trajectories overshoot.
 
-    This is the failure mode that motivates the hybrid: a pure
-    mechanistic model has no place to put the missing pH
-    dependence, so the practitioner is forced to maintain a
-    dictionary of bin-specific fits and lose all interpolation
-    capability between them.
+    This is the failure mode that motivates the hybrid. A mechanistic model
+    has nowhere to put the missing pH dependence, so you are left
+    maintaining a dictionary of bin-specific fits with no way to interpolate
+    between them.
     """)
     return
 
@@ -1216,34 +1145,26 @@ def _hybrid_md(mo):
     mo.md(r"""
     # The hybrid model
 
-    The hybrid is the same architecture as the baseline plus the
-    residual MLP, trained on all twelve experiments simultaneously.
-    Training proceeds in two phases that share the predictors pytree
-    but flip the trainable mask between them.
+    The hybrid is the baseline architecture plus the residual MLP, trained
+    on all twelve experiments at once, in two phases that share the
+    predictors pytree and flip the trainable mask between them.
 
-    **Phase 1 — Arrhenius trunk fit (evosax/CMA-ES).** The same
-    `mask_p1` used by the baseline is run on the *combined* dataset.
-    Without a pH input the trunk has to compromise across bins; the
-    fit therefore lands at parameters that minimise the joint MSE
-    but cannot match any single bin precisely. This is by design:
-    phase 1 establishes the temperature dependence and leaves the
-    pH residual to phase 2.
+    **Phase 1, CMA-ES on the trunk.** The baseline's `mask_p1` on the
+    *combined* dataset. Without a pH input the trunk has to compromise
+    across bins, landing where the joint MSE is lowest without matching any
+    single bin. That is the design: phase 1 establishes the temperature
+    dependence and leaves pH to phase 2.
 
-    **Phase 2 — residual MLP fit (optax/AdamW).** The mask flips:
-    `freeze_modules_of_type(predictors_p1, ArrheniusKinetics)` zeroes
-    the trunk submask, so the parametric scalars stay fixed at their
-    phase-1 endpoint. The residual MLP becomes the only trainable
-    component. Because the residual at the phase-1 endpoint contributes
-    ${\sim}0$ decades (symmetric output bound, sigmoid midpoint), the
-    phase-2 step-0 loss equals the phase-1 final loss to within
-    numerical noise — the seam between the two phases is invisible
-    in the loss curve.
+    **Phase 2, AdamW on the residual.** The mask flips, freezing the trunk
+    at its phase-1 endpoint and leaving the MLP as the only trainable
+    component. The residual contributes ${\sim}0$ decades there, so the
+    phase-2 step-0 loss matches the phase-1 final loss to numerical noise
+    and the seam is invisible in the loss curve.
 
-    The two-phase decomposition pays off whenever the trunk's basin
-    is non-convex: CMA-ES locates it from a wide LHS prior in the
-    two-dimensional latent space; AdamW then polishes the much
-    higher-dimensional residual smoothly. Neither optimiser alone
-    would do as well on the combined search.
+    The two-phase split pays off whenever the trunk's basin is non-convex.
+    CMA-ES locates it from a wide LHS prior over two latent dimensions, and
+    AdamW then polishes the much higher-dimensional residual. Neither
+    optimiser alone would do as well on the combined search.
     """)
     return
 
@@ -1614,17 +1535,14 @@ def _phase2_kreveal_md(mo):
     mo.md(r"""
     ### Post-fit $\log_{10} k$ reveal
 
-    The headline diagnostic for the hybrid pipeline. Each coloured
-    curve plots $\log_{10} k(\mathrm{pH})$ at a fixed temperature
-    (15 °C, 25 °C, 35 °C): solid for the hidden truth, dashed for
-    the parametric trunk's prediction (flat in pH by construction),
-    and dotted for the full hybrid (parametric + residual MLP). The
-    hybrid (dotted) tracks the truth (solid) closely, while the
-    parametric (dashed) stays flat. The residual MLP has recovered
-    the saturation shape of the hidden $k_{\mathrm{sat}}(\mathrm{pH})$
-    curve from concentration data alone, without ever seeing the
-    rate constant directly. The black markers show each LHS sample
-    at its true $(\mathrm{pH}, \log_{10} k_{\mathrm{true}})$.
+    The headline diagnostic. Each colour is $\log_{10} k(\mathrm{pH})$ at a
+    fixed temperature: solid for the hidden truth, dashed for the trunk
+    (flat in pH by construction), dotted for the full hybrid. The hybrid
+    tracks the truth closely while the trunk stays flat, so the residual has
+    recovered the shape of $k_{\mathrm{sat}}(\mathrm{pH})$ from
+    concentration data alone, never having seen a rate constant. Black
+    markers are the LHS samples at their true
+    $(\mathrm{pH}, \log_{10} k_{\mathrm{true}})$.
     """)
     return
 
@@ -1699,21 +1617,17 @@ def _loocv_md(mo):
     mo.md(r"""
     # Leave-one-out cross-validation
 
-    The headline run was trained on all eleven experiments. To verify
-    the hybrid model actually generalises, we now retrain the entire
-    two-phase pipeline eleven times — each time holding out a
-    different experiment and predicting it from the model fit on the
-    other ten. The aggregated out-of-fold predictions form the
-    validation set: every experiment is predicted exactly once by a
-    model that never saw it during training.
+    The headline run saw all eleven experiments. To check the hybrid
+    generalises, the whole two-phase pipeline is retrained eleven times,
+    each holding out one experiment and predicting it from the other ten.
+    Every experiment is then predicted exactly once by a model that never
+    saw it.
 
-    This is heavy — eleven full evosax + optax cycles, each with the
-    same population size and step budget as the headline run — but
-    the resulting OOF parity, trajectory grid, and per-fold loss
-    table are the most informative generalisation diagnostic this
-    small example can produce. The configs are identical to the
-    headline run; per-fold seeds are derived from the fold index so
-    folds remain reproducible across reruns.
+    This is heavy, eleven full CMA-ES plus AdamW cycles at the headline
+    budget, but the out-of-fold parity, trajectory grid and per-fold losses
+    are the most informative generalisation diagnostic this example can
+    produce. Per-fold seeds come from the fold index, so folds reproduce
+    across reruns.
     """)
     return
 
@@ -2157,42 +2071,32 @@ def _outro(mo):
     mo.md(r"""
     ## Discussion
 
-    The two evaluations make opposite statements about the same
-    dataset. The pure mechanistic baseline fits each pH bin
-    accurately on its own — per-bin LOO-CV stays tight against the
-    diagonal in every bin, and the recovered $(\log k_{\mathrm{ref}}, E_a)$
-    track the truth — but cannot transfer between bins, because the
-    parametric model class has no place to put pH. The inter-bin
-    transfer test is the failure mode that this implies: a model
-    fitted at pH = 5.0 systematically overshoots pH = 7.0 trajectories,
-    and there is no fix within the model class. To use the
-    mechanistic at a new pH, the practitioner must collect data at
-    that pH and refit — a *dictionary* of fits with no
-    interpolation between entries.
+    The two evaluations say opposite things about the same dataset. The
+    mechanistic baseline fits each pH bin accurately on its own: per-bin
+    LOO-CV sits tight against the diagonal and the recovered
+    $(\log k_{\mathrm{ref}}, E_a)$ track the truth. It cannot transfer
+    between bins, because the model class has nowhere to put pH. A fit at
+    pH = 5.0 systematically overshoots pH = 7.0, and no amount of refitting
+    inside the class fixes it: each new pH needs new data and a new entry in
+    the dictionary.
 
-    The hybrid is the same trunk plus a small residual MLP that
-    consumes pH as an input. Trained on all twelve experiments at
-    once, it achieves an in-sample fit comparable to the per-bin
-    baselines (R² $\approx$ 0.999 on the headline run), and the
-    combined LOO-CV confirms it generalises across held-out
-    experiments inside the trained pH range. The leave-one-pH-out
-    test is the hard one: holding out *every* experiment at the
-    intermediate pH = 5.85, the hybrid still predicts those
-    trajectories with R² $\approx 0.98$ — the residual MLP has
-    interpolated the saturation knee from its two flanking bins
-    without ever seeing data at the held-out pH.
+    The hybrid is the same trunk plus a residual MLP that takes pH as an
+    input. Trained on all twelve experiments at once it matches the per-bin
+    baselines in sample (R² $\approx$ 0.999 on the headline run), and the
+    combined LOO-CV shows it generalising to held-out experiments inside the
+    trained range. Leave-one-pH-out is the hard test: with *every*
+    experiment at pH = 5.85 held out, it still predicts them at
+    R² $\approx 0.98$, having interpolated the saturation knee from the two
+    flanking bins.
 
-    Two practical points worth flagging. First, the pure mechanistic
-    baseline must run with a `simulate_fn` that *omits* the residual
-    term entirely; the residual at random initialisation is not
-    identically zero, and letting it through pollutes the trunk's
-    $E_a$ identification — the symmetric output bound only zeros the
-    residual at the sigmoid midpoint, which is not where a freshly
-    initialised MLP sits. Second, the LOPO test is sensitive to how
-    informative the flanking pH bins are: with three pH knots the
-    interpolation is well-posed; with two it would devolve into
-    extrapolation and the hybrid's advantage over the dictionary
-    approach would shrink.
+    Two practical points. The mechanistic baseline has to run a
+    `simulate_fn` that omits the residual entirely, because a randomly
+    initialised MLP is not identically zero and pollutes the trunk's $E_a$;
+    the symmetric output bound zeroes the residual only at the sigmoid
+    midpoint, which is not where a fresh MLP sits. And the LOPO result
+    depends on how informative the flanking bins are: three pH knots make
+    the interpolation well-posed, two would make it extrapolation and shrink
+    the hybrid's advantage.
     """)
     return
 

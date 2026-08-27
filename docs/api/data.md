@@ -29,18 +29,13 @@ ChannelObs(ts: 'Any', values: 'Any', variance: 'Any' = 1.0) -> 'None'
 What one measured quantity of one experiment was observed to be, and when.
 
 A *channel* is one observable quantity, for example concentration or
-mean crystal size. Each channel of an experiment carries its own
-``Tc`` observation times, independent of every other channel, so
-channels can be sampled at completely different rates. ``make_dataset``
-later merges an experiment's channels onto a shared time axis and
-builds the mask that says which cells hold real measurements.
+mean crystal size. Each carries its own ``Tc`` observation times, so
+channels can be sampled at completely different rates.
+``make_dataset`` later merges them onto a shared time axis.
 
-**Shape contract**
-
-All three arrays share the same leading dimension ``Tc``, the number of
-observations for this channel. ``ts`` may be unsorted, since
-``_per_experiment_arrays`` sorts when it builds the union axis. It must
-not contain duplicate times within a single channel.
+All three arrays share the leading dimension ``Tc``. ``ts`` may be
+unsorted, since ``_per_experiment_arrays`` sorts when it builds the
+union axis, but must not repeat a time within one channel.
 
 **Attributes**
 
@@ -50,7 +45,7 @@ not contain duplicate times within a single channel.
 | `values` | `Float[Array, "Tc"]` | Observed channel values aligned with ``ts``. |
 | `variance` | `Float[Array, "Tc"]` | Per-observation variance used by ``masked_mle`` / ``bal_mle``. A scalar passed to the constructor is broadcast to ``values.shape`` so downstream code can assume rank-1. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L62)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L57)</small>
 
 ---
 
@@ -84,7 +79,7 @@ after a permutation.
 | `channels` | `dict[str, ChannelObs]` | Sparse observations, one entry per measured quantity. Must contain every name listed in ``make_dataset(..., output_channel_names=...)``. |
 | `exp_id` | `str` | Identifier carried through for diagnostics. A static field, so it is not a JAX array leaf and never reaches a compiled kernel as data. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L119)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L108)</small>
 
 ---
 
@@ -105,15 +100,12 @@ make_experiment(
 
 Build one ``Experiment`` from raw covariates, channels, and a state-init hook.
 
-``y0_fn`` builds the model's full starting state. It receives the
-covariates dict (already converted to JAX arrays) and the channels
-dict, and returns ``Float[Array, "S"]``.
-
+``y0_fn`` builds the model's full starting state from the covariates
+(already JAX arrays) and the channels, returning ``Float[Array, "S"]``.
 Where the observed channels are the whole state, a typical hook is
 ``lambda c, ch: jnp.array([ch["x"].values[0], ch["v"].values[0]])``.
-Where the model carries unobserved state components, the hook
-constructs them from covariates or from initial channel values. A
-population moment initialised to zero is a common case.
+Unobserved state components are constructed there too, a population
+moment initialised to zero being the common case.
 
 **Parameters**
 
@@ -124,7 +116,7 @@ population moment initialised to zero is a common case.
 | `y0_fn` |  | Hook ``(covariates, channels) -> [S]`` building the full initial state, where ``S`` is the state dimension the user's ``simulate_fn`` integrates. |
 | `exp_id` |  | Optional human-readable id copied to ``Experiment.exp_id``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L244)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L228)</small>
 
 ---
 
@@ -153,12 +145,9 @@ length ``T``. The bucketing rule fixes only that length. Two
 experiments in the same bucket can still have different observation
 times and different masks.
 
-This is a ``NamedTuple`` rather than an ``eqx.Module`` because every
-field is a stacked JAX array and there are no methods to hang on it.
-Compiled training and prediction kernels read the fields positionally,
-and a ``NamedTuple`` is the lightest container JAX already recognises
-as a pytree (a nested structure of arrays that JAX can flatten,
-transform, and rebuild).
+A ``NamedTuple`` rather than an ``eqx.Module`` because every field is a
+stacked JAX array with no methods to hang on it, and a ``NamedTuple`` is
+the lightest pytree container JAX already recognises.
 
 **Fields**
 
@@ -185,12 +174,11 @@ n_obs : Int[Array, ""]
     Total observed-cell count for the bucket (``mask.sum()``).
 
     No shipped loss reads it, and none should: it counts across *all*
-    channels, while every loss here reduces over a selected subset and
-    needs its own denominator. It is kept because examples and smoke
-    scripts use it to report and assert dataset shape, which is a real
-    use even though it is not a training one (R-D4).
+    channels, while every loss reduces over a selected subset and needs
+    its own denominator. Kept because examples and smoke scripts assert
+    dataset shape with it (R-D4).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L151)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L140)</small>
 
 ---
 
@@ -212,10 +200,9 @@ Dataset(
 
 All buckets of a dataset, plus the hook that maps model state to observed channels.
 
-Training and prediction loops iterate over a ``Dataset``. The
-``bucket_payloads`` tuple is the dispatch list, one compiled kernel per
-bucket shape. ``state_to_output`` rides along so the loss pipeline can
-apply it without the user passing it to every call.
+``bucket_payloads`` is the dispatch list, one compiled kernel per bucket
+shape. ``state_to_output`` rides along so the loss pipeline can apply it
+without the user passing it to every call.
 
 **Attributes**
 
@@ -227,7 +214,7 @@ apply it without the user passing it to every call.
 | `covariate_names` | `tuple[str, ...]` | Covariate keys, sorted. Matches each ``Experiment.covariates`` key set. Sorting makes dict iteration deterministic. |
 | `_experiments` | `tuple[Experiment, ...]` | Source experiments, kept so ``split_dataset`` can re-bucket each split. Empty when a ``Dataset`` is built by hand from raw payloads, and ``split_dataset`` then raises. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L206)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L191)</small>
 
 ---
 
@@ -273,7 +260,7 @@ Three steps run in order.
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with ``_experiments`` kept so ``split_dataset`` can re-bucket subsets. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L358)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L337)</small>
 
 ---
 
@@ -295,15 +282,13 @@ split_dataset(
 
 Permute experiments and re-bucket each split independently.
 
-Splitting happens at the ``Experiment`` level, and each split is then
-bucketed from scratch. Carving up existing bucket payloads instead
-would tie the split sizes to the original bucket boundaries. Rebucketing
-gives each split a bucket structure suited to its own contents.
+Splitting happens at the ``Experiment`` level and each split is bucketed
+from scratch, so its bucket structure suits its own contents rather than
+the original bucket boundaries.
 
-Counts use ``floor(train*n)`` and ``floor(val*n)``. The test split takes
-the remainder, so the three sizes sum to ``n`` even after rounding. An
-empty split comes back as a ``Dataset`` with no payloads and no
-``_experiments``, so it cannot be split again.
+Counts use ``floor(train*n)`` and ``floor(val*n)``, with test taking the
+remainder so the sizes sum to ``n``. An empty split comes back with no
+payloads and no ``_experiments``, so it cannot be split again.
 
 **Parameters**
 
@@ -311,7 +296,7 @@ empty split comes back as a ``Dataset`` with no payloads and no
 | --- | --- | --- |
 | `dataset` |  | Source dataset. Must carry ``_experiments``, or this raises. |
 | `train, val, test` |  | Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``). |
-| `key` |  | Required ``jr.PRNGKey`` for the permutation. There is no silent default. The framework refuses to permute under an implicit key so reproducibility never rests on a hidden global. |
+| `key` |  | Required ``jr.PRNGKey`` for the permutation, never defaulted, so reproducibility does not rest on a hidden global. |
 
 **Returns**
 
@@ -319,4 +304,4 @@ empty split comes back as a ``Dataset`` with no payloads and no
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L455)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L434)</small>

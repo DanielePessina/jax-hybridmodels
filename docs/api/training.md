@@ -45,12 +45,11 @@ OptaxTrainingConfig(
 
 Configuration for :func:`train_with_optax`.
 
-The first five fields are **phase-keyed**. A run is a sequence of
-phases (see the module docstring), and each of these tuples carries
-one entry per phase. ``steps``, ``lr``, ``optimizer``,
-``reset_optimiser_state`` and ``length_schedule`` must all have the
-same length, and no scalar broadcasts. None of them has a defensible
-default, so a single-phase run spells out one-element tuples::
+The first five fields are **phase-keyed**: ``steps``, ``lr``,
+``optimizer``, ``reset_optimiser_state`` and ``length_schedule`` carry
+one entry per phase, must have the same length, and do not broadcast.
+None has a defensible default, so a single-phase run spells out
+one-element tuples::
 
     OptaxTrainingConfig(
         steps=(500,), lr=(1e-3,), optimizer=("adamw",),
@@ -68,18 +67,18 @@ so a length-1 tuple broadcasts across every phase.
 | `lr` | `tuple[float, ...]` | Learning rate per phase. Applied to the live optimiser state unless that phase also resets it. |
 | `optimizer` | `tuple[str, ...]` | Optimiser name per phase, ``"adamw"`` or ``"adabelief"``. A phase that changes the name must also set ``reset_optimiser_state``, because optimiser state belongs to the optimiser that built it. |
 | `reset_optimiser_state` | `tuple[bool, ...]` | Per phase, rebuild the optimiser and discard its state at that boundary. Set it when switching optimiser, and when a length-schedule change has made the accumulated momentum wrong. |
-| `length_schedule` | `tuple[float, ...]` | Fraction of each experiment's timeline the loss looks at, per phase, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only the first ``fraction`` of the observation times is scored. Training on early times first is a standard way to stop a long-horizon divergence from drowning the gradient. Because it is a runtime mask rather than a shape change, crossing a phase boundary costs no recompile. Default ``(1.0,)`` scores everything. |
+| `length_schedule` | `tuple[float, ...]` | Fraction of each experiment's timeline the loss looks at, per phase, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only the first ``fraction`` of the observation times is scored, which stops a long-horizon divergence from drowning the gradient. Being a runtime mask rather than a shape change, a phase boundary costs no recompile. Default ``(1.0,)`` scores everything. |
 | `penalty_weight` | `tuple[float, ...]` | Weight on the bound-saturation penalty. Length 1 broadcasts to every phase; any other length must match ``steps``. Entries must be non-negative. ``0.0`` disables the penalty. |
 | `penalty_grid_points` | `int` | Points per input dimension in the collocation grid the penalty is evaluated on. At least 2 (one per box edge). |
 | `loss` | `Callable | str` | A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``, ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``. |
 | `channel_idx, channel_weights` | `tuple | None` | Forwarded into the resolved loss. See ``hybridmodels.losses``. |
-| `tournament_attempts, tournament_steps` | `int` | The tournament runs only when ``tournament_steps > 0`` and ``tournament_attempts > 1``. It re-initialises the predictors ``tournament_attempts`` times, trains each candidate for ``tournament_steps`` steps, scores each on the data term alone with a forward-only pass, and keeps the lowest-scoring candidate. An attempt that raises a diffrax error or produces a non-finite loss is dropped and the next key is tried. If every attempt fails, the original predictors are used and a ``RuntimeWarning`` is raised, so a tournament cannot leave training worse off than not running one. |
+| `tournament_attempts, tournament_steps` | `int` | The tournament runs only when ``tournament_steps > 0`` and ``tournament_attempts > 1``. Each attempt re-initialises the predictors, trains for ``tournament_steps`` steps, and is scored on the data term alone by a forward-only pass; the lowest wins. An attempt that raises a diffrax error or a non-finite loss is dropped and the next key tried. If all fail, the original predictors are used and a ``RuntimeWarning`` is raised. |
 | `tournament_lr` | `float` | Learning rate for the tournament's short bursts, independent of ``lr``. |
-| `patience` | `int` | Number of consecutive steps without a new best data loss before the current phase stops early. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next one before its new learning rate acts. ``0`` disables early stopping. |
-| `restore_best` | `bool` | When true, :func:`train_with_optax` returns the predictors from the step with the lowest data loss instead of the last step. The running minimum resets whenever ``length_schedule`` changes, because losses measured over different horizons are not comparable and the shortest-horizon phase would otherwise always own the minimum. |
+| `patience` | `int` | Consecutive steps without a new best data loss before the current phase stops early. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
+| `restore_best` | `bool` | Return the predictors from the lowest-data-loss step instead of the last one. The running minimum resets whenever ``length_schedule`` changes, since losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 | `verbose` | `bool` | Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L70)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L65)</small>
 
 #### `OptaxTrainingConfig.penalty_weight_for_phase()`
 
@@ -89,7 +88,7 @@ penalty_weight_for_phase(self, phase_idx: 'int') -> 'float'
 
 Penalty weight for ``phase_idx``, honouring the length-1 broadcast.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L174)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L161)</small>
 
 ---
 
@@ -118,27 +117,24 @@ Runs the phases described by ``config``, optionally preceded by a
 tournament. See the module docstring for what a step, a phase, and
 the tournament are, and :class:`OptaxTrainingConfig` for the fields.
 
-``predictors`` is a ``PyTree[eqx.Module]``. The convention is a tuple
-of ``BoundedPredictor`` leaves, but any pytree shape is accepted
-(dict, NamedTuple, single Module) because ``eqx.partition`` walks
-them uniformly. ``key`` is keyword-only and required. Calling without
-it raises ``TypeError`` before any compilation, so reproducibility
-never rests on an implicit default.
+``predictors`` is a ``PyTree[eqx.Module]``, conventionally a tuple of
+``BoundedPredictor`` leaves but any shape ``eqx.partition`` can walk.
+``key`` is keyword-only and required, so reproducibility never rests on
+an implicit default.
 
-``trainable`` is a boolean PyTree mask matching the structure of
-``predictors``. Omitting it defaults to
-:func:`hybridmodels.trainable.trainable_mask`, which marks every
-inexact-array leaf trainable. Pass a custom mask, usually built with
-the freezers in ``hybridmodels.trainable``, to hold specific leaves
-fixed. Freezing ``BoundScaler`` leaves is the common case.
+``trainable`` is a boolean mask matching ``predictors``. Omitting it
+defaults to :func:`hybridmodels.trainable.trainable_mask`, which marks
+every inexact-array leaf trainable. Pass a custom mask, usually from
+the freezers in ``hybridmodels.trainable``, to hold leaves fixed;
+freezing ``BoundScaler`` leaves is the common case.
 
 **Returns**
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step data loss**, one entry per step, concatenated across phases. It can go up.<br><br>Two things are excluded from it. The bound penalty, because including it would move the series when only the penalty weight ramped between phases and would make runs with different weights incomparable. And any smoothing: these are the values the optimiser actually saw.<br><br>It also differs from :func:`~hybridmodels.training.evosax.train_with_evosax`, whose history is best-so-far and therefore monotone non-increasing. Same type, same position in the return tuple, different meaning. Plotting the two on one axis, or feeding both to a shared stopping rule, will mislead.<br><br>``trained_predictors`` is the predictors from the lowest-loss step when ``config.restore_best=True``, or from the final step otherwise. The running minimum behind "lowest" resets whenever ``length_schedule`` changes between phases, so the returned model always comes from the last horizon trained on. |
+| `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step data loss**, one entry per step, concatenated across phases. It can go up. The bound penalty is excluded, so a ramping penalty weight cannot move the series and runs with different weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from :func:`~hybridmodels.training.evosax.train_with_evosax`, whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever ``length_schedule`` changes, so the returned model always comes from the last horizon trained on. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L540)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L496)</small>
 
 ---
 
@@ -168,10 +164,9 @@ EvosaxTrainingConfig(
 
 Configuration for :func:`train_with_evosax`.
 
-There are no phase-keyed tuples here, unlike
-:class:`~hybridmodels.training.optax.OptaxTrainingConfig`. The run is
-a flat loop of ``num_generations`` over a population of
-``population_size`` individuals, so every field is a scalar.
+Unlike :class:`~hybridmodels.training.optax.OptaxTrainingConfig` there
+are no phase-keyed tuples: the run is a flat loop, so every field is a
+scalar.
 
 **Attributes**
 
@@ -189,7 +184,7 @@ a flat loop of ``num_generations`` over a population of
 | `log_every` |  | UI heartbeat cadence. Honoured only by the Rich UIs; the silent and recording UIs see every generation. |
 | `verbose` |  | Selects ``RichEvosaxUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L96)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L85)</small>
 
 ---
 
@@ -215,23 +210,20 @@ train_with_evosax(
 Train ``predictors`` against ``dataset`` with an evolutionary strategy.
 
 Runs ``config.num_generations`` generations of CMA-ES over a
-population of ``config.population_size`` candidate parameter vectors.
-No gradient of the loss is taken. See the module docstring for the
-JIT boundary and the initial-population modes.
+population of ``config.population_size`` candidates, taking no
+gradient. See the module docstring for the JIT boundary and the
+initial-population modes.
 
-``predictors`` is a ``PyTree[eqx.Module]``. The convention is a tuple
-of ``BoundedPredictor`` leaves, but any pytree shape works. ``key``
-is keyword-only and required; calling without it raises
-``TypeError`` before any work happens. ``trainable`` defaults to
-:func:`hybridmodels.trainable.trainable_mask` over the supplied
-pytree, marking every inexact-array leaf trainable. The mask has to
-select at least one scalar.
+``predictors`` is a ``PyTree[eqx.Module]`` in any shape. ``key`` is
+keyword-only and required. ``trainable`` defaults to
+:func:`hybridmodels.trainable.trainable_mask`, and must select at
+least one scalar.
 
 **Returns**
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `history` | `list[float]` | **Best loss so far** at the end of each generation, so the series is monotone non-increasing. Length ``config.num_generations``.<br><br>This differs from :func:`~hybridmodels.training.optax.train_with_optax`, whose history is the raw per-step loss and can go up. Same type, same position in the return tuple, different meaning. Plotting the two together, or feeding both to a shared stopping rule, will mislead.<br><br>When ``config.penalty_weight > 0`` the recorded value is the combined objective, because evosax ranks individuals by one scalar and the terms are never separated. The optax history excludes its penalty. |
-| `best_predictors` | `Any` | The predictors rebuilt from the flat parameter vector with the lowest loss seen in any generation, including the warm-up evaluation of the input predictors. Same container shape as the input ``predictors``. |
+| `history` | `list[float]` | **Best loss so far** at the end of each generation, so the series is monotone non-increasing. Length ``config.num_generations``.<br><br>It differs from :func:`~hybridmodels.training.optax.train_with_optax`, whose history is the raw per-step loss and can go up. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>When ``config.penalty_weight > 0`` the recorded value is the combined objective, since evosax ranks by one scalar. The optax history excludes its penalty. |
+| `best_predictors` | `Any` | Predictors rebuilt from the lowest-loss flat vector seen in any generation, the warm-up evaluation of the input predictors included. Same container shape as the input. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L333)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L308)</small>

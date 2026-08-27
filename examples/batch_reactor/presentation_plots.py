@@ -1,37 +1,27 @@
 """Generate presentation plots for the batch reactor hybrid example.
 
-Three 1x3 figures saved as PNG (300 DPI) under ``figures/presentation/``:
+Four figures under ``figures/presentation/``, each three pH-bin columns wide
+with four temperature curves per column. Scatter is the noisy observations,
+the line is the model on a dense time grid. No truth curve: the message is
+model against data.
 
-* ``01_per_bin_arrhenius.png`` — three independent Arrhenius fits, one per pH
-  bin (the classical "dictionary" baseline). Each column shows that bin's own
-  fit on its own data.
-* ``02_joint_arrhenius.png`` — a single Arrhenius fit on all twelve experiments,
-  shown across all three pH columns. The trunk has no pH input so the same
-  predicted curves appear in every column; the data they are compared against
-  changes with pH. This is the precursor model to the hybrid: the part the
-  residual MLP has to correct.
-* ``02b_linear_ph_arrhenius.png`` — a hand-crafted "smarter" parametric guess:
-  ``log_k_ref(pH) = a + b·pH`` with a single shared Ea (3 trainable scalars:
-  a, b, Ea). The proposer assumes Ea is a single constant of the reaction.
-  The truth's effective Ea varies strongly with pH, so the LSQ-best Ea is a
-  compromise that fits no edge bin well: the figure shows the same opposite-
-  sign temperature-systematic miss at low and high pH.
-* ``03_hybrid.png`` — full hybrid (joint Arrhenius trunk + residual MLP)
-  trained on all twelve experiments. One model, predictions tracking the
-  data across pH.
-
-Each figure: 3 columns (one per pH bin) × 1 row, 4 curves per column overlaid
-by temperature (Dark2 palette, sorted cold→warm). Scatter shows the noisy
-observations; solid line is the model integrated on a dense time grid. No
-truth curve overlaid — the slide message is "model vs. data", not "model vs.
-truth".
+* ``01_per_bin_arrhenius.png`` — three independent Arrhenius fits, one per
+  pH bin, the classical dictionary baseline.
+* ``02_joint_arrhenius.png`` — one Arrhenius fit on all twelve experiments.
+  The trunk has no pH input, so the same curves appear in every column while
+  the data they meet changes. This is what the residual MLP has to correct.
+* ``02b_linear_ph_arrhenius.png`` — a smarter parametric guess,
+  ``log_k_ref(pH) = a + b·pH`` with one shared Ea. The truth's effective Ea
+  varies strongly with pH, so the best single Ea is a compromise that misses
+  both edge bins, with opposite sign in each.
+* ``03_hybrid.png`` — the full hybrid, trunk plus residual MLP, on all twelve
+  experiments. One model, tracking the data across pH.
 
 Run with::
 
     uv run python examples/batch_reactor/presentation_plots.py
 
-Training is small (~1 minute total on CPU): four CMA-ES fits and one AdamW
-phase. Re-run any time the model code changes.
+About a minute on CPU: four CMA-ES fits and one AdamW phase.
 """
 
 # ruff: noqa: F722
@@ -66,9 +56,7 @@ from hybridmodels.training import (
     train_with_optax,
 )
 
-# ---------------------------------------------------------------------------
 # Truth and physics constants — only used for synthetic data generation.
-# ---------------------------------------------------------------------------
 T_REF = 298.15  # K (25 °C); centring temperature for Arrhenius
 R_GAS = 8.314e-3  # kJ/(mol·K); pair with Ea in kJ/mol
 EA_TRUE = 30.0  # kJ/mol
@@ -112,9 +100,7 @@ def k_true(temperature_C, pH):
     return _k_sat_from_ph(pH) * arrhenius
 
 
-# ---------------------------------------------------------------------------
 # Design of experiments — same disjoint-pH LHS as the notebook.
-# ---------------------------------------------------------------------------
 T_C_RANGE = (15.0, 35.0)
 CA0_RANGE = (0.75, 1.5)
 PH_BINS = (5.0, 5.85, 7.0)
@@ -199,9 +185,7 @@ def _build_experiments():
     return experiments, bin_of_exp
 
 
-# ---------------------------------------------------------------------------
 # Predictor — Arrhenius trunk + residual MLP, identical layout to the notebook.
-# ---------------------------------------------------------------------------
 LOG_KREF_BOUNDS = (-3.0, 2.0)
 EA_BOUNDS = (0.0, 120.0)
 
@@ -301,11 +285,9 @@ def _build_predictors_init(trunk_cls: _TrunkFactory = ArrheniusKinetics):
     return (parametric_trunk, residual_bp)
 
 
-# ---------------------------------------------------------------------------
 # Simulators — full hybrid (trunk + residual) and the pure-mechanistic baseline
 # (residual contribution dropped; safe to run with a freshly-initialised
 # residual MLP that is not identically zero).
-# ---------------------------------------------------------------------------
 def simulate_fn(predictors, ts, covariates, y0, solver):
     parametric, residual = predictors
     log_k_ref, Ea = parametric()
@@ -410,9 +392,7 @@ def simulate_fn_linear_ph(predictors, ts, covariates, y0, solver):
     return jnp.asarray(sol.ys)
 
 
-# ---------------------------------------------------------------------------
 # Training configs and fit drivers.
-# ---------------------------------------------------------------------------
 def _make_solver():
     return SolverConfig(
         solver=diffrax.Tsit5(),
@@ -525,9 +505,7 @@ def fit_hybrid(predictors_p1, dataset, mask_p2, solver):
     return preds
 
 
-# ---------------------------------------------------------------------------
 # Plotting.
-# ---------------------------------------------------------------------------
 DARK2 = plt.get_cmap("Dark2")
 # Dark2 indices used cold→warm. Dark2 is qualitative so this mapping is purely
 # conventional; the cold→warm intuition comes from sorting experiments by T
@@ -608,9 +586,7 @@ def _three_panel_figure(
     print(f"  wrote {out_path}")
 
 
-# ---------------------------------------------------------------------------
 # Entry point.
-# ---------------------------------------------------------------------------
 def main():
     plt.rcParams.update({"font.size": 12})
 

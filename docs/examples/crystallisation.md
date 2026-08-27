@@ -1,26 +1,24 @@
 # Crystallisation (hybrid MLP)
 
-The canonical end-to-end example. We fit a hybrid kinetic model to four
-crystallisation experiments. Each one is an irregular concentration
-trajectory with a single particle-size measurement at the end. Two
-neural networks emit the unknown rate laws, and those rates drive a
-population-balance ODE.
+The canonical end-to-end example: a hybrid kinetic model fitted to four
+crystallisation experiments, each an irregular concentration trajectory
+with one particle-size measurement at the end. Two neural networks emit
+the unknown rate laws, and those rates drive a population-balance ODE.
 
 **Crystallisation** is a dissolved solute leaving solution as solid
-crystals. Two rates drive it. **Nucleation** is new crystals appearing.
-**Growth** is existing crystals getting larger. Nobody can derive either
-rate from first principles for a given system, which is the situation
-this library is for.
+crystals, driven by **nucleation**, new crystals appearing, and
+**growth**, existing ones getting larger. Nobody can derive either rate
+from first principles for a given system, which is the situation this
+library is for.
 
-The full script lives at `examples/crystallisation/train_kinetic.py`:
+The full script is `examples/crystallisation/train_kinetic.py`:
 
 ```bash
 uv run python examples/crystallisation/train_kinetic.py
 ```
 
-The four experiments are written into the script, so there is no Excel,
-CSV, or external data dependency. Every section here corresponds to a
-section of the file.
+The four experiments are written into it, so there is no external data
+dependency. Every section here matches a section of the file.
 
 ## What we're modelling
 
@@ -34,20 +32,18 @@ $$
 \end{aligned}
 $$
 
-The $\mu_k$ are **moments** of the crystal size distribution. $\mu_0$
-counts crystals, $\mu_3$ tracks total volume, and the ratio
-$\mu_4 / \mu_3$ gives a mean diameter. Tracking five moments rather than
-the full distribution turns a partial differential equation into six
-ordinary ones.
+The $\mu_k$ are **moments** of the crystal size distribution: $\mu_0$
+counts crystals, $\mu_3$ tracks total volume, and $\mu_4 / \mu_3$ gives a
+mean diameter. Tracking five moments instead of the full distribution
+turns a partial differential equation into six ordinary ones.
 
 $G$ (growth velocity, m/s) and $J$ (nucleation rate, per m³ per second)
-are the unknowns. Rather than committing to a Classical Nucleation
-Theory or power-law form, we let two neural networks learn
-$\log_{10} G$ and $\log_{10} J$ from `(temperature_C, supersaturation)`,
-and the vector field exponentiates back to physical rates inside the
-integrator. **Supersaturation** is the concentration divided by the
-saturation concentration; above 1 the solution is loaded and crystals
-can form.
+are the unknowns. Rather than commit to Classical Nucleation Theory or a
+power law, two networks learn $\log_{10} G$ and $\log_{10} J$ from
+`(temperature_C, supersaturation)`, and the vector field exponentiates
+back to physical rates inside the integrator. **Supersaturation** is
+concentration over saturation concentration; above 1 the solution is
+loaded and crystals can form.
 
 Two quantities are observed: concentration (measured often) and the
 volume-weighted mean diameter $d_{43} = \mu_4 / \mu_3 \cdot 10^6$ µm
@@ -70,10 +66,9 @@ $d_{43}$ variances are the rounded thesis values.
 | `LowData4_7`  | 21.0   | 7      | 1     | 0 → 360      | 10.5              |
 | `LowData4_9`  | 21.0   | 7      | 1     | 0 → 375      | 11.9              |
 
-Two experiments at each of two temperatures, with different time grids.
+Two experiments at each of two temperatures, on different time grids.
 `make_dataset` merges each experiment's per-channel timestamps into one
-axis and groups experiments by the length of that axis, so training sees
-two groups.
+axis and groups by that axis's length, so training sees two groups.
 
 ## Step 1: define the experiments
 
@@ -155,7 +150,7 @@ def state_to_output(state):
     return jnp.stack([conc, d43], axis=-1)
 ```
 
-The `safe_mu3` line is mandatory, not stylistic. Replacing the divisor
+The `safe_mu3` line is mandatory, not stylistic: replacing the divisor
 before dividing is what keeps the gradient finite on the discarded
 branch. See
 [Recommendations](/guide/recommendations#guarded-division-must-guard-the-divisor-not-the-result).
@@ -175,11 +170,10 @@ for i, bp in enumerate(dataset.bucket_payloads):
     print(f"  bucket {i}: ts={tuple(bp.ts.shape)}, n_obs={int(bp.n_obs)}")
 ```
 
-You get two buckets. The two 17 °C experiments have merged axes of
-length 9, because `d43_time_min=270` already appears in the
-concentration grid. The two 21 °C experiments have length 7, because
-their `d43` times (360 and 375) each add one entry to the union axis.
-Each bucket is compiled once and reused for the whole run.
+Two buckets. The 17 °C pair merge to length 9, since `d43_time_min=270`
+already sits in the concentration grid; the 21 °C pair to length 7, their
+`d43` times each adding an entry. Each bucket compiles once and is reused
+for the whole run.
 
 ## Step 4: two bounded predictors
 
@@ -232,22 +226,22 @@ predictors = (growth, nucleation)
 ```
 
 The bound choice matters more than anything else on this page. A fresh
-network emits the midpoint of its output box, so the midpoint is what
-the integrator sees on step 0. `LOG10_GROWTH_BOUNDS = (-15, -5)` puts it
-at $G \approx 10^{-10}$ m/s, which is physically reasonable for early
-growth. An earlier `(-12, -3)` draft put it at
-$G \approx 3 \cdot 10^{-8}$ m/s, large enough that random weights
-produced rates the moment solver could not track within `max_steps`. See
+network emits the midpoint of its output box, so that is what the
+integrator sees on step 0. `LOG10_GROWTH_BOUNDS = (-15, -5)` puts it at
+$G \approx 10^{-10}$ m/s, reasonable for early growth. An earlier
+`(-12, -3)` draft put it at $G \approx 3 \cdot 10^{-8}$ m/s, large enough
+that random weights produced rates the moment solver could not track
+within `max_steps`. See
 [Recommendations](/guide/recommendations#bounds).
 
 ::: tip Optional: pin the readout to the box midpoint
-The nucleation box spans 26 decades. Even well centred, an unlucky final-layer
-draw can put the initial output far enough off midpoint to make the ODE
+The nucleation box spans 26 decades, so even well centred an unlucky
+readout draw can start far enough off midpoint to make the ODE
 intractably stiff.
 [`MLPPredictor.with_zero_final_head()`](/api/predictors#mlppredictor)
-and its KAN counterpart return a copy whose readout layer is zeroed, so
-the initial output is the exact midpoint whatever the key. Hidden layers
-keep their random init.
+and its KAN counterpart zero the readout layer, putting the initial
+output exactly at the midpoint whatever the key. Hidden layers keep their
+random init.
 
 ```python
 inner=MLPPredictor(in_size=2, out_size=1, width_size=64,
@@ -387,9 +381,9 @@ log10_J = float(jnp.squeeze(trained_nucleation(sample_inputs)))
 print(f"G(20°C, S=1.5) = {10**log10_G:.2e} m/s, J = {10**log10_J:.2e} #/(m³·s)")
 ```
 
-Reading the predictors directly at conditions no experiment visited is
-the point of a bounded hybrid model. The script also writes parity and
-trajectory plots under `examples/crystallisation/figures/`.
+Reading the predictors at conditions no experiment visited is the point
+of a bounded hybrid model. The script also writes parity and trajectory
+plots under `examples/crystallisation/figures/`.
 
 ## What's next
 

@@ -1,43 +1,37 @@
 """Batch reactor, part two: a bounded parameter controller trained by PPO.
 
-End-to-end script implementing ``examples/batch_reactor/SPEC_RL.md``. Reads the
-frozen trunk that ``train_hybrid.py --save-predictors`` wrote, then learns the
-one thing that trunk cannot represent: a catalyst whose activity decays as the
-batch runs.
+Reads the frozen trunk that ``train_hybrid.py --save-predictors`` wrote,
+then learns the one thing that trunk cannot represent: a catalyst whose
+activity decays as the batch runs.
 
-What this demonstrates
-----------------------
 Mowbray et al. (Biotechnol Bioeng 120:154, 2023) reframe kinetic parameter
 estimation as control. Parameters become actions, a policy maps the current
-model state to those actions, and reward is the negative fit error at the next
-measurement. This script carries that reframing onto the batch reactor and uses
-it to show two things.
+model state to those actions, and reward is the negative fit error at the
+next measurement. Carrying that onto the batch reactor shows two things.
 
 **Bounds by reparameterisation, inside an RL actor.** Continuous-control RL
-normally bounds its actions with a ``tanh`` squash and then corrects the
-log-probability by the squash's log-det-Jacobian. Here the policy distribution
-lives in the *latent* space instead: the network emits a Gaussian mean over
-``z``, and ``BoundScaler.from_latent`` carries ``z`` into the physical box
-inside the rollout. The action is ``z``, so the log-probability is a plain
-diagonal Gaussian with no correction term, the bound is structural rather than
-enforced, and ``BoundScaler.saturation`` becomes a reward term that keeps the
-policy off the dead flat region of the squash. At the end the pieces recombine
-into an ordinary ``BoundedPredictor``, which is why the trained policy drops
-straight into ``predict_dataset``.
+normally bounds actions with a ``tanh`` squash and corrects the
+log-probability by its log-det-Jacobian. Here the policy distribution lives
+in the *latent* space instead: the network emits a Gaussian mean over ``z``
+and ``BoundScaler.from_latent`` carries it into the physical box inside the
+rollout. The action is ``z``, so the log-probability is a plain diagonal
+Gaussian with no correction term, the bound is structural rather than
+enforced, and ``BoundScaler.saturation`` becomes a reward term keeping the
+policy off the dead flat region of the squash. The pieces recombine into an
+ordinary ``BoundedPredictor`` at the end, which is why the trained policy
+drops straight into ``predict_dataset``.
 
 **No gradient through the solve.** PPO differentiates only the policy's
-log-probability and the value head. The rollout produces rewards and is never
-differentiated, so ``SolverConfig.adjoint`` is irrelevant to this training loop
-and the solver could be stiff or nonsmooth without consequence. That is the
-honest reason to reach for RL here, and it is the same argument the framework's
-evosax trainer makes by a different route.
+log-probability and the value head. The rollout is never differentiated, so
+``SolverConfig.adjoint`` is irrelevant here and the solver could be stiff or
+nonsmooth without consequence. That is the honest reason to reach for RL,
+and the same argument the evosax trainer makes by another route. A
+gradient-trained version of the identical model runs as a baseline, and on a
+problem this smooth it is expected to be competitive: the conclusion is
+about the adjoint, not about accuracy.
 
-The page reports a gradient-trained version of the identical model as a
-baseline. On a problem this smooth it is expected to be competitive, and the
-conclusion is about the adjoint, not about accuracy.
-
-Deviation from the paper: PPO rather than SAC. The MDP is deterministic, the
-horizon is 11 steps, and rollouts are nearly free, so off-policy replay buys
+PPO rather than the paper's SAC, because the MDP is deterministic, the
+horizon is 11 steps and rollouts are nearly free, so off-policy replay buys
 little against roughly twice the code.
 
 Run::
@@ -89,10 +83,9 @@ from hybridmodels.training import OptaxTrainingConfig, train_with_optax
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# ``_model`` sits in this script's own directory. It owns everything the two
-# batch reactor examples must agree on exactly, including ArrheniusKinetics:
-# load_predictors rebuilds a saved pytree against a template and matches static
-# configuration per leaf, so a second definition here would fail to deserialise.
+# ``_model`` sits in this script's own directory and owns everything the two
+# batch reactor examples must agree on exactly. A second definition of
+# ArrheniusKinetics here would fail to deserialise against the saved trunk.
 from _model import (  # noqa: E402
     PH_BOUNDS,
     R_GAS,
@@ -107,23 +100,18 @@ from _shared import (  # noqa: E402
     print_diagnostics,
 )
 
-# --------------------------------------------------------------------------- #
-# Constants                                                                   #
-# --------------------------------------------------------------------------- #
-
-# Truth, duplicated from train_hybrid.py rather than shared. The two scripts
-# generate different datasets and agree only on the physics in _model.py; see
-# SPEC_RL.md section 4.
+# Truth, duplicated from train_hybrid.py rather than shared: the two scripts
+# generate different datasets and agree only on the physics in _model.py.
 EA_TRUE: float = 30.0  # kJ/mol
 K_SAT_BASELINE: float = 0.14
 K_SAT_AMPLITUDE: float = 1.05
 K_SAT_PH50: float = 5.85
 K_SAT_HILL: float = 5.0
 
-# Deactivation truth. Sigmoidal in time with a pH-dependent onset: acid attacks
-# the catalyst sooner. The cubic exponent gives a flat plateau then a sharp
-# fall, which no exponential decay scalar can represent, which is what makes a
-# time-varying policy necessary rather than decorative.
+# Deactivation truth. Sigmoidal in time with a pH-dependent onset, so acid
+# ages the catalyst sooner. The cubic exponent gives a flat plateau then a
+# sharp fall, which no single decay scalar can represent, which is what makes
+# a time-varying policy necessary rather than decorative.
 TAU_REF: float = 1.2  # time units, against a batch length of 5
 PH_REF: float = 6.0
 DEACT_HILL: float = 3.0
@@ -153,11 +141,10 @@ CA_BOUNDS: tuple[float, float] = (0.0, 1.0)
 OBS_BOUNDS: tuple[tuple[float, float], ...] = (CA_BOUNDS, TEMPERATURE_BOUNDS, PH_BOUNDS)
 OBS_KEYS: tuple[str, ...] = ("Ca", "temperature_C", "pH")
 
-# Activity bound. The upper edge is 1.05, not 1.0, because a fresh catalyst has
-# activity exactly 1 and a sigmoid only approaches its edge asymptotically. With
-# a hard 1.0 ceiling the policy would have to saturate to represent t=0, and the
-# saturation reward term would then fight the fit. The 5% headroom puts a=1
-# comfortably inside the box.
+# The upper edge is 1.05, not 1.0: a fresh catalyst has activity exactly 1,
+# and a sigmoid only approaches its edge asymptotically. Under a hard ceiling
+# the policy would have to saturate to represent t=0 and the saturation
+# reward term would fight the fit.
 ACTIVITY_BOUNDS: tuple[tuple[float, float], ...] = ((0.0, 1.05),)
 
 # Deactivation-rate bound for the exponential baseline. Log-warped because a
@@ -179,15 +166,13 @@ N_PPO_EPOCHS: int = 4
 N_MINIBATCHES: int = 4
 MAX_GRAD_NORM: float = 0.5
 
-# Half of log(2*pi*e), the per-dimension constant in a Gaussian's differential
-# entropy. Pulled out so the entropy expression stays one line.
+# Per-dimension constants in a Gaussian's differential entropy and density,
+# pulled out so those expressions stay one line each.
 _HALF_LOG_2PI_E: float = 0.5 * math.log(2.0 * math.pi * math.e)
 _HALF_LOG_2PI: float = 0.5 * math.log(2.0 * math.pi)
 
 
-# --------------------------------------------------------------------------- #
-# Truth helpers. Data generation and plot overlays only, never the model path. #
-# --------------------------------------------------------------------------- #
+# Truth helpers. Data generation and plot overlays only, never the model path.
 
 
 def _k_sat_from_ph(pH: ArrayLike) -> Array:
@@ -228,9 +213,9 @@ def _activity_interval_mean(t0: ArrayLike, t1: ArrayLike, pH: ArrayLike, n: int 
     enters, so holding activity at its interval mean reproduces the continuous
     truth exactly, while holding it at the left endpoint does not.
 
-    That matters twice. It is the reference the pre-learning checkpoint scores
-    against, and it is what the policy should be understood to be recovering:
-    the step function it emits is not sampling ``a_true(t_i)``, it is the
+    That matters twice: it is the reference the pre-learning checkpoint
+    scores against, and it is what the policy is recovering. The step
+    function it emits is not sampling ``a_true(t_i)``, it is the
     piecewise-constant activity that best represents each interval.
     """
     grid = jnp.linspace(t0, t1, n)
@@ -286,11 +271,6 @@ def _lhs_design(seed: int, n: int = N_TRAIN_EXPERIMENTS) -> list[tuple[float, fl
     return [(float(t), float(ph)) for t, ph in scaled]
 
 
-# --------------------------------------------------------------------------- #
-# Hooks                                                                       #
-# --------------------------------------------------------------------------- #
-
-
 def y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Float[Array, " 2"]:
     """Initial state ``[Ca, Cb] = [Ca0_observed, 0]``. Same rule as the fresh runs."""
     ca0 = jnp.asarray(channels["Ca"].values[0])
@@ -300,11 +280,6 @@ def y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Floa
 def state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
     """Project ``[Ca, Cb]`` to the observed channel ``[Ca]``."""
     return state[..., :1]
-
-
-# --------------------------------------------------------------------------- #
-# Aged dataset construction                                                   #
-# --------------------------------------------------------------------------- #
 
 
 def _make_aged_experiment(
@@ -355,11 +330,6 @@ def _build_aged_datasets(
     return train, val
 
 
-# --------------------------------------------------------------------------- #
-# The frozen trunk                                                            #
-# --------------------------------------------------------------------------- #
-
-
 def load_trunk(path: Path, *, key: Array) -> tuple[Any, BoundedPredictor]:
     """Restore the ``(ArrheniusKinetics, BoundedPredictor)`` tuple from ``path``.
 
@@ -390,11 +360,6 @@ def trunk_rate(trunk: tuple[Any, BoundedPredictor], temperature_C: Array, pH: Ar
     log10_k_param = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
     delta = jnp.squeeze(residual({"temperature_C": temperature_C, "pH": pH}))
     return jnp.power(10.0, log10_k_param + delta)
-
-
-# --------------------------------------------------------------------------- #
-# The zero-order-hold simulator, shared by every model on the page            #
-# --------------------------------------------------------------------------- #
 
 
 def _integrate_interval(
@@ -456,11 +421,6 @@ def zoh_states(
     return jnp.concatenate([y0[None, :], ys], axis=0)
 
 
-# --------------------------------------------------------------------------- #
-# Activity models                                                             #
-# --------------------------------------------------------------------------- #
-
-
 class ExponentialDecay(eqx.Module):
     """Baseline 2: one trainable scalar, ``a(t) = exp(-k_d t)``.
 
@@ -485,13 +445,13 @@ def build_policy(*, key: Array) -> BoundedPredictor:
     """The activity policy: ``(Ca, T, pH) -> a`` in ``ACTIVITY_BOUNDS``.
 
     An ordinary ``BoundedPredictor``. PPO trains it by splitting it at
-    ``out_scaler`` (see :func:`rollout_batch`), and both the gradient baseline
-    and the final evaluation call it whole. Nothing about the class knows which.
+    ``out_scaler`` (see :func:`rollout_batch`); the gradient baseline and the
+    final evaluation call it whole. The class knows neither.
 
     The covariates are in the observation because without them the problem is
-    not identifiable: only ``Ca`` is measured and ``Ca0`` is fixed, so the state
-    is one scalar, and a policy on conversion alone would return the same action
-    for a hot acidic batch and a cool neutral one at equal conversion.
+    not identifiable: only ``Ca`` is measured and ``Ca0`` is fixed, so a
+    policy on conversion alone would return the same action for a hot acidic
+    batch and a cool neutral one.
     """
     return BoundedPredictor(
         input_keys=OBS_KEYS,
@@ -522,8 +482,8 @@ def make_simulate_fn(trunk: tuple[Any, BoundedPredictor], *, kind: str) -> Any:
         ``predictors`` is a :class:`BoundedPredictor` over ``OBS_KEYS``.
 
     The trunk is closed over rather than passed through ``predictors``, so it
-    can never appear in a gradient transformation. Freezing it is structural,
-    not a matter of getting a mask right.
+    can never reach a gradient transformation. Freezing it is structural, not
+    a matter of getting a mask right.
     """
 
     def simulate_fn(
@@ -558,11 +518,6 @@ def make_simulate_fn(trunk: tuple[Any, BoundedPredictor], *, kind: str) -> Any:
         return zoh_states(activity_fn, ts, k_fresh, y0, solver)
 
     return simulate_fn
-
-
-# --------------------------------------------------------------------------- #
-# PPO                                                                         #
-# --------------------------------------------------------------------------- #
 
 
 class EpisodeData(NamedTuple):
@@ -975,11 +930,6 @@ def train_ppo(
     return best_agent, best_val_agent, returns, val_returns, losses
 
 
-# --------------------------------------------------------------------------- #
-# Episode data assembly                                                      #
-# --------------------------------------------------------------------------- #
-
-
 def episodes_from_experiments(
     experiments: list[Experiment], trunk: tuple[Any, BoundedPredictor]
 ) -> EpisodeData:
@@ -1004,11 +954,6 @@ def episodes_from_experiments(
         pH=pH,
         y0=y0,
     )
-
-
-# --------------------------------------------------------------------------- #
-# Verification checkpoints                                                    #
-# --------------------------------------------------------------------------- #
 
 
 def _verify_truth() -> None:
@@ -1070,16 +1015,16 @@ def reference_returns(episodes: EpisodeData, solver: SolverConfig) -> tuple[floa
     the continuous truth exactly, so the only residue is observation noise and
     whatever the frozen trunk gets wrong about ``k``.
 
-    It is a reference, not a ceiling. A model can score *above* it, and one that
-    does is fitting the noise rather than the signal, which is the
-    over-parameterisation failure mode hybrid models are prone to. Reading the
-    return against this number is how that shows up.
+    A reference, not a ceiling. A model scoring *above* it is fitting noise
+    rather than signal, the over-parameterisation failure mode hybrid models
+    are prone to, and reading the return against this number is how that
+    shows up.
 
     The undiscounted return does *not* top out at ``HORIZON``. With
-    ``r = exp(-err^2 / sigma^2)`` and residuals distributed as ``N(0, sigma^2)``
-    at the true model, ``E[r] = 1/sqrt(3) = 0.577``, so the noise-limited
-    optimum is about ``0.577 * HORIZON``. Reporting progress against ``HORIZON``
-    would understate a converged policy by a factor of nearly two.
+    ``r = exp(-err^2 / sigma^2)`` and residuals ``N(0, sigma^2)`` at the true
+    model, ``E[r] = 1/sqrt(3) = 0.577``, so the noise-limited optimum is about
+    ``0.577 * HORIZON`` and reporting against ``HORIZON`` would understate a
+    converged policy by nearly a factor of two.
     """
 
     def scored(activity_fn: Any) -> Array:
@@ -1122,11 +1067,6 @@ def _verify_rollout_ceiling(episodes: EpisodeData, solver: SolverConfig) -> tupl
         "deactivation must matter, or there is nothing for the policy to learn"
     )
     return truth, static
-
-
-# --------------------------------------------------------------------------- #
-# Plots                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def _activity_recovery_plot(
@@ -1342,11 +1282,6 @@ def _saturation_plot(
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                        #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

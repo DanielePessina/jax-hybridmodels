@@ -45,7 +45,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 | `channel_idx` |  | Trailing-axis indices to keep. ``None`` keeps all ``D`` channels. |
 | `channel_weights` |  | Per-channel multipliers; length must match ``channel_idx`` (or ``D`` when ``channel_idx`` is ``None``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L101)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L99)</small>
 
 ---
 
@@ -75,7 +75,7 @@ Nothing is averaged. The result is a sum of log-likelihoods and grows
 linearly with the number of observations. Use ``bal_mle`` for the
 per-experiment averaged version.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L143)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L139)</small>
 
 ---
 
@@ -106,7 +106,7 @@ Per-experiment, per-channel denominators are clamped to ``1`` with
 channel does not divide by zero. Mask gating has already zeroed the
 matching numerator, so that contribution is exactly ``0.0``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L169)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L165)</small>
 
 ---
 
@@ -132,7 +132,7 @@ reduction as ``bal_mse``, with ``_gaussian_nll_terms`` (which reads
 ``bp.yvar``) in place of the pointwise squared error. Returns the bucket
 mean of the per-experiment, channel-weighted, time-averaged NLLs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L205)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L199)</small>
 
 ---
 

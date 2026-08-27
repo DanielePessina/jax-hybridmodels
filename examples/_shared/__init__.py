@@ -1,29 +1,11 @@
-"""Shared example utilities — matplotlib style, diagnostics, default plots.
+"""Reporting machinery the examples would otherwise duplicate.
 
-This sub-package is intentionally **outside** ``hybridmodels`` (per
-``AGENTS.md`` "What's explicitly not your job: Adding plotting beyond what
-an example script needs."). It bundles the small amount of reporting
-machinery that every example otherwise duplicates: a high-DPI matplotlib
-style, a per-channel diagnostics summary (MSE/RMSE/MAE/R^2), and two
-default plots (parity, predicted-vs-observed time series).
+A high-DPI matplotlib style, per-channel diagnostics (MSE/RMSE/MAE/R^2),
+and two default plots. Deliberately outside ``hybridmodels``, which ships
+no plotting.
 
-Usage from an example script::
-
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-    from _shared import (
-        apply_default_style,
-        compute_diagnostics,
-        print_diagnostics,
-        parity_plot,
-        trajectory_plot,
-    )
-
-The path tweak is needed because example scripts run as ``__main__``
-under ``examples/<scenario>/`` and ``_shared`` is a sibling of those
-scenario directories.
+Example scripts run as ``__main__`` under ``examples/<scenario>/``, so they
+put the parent directory on ``sys.path`` before importing this package.
 """
 
 from __future__ import annotations

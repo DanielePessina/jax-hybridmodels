@@ -54,10 +54,9 @@ class OmegaPredictor(Predictor):
 
 `initialized_with_key` is what the
 [tournament](/guide/training#the-shared-tournament) calls to draw a
-fresh starting point on each attempt. You can omit it. The default
-`reinitialize_with_key` then resamples every floating-point leaf from
-`jr.normal`, which is worse for a module that owns its own
-initialisation scheme.
+fresh starting point on each attempt. Omit it and the default
+`reinitialize_with_key` resamples every floating-point leaf from
+`jr.normal`, which is worse for a module owning its own init scheme.
 
 Wrap it in a `BoundedPredictor`:
 
@@ -74,9 +73,9 @@ predictors = (predictor,)
 ```
 
 The `"dummy"` covariate exists only because `BoundedPredictor` requires
-at least one input; a predictor with none has no training signal.
-`OmegaPredictor` ignores the value. Every experiment shares the same
-true $\omega$, so there is nothing to condition on.
+at least one input, and a predictor with none has no training signal.
+`OmegaPredictor` ignores the value: every experiment shares the same true
+$\omega$, so there is nothing to condition on.
 
 ## Step 2: generate the experiments
 
@@ -99,11 +98,10 @@ for i, (x0, v0) in enumerate(INITIAL_STATES):
     ))
 ```
 
-**`y0_fn`** builds one experiment's full initial state. It runs once,
-here, and never during training. The `_y0` default argument is Python's
-standard trick for binding a loop variable early. In a real workflow
-`y0_fn` would derive the state from covariates or from the first
-observation.
+**`y0_fn`** builds one experiment's full initial state. It runs here,
+once, and never during training. The `_y0` default argument binds the
+loop variable early. In a real workflow it would derive the state from
+covariates or from the first observation.
 
 `T_MAX = 5.0` covers roughly 0.8 of one period, enough phase coverage to
 fit $\omega$ without aliasing into the wrong basin.
@@ -131,10 +129,9 @@ def _simulate_fn(predictor, ts, covariates, y0, solver):
     return jnp.asarray(sol.ys)
 ```
 
-`predictor(covariates)` returns shape `[1]`, and `.reshape(())` makes it
-a scalar so the multiplication broadcasts cleanly. `BoundedPredictor`
-always returns an array for uniformity, so scalar problems reshape at
-the call site.
+`predictor(covariates)` returns shape `[1]`; `.reshape(())` makes it a
+scalar so the multiplication broadcasts. `BoundedPredictor` always
+returns an array, so scalar problems reshape at the call site.
 
 Note also that `predictor` is called above `diffeqsolve`, not inside the
 vector field. Its inputs are all covariates, so its value cannot change
@@ -174,8 +171,8 @@ recovered omega: 0.9986  (target: 1.0000, final loss: 0.000186)
 
 ## What this example exercises
 
-The same set of pieces as the crystallisation example, on a problem with
-a known answer.
+The same pieces as the crystallisation example, on a problem with a
+known answer.
 
 - [`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`make_dataset`](/api/data#make_dataset)
 - A custom [`Predictor`](/api/predictors#predictor) subclass wrapped in a [`BoundedPredictor`](/api/predictors#boundedpredictor)
@@ -188,7 +185,7 @@ a known answer.
 To check a refactor of your own physics, run this and confirm the
 recovered $\omega$ lands within about 1% of `OMEGA_TRUE`. If it does not,
 the integrator and loss path has a wiring bug, usually in
-`state_to_output` or in `y0_fn`.
+`state_to_output` or `y0_fn`.
 
 ## What's next
 

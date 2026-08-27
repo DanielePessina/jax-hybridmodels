@@ -1,18 +1,12 @@
 """Per-channel summary diagnostics for hybrid-model predictions.
 
-Given the tuple returned by ``hybridmodels.predict_dataset`` and the
-matching ``Dataset``, these helpers flatten the observed/predicted pairs
-under each bucket's mask, then compute the standard regression triple
-(MSE, RMSE, MAE) and the mask-aware coefficient of determination per
-channel.
+Takes the tuple from ``hybridmodels.predict_dataset`` and its ``Dataset``,
+flattens the observed/predicted pairs under each bucket's mask, and
+reports MSE, RMSE, MAE and R^2 per channel.
 
-Why per-channel and not aggregate
----------------------------------
-Hybrid examples in this repo deliberately observe multiple channels with
-*different units and dynamic ranges* (e.g. ``conc`` in mol/L and ``d43``
-in micrometres). A single MSE across both is not interpretable. We
-therefore report one row per channel; aggregate stats are out of scope
-for this helper.
+Per channel, never aggregated: these examples observe channels with
+different units and dynamic ranges (``conc`` in mol/L, ``d43`` in
+micrometres), and one MSE across both means nothing.
 """
 
 from __future__ import annotations
@@ -32,22 +26,14 @@ class ChannelDiagnostics:
     name : str
         Channel name from ``dataset.output_channel_names``.
     n : int
-        Number of observed (mask=True) cells contributing to the stats.
-    mse : float
-        Mean squared error of ``predicted - observed`` over the masked cells.
-    rmse : float
-        ``sqrt(mse)`` for unit-matched reporting.
-    mae : float
-        Mean absolute error.
+        Number of observed (mask=True) cells behind the stats.
+    mse, rmse, mae : float
+        Error of ``predicted - observed`` over the masked cells.
     r2 : float
-        Coefficient of determination ``1 - SS_res/SS_tot`` where
-        ``SS_tot`` uses the mean of the observed values. Returns ``nan``
-        when ``SS_tot == 0`` (constant observations); a parity plot will
-        still render but R^2 is undefined in that degenerate case.
-    obs : np.ndarray
-        Flattened observed values (shape ``[n]``); kept for parity plots.
-    pred : np.ndarray
-        Flattened predicted values (shape ``[n]``); kept for parity plots.
+        ``1 - SS_res/SS_tot``, ``nan`` when the observations are constant
+        and ``SS_tot`` is zero.
+    obs, pred : np.ndarray
+        Flattened ``[n]`` value pairs, kept for parity plots.
     """
 
     name: str
@@ -69,19 +55,16 @@ def compute_diagnostics(
     Parameters
     ----------
     predictions : tuple of arrays, one per bucket
-        The tuple returned by ``hybridmodels.predict_dataset``. Each
-        entry has shape ``[N_b, T_b, D]`` matching the corresponding
-        ``BucketPayload``.
+        From ``hybridmodels.predict_dataset``; each entry is
+        ``[N_b, T_b, D]`` matching its ``BucketPayload``.
     dataset : hybridmodels.Dataset
-        The dataset that produced ``predictions`` — its
-        ``bucket_payloads`` (for masks/observations) and
-        ``output_channel_names`` (for channel labels) are read here.
+        The dataset that produced ``predictions``. Read for masks,
+        observations, and channel names.
 
     Returns
     -------
     dict[str, ChannelDiagnostics]
-        Insertion-order dict keyed by channel name in
-        ``dataset.output_channel_names`` order.
+        Keyed by channel, in ``dataset.output_channel_names`` order.
     """
     channels = dataset.output_channel_names
     if len(predictions) != len(dataset.bucket_payloads):
@@ -128,7 +111,7 @@ def print_diagnostics(
     *,
     header: str | None = None,
 ) -> None:
-    """Pretty-print a diagnostics table to stdout.
+    """Print a diagnostics table, one row per channel.
 
     Format::
 
@@ -137,10 +120,9 @@ def print_diagnostics(
           conc          42   1.2345e-03   3.5135e-02   2.7012e-02    0.9876
           d43           17   1.4321e+00   1.1967e+00   8.9120e-01    0.4231
 
-    The MSE/RMSE/MAE columns use scientific notation so the same template
-    stays readable across the wildly different scales in the example
-    suite (omega ~ O(1), conc ~ O(0.1), d43 ~ O(10), nucleation rates
-    spanning ~9 decades after the predictor exponentiates them).
+    Scientific notation throughout, so one template stays readable across
+    the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
+    spanning nine decades.
     """
     if header:
         print(header)

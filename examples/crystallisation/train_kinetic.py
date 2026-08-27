@@ -1,19 +1,14 @@
-"""Crystallisation kinetic-MLP training example.
+"""Learn crystallisation kinetics with two networks inside a moment ODE.
 
-Trains a hybrid model on four hardcoded crystallisation experiments
-(reproduced from the thesis ``Unseeded_LowData4`` cut), where two MLPs
-predict reaction rates that feed a method-of-moments ODE.
+Two predictors read ``(temperature_C, supersaturation)`` and emit bounded
+log-rates, ``log10(G)`` for growth and ``log10(J)`` for nucleation, that
+feed a method-of-moments ODE. Supersaturation is state-derived inside the
+vector field; the population balance and mass balance around it stay
+mechanistic. The script trains an MLP pair and a KAN pair on the same data
+and prints both final losses.
 
-Each MLP consumes ``(temperature_C, supersaturation)`` and emits a bounded
-log-rate — ``log10(G)`` for crystal growth, ``log10(J)`` for nucleation.
-``supersaturation`` is state-derived inside the vector field; the
-population-balance moment ODEs and mass balance around them stay mechanistic.
-
-The four experiments are inlined as a tuple of dicts at module level so the
-script runs from a clean checkout with no Excel/CSV dependency. Concentration
-variance is a single made-up scalar (the thesis cuts carry per-row variances
-that are noisy and not needed to demonstrate the framework); the d43 variances
-are the rounded thesis values.
+Four experiments from the thesis ``Unseeded_LowData4`` cut are inlined
+below, so the script runs from a clean checkout with no data file.
 
 Run: ``uv run python examples/crystallisation/train_kinetic.py``
 """
@@ -28,9 +23,8 @@ from pathlib import Path
 
 import jax
 
-# x64 must be enabled before any other JAX-touching import. The population-
-# balance moments span ~18 decades during integration; float32 mass balance
-# drifts visibly within a single experiment.
+# Before any other JAX-touching import. The moments span ~18 decades during
+# integration, and a float32 mass balance drifts visibly within one run.
 jax.config.update("jax_enable_x64", True)
 
 import diffrax  # noqa: E402
@@ -62,17 +56,9 @@ from _shared import (  # noqa: E402
     trajectory_plot,
 )
 
-# --------------------------------------------------------------------------- #
-# Constants                                                                   #
-# --------------------------------------------------------------------------- #
-
-# Four hardcoded experiments from the thesis ``Unseeded_LowData4`` sheet.
-# Conc and d43 are rounded to 1 dp; d43 variance to 3 dp; concentration
-# variance is a single made-up scalar (``CONC_VAR``) applied per row. Each
-# experiment carries one terminal d43 measurement, so the d43 channel's ``ts``
-# axis is sparser than the conc channel's — exactly the irregular layout
-# ``make_dataset`` is designed to bucket. The thesis ``Loading`` column is
-# uniformly zero across LowData4 and is intentionally omitted as a covariate.
+# Values rounded from the thesis sheet. Each experiment carries one terminal
+# d43 measurement, so that channel's ``ts`` axis is far sparser than conc's,
+# which is exactly the irregular layout ``make_dataset`` buckets.
 EXPERIMENTS_DATA: tuple[dict[str, object], ...] = (
     {
         "exp_id": "LowData4_3",
@@ -111,14 +97,11 @@ EXPERIMENTS_DATA: tuple[dict[str, object], ...] = (
         "d43_var": 0.267,
     },
 )
-# Made-up uniform concentration variance, broadcast across every row.
-CONC_VAR = 0.1
+CONC_VAR = 0.1  # made up; the thesis per-row variances are noisy and unneeded
 
-# Predictor input/output bounds. Centring matters: a random-init network sits
-# near the sigmoid midpoint, so the midpoint must be a physically reasonable
-# rate. ``G ~ 1e-10 m/s`` and ``J ~ 1.8e3 #/m³/s`` are matched to the source-
-# package's typical ranges; earlier wider bounds put the midpoint several
-# decades off and made the moment ODE intractably stiff at random init.
+# Centring matters: a random-init network sits near the sigmoid midpoint, so
+# that midpoint has to be a physically reasonable rate. Wider bounds put it
+# several decades off and made the moment ODE intractably stiff at init.
 TEMPERATURE_BOUNDS = (13.0, 27.0)  # °C, slightly wider than data span
 SUPERSATURATION_BOUNDS = (0.0, 12.0)  # S = conc / conc_sat
 LOG10_GROWTH_BOUNDS = (-15.0, -5.0)  # log10(G [m/s])
@@ -135,12 +118,8 @@ OUTPUT_CHANNELS = ("conc", "d43")
 INPUT_KEYS = ("temperature_C", "supersaturation")
 
 
-# --------------------------------------------------------------------------- #
-# Hook callables consumed by the framework                                    #
-# --------------------------------------------------------------------------- #
-# These three functions are passed into ``make_experiment``, ``make_dataset``,
-# and ``train_with_optax`` respectively. They have to live at module level so
-# their identities are stable across calls.
+# The three framework hooks, at module level so their identities are stable
+# across calls: y0_fn, state_to_output, simulate_fn.
 
 
 def y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Float[Array, " 6"]:
@@ -154,12 +133,10 @@ def state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
     mu3 = state[..., 3]
     mu4 = state[..., 4]
     conc = state[..., 5]
-    # d43 = (mu4 / mu3) * 1e6 [um], guarded against the early-time near-zero-
-    # moments regime. The double-``where`` pattern is the canonical JAX-grad-
-    # safe guarded division: a naive ``jnp.where(cond, mu4/mu3, 0.0)`` still
-    # evaluates ``mu4/mu3`` on the masked branch, producing inf/nan whose
-    # gradient flows back through ``where`` and poisons the loss. Replacing
-    # the divisor on the masked branch gives a finite gradient on both sides.
+    # d43 = (mu4 / mu3) * 1e6 [um], guarded for the early near-zero moments.
+    # The double-``where`` is the grad-safe form: a naive
+    # ``jnp.where(cond, mu4/mu3, 0.0)`` still evaluates the division on the
+    # masked branch, and its inf/nan gradient flows back through ``where``.
     safe_mu3 = jnp.where(mu3 > D43_MU3_EPS, mu3, 1.0)
     ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
     d43 = jnp.clip(jnp.where(jnp.isfinite(ratio) & (ratio > 0.0), ratio, 0.0), 0.0, D43_MAX)
@@ -175,12 +152,11 @@ def simulate_fn(
 ) -> Float[Array, "T 6"]:
     """Integrate the method-of-moments ODE using two direct-rate predictors.
 
-    ``predictors = (growth_BP, nucleation_BP)``. Each consumes
-    ``(temperature_C, supersaturation)`` and emits one bounded log-rate;
-    the vector field exponentiates with ``10**(.)`` to recover physical units.
-    Temperature is constant per experiment; supersaturation is state-derived
-    each step. Both rates are gated by ``(S > 1 + eps)`` so the ODE stops
-    moving below the metastable limit.
+    ``predictors = (growth_BP, nucleation_BP)``, each emitting one bounded
+    log-rate that the vector field exponentiates back to physical units.
+    Temperature is constant per experiment, supersaturation is state-derived
+    each step, and both rates are gated by ``(S > 1 + eps)`` so the ODE
+    stops moving below the metastable limit.
     """
     growth_bp, nucleation_bp = predictors
     temperature_C = covariates["temperature_C"]
@@ -204,9 +180,8 @@ def simulate_fn(
         G = meta_mask * jnp.power(10.0, log10_G)
         J = meta_mask * jnp.power(10.0, log10_J)
 
-        # Hulburt-Katz form for size-independent nucleation at zero size and
-        # pure linear growth, plus a mass balance: solute lost equals crystal
-        # volume gained.
+        # Hulburt-Katz form for nucleation at zero size and linear growth,
+        # plus a mass balance: solute lost equals crystal volume gained.
         dmu0 = J
         dmu1 = G * mu0
         dmu2 = 2.0 * G * mu1
@@ -218,15 +193,15 @@ def simulate_fn(
     # Dataset stores time in minutes; rate constants are SI-second-based.
     times_sec = ts * 60.0
     if solver.dt0 is None:
-        # 1/1000 of the full span, floored at 1 s so the first step doesn't
-        # underflow on short trajectories.
+        # 1/1000 of the span, floored at 1 s so short trajectories do not
+        # underflow on the first step.
         span = times_sec[-1] - times_sec[0]
         dt0 = jnp.maximum(span / 1000.0, jnp.asarray(1.0, dtype=times_sec.dtype))
     else:
         dt0 = jnp.asarray(solver.dt0, dtype=times_sec.dtype)
 
-    # diffrax.PIDController needs atol as a scalar/array — tuples don't
-    # broadcast against the y_error PyTree leaves.
+    # PIDController needs atol as a scalar or array; a tuple does not
+    # broadcast against the y_error pytree leaves.
     atol = (
         jnp.asarray(solver.atol, dtype=times_sec.dtype)
         if isinstance(solver.atol, tuple)
@@ -248,21 +223,14 @@ def simulate_fn(
     return jnp.asarray(sol.ys)
 
 
-# --------------------------------------------------------------------------- #
-# Script body                                                                 #
-# --------------------------------------------------------------------------- #
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
-    # KAN-specific hyperparameters. ``grid_size`` is the spline resolution
-    # per edge — 5 is the jaxkan default and is appropriate for the smooth
-    # log-rate surfaces we expect here. ``basis`` selects the layer
-    # parameterisation: ``spline`` is the canonical KAN (learnable spline
-    # + residual), ``base`` drops the spline and is kept as an ablation.
+    # ``grid_size`` is the spline resolution per edge; 5 is the jaxkan
+    # default and suits the smooth log-rate surfaces here. ``basis="base"``
+    # drops the spline and is kept as an ablation.
     parser.add_argument("--kan-grid-size", type=int, default=5)
     parser.add_argument("--kan-basis", choices=("spline", "base"), default="spline")
     parser.add_argument(
@@ -276,13 +244,9 @@ def main() -> None:
     apply_default_style()
     k_init, k_train = jr.split(jr.PRNGKey(args.seed), 2)
 
-    # ---- Build experiments from the hardcoded LowData4 cut ----------------- #
-    # Each entry in ``EXPERIMENTS_DATA`` is converted into one
-    # ``hybridmodels.Experiment`` carrying two channels with their own ``ts``
-    # axes — the d43 channel has a single terminal observation, so
-    # ``make_dataset`` will form per-experiment union axes and bucket on
-    # length parity. ``CONC_VAR`` is broadcast to a per-row variance vector;
-    # the d43 variance is scalar (one observation per experiment).
+    # One Experiment per entry, each with two channels on their own ``ts``
+    # axes. ``CONC_VAR`` broadcasts to a per-row vector; d43 has a single
+    # terminal observation and a scalar variance.
     experiments: list[Experiment] = []
     for data in EXPERIMENTS_DATA:
         time_min = jnp.asarray(data["time_min"], dtype=float)
@@ -315,7 +279,6 @@ def main() -> None:
             f"d43 obs={exp.channels['d43'].values.shape[0]}"
         )
 
-    # ---- Build dataset (bucket + union-axis logic) ------------------------ #
     print("\n[build] dataset")
     dataset = make_dataset(
         experiments,
@@ -330,14 +293,11 @@ def main() -> None:
             f"mask={tuple(bp.mask.shape)}, n_obs={int(bp.n_obs)}"
         )
 
-    # ---- Solver ----------------------------------------------------------- #
-    # Per-state atol matched to the natural moment magnitudes (``mu0 ~ 1e11``,
-    # ``mu1 ~ 1e6``, ..., ``mu4 ~ 1e-7``, ``conc ~ 1``). A uniform atol
-    # forces the PIDController to over-resolve small components and
-    # under-resolve large ones, and the integrator hits ``max_steps`` before
-    # finishing one trajectory. Setting atol per-component ~9 decades below
-    # each natural magnitude lets ``rtol`` dominate once values are
-    # appreciable, with atol acting as a near-zero floor.
+    # Per-state atol matched to the natural moment magnitudes (``mu0 ~ 1e11``
+    # down to ``mu4 ~ 1e-7``, ``conc ~ 1``). A uniform atol over-resolves the
+    # small components and under-resolves the large ones, and the integrator
+    # hits ``max_steps`` before finishing one trajectory. Nine decades below
+    # each magnitude leaves rtol dominant and atol a near-zero floor.
     solver = SolverConfig(
         solver=diffrax.Tsit5(),
         rtol=1e-4,
@@ -346,16 +306,10 @@ def main() -> None:
         dt0=None,
     )
 
-    # ---- Build predictor pairs (MLP first, then KAN) ---------------------- #
-    # Each BoundedPredictor branch:
-    #     dict -> [2] (INPUT_KEYS order)
-    #          -> in_scaler  : physical -> latent (logit-of-normalised)
-    #          -> inner      : [2] -> [1] (MLPPredictor or KANPredictor)
-    #          -> out_scaler : latent -> physical (sigmoid into log-bounds)
-    # Both pairs share the input scaler; growth/nucleation branches inside
-    # each pair get independent inner weights via key splitting. KAN
-    # ``hidden_widths=(64,)`` mirrors the MLP's single hidden layer of width
-    # 64 so the comparison varies only the inner-network family.
+    # Both pairs share the input scaler, and the growth and nucleation
+    # branches get independent inner weights by key splitting. The KAN's
+    # ``hidden_widths=(64,)`` mirrors the MLP's single width-64 hidden layer,
+    # so the comparison varies only the inner-network family.
     in_scaler = BoundScaler(
         bounds=(TEMPERATURE_BOUNDS, SUPERSATURATION_BOUNDS),
         transform="sigmoid",
@@ -397,17 +351,13 @@ def main() -> None:
             key=k_mlp_nucleation,
         ),
     )
-    # ``with_zero_final_head`` zeroes the inner KAN's readout layer so the
-    # bounded predictor's init lands at the physical midpoint of each
-    # log-bound. Without this warm start, jaxkan's default spline+residual
-    # init produces a non-zero inner output that, composed with the
-    # asymmetric out-scaler ``low + (high-low)*sigmoid(z)`` for
-    # ``LOG10_NUCLEATION_BOUNDS = (-6.5, 20.0)``, parks log10_J several
-    # decades below the midpoint. With ``J ~ 2`` the moment ODE never
-    # evolves over the trajectory and ``∂loss/∂params`` through the
-    # integrator is numerically vanishing — Adam stays at a flat loss for
-    # the entire run. The MLP path is not affected because random linear
-    # init naturally produces near-zero output for a 2->64->1 net.
+    # ``with_zero_final_head`` lands the KAN's init at the physical midpoint
+    # of each log-bound. Without it, jaxkan's spline+residual init gives a
+    # non-zero inner output that the asymmetric out-scaler over
+    # ``(-6.5, 20.0)`` parks decades below the midpoint. At ``J ~ 2`` the
+    # moments never evolve, the gradient through the integrator vanishes,
+    # and Adam sits at a flat loss for the whole run. The MLP is unaffected:
+    # random linear init already gives a near-zero output.
     kan_predictors = _wrap(
         KANPredictor(
             in_size=2,
@@ -427,16 +377,14 @@ def main() -> None:
         ).with_zero_final_head(),
     )
 
-    # Sanity-check evaluation at the first experiment's covariates and a
-    # plausible mid-range supersaturation. Same input shape the vector field
-    # constructs each timestep.
+    # Sanity check at the first experiment's covariates and a mid-range
+    # supersaturation, in the shape the vector field builds each step.
     sample_cov = experiments[0].covariates
     sample_inputs = {
         "temperature_C": jnp.asarray(sample_cov["temperature_C"]),
         "supersaturation": jnp.asarray(1.5),
     }
 
-    # ---- Train + diagnose + plot, once per family ------------------------ #
     config = OptaxTrainingConfig(
         steps=(args.steps,),
         lr=(args.lr,),
@@ -450,11 +398,8 @@ def main() -> None:
     def run_family(label: str, predictors_init):
         """Train one predictor family end-to-end and write its plots.
 
-        Reuses the outer-scope ``dataset``, ``solver``, ``config``,
-        ``k_train``, ``sample_inputs``, ``sample_cov``, and ``args``.
-        ``label`` becomes the plot subdirectory and is interpolated into
-        figure titles so MLP and KAN outputs land side by side under
-        ``args.plot_dir``.
+        ``label`` becomes the plot subdirectory and goes into the figure
+        titles, so MLP and KAN outputs land side by side.
         """
         growth_bp, nucleation_bp = predictors_init
         log10_G_init = float(jnp.squeeze(growth_bp(sample_inputs)))

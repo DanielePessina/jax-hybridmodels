@@ -1,36 +1,25 @@
 """Rich-based ``EvosaxUI`` for ``train_with_evosax``.
 
-Mirrors :class:`hybridmodels.ui.optax.RichTrainingUI` but with the panel
-set adjusted for an evolutionary outer loop: phases and per-step
-losses are replaced by generations and population statistics. A single
-:class:`rich.live.Live` is started in :meth:`RichEvosaxUI.on_run_start`
-and stopped in :meth:`RichEvosaxUI.on_run_end`. The live renderable is
-a :class:`rich.console.Group` that swaps panels as the run progresses:
+Mirrors :class:`hybridmodels.ui.optax.RichTrainingUI` with phases and
+per-step losses replaced by generations and population statistics. One
+:class:`rich.live.Live` runs between :meth:`RichEvosaxUI.on_run_start`
+and :meth:`RichEvosaxUI.on_run_end`, rendering:
 
-* a header :class:`rich.panel.Panel` with run-level info (generations,
-  population size, elapsed wall-clock, and post-run final best
-  fitness);
-* a compile-progress panel shown only between ``on_compile_start`` and
-  the matching ``on_compile_done``; once any bucket has finished
-  compiling that slot is replaced by a
-  :class:`rich.progress.Progress` bar tracking generations completed /
-  total;
-* a small :class:`rich.table.Table` of the most recent
-  ``recent_generations`` generations with columns
-  ``gen | best_fitness | mean_fitness | best-so-far``, throttled by
+* a header panel with generations, population size, elapsed wall-clock,
+  and the final best fitness after the run;
+* a compile-progress panel, replaced by a generations-completed progress
+  bar once a bucket has finished compiling;
+* a table of the most recent ``recent_generations`` generations
+  (``gen | best_fitness | mean_fitness | best-so-far``), throttled by
   ``log_every``;
 * a message-log panel with the most recent ``recent_messages`` lines.
 
-The class is defensive about event ordering. An event that arrives
-before the state it references, ``on_run_end`` with no generations seen
-for instance, becomes a no-op rather than an assertion. Graceful-abort
-paths and recording-UI tests can legitimately fire events out of order.
+Event ordering is handled defensively: an event arriving before the state
+it references is a no-op rather than an assertion.
 
-This class deliberately does **not** subclass ``RichTrainingUI``. The
-two share a few small rendering helpers, but the bodies are short enough
-that duplication costs less than a shared base. Extracting one would
-force both UIs to negotiate every future panel change through a single
-supertype.
+This class deliberately does not subclass ``RichTrainingUI``. The two
+share a few small rendering helpers, and a shared base would force both
+to negotiate every future panel change through one supertype.
 """
 
 from __future__ import annotations
