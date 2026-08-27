@@ -10,18 +10,19 @@ written against ``console.export_text()``.
 from __future__ import annotations
 
 import re
-from io import StringIO
 
-import diffrax
 import jax.numpy as jnp
 import jax.random as jr
 import pytest
-from jax import Array
-from rich.console import Console
+from _harness import (
+    N_DIM,
+    QuadraticPredictor,
+    quadratic_dataset,
+    quadratic_simulate_fn,
+    recording_console,
+    solver_config,
+)
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.solver import SolverConfig
 from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
 from hybridmodels.ui import EvosaxUI, RichEvosaxUI
 
@@ -31,18 +32,13 @@ from hybridmodels.ui import EvosaxUI, RichEvosaxUI
 _SIG4 = re.compile(r"\d\.\d{4,}")
 
 
-def _make_console() -> Console:
-    """Recording console with no TTY so ``Live`` prints once at stop()."""
-    return Console(record=True, force_terminal=False, width=120, file=StringIO())
-
-
 # ---------------------------------------------------------------------------
 # Test 1: protocol satisfaction.
 # ---------------------------------------------------------------------------
 
 
 def test_rich_evosax_ui_satisfies_protocol() -> None:
-    ui = RichEvosaxUI(console=_make_console())
+    ui = RichEvosaxUI(console=recording_console())
     assert isinstance(ui, EvosaxUI)
 
 
@@ -52,7 +48,7 @@ def test_rich_evosax_ui_satisfies_protocol() -> None:
 
 
 def test_rendered_output_contains_population_generation_fitness_and_final() -> None:
-    console = _make_console()
+    console = recording_console()
     ui = RichEvosaxUI(console=console)
 
     ui.on_run_start(num_generations=5, population_size=12)
@@ -92,7 +88,7 @@ def test_rendered_output_contains_population_generation_fitness_and_final() -> N
 
 
 def test_out_of_order_events_do_not_crash() -> None:
-    ui = RichEvosaxUI(console=_make_console())
+    ui = RichEvosaxUI(console=recording_console())
     # on_run_end immediately after on_run_start: no generations in between.
     ui.on_run_start(num_generations=3, population_size=4)
     ui.on_run_end(best_fitness=0.0)
@@ -104,7 +100,7 @@ def test_out_of_order_events_do_not_crash() -> None:
 
 
 def test_log_every_throttles_generation_table_rows() -> None:
-    console = _make_console()
+    console = recording_console()
     # recent_generations large enough to hold all expected rows so throttling
     # alone determines what shows up.
     ui = RichEvosaxUI(console=console, log_every=2, recent_generations=10)
@@ -132,56 +128,10 @@ def test_log_every_throttles_generation_table_rows() -> None:
 # ---------------------------------------------------------------------------
 # Tests 5 & 6: integration with ``train_with_evosax``.
 #
-# A 4-D quadratic problem (mirrors ``tests/test_train_evosax.py``) trimmed
-# to the minimum needed to exercise ``verbose=True`` / ``verbose=False``
-# UI selection.
+# The 4-D quadratic problem comes from ``tests/_harness.py``, shared with
+# ``tests/test_train_evosax.py``. It needs no ODE solve, so UI selection is
+# exercised without paying for numerics.
 # ---------------------------------------------------------------------------
-
-
-THETA_STAR = jnp.array([1.0, -2.0, 3.0, -4.0], dtype=jnp.float32)
-N_DIM = 4
-
-
-class _QuadraticPredictor(Predictor):
-    """Single trainable ``theta: [4]``; ``__call__`` ignores covariates."""
-
-    theta: Array
-
-    def __init__(self, theta: Array) -> None:
-        self.theta = jnp.asarray(theta, dtype=jnp.float32)
-
-    def __call__(self, covariates):  # type: ignore[override]
-        return self.theta
-
-
-def _quadratic_dataset() -> Dataset:
-    ts = jnp.array([0.0], dtype=jnp.float32)
-    channels = {f"c{i}": ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(N_DIM)}
-    exp = make_experiment(
-        covariates={"id": 0.0},
-        channels=channels,
-        y0_fn=lambda _c, _ch: jnp.zeros(N_DIM, dtype=jnp.float32),
-        exp_id="exp_0",
-    )
-    return make_dataset(
-        [exp],
-        state_to_output=lambda state: state,
-        output_channel_names=tuple(f"c{i}" for i in range(N_DIM)),
-    )
-
-
-def _simulate_fn(predictor, ts, covariates, y0, solver):
-    return jnp.broadcast_to(predictor(covariates)[None, :], (ts.shape[0], N_DIM))
-
-
-def _solver_config() -> SolverConfig:
-    return SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-5,
-        atol=1e-7,
-        max_steps=4096,
-        dt0=0.05,
-    )
 
 
 def test_train_with_evosax_verbose_true_runs_with_rich_ui_default(monkeypatch) -> None:
@@ -194,15 +144,15 @@ def test_train_with_evosax_verbose_true_runs_with_rich_ui_default(monkeypatch) -
     """
     import hybridmodels.training.evosax as evosax_module
 
-    record_console = _make_console()
+    record_console = recording_console()
 
     def _factory():
         return RichEvosaxUI(console=record_console)
 
     monkeypatch.setattr(evosax_module, "RichEvosaxUI", _factory)
 
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
-    ds = _quadratic_dataset()
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=8,
@@ -215,8 +165,8 @@ def test_train_with_evosax_verbose_true_runs_with_rich_ui_default(monkeypatch) -
         pred,
         ds,
         config,
-        simulate_fn=_simulate_fn,
-        solver=_solver_config(),
+        simulate_fn=quadratic_simulate_fn,
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
 
@@ -231,8 +181,8 @@ def test_train_with_evosax_verbose_true_runs_with_rich_ui_default(monkeypatch) -
 
 
 def test_train_with_evosax_verbose_false_silent_on_stdout(capsys) -> None:
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
-    ds = _quadratic_dataset()
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=8,
@@ -245,8 +195,8 @@ def test_train_with_evosax_verbose_false_silent_on_stdout(capsys) -> None:
         pred,
         ds,
         config,
-        simulate_fn=_simulate_fn,
-        solver=_solver_config(),
+        simulate_fn=quadratic_simulate_fn,
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     captured = capsys.readouterr()

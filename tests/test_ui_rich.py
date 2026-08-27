@@ -10,18 +10,17 @@ which is exactly what we want for assertion-friendly captures.
 from __future__ import annotations
 
 import re
-from io import StringIO
 
-import diffrax
-import jax.numpy as jnp
 import jax.random as jr
 import pytest
-from jax import Array
-from rich.console import Console
+from _harness import (
+    OmegaPredictor,
+    make_oscillator_dataset,
+    make_oscillator_simulate_fn,
+    recording_console,
+    solver_config,
+)
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.solver import SolverConfig
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 from hybridmodels.ui import RichTrainingUI, TrainingUI
 
@@ -31,18 +30,13 @@ from hybridmodels.ui import RichTrainingUI, TrainingUI
 _SIG4 = re.compile(r"\d\.\d{4,}")
 
 
-def _make_console() -> Console:
-    """Recording console with no TTY so ``Live`` prints once at stop()."""
-    return Console(record=True, force_terminal=False, width=120, file=StringIO())
-
-
 # ---------------------------------------------------------------------------
 # Test 1: protocol satisfaction.
 # ---------------------------------------------------------------------------
 
 
 def test_rich_training_ui_satisfies_protocol() -> None:
-    ui = RichTrainingUI(console=_make_console())
+    ui = RichTrainingUI(console=recording_console())
     assert isinstance(ui, TrainingUI)
 
 
@@ -52,7 +46,7 @@ def test_rich_training_ui_satisfies_protocol() -> None:
 
 
 def test_rendered_output_contains_phase_loss_optimizer_and_final() -> None:
-    console = _make_console()
+    console = recording_console()
     ui = RichTrainingUI(console=console)
 
     ui.on_run_start(total_steps=10, num_phases=2)
@@ -95,7 +89,7 @@ def test_rendered_output_contains_phase_loss_optimizer_and_final() -> None:
 
 
 def test_out_of_order_events_do_not_crash() -> None:
-    ui = RichTrainingUI(console=_make_console())
+    ui = RichTrainingUI(console=recording_console())
     ui.on_run_start(total_steps=1, num_phases=1)
     # phase_end before any phase_start: should be a no-op, not an error.
     ui.on_phase_end(phase_idx=0)
@@ -107,88 +101,10 @@ def test_out_of_order_events_do_not_crash() -> None:
 # ---------------------------------------------------------------------------
 # Tests 4 & 5: integration with ``train_with_optax``.
 #
-# A minimal harmonic-oscillator fixture, mirroring
-# ``tests/test_train_optax.py`` but trimmed to the bare minimum needed
-# to exercise the ``verbose=True`` / ``verbose=False`` branches of UI
-# selection.
+# The harmonic oscillator comes from ``tests/_harness.py``, cut to two
+# experiments here: these tests only need the ``verbose=True`` /
+# ``verbose=False`` branches of UI selection to run end-to-end.
 # ---------------------------------------------------------------------------
-
-
-class _OmegaPredictor(Predictor):
-    omega: Array
-
-    def __init__(self, omega: float) -> None:
-        self.omega = jnp.asarray(omega, dtype=jnp.float32)
-
-    def __call__(self, x: Array) -> Array:  # type: ignore[override]
-        return self.omega
-
-
-def _y0_fn_factory(y0: Array):
-    def _y0_fn(_cov, _channels):
-        return y0
-
-    return _y0_fn
-
-
-def _solver_config() -> SolverConfig:
-    return SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-5,
-        atol=1e-7,
-        max_steps=4096,
-        dt0=0.05,
-    )
-
-
-def _state_to_output(state: Array) -> Array:
-    return state[..., 0:1]
-
-
-def _make_oscillator_dataset() -> Dataset:
-    ts = jnp.linspace(0.0, 5.0, 10)
-    experiments = []
-    for i, (x0, v0) in enumerate(((1.0, 0.0), (0.0, 1.0))):
-        x_obs = x0 * jnp.cos(ts) + v0 * jnp.sin(ts)
-        y0 = jnp.asarray([x0, v0])
-        experiments.append(
-            make_experiment(
-                covariates={"id": float(i)},
-                channels={"position": ChannelObs(ts=ts, values=x_obs)},
-                y0_fn=_y0_fn_factory(y0),
-                exp_id=f"exp_{i}",
-            )
-        )
-    return make_dataset(
-        experiments,
-        state_to_output=_state_to_output,
-        output_channel_names=("position",),
-    )
-
-
-def _make_simulate_fn():
-    def simulate_fn(predictor, ts, covariates, y0, solver):
-        omega = predictor.omega
-
-        def vector_field(t, y, args):
-            return jnp.stack([y[1], -(omega**2) * y[0]])
-
-        term = diffrax.ODETerm(vector_field)
-        controller = diffrax.PIDController(rtol=solver.rtol, atol=solver.atol)
-        sol = diffrax.diffeqsolve(
-            term,
-            solver.solver,
-            t0=ts[0],
-            t1=ts[-1],
-            dt0=solver.dt0,
-            y0=y0,
-            saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=controller,
-            max_steps=solver.max_steps,
-        )
-        return sol.ys
-
-    return simulate_fn
 
 
 def _trivial_config(verbose: bool) -> OptaxTrainingConfig:
@@ -212,21 +128,21 @@ def test_train_with_optax_verbose_true_runs_with_rich_ui_default(monkeypatch) ->
     """
     import hybridmodels.training.optax as optax_module
 
-    record_console = _make_console()
+    record_console = recording_console()
 
     def _factory():
         return RichTrainingUI(console=record_console)
 
     monkeypatch.setattr(optax_module, "RichTrainingUI", _factory)
 
-    pred = _OmegaPredictor(omega=2.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=2.0)
+    ds = make_oscillator_dataset(initial_states=((1.0, 0.0), (0.0, 1.0)), t_max=5.0, n_timesteps=10)
     history, trained = train_with_optax(
         pred,
         ds,
         _trivial_config(verbose=True),
-        simulate_fn=_make_simulate_fn(),
-        solver=_solver_config(),
+        simulate_fn=make_oscillator_simulate_fn(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
 
@@ -240,14 +156,14 @@ def test_train_with_optax_verbose_true_runs_with_rich_ui_default(monkeypatch) ->
 
 
 def test_train_with_optax_verbose_false_silent_on_stdout(capsys) -> None:
-    pred = _OmegaPredictor(omega=2.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=2.0)
+    ds = make_oscillator_dataset(initial_states=((1.0, 0.0), (0.0, 1.0)), t_max=5.0, n_timesteps=10)
     train_with_optax(
         pred,
         ds,
         _trivial_config(verbose=False),
-        simulate_fn=_make_simulate_fn(),
-        solver=_solver_config(),
+        simulate_fn=make_oscillator_simulate_fn(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     captured = capsys.readouterr()

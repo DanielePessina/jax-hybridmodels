@@ -24,7 +24,6 @@ Each test pins one piece of the contract:
 
 from __future__ import annotations
 
-import diffrax
 import equinox as eqx
 import jax
 import jax.flatten_util as jfu
@@ -32,9 +31,17 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 import pytest
+from _harness import (
+    N_DIM,
+    THETA_STAR,
+    QuadraticPredictor,
+    quadratic_dataset,
+    quadratic_simulate_fn,
+    solver_config,
+)
 from jax import Array
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
+from hybridmodels.data import Dataset
 from hybridmodels.losses import masked_mse
 from hybridmodels.predictors.base import (
     BoundedPredictor,
@@ -42,7 +49,6 @@ from hybridmodels.predictors.base import (
     Predictor,
 )
 from hybridmodels.predictors.mlp import MLPPredictor
-from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
 from hybridmodels.training.evosax import (
     EvosaxTrainingConfig,
@@ -52,77 +58,21 @@ from hybridmodels.training.evosax import (
 )
 from hybridmodels.ui.testing import RecordingUI
 
-THETA_STAR = jnp.array([1.0, -2.0, 3.0, -4.0], dtype=jnp.float32)
-N_DIM = 4
-
-
-class _QuadraticPredictor(Predictor):
-    """Single inexact-array leaf ``theta: [4]`` — covariates are ignored on call."""
-
-    theta: Array
-
-    def __init__(self, theta: Array) -> None:
-        # Float32 to keep CMA-ES (whose state is float32 by default) and the
-        # predictor's leaf in a single dtype, avoiding silent upcasts that
-        # would force a re-trace inside population_eval.
-        self.theta = jnp.asarray(theta, dtype=jnp.float32)
-
-    def __call__(self, covariates):  # type: ignore[override]
-        # The covariates dict is irrelevant here — the "model" is just the
-        # constant theta. Returning the leaf directly lets simulate_fn fold it
-        # into [T, S] = [1, 4] without an ODE call.
-        return self.theta
-
-
-def _quadratic_dataset() -> Dataset:
-    """One bucket containing one experiment, T=1, D=4, mask all True."""
-    ts = jnp.array([0.0], dtype=jnp.float32)
-    channels = {f"c{i}": ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(N_DIM)}
-    exp = make_experiment(
-        covariates={"id": 0.0},
-        channels=channels,
-        y0_fn=lambda _c, _ch: jnp.zeros(N_DIM, dtype=jnp.float32),
-        exp_id="exp_0",
-    )
-    return make_dataset(
-        [exp],
-        state_to_output=lambda state: state,
-        output_channel_names=tuple(f"c{i}" for i in range(N_DIM)),
-    )
-
-
-def _simulate_fn(predictor, ts, covariates, y0, solver):
-    """Identity-of-predictor "simulator": returns ``[T, 4]`` constant in time."""
-    # predictor(covariates) -> [4]; broadcasting to [T, 4] gives the per-experiment
-    # full-state trajectory expected by the framework.
-    return jnp.broadcast_to(predictor(covariates)[None, :], (ts.shape[0], N_DIM))
-
-
-def _solver() -> SolverConfig:
-    """A ``SolverConfig`` for the simulate_fn signature; values are unused here."""
-    return SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-5,
-        atol=1e-7,
-        max_steps=4096,
-        dt0=0.05,
-    )
-
 
 def _eval_loss(predictor: Predictor, ds: Dataset) -> float:
     """Recompute the same ``masked_mse`` the trainer minimises, single-bucket only."""
     bp = ds.bucket_payloads[0]
 
     def per_exp(ts, cov, y0):
-        return ds.state_to_output(_simulate_fn(predictor, ts, cov, y0, _solver()))
+        return ds.state_to_output(quadratic_simulate_fn(predictor, ts, cov, y0, solver_config()))
 
     pred_obs = jax.vmap(per_exp, in_axes=(0, 0, 0))(bp.ts, bp.covariates, bp.y0)
     return float(masked_mse(pred_obs, bp))
 
 
 def test_convergence_to_known_minimum() -> None:
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
-    ds = _quadratic_dataset()
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=24,
@@ -135,8 +85,8 @@ def test_convergence_to_known_minimum() -> None:
         pred,
         ds,
         config,
-        simulate_fn=_simulate_fn,
-        solver=_solver(),
+        simulate_fn=quadratic_simulate_fn,
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     assert jnp.allclose(trained.theta, THETA_STAR, rtol=5e-2, atol=5e-2)
@@ -144,8 +94,8 @@ def test_convergence_to_known_minimum() -> None:
 
 
 def test_best_ever_tracking() -> None:
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
-    ds = _quadratic_dataset()
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
     ui = RecordingUI()
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
@@ -159,8 +109,8 @@ def test_best_ever_tracking() -> None:
         pred,
         ds,
         config,
-        simulate_fn=_simulate_fn,
-        solver=_solver(),
+        simulate_fn=quadratic_simulate_fn,
+        solver=solver_config(),
         key=jr.PRNGKey(1),
         ui=ui,
     )
@@ -181,7 +131,7 @@ def test_init_modes_change_population_spread() -> None:
     # from a tight N(0, 0.5*I) ball — the LHS spread must be visibly
     # wider, which is the whole reason a user would pick ``"lhs_box"``
     # over ``"warm"`` in the first place.
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
     mask = trainable_mask(pred)
     key = jr.PRNGKey(7)
 
@@ -235,7 +185,7 @@ def test_init_modes_change_population_spread() -> None:
 
 
 def test_box_population_respects_the_requested_extent() -> None:
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
     mask = trainable_mask(pred)
     params, _static = eqx.partition(pred, mask)
     flat, _unflatten = jfu.ravel_pytree(params)
@@ -281,8 +231,8 @@ def test_flatten_unflatten_round_trip() -> None:
 
 
 def test_missing_key_raises() -> None:
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
-    ds = _quadratic_dataset()
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=8,
@@ -294,14 +244,14 @@ def test_missing_key_raises() -> None:
             pred,
             ds,
             config,
-            simulate_fn=_simulate_fn,
-            solver=_solver(),
+            simulate_fn=quadratic_simulate_fn,
+            solver=solver_config(),
         )
 
 
 def test_recording_ui_lifecycle_events_fire() -> None:
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
-    ds = _quadratic_dataset()
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
     n_gens = 3
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
@@ -316,8 +266,8 @@ def test_recording_ui_lifecycle_events_fire() -> None:
         pred,
         ds,
         config,
-        simulate_fn=_simulate_fn,
-        solver=_solver(),
+        simulate_fn=quadratic_simulate_fn,
+        solver=solver_config(),
         key=jr.PRNGKey(0),
         ui=ui,
     )
@@ -338,8 +288,8 @@ def test_recording_ui_lifecycle_events_fire() -> None:
 def test_silent_default_when_no_ui_and_verbose_false(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    pred = _QuadraticPredictor(theta=jnp.zeros(N_DIM))
-    ds = _quadratic_dataset()
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
     config = EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=8,
@@ -352,8 +302,8 @@ def test_silent_default_when_no_ui_and_verbose_false(
         pred,
         ds,
         config,
-        simulate_fn=_simulate_fn,
-        solver=_solver(),
+        simulate_fn=quadratic_simulate_fn,
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     assert capsys.readouterr().out == ""
@@ -382,11 +332,11 @@ class TestEvosaxPenalty:
         # A predictors pytree with no BoundedPredictor leaf must be
         # completely unaffected, and an explicit zero must match the
         # default exactly.
-        ds = _quadratic_dataset()
+        ds = quadratic_dataset()
 
         def run(weight: float) -> list[float]:
             history, _ = train_with_evosax(
-                _QuadraticPredictor(theta=jnp.zeros(N_DIM)),
+                QuadraticPredictor(theta=jnp.zeros(N_DIM)),
                 ds,
                 EvosaxTrainingConfig(
                     algorithm="CMA_ES",
@@ -396,8 +346,8 @@ class TestEvosaxPenalty:
                     penalty_weight=weight,
                     verbose=False,
                 ),
-                simulate_fn=_simulate_fn,
-                solver=_solver(),
+                simulate_fn=quadratic_simulate_fn,
+                solver=solver_config(),
                 key=jr.PRNGKey(0),
             )
             return history

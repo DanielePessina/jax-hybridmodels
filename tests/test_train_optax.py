@@ -16,117 +16,34 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 import pytest
-from jax import Array
+from _harness import (
+    INITIAL_STATES,
+    N_TIMESTEPS,
+    OMEGA_TRUE,
+    T_MAX,
+    OmegaPredictor,
+    make_oscillator_dataset,
+    make_oscillator_simulate_fn,
+    oscillator_state_to_output,
+    solver_config,
+    true_position,
+    y0_fn_factory,
+)
 
 from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
 from hybridmodels.losses import masked_mse
 from hybridmodels.penalties import bound_penalty, collocation_grids
 from hybridmodels.prediction import predict_dataset
 from hybridmodels.predictors import BoundedPredictor, BoundScaler, MLPPredictor
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.solver import SolverConfig
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 from hybridmodels.ui.testing import RecordingUI
-
-OMEGA_TRUE: float = 1.0
-N_TIMESTEPS: int = 10
-T_MAX: float = 5.0
-INITIAL_STATES: tuple[tuple[float, float], ...] = (
-    (1.0, 0.0),
-    (0.0, 1.0),
-    (0.5, -0.5),
-    (1.0, 1.0),
-)
-
-
-class _OmegaPredictor(Predictor):
-    omega: Array
-
-    def __init__(self, omega):
-        # Strong-type the leaf so the predictor's pytree weak_type does not flip
-        # after the first apply_update (which would force a make_step retrace).
-        self.omega = jnp.asarray(omega, dtype=jnp.float32)
-
-    def __call__(self, x: Array) -> Array:  # type: ignore[override]
-        return self.omega
-
-
-def _y0_fn_factory(y0: Array):
-    def _y0_fn(_cov, _channels):
-        return y0
-
-    return _y0_fn
-
-
-def _solver_config() -> SolverConfig:
-    return SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-5,
-        atol=1e-7,
-        max_steps=4096,
-        dt0=0.05,
-    )
-
-
-def _true_position(omega: float, t: Array, x0: float, v0: float) -> Array:
-    return x0 * jnp.cos(omega * t) + (v0 / omega) * jnp.sin(omega * t)
-
-
-def _state_to_output(state: Array) -> Array:
-    return state[..., 0:1]
-
-
-def _make_oscillator_dataset() -> Dataset:
-    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    experiments = []
-    for i, (x0, v0) in enumerate(INITIAL_STATES):
-        x_obs = _true_position(OMEGA_TRUE, ts, x0, v0)
-        y0 = jnp.asarray([x0, v0])
-        experiments.append(
-            make_experiment(
-                covariates={"id": float(i)},
-                channels={"position": ChannelObs(ts=ts, values=x_obs)},
-                y0_fn=_y0_fn_factory(y0),
-                exp_id=f"exp_{i}",
-            )
-        )
-    return make_dataset(
-        experiments,
-        state_to_output=_state_to_output,
-        output_channel_names=("position",),
-    )
-
-
-def _make_simulate_fn():
-    def simulate_fn(predictor, ts, covariates, y0, solver):
-        omega = predictor.omega
-
-        def vector_field(t, y, args):
-            return jnp.stack([y[1], -(omega**2) * y[0]])
-
-        term = diffrax.ODETerm(vector_field)
-        controller = diffrax.PIDController(rtol=solver.rtol, atol=solver.atol)
-        sol = diffrax.diffeqsolve(
-            term,
-            solver.solver,
-            t0=ts[0],
-            t1=ts[-1],
-            dt0=solver.dt0,
-            y0=y0,
-            saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=controller,
-            max_steps=solver.max_steps,
-        )
-        return sol.ys
-
-    return simulate_fn
 
 
 def _bounded_simulate_fn():
     """Same oscillator, but omega comes from a BoundedPredictor tuple.
 
     The penalty tests need a predictors pytree that actually holds a
-    ``BoundedPredictor`` leaf; ``_OmegaPredictor`` is a bare scalar module
+    ``BoundedPredictor`` leaf; ``OmegaPredictor`` is a bare scalar module
     and would give the penalty nothing to find.
     """
 
@@ -162,8 +79,8 @@ def test_convergence_recovers_omega():
     # oscillator's loss is multimodal further out (a local minimum sits near
     # omega=2.4) so a single-phase optax run from omega=2 lands in that basin
     # rather than the global optimum.
-    pred = _OmegaPredictor(omega=1.5)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=1.5)
+    ds = make_oscillator_dataset()
     config = OptaxTrainingConfig(
         steps=(150,),
         lr=(5e-2,),
@@ -176,8 +93,8 @@ def test_convergence_recovers_omega():
         pred,
         ds,
         config,
-        simulate_fn=_make_simulate_fn(),
-        solver=_solver_config(),
+        simulate_fn=make_oscillator_simulate_fn(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     assert abs(float(trained.omega) - OMEGA_TRUE) <= 2e-2 * OMEGA_TRUE
@@ -185,8 +102,8 @@ def test_convergence_recovers_omega():
 
 
 def test_multi_phase_runs_and_improves():
-    pred = _OmegaPredictor(omega=2.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=2.0)
+    ds = make_oscillator_dataset()
 
     config_phase0 = OptaxTrainingConfig(
         steps=(40,),
@@ -200,8 +117,8 @@ def test_multi_phase_runs_and_improves():
         pred,
         ds,
         config_phase0,
-        simulate_fn=_make_simulate_fn(),
-        solver=_solver_config(),
+        simulate_fn=make_oscillator_simulate_fn(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
 
@@ -217,8 +134,8 @@ def test_multi_phase_runs_and_improves():
         pred,
         ds,
         config_two_phase,
-        simulate_fn=_make_simulate_fn(),
-        solver=_solver_config(),
+        simulate_fn=make_oscillator_simulate_fn(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     err_phase0 = abs(float(after_phase0.omega) - OMEGA_TRUE)
@@ -228,14 +145,14 @@ def test_multi_phase_runs_and_improves():
 
 def test_length_schedule_does_not_recompile():
     trace_count = [0]
-    base_simulate = _make_simulate_fn()
+    base_simulate = make_oscillator_simulate_fn()
 
     def counted_simulate(predictor, ts, covariates, y0, solver):
         trace_count[0] += 1
         return base_simulate(predictor, ts, covariates, y0, solver)
 
-    pred = _OmegaPredictor(omega=2.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=2.0)
+    ds = make_oscillator_dataset()
 
     config = OptaxTrainingConfig(
         steps=(2, 2),
@@ -250,15 +167,15 @@ def test_length_schedule_does_not_recompile():
         ds,
         config,
         simulate_fn=counted_simulate,
-        solver=_solver_config(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     assert trace_count[0] == 1
 
 
 def test_missing_key_raises():
-    pred = _OmegaPredictor(omega=1.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=1.0)
+    ds = make_oscillator_dataset()
     config = OptaxTrainingConfig(
         steps=(1,),
         lr=(1e-2,),
@@ -272,8 +189,8 @@ def test_missing_key_raises():
             pred,
             ds,
             config,
-            simulate_fn=_make_simulate_fn(),
-            solver=_solver_config(),
+            simulate_fn=make_oscillator_simulate_fn(),
+            solver=solver_config(),
         )
 
 
@@ -302,15 +219,15 @@ def test_tournament_reduces_across_seed_variance():
     )
 
     for seed in seeds:
-        pred = _OmegaPredictor(omega=2.0)
-        ds = _make_oscillator_dataset()
+        pred = OmegaPredictor(omega=2.0)
+        ds = make_oscillator_dataset()
 
         history_no_tourn, _ = train_with_optax(
             pred,
             ds,
             config_no_tournament,
-            simulate_fn=_make_simulate_fn(),
-            solver=_solver_config(),
+            simulate_fn=make_oscillator_simulate_fn(),
+            solver=solver_config(),
             key=jr.PRNGKey(seed),
         )
         base_losses.append(history_no_tourn[0])
@@ -319,8 +236,8 @@ def test_tournament_reduces_across_seed_variance():
             pred,
             ds,
             config_tournament,
-            simulate_fn=_make_simulate_fn(),
-            solver=_solver_config(),
+            simulate_fn=make_oscillator_simulate_fn(),
+            solver=solver_config(),
             key=jr.PRNGKey(seed),
         )
         tournament_losses.append(history_tourn[0])
@@ -344,8 +261,8 @@ def test_tournament_reduces_across_seed_variance():
 
 
 def test_tournament_falls_back_when_all_attempts_fail():
-    pred = _OmegaPredictor(omega=2.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=2.0)
+    ds = make_oscillator_dataset()
     config = OptaxTrainingConfig(
         steps=(1,),
         lr=(1e-2,),
@@ -362,14 +279,14 @@ def test_tournament_falls_back_when_all_attempts_fail():
             ds,
             config,
             simulate_fn=_nan_simulate_fn,
-            solver=_solver_config(),
+            solver=solver_config(),
             key=jr.PRNGKey(0),
         )
 
 
 def test_recording_ui_lifecycle_events_fire():
-    pred = _OmegaPredictor(omega=2.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=2.0)
+    ds = make_oscillator_dataset()
     config = OptaxTrainingConfig(
         steps=(2,),
         lr=(1e-2,),
@@ -383,8 +300,8 @@ def test_recording_ui_lifecycle_events_fire():
         pred,
         ds,
         config,
-        simulate_fn=_make_simulate_fn(),
-        solver=_solver_config(),
+        simulate_fn=make_oscillator_simulate_fn(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
         ui=ui,
     )
@@ -399,8 +316,8 @@ def test_recording_ui_lifecycle_events_fire():
 
 
 def test_silent_default_when_no_ui_and_verbose_false(capsys):
-    pred = _OmegaPredictor(omega=2.0)
-    ds = _make_oscillator_dataset()
+    pred = OmegaPredictor(omega=2.0)
+    ds = make_oscillator_dataset()
     config = OptaxTrainingConfig(
         steps=(1,),
         lr=(1e-2,),
@@ -413,8 +330,8 @@ def test_silent_default_when_no_ui_and_verbose_false(capsys):
         pred,
         ds,
         config,
-        simulate_fn=_make_simulate_fn(),
-        solver=_solver_config(),
+        simulate_fn=make_oscillator_simulate_fn(),
+        solver=solver_config(),
         key=jr.PRNGKey(0),
     )
     assert capsys.readouterr().out == ""
@@ -474,8 +391,8 @@ class TestPenaltyWiring:
             preds,
             ds,
             config,
-            simulate_fn=_bounded_simulate_fn() if bounded else _make_simulate_fn(),
-            solver=_solver_config(),
+            simulate_fn=_bounded_simulate_fn() if bounded else make_oscillator_simulate_fn(),
+            solver=solver_config(),
             key=jr.PRNGKey(0),
             ui=ui,
         )
@@ -486,7 +403,7 @@ class TestPenaltyWiring:
         # that actually holds a BoundedPredictor: with no such leaf the
         # penalty is zero for reasons unrelated to the weight, and the
         # test passes whether or not the feature works.
-        ds = _make_oscillator_dataset()
+        ds = make_oscillator_dataset()
         preds = self._bounded_predictors(scale=50.0)
         # Anti-vacuity guard: without this the test would also pass if the
         # penalty never reached the loss at all.
@@ -538,7 +455,7 @@ class TestPenaltyWiring:
         # A large penalty must not inflate the reported loss; otherwise
         # runs with different weights are incomparable and restore_best
         # chases the schedule rather than the fit.
-        ds = _make_oscillator_dataset()
+        ds = make_oscillator_dataset()
         preds = self._bounded_predictors(scale=50.0)
         h_off, _ = self._run(preds, ds, self._config())
         h_on, _ = self._run(preds, ds, self._config(penalty_weight=(1e3,)))
@@ -547,7 +464,7 @@ class TestPenaltyWiring:
         assert h_off[0] == pytest.approx(h_on[0], rel=1e-6)
 
     def test_penalty_changes_the_trajectory(self):
-        ds = _make_oscillator_dataset()
+        ds = make_oscillator_dataset()
         preds = self._bounded_predictors(scale=50.0)
         # restore_best=False so we observe where the optimiser actually
         # walked. With it on, both runs would return the step-0 snapshot
@@ -562,7 +479,7 @@ class TestPenaltyWiring:
     def test_penalty_shrinks_saturation(self):
         # The point of the whole exercise: turning the penalty on must pull
         # a saturated predictor back toward its usable range.
-        ds = _make_oscillator_dataset()
+        ds = make_oscillator_dataset()
         preds = self._bounded_predictors(scale=50.0)
         grids = collocation_grids(preds, 5)
         before = float(bound_penalty(preds, grids))
@@ -575,7 +492,7 @@ class TestPenaltyWiring:
         assert after < before
 
     def test_ui_receives_the_penalty(self):
-        ds = _make_oscillator_dataset()
+        ds = make_oscillator_dataset()
         ui = RecordingUI()
         self._run(
             self._bounded_predictors(scale=50.0),
@@ -646,22 +563,22 @@ class TestRestoreBestAcrossHorizons:
                 make_experiment(
                     covariates={"id": float(i)},
                     channels={
-                        "position": ChannelObs(ts=ts, values=_true_position(omega, ts, x0, v0))
+                        "position": ChannelObs(ts=ts, values=true_position(omega, ts, x0, v0))
                     },
-                    y0_fn=_y0_fn_factory(jnp.asarray([x0, v0])),
+                    y0_fn=y0_fn_factory(jnp.asarray([x0, v0])),
                     exp_id=f"exp_{i}",
                 )
             )
         return make_dataset(
             experiments,
-            state_to_output=_state_to_output,
+            state_to_output=oscillator_state_to_output,
             output_channel_names=("position",),
         )
 
     def _full_length_loss(self, dataset: Dataset, predictor) -> float:
         """Data loss over the whole window, the quantity a user cares about."""
         predictions = predict_dataset(
-            predictor, dataset, simulate_fn=_make_simulate_fn(), solver=_solver_config()
+            predictor, dataset, simulate_fn=make_oscillator_simulate_fn(), solver=solver_config()
         )
         total = sum(
             float(masked_mse(pred, bp))
@@ -671,7 +588,7 @@ class TestRestoreBestAcrossHorizons:
 
     def _run(self, dataset: Dataset, *, steps, length_schedule, restore_best, lr=3e-2):
         history, trained = train_with_optax(
-            _OmegaPredictor(0.55),
+            OmegaPredictor(0.55),
             dataset,
             OptaxTrainingConfig(
                 steps=steps,
@@ -682,8 +599,8 @@ class TestRestoreBestAcrossHorizons:
                 restore_best=restore_best,
                 verbose=False,
             ),
-            simulate_fn=_make_simulate_fn(),
-            solver=_solver_config(),
+            simulate_fn=make_oscillator_simulate_fn(),
+            solver=solver_config(),
             key=jr.PRNGKey(0),
         )
         return history, trained
@@ -796,15 +713,15 @@ class TestTournamentSelection:
 
     def _winner_loss(self, dataset: Dataset, attempts: int) -> float:
         _history, trained = train_with_optax(
-            _OmegaPredictor(0.55),
+            OmegaPredictor(0.55),
             dataset,
             self._config(attempts),
-            simulate_fn=_make_simulate_fn(),
-            solver=_solver_config(),
+            simulate_fn=make_oscillator_simulate_fn(),
+            solver=solver_config(),
             key=jr.PRNGKey(self.KEY_SEED),
         )
         predictions = predict_dataset(
-            trained, dataset, simulate_fn=_make_simulate_fn(), solver=_solver_config()
+            trained, dataset, simulate_fn=make_oscillator_simulate_fn(), solver=solver_config()
         )
         return sum(
             float(masked_mse(pred, bp))
@@ -812,7 +729,7 @@ class TestTournamentSelection:
         ) / len(dataset.bucket_payloads)
 
     def test_more_attempts_never_gives_a_worse_winner(self):
-        dataset = _make_oscillator_dataset()
+        dataset = make_oscillator_dataset()
         losses = [self._winner_loss(dataset, n) for n in self.ATTEMPT_COUNTS]
         for smaller, larger in zip(losses, losses[1:], strict=False):
             assert larger <= smaller + 1e-9, (
@@ -824,12 +741,12 @@ class TestTournamentSelection:
         # same, non-increasing would hold trivially and would also hold
         # under first-survivor-wins. At least one larger pool has to do
         # strictly better.
-        dataset = _make_oscillator_dataset()
+        dataset = make_oscillator_dataset()
         losses = [self._winner_loss(dataset, n) for n in self.ATTEMPT_COUNTS]
         assert min(losses) < losses[0] - 1e-9, (
             f"no larger pool improved on two attempts, so selection is untested: {losses}"
         )
 
     def test_selection_is_deterministic_in_the_key(self):
-        dataset = _make_oscillator_dataset()
+        dataset = make_oscillator_dataset()
         assert self._winner_loss(dataset, 4) == self._winner_loss(dataset, 4)

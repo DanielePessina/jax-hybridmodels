@@ -14,41 +14,26 @@ from __future__ import annotations
 import diffrax
 import jax.numpy as jnp
 import pytest
+from _harness import OMEGA_TRUE, OmegaPredictor, solver_config, y0_fn_factory
 from jax import Array
 
 from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
 from hybridmodels.prediction import predict_bucket, predict_dataset
-from hybridmodels.predictors.base import Predictor
 from hybridmodels.solver import SolverConfig
 
-OMEGA_TRUE = 1.0
 
+def _solver() -> SolverConfig:
+    """Tighter than the training tests on purpose.
 
-class _OmegaPredictor(Predictor):
-    """One scalar leaf, so the pytree stays trivial and the focus is on shapes."""
-
-    omega: Array
-
-    def __init__(self, omega: float) -> None:
-        self.omega = jnp.asarray(omega, dtype=jnp.float32)
-
-    def __call__(self, x: Array) -> Array:
-        return self.omega
+    The oracle here compares an un-vmapped Python loop against the vmapped
+    path, so integration error has to sit well below the comparison
+    tolerance.
+    """
+    return solver_config(rtol=1e-6, atol=1e-8)
 
 
 def _state_to_output(full_state: Array) -> Array:
     return full_state[:, :1]
-
-
-def _y0_fn_factory(y0: Array):
-    def _y0_fn(covariates, channels):
-        return y0
-
-    return _y0_fn
-
-
-def _solver() -> SolverConfig:
-    return SolverConfig(solver=diffrax.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=4096, dt0=0.05)
 
 
 def _simulate_fn(predictor, ts, covariates, y0, solver):
@@ -78,7 +63,7 @@ def _experiment(n_steps: int, x0: float, v0: float, exp_id: str):
     return make_experiment(
         covariates={"x0": x0},
         channels={"position": ChannelObs(ts=ts, values=values)},
-        y0_fn=_y0_fn_factory(jnp.asarray([x0, v0])),
+        y0_fn=y0_fn_factory(jnp.asarray([x0, v0])),
         exp_id=exp_id,
     )
 
@@ -94,7 +79,7 @@ class TestPredictBucket:
         # The oracle: call simulate_fn once per experiment and project, with
         # no vmap anywhere. Independent of the batching under test.
         ds = _dataset()
-        pred = _OmegaPredictor(OMEGA_TRUE)
+        pred = OmegaPredictor(OMEGA_TRUE)
         solver = _solver()
         bp = ds.bucket_payloads[0]
 
@@ -126,7 +111,7 @@ class TestPredictBucket:
         ds = _dataset()
         bp = ds.bucket_payloads[0]
         out = predict_bucket(
-            _OmegaPredictor(OMEGA_TRUE),
+            OmegaPredictor(OMEGA_TRUE),
             bp,
             simulate_fn=_simulate_fn,
             state_to_output=_state_to_output,
@@ -140,7 +125,7 @@ class TestPredictBucket:
         ds = _dataset()
         bp = ds.bucket_payloads[0]
         out = predict_bucket(
-            _OmegaPredictor(OMEGA_TRUE),
+            OmegaPredictor(OMEGA_TRUE),
             bp,
             simulate_fn=_simulate_fn,
             state_to_output=_state_to_output,
@@ -153,7 +138,7 @@ class TestPredictDataset:
     def test_returns_one_array_per_bucket_in_payload_order(self):
         ds = _dataset()
         outs = predict_dataset(
-            _OmegaPredictor(OMEGA_TRUE), ds, simulate_fn=_simulate_fn, solver=_solver()
+            OmegaPredictor(OMEGA_TRUE), ds, simulate_fn=_simulate_fn, solver=_solver()
         )
         assert isinstance(outs, tuple)
         assert len(outs) == len(ds.bucket_payloads)
@@ -167,14 +152,14 @@ class TestPredictDataset:
         widths = {bp.ts.shape[1] for bp in ds.bucket_payloads}
         assert len(widths) > 1
         outs = predict_dataset(
-            _OmegaPredictor(OMEGA_TRUE), ds, simulate_fn=_simulate_fn, solver=_solver()
+            OmegaPredictor(OMEGA_TRUE), ds, simulate_fn=_simulate_fn, solver=_solver()
         )
         with pytest.raises(Exception):  # noqa: B017
             jnp.stack(outs)
 
     def test_agrees_with_predict_bucket_called_directly(self):
         ds = _dataset()
-        pred = _OmegaPredictor(OMEGA_TRUE)
+        pred = OmegaPredictor(OMEGA_TRUE)
         solver = _solver()
         outs = predict_dataset(pred, ds, simulate_fn=_simulate_fn, solver=solver)
         for out, bp in zip(outs, ds.bucket_payloads, strict=True):
@@ -198,7 +183,7 @@ class TestPredictDataset:
                 "position": ChannelObs(ts=ts, values=jnp.cos(ts)),
                 "velocity": ChannelObs(ts=ts, values=-jnp.sin(ts)),
             },
-            y0_fn=_y0_fn_factory(jnp.asarray([1.0, 0.0])),
+            y0_fn=y0_fn_factory(jnp.asarray([1.0, 0.0])),
             exp_id="two",
         )
         both_channels = make_dataset(
@@ -207,7 +192,7 @@ class TestPredictDataset:
             output_channel_names=("position", "velocity"),
         )
         out = predict_dataset(
-            _OmegaPredictor(OMEGA_TRUE),
+            OmegaPredictor(OMEGA_TRUE),
             both_channels,
             simulate_fn=_simulate_fn,
             solver=_solver(),
@@ -228,7 +213,7 @@ class TestCompileCaching:
 
         ds = _dataset()
         assert len({bp.ts.shape for bp in ds.bucket_payloads}) == 2
-        pred = _OmegaPredictor(OMEGA_TRUE)
+        pred = OmegaPredictor(OMEGA_TRUE)
 
         predict_dataset(pred, ds, simulate_fn=counting_simulate_fn, solver=_solver())
         first = traces["n"]
@@ -246,13 +231,9 @@ class TestCompileCaching:
             return _simulate_fn(predictor, ts, covariates, y0, solver)
 
         ds = _dataset()
-        predict_dataset(
-            _OmegaPredictor(1.0), ds, simulate_fn=counting_simulate_fn, solver=_solver()
-        )
+        predict_dataset(OmegaPredictor(1.0), ds, simulate_fn=counting_simulate_fn, solver=_solver())
         before = traces["n"]
-        predict_dataset(
-            _OmegaPredictor(1.3), ds, simulate_fn=counting_simulate_fn, solver=_solver()
-        )
+        predict_dataset(OmegaPredictor(1.3), ds, simulate_fn=counting_simulate_fn, solver=_solver())
         assert traces["n"] == before
 
     def test_prediction_and_training_kernels_do_not_share_a_cache(self):
@@ -269,7 +250,7 @@ class TestCompileCaching:
             return _simulate_fn(predictor, ts, covariates, y0, solver)
 
         ds = _dataset()
-        pred = _OmegaPredictor(OMEGA_TRUE)
+        pred = OmegaPredictor(OMEGA_TRUE)
         solver = _solver()
         bp = ds.bucket_payloads[0]
 
