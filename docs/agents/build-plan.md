@@ -234,7 +234,7 @@ SPEC §8 step 10. **Fat subagent prompt expected. Re-spawn likely.**
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 9.1 | Subagent: write `tests/test_train_optax.py` red — (a) trains a synthetic harmonic oscillator ODE to known parameters within `rtol=1e-2`; (b) multi-phase config with `reset_optimiser_state=(False, True)` does not crash; (c) `length_schedule=(0.5, 1.0)` does not trigger recompile (verify via JAX trace counter or by side-effect counter on a wrapped function); (d) tournament reduces variance across 5 seeds (`std(with) < std(without)`) | S | red |
-| 9.2 | Subagent: implement `src/hybridmodels/training/optax.py` — `OptaxTrainingConfig`, `make_step`, `apply_update`, phase loop, length-schedule mask cutoff, shared tournament with diffrax-error/non-finite drop + fresh-RNG retry, missing-key raise, `RecordingUI` event fires | S | green |
+| 9.2 | Subagent: implement `src/hybridmodels/training/optax.py` — `OptaxTrainingConfig`, `bucket_step`, `apply_update`, phase loop, length-schedule mask cutoff, shared tournament with diffrax-error/non-finite drop + fresh-RNG retry, missing-key raise, `RecordingUI` event fires | S | green |
 | 9.3 | **Behaviour parity gate**: orchestrator runs `hybridcrystals/thesis_training/sharedgrowth.py` for ~50 steps on a tiny dataset, captures final loss; runs the new optax trainer on the same dataset/predictor for 50 steps; asserts within `rtol=1e-2` | O | numerical |
 | 9.4 | ruff + ty + commit + push | O | clean |
 

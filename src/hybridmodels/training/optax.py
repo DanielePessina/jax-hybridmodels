@@ -1,7 +1,7 @@
 """Gradient training loop for hybrid mechanistic models, driven by Optax.
 
 One training **step** is one full pass over every bucket: per-bucket
-gradients from ``make_step`` (jitted, one trace per bucket shape),
+gradients from ``bucket_step`` (jitted, one trace per bucket shape),
 accumulated and averaged, then a single ``optimizer.update``. A bucket is
 not a step, and there is no minibatching.
 
@@ -252,7 +252,7 @@ def _resolve_loss_fn(
     return loss_fn
 
 
-def _build_make_step(
+def _build_bucket_step(
     *,
     simulate_fn: Callable[..., Array],
     state_to_output: Callable[[Array], Array],
@@ -281,7 +281,7 @@ def _build_make_step(
     grad_fn = eqx.filter_value_and_grad(loss_eval)
 
     @eqx.filter_jit
-    def make_step(
+    def bucket_step(
         predictors: Any, bp: BucketPayload, length_mask_fraction: Array
     ) -> tuple[Array, Any]:
         T = bp.ts.shape[1]
@@ -294,7 +294,7 @@ def _build_make_step(
         diff_part, static_part = eqx.partition(predictors, trainable)
         return grad_fn(diff_part, static_part, bp_masked)
 
-    return make_step
+    return bucket_step
 
 
 def _build_score_bucket(
@@ -306,7 +306,7 @@ def _build_score_bucket(
 ) -> Callable[[Any, BucketPayload, Array], Array]:
     """Return a forward-only ``score_bucket(predictors, bp, fraction) -> loss``.
 
-    Scoring through ``make_step`` would run a full ``value_and_grad`` and
+    Scoring through ``bucket_step`` would run a full ``value_and_grad`` and
     discard the gradients, roughly tripling the cost of a scoring sweep.
     This costs one extra compile per bucket shape and pays for itself above
     two attempts.
@@ -339,7 +339,7 @@ def _build_penalty_step(
     """Return ``penalty_step(predictors, weight) -> (penalty, weighted_grads)``.
 
     Evaluated once per training step, outside the bucket loop: the penalty
-    reads only the predictors pytree, so computing it inside ``make_step``
+    reads only the predictors pytree, so computing it inside ``bucket_step``
     would repeat one identical evaluation per bucket.
 
     Returns the gradient of ``weight * penalty``, to add straight onto the
@@ -378,10 +378,10 @@ def _build_apply_update(
     return apply_update
 
 
-def _accumulate_step(
+def _training_step(
     predictors: Any,
     dataset: Dataset,
-    make_step: Callable[..., tuple[Array, Any]],
+    bucket_step: Callable[..., tuple[Array, Any]],
     length_mask_fraction: Array,
     trainable: Any,
 ) -> tuple[Array, Any]:
@@ -395,7 +395,7 @@ def _accumulate_step(
     total_loss = jnp.asarray(0.0)
     n_batches = 0
     for bp in dataset.bucket_payloads:
-        loss, grads = make_step(predictors, bp, length_mask_fraction)
+        loss, grads = bucket_step(predictors, bp, length_mask_fraction)
         acc_grads = jax.tree.map(jnp.add, acc_grads, grads)
         total_loss = total_loss + loss
         n_batches += 1
@@ -408,7 +408,7 @@ def _shared_tournament(
     predictors: Any,
     dataset: Dataset,
     *,
-    make_step: Callable[..., tuple[Array, Any]],
+    bucket_step: Callable[..., tuple[Array, Any]],
     score_bucket: Callable[..., Array],
     apply_update: Callable[..., tuple[Any, Any]],
     optimizer: optax.GradientTransformation,
@@ -444,12 +444,12 @@ def _shared_tournament(
             opt_state.hyperparams["learning_rate"] = jnp.asarray(tournament_lr)
 
             for _ in range(tournament_steps):
-                _loss, avg_grads = _accumulate_step(
-                    candidate, dataset, make_step, length_mask_fraction, trainable
+                _loss, avg_grads = _training_step(
+                    candidate, dataset, bucket_step, length_mask_fraction, trainable
                 )
                 candidate, opt_state = apply_update(candidate, avg_grads, opt_state)
 
-            # Forward-only scorer, not make_step, whose discarded backward
+            # Forward-only scorer, not bucket_step, whose discarded backward
             # pass roughly tripled the cost of a scoring sweep. Scores the
             # data term alone, so a candidate wins on fit.
             score = jnp.asarray(0.0)
@@ -558,7 +558,7 @@ def train_with_optax(
     # holds no BoundedPredictor, in which case the penalty is a no-op.
     penalty_grids = collocation_grids(predictors, config.penalty_grid_points)
 
-    make_step = _build_make_step(
+    bucket_step = _build_bucket_step(
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         solver=solver,
@@ -581,7 +581,7 @@ def train_with_optax(
     for idx, bp in enumerate(bucket_payloads):
         bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
         ui_.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
-        warm_loss, _g = make_step(predictors, bp, full_mask)
+        warm_loss, _g = bucket_step(predictors, bp, full_mask)
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
         ui_.on_compile_done(bucket_idx=idx)
         ui_.on_compile_progress(bucket_idx=idx, total_buckets=len(bucket_payloads))
@@ -594,7 +594,7 @@ def train_with_optax(
         predictors = _shared_tournament(
             predictors,
             dataset,
-            make_step=make_step,
+            bucket_step=bucket_step,
             score_bucket=score_bucket,
             apply_update=apply_update,
             optimizer=optimizer,
@@ -624,7 +624,7 @@ def train_with_optax(
 
         length_mask_fraction = jnp.asarray(config.length_schedule[phase_idx])
         # Traced, not closed over: a Python float that changed per phase
-        # would retrace ``make_step`` at every phase boundary. Same reason
+        # would retrace ``bucket_step`` at every phase boundary. Same reason
         # ``length_mask_fraction`` is passed rather than baked in.
         penalty_weight = jnp.asarray(config.penalty_weight_for_phase(phase_idx))
 
@@ -651,8 +651,8 @@ def train_with_optax(
         )
 
         for step in range(int(n_steps)):
-            avg_data, avg_grads = _accumulate_step(
-                predictors, dataset, make_step, length_mask_fraction, trainable
+            avg_data, avg_grads = _training_step(
+                predictors, dataset, bucket_step, length_mask_fraction, trainable
             )
             avg_penalty, penalty_grads = penalty_step(predictors, penalty_weight)
             # Added after the bucket average, not inside it: the penalty is

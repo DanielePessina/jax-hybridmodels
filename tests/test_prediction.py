@@ -241,7 +241,7 @@ class TestCompileCaching:
         # so the two graphs cannot collide. Build a training step over the
         # same bucket and check prediction still traces its own.
         from hybridmodels.trainable import trainable_mask
-        from hybridmodels.training.optax import _build_make_step
+        from hybridmodels.training.optax import _build_bucket_step
 
         traces = {"n": 0}
 
@@ -254,14 +254,14 @@ class TestCompileCaching:
         solver = _solver()
         bp = ds.bucket_payloads[0]
 
-        make_step = _build_make_step(
+        bucket_step = _build_bucket_step(
             simulate_fn=counting_simulate_fn,
             state_to_output=ds.state_to_output,
             solver=solver,
             loss_fn=lambda p, b: jnp.sum(jnp.where(b.mask, (p - b.y_observed) ** 2, 0.0)),
             trainable=trainable_mask(pred),
         )
-        make_step(pred, bp, jnp.asarray(1.0))
+        bucket_step(pred, bp, jnp.asarray(1.0))
         after_training = traces["n"]
         assert after_training > 0
 
