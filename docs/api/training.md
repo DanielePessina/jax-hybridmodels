@@ -134,7 +134,7 @@ freezing ``BoundScaler`` leaves is the common case.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step data loss**, one entry per step, concatenated across phases. It can go up. The bound penalty is excluded, so a ramping penalty weight cannot move the series and runs with different weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from :func:`~hybridmodels.training.evosax.train_with_evosax`, whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever ``length_schedule`` changes, so the returned model always comes from the last horizon trained on. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L634)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L677)</small>
 
 ---
 

@@ -165,59 +165,102 @@ class OptaxTrainingConfig:
         return float(self.penalty_weight[phase_idx])
 
     def __post_init__(self) -> None:
-        n = len(self.steps)
-        if n == 0:
-            raise ValueError("OptaxTrainingConfig.steps must contain at least one phase")
-        for name in _PHASE_KEYED_FIELDS:
-            value = getattr(self, name)
-            if len(value) != n:
-                raise ValueError(
-                    f"OptaxTrainingConfig: phase-keyed field {name!r} has length "
-                    f"{len(value)}, expected {n} (matching steps)"
-                )
-        # penalty_weight is deliberately NOT in _PHASE_KEYED_FIELDS: those
-        # fields lack a safe default, while this one has an unambiguous off
-        # state. A length-1 tuple broadcasts; any other length must match
-        # `steps` exactly, so a real per-phase schedule cannot be truncated.
-        if len(self.penalty_weight) not in (1, n):
+        # Lengths first: every later rule indexes a phase-keyed field, and on a
+        # short tuple would raise IndexError instead of the real message.
+        _validate_phase_lengths(self)
+        _validate_penalty(self)
+        _validate_grid_points(self)
+        _validate_optimizer_transitions(self)
+        _validate_length_schedule(self)
+
+
+def _validate_phase_lengths(config: OptaxTrainingConfig) -> None:
+    """Every phase-keyed field must be exactly as long as ``steps``.
+
+    These four have no defensible default, so none of them broadcasts. A
+    shorter tuple would either truncate the run or index out of range at a
+    phase boundary, both silently.
+    """
+    n = len(config.steps)
+    if n == 0:
+        raise ValueError("OptaxTrainingConfig.steps must contain at least one phase")
+    for name in _PHASE_KEYED_FIELDS:
+        value = getattr(config, name)
+        if len(value) != n:
             raise ValueError(
-                "OptaxTrainingConfig.penalty_weight must have length 1 "
-                f"(broadcast across phases) or {n} (one per phase); "
-                f"got {len(self.penalty_weight)}"
+                f"OptaxTrainingConfig: phase-keyed field {name!r} has length "
+                f"{len(value)}, expected {n} (matching steps)"
             )
-        for weight in self.penalty_weight:
-            if float(weight) < 0.0:
-                raise ValueError(
-                    f"OptaxTrainingConfig.penalty_weight entries must be non-negative; got {weight}"
-                )
-        if self.penalty_grid_points < 2:
+
+
+def _validate_penalty(config: OptaxTrainingConfig) -> None:
+    """``penalty_weight`` broadcasts from length 1, and entries are non-negative.
+
+    It is deliberately not in ``_PHASE_KEYED_FIELDS``: those fields lack a
+    safe default, while this one has an unambiguous off state. A length-1
+    tuple broadcasts across every phase; any other length must match ``steps``
+    exactly, so a real per-phase schedule cannot be silently truncated.
+    """
+    n = len(config.steps)
+    if len(config.penalty_weight) not in (1, n):
+        raise ValueError(
+            "OptaxTrainingConfig.penalty_weight must have length 1 "
+            f"(broadcast across phases) or {n} (one per phase); "
+            f"got {len(config.penalty_weight)}"
+        )
+    for weight in config.penalty_weight:
+        if float(weight) < 0.0:
             raise ValueError(
-                "OptaxTrainingConfig.penalty_grid_points must be at least 2 "
-                f"(one point per box edge); got {self.penalty_grid_points}"
+                f"OptaxTrainingConfig.penalty_weight entries must be non-negative; got {weight}"
             )
-        for phase_idx in range(1, n):
-            # Without a reset only the learning rate is pushed into the
-            # existing opt_state, so a changed optimizer name would be
-            # accepted and then ignored. Refuse the combination instead.
-            if (
-                self.optimizer[phase_idx] != self.optimizer[phase_idx - 1]
-                and not self.reset_optimiser_state[phase_idx]
-            ):
-                raise ValueError(
-                    f"OptaxTrainingConfig: phase {phase_idx} changes optimizer from "
-                    f"{self.optimizer[phase_idx - 1]!r} to {self.optimizer[phase_idx]!r} "
-                    "but reset_optimiser_state[{0}] is False. Optimiser state is "
-                    "specific to the optimiser that built it, so switching without a "
-                    "reset would keep running the previous one. Set "
-                    "reset_optimiser_state[{0}]=True.".format(phase_idx)
-                )
-        for fraction in self.length_schedule:
-            f = float(fraction)
-            if not (0.0 < f <= 1.0):
-                raise ValueError(
-                    "OptaxTrainingConfig.length_schedule entries must lie in (0, 1]; "
-                    f"got {fraction}"
-                )
+
+
+def _validate_grid_points(config: OptaxTrainingConfig) -> None:
+    """At least two collocation points per dimension, one per box edge.
+
+    Fewer cannot span the box, so the grid would sample only its interior and
+    the penalty would never see the saturation it exists to measure.
+    """
+    if config.penalty_grid_points < 2:
+        raise ValueError(
+            "OptaxTrainingConfig.penalty_grid_points must be at least 2 "
+            f"(one point per box edge); got {config.penalty_grid_points}"
+        )
+
+
+def _validate_optimizer_transitions(config: OptaxTrainingConfig) -> None:
+    """A phase that changes the optimiser name must also reset its state.
+
+    Without a reset only the learning rate is pushed into the existing
+    ``opt_state``, so a changed name would be accepted and then ignored,
+    leaving the previous optimiser running for the rest of the run.
+    """
+    for phase_idx in range(1, len(config.steps)):
+        if (
+            config.optimizer[phase_idx] != config.optimizer[phase_idx - 1]
+            and not config.reset_optimiser_state[phase_idx]
+        ):
+            raise ValueError(
+                f"OptaxTrainingConfig: phase {phase_idx} changes optimizer from "
+                f"{config.optimizer[phase_idx - 1]!r} to {config.optimizer[phase_idx]!r} "
+                f"but reset_optimiser_state[{phase_idx}] is False. Optimiser state is "
+                "specific to the optimiser that built it, so switching without a "
+                "reset would keep running the previous one. Set "
+                f"reset_optimiser_state[{phase_idx}]=True."
+            )
+
+
+def _validate_length_schedule(config: OptaxTrainingConfig) -> None:
+    """Every fraction lies in ``(0, 1]``.
+
+    Zero would score no timestamps at all, and above one would claim more of
+    the trajectory than there is.
+    """
+    for fraction in config.length_schedule:
+        if not (0.0 < float(fraction) <= 1.0):
+            raise ValueError(
+                f"OptaxTrainingConfig.length_schedule entries must lie in (0, 1]; got {fraction}"
+            )
 
 
 def _build_optimizer(name: str, lr: float) -> optax.GradientTransformation:
