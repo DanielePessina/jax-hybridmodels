@@ -33,6 +33,7 @@ export default defineConfig({
         { text: 'Getting Started', link: '/guide/getting-started' },
         { text: 'Concepts', link: '/guide/concepts' },
         { text: 'Training', link: '/guide/training' },
+        { text: 'Custom Predictors', link: '/guide/custom-predictors' },
         { text: 'Recommendations', link: '/guide/recommendations' },
       ],
       // The two embedded marimo notebooks are the canonical example docs.
@@ -47,6 +48,7 @@ export default defineConfig({
         { text: 'Batch reactor RL notebook', link: '/examples/batch-reactor-rl-notebook' },
         { text: 'Hybrid ODE', link: '/examples/hybrid-ode' },
         { text: 'Hybrid ODE notebook', link: '/examples/hybrid-ode-notebook' },
+        { text: 'Custom predictor', link: '/examples/custom-predictor' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },

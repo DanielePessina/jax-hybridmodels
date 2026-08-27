@@ -347,8 +347,10 @@ def _print_rate_table(predictors: tuple[BoundedPredictor, ...], header: str) -> 
         print(f"    {temperature:7.0f}  {truth:9.4f}  {learned:9.4f}  {rel:9.2%}")
 
 
-def _check_roundtrip(predictors: tuple[BoundedPredictor, ...], *, n_features: int, bandwidth: float):
-    """Save and reload the trained predictors, then re-read the rates.
+def _check_roundtrip(
+    predictors: tuple[BoundedPredictor, ...], *, n_features: int, bandwidth: float
+) -> tuple[BoundedPredictor, ...]:
+    """Save the trained predictors and load them back through a template.
 
     ``load_predictors`` needs a template with the right structure, which
     means building the same predictor again with any key. Every static
@@ -400,8 +402,10 @@ def main() -> None:
         output_channel_names=OUTPUT_CHANNELS,
     )
     print(f"  {len(experiments)} experiments, {len(dataset.bucket_payloads)} bucket(s)")
-    print(f"  true k spans {float(true_k(TEMPERATURES[0])):.4f} to "
-          f"{float(true_k(TEMPERATURES[-1])):.4f}")
+    print(
+        f"  true k spans {float(true_k(TEMPERATURES[0])):.4f} to "
+        f"{float(true_k(TEMPERATURES[-1])):.4f}"
+    )
 
     print("\n[build] solver + custom predictor")
     solver = SolverConfig(
@@ -411,9 +415,7 @@ def main() -> None:
         max_steps=10_000,
         dt0=0.1,
     )
-    predictors = (
-        _build_predictor(k_init, n_features=args.n_features, bandwidth=args.bandwidth),
-    )
+    predictors = (_build_predictor(k_init, n_features=args.n_features, bandwidth=args.bandwidth),)
     mask = _build_mask(predictors, train_bank=args.train_bank)
     frozen = "none (--train-bank)" if args.train_bank else ", ".join(BANK_PATHS)
     print(f"  RandomFourierPredictor: {args.n_features} features, bandwidth {args.bandwidth}")

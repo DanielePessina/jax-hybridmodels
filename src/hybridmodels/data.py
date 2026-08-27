@@ -260,10 +260,36 @@ def make_experiment(
     return Experiment(covariates=cov_arr, y0=y0, channels=channels, exp_id=exp_id)
 
 
+class _ExperimentArrays(NamedTuple):
+    """One experiment's union-axis tensors, before any bucket stacking.
+
+    A name for what was a bare 4-tuple threaded through ``make_dataset`` and
+    indexed positionally at both ends. Holds no invariant of its own beyond
+    the shared leading ``T``, which is exactly what ``make_dataset`` buckets
+    on.
+
+    Attributes
+    ----------
+    ts : Float[Array, "T"]
+        Sorted union timestamp axis.
+    y_observed : Float[Array, "T D"]
+        Channel values scattered onto ``ts``; ``0.0`` at unobserved cells.
+    yvar : Float[Array, "T D"]
+        Per-cell variance; ``1.0`` at unobserved cells (read only via mask).
+    mask : Bool[Array, "T D"]
+        ``True`` iff cell ``[t, d]`` came from a real ``ChannelObs`` entry.
+    """
+
+    ts: Float[Array, " T"]
+    y_observed: Float[Array, "T D"]
+    yvar: Float[Array, "T D"]
+    mask: Bool[Array, "T D"]
+
+
 def _per_experiment_arrays(
     experiment: Experiment,
     output_channel_names: tuple[str, ...],
-) -> tuple[Array, Array, Array, Array]:
+) -> _ExperimentArrays:
     """Build the per-experiment union-axis tensors ``(ts, y_observed, yvar, mask)``.
 
     Computes ``T = len(union(ts_c) for c in output_channel_names)``,
@@ -276,14 +302,8 @@ def _per_experiment_arrays(
 
     Returns
     -------
-    ts : Float[Array, "T"]
-        Sorted union timestamp axis.
-    y_observed : Float[Array, "T D"]
-        Channel values scattered onto ``ts``; ``0.0`` at unobserved cells.
-    yvar : Float[Array, "T D"]
-        Per-cell variance; ``1.0`` at unobserved cells (read only via mask).
-    mask : Bool[Array, "T D"]
-        ``True`` iff cell ``[t, d]`` came from a real ``ChannelObs`` entry.
+    _ExperimentArrays
+        See that class for the per-field shapes.
     """
     # One pass caches each channel's host-side arrays, accumulates dtypes, and
     # collects the union timestamp set. The scatter loop below reuses the
@@ -326,11 +346,69 @@ def _per_experiment_arrays(
             yvar[idx, d] = var
             mask[idx, d] = True
 
-    return (
-        jnp.asarray(np.asarray(sorted_ts, dtype=ts_dtype)),
-        jnp.asarray(y_observed),
-        jnp.asarray(yvar),
-        jnp.asarray(mask),
+    return _ExperimentArrays(
+        ts=jnp.asarray(np.asarray(sorted_ts, dtype=ts_dtype)),
+        y_observed=jnp.asarray(y_observed),
+        yvar=jnp.asarray(yvar),
+        mask=jnp.asarray(mask),
+    )
+
+
+def _validate_experiments(
+    experiments: Sequence[Experiment],
+    output_channel_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Check the experiments agree with each other; return the covariate keys.
+
+    Every experiment must carry the same covariate key set, because those keys
+    become the stacked ``covariates`` dict and a missing one has no value to
+    stack. Each must also define every requested output channel, because the
+    trailing ``D`` axis is positional.
+
+    Raising here, naming the offending ``exp_id``, is the point: both
+    mismatches would otherwise surface much later as a shape error inside a
+    ``jnp.stack``, with nothing to say which experiment caused it.
+    """
+    cov_keys = tuple(sorted(experiments[0].covariates.keys()))
+    for exp in experiments:
+        exp_keys = tuple(sorted(exp.covariates.keys()))
+        if exp_keys != cov_keys:
+            raise ValueError(
+                f"Inconsistent covariate keys: experiment {exp.exp_id!r} has "
+                f"{list(exp_keys)}, expected {list(cov_keys)}"
+            )
+        missing = [c for c in output_channel_names if c not in exp.channels]
+        if missing:
+            raise ValueError(
+                f"Experiment {exp.exp_id!r} missing requested output channels: {missing}"
+            )
+    return cov_keys
+
+
+def _stack_bucket(
+    items: list[tuple[_ExperimentArrays, Experiment]],
+    cov_keys: tuple[str, ...],
+) -> BucketPayload:
+    """Stack same-``T`` experiments along a new leading ``N`` axis.
+
+    Everything in ``items`` already shares its leading ``T``, which is what
+    makes one ``jnp.stack`` per field legal and is the whole reason bucketing
+    keys on ``T``.
+    """
+    arrays = [a for a, _exp in items]
+    experiments = [exp for _a, exp in items]
+    mask = jnp.stack([a.mask for a in arrays], axis=0)
+    return BucketPayload(
+        ts=jnp.stack([a.ts for a in arrays], axis=0),
+        y_observed=jnp.stack([a.y_observed for a in arrays], axis=0),
+        yvar=jnp.stack([a.yvar for a in arrays], axis=0),
+        mask=mask,
+        covariates={
+            k: jnp.stack([jnp.asarray(exp.covariates[k]) for exp in experiments], axis=0)
+            for k in cov_keys
+        },
+        y0=jnp.stack([exp.y0 for exp in experiments], axis=0),
+        n_obs=mask.sum().astype(jnp.int32),
     )
 
 
@@ -375,59 +453,91 @@ def make_dataset(
     if not experiments:
         raise ValueError("make_dataset requires at least one experiment")
     output_channel_names = tuple(output_channel_names)
+    cov_keys = _validate_experiments(experiments, output_channel_names)
 
-    cov_keys = tuple(sorted(experiments[0].covariates.keys()))
-    for exp in experiments:
-        exp_keys = tuple(sorted(exp.covariates.keys()))
-        if exp_keys != cov_keys:
-            raise ValueError(
-                f"Inconsistent covariate keys: experiment {exp.exp_id!r} has "
-                f"{list(exp_keys)}, expected {list(cov_keys)}"
-            )
-        missing = [c for c in output_channel_names if c not in exp.channels]
-        if missing:
-            raise ValueError(
-                f"Experiment {exp.exp_id!r} missing requested output channels: {missing}"
-            )
-
-    by_len: dict[int, list[tuple[tuple[Array, Array, Array, Array], Experiment]]] = defaultdict(
-        list
-    )
+    by_len: dict[int, list[tuple[_ExperimentArrays, Experiment]]] = defaultdict(list)
     for exp in experiments:
         arrays = _per_experiment_arrays(exp, output_channel_names)
-        by_len[arrays[0].shape[0]].append((arrays, exp))
+        by_len[arrays.ts.shape[0]].append((arrays, exp))
 
-    bucket_payloads: list[BucketPayload] = []
-    for T in sorted(by_len.keys()):
-        items = by_len[T]
-        ts_stack = jnp.stack([item[0][0] for item in items], axis=0)
-        yo_stack = jnp.stack([item[0][1] for item in items], axis=0)
-        yv_stack = jnp.stack([item[0][2] for item in items], axis=0)
-        mk_stack = jnp.stack([item[0][3] for item in items], axis=0)
-        y0_stack = jnp.stack([item[1].y0 for item in items], axis=0)
-        cov_stack: dict[str, Array] = {
-            k: jnp.stack([jnp.asarray(item[1].covariates[k]) for item in items], axis=0)
-            for k in cov_keys
-        }
-        n_obs = mk_stack.sum().astype(jnp.int32)
-        bucket_payloads.append(
-            BucketPayload(
-                ts=ts_stack,
-                y_observed=yo_stack,
-                yvar=yv_stack,
-                mask=mk_stack,
-                covariates=cov_stack,
-                y0=y0_stack,
-                n_obs=n_obs,
-            )
-        )
+    # Ascending T, so bucket order is a deterministic function of the data
+    # rather than of dict insertion order.
+    bucket_payloads = tuple(_stack_bucket(by_len[T], cov_keys) for T in sorted(by_len))
 
     return Dataset(
-        bucket_payloads=tuple(bucket_payloads),
+        bucket_payloads=bucket_payloads,
         state_to_output=state_to_output,
         output_channel_names=output_channel_names,
         covariate_names=cov_keys,
         _experiments=tuple(experiments),
+    )
+
+
+def _validate_fractions(train: float, val: float, test: float) -> None:
+    """Reject split fractions that are out of range or do not sum to one.
+
+    Called before the source-experiments check, so a caller who gets both
+    wrong hears about the fractions first.
+    """
+    if any(f < 0.0 or f > 1.0 for f in (train, val, test)):
+        raise ValueError("train, val, and test fractions must each be in [0, 1]")
+    total = train + val + test
+    if not np.isclose(total, 1.0):
+        raise ValueError(f"train + val + test fractions must sum to 1.0, got {total}")
+
+
+def _split_counts(n: int, train: float, val: float, test: float) -> tuple[int, int, int]:
+    """Experiment counts per split. Train and val floor, test takes the remainder.
+
+    Giving test the remainder rather than its own floor is what makes the
+    three sum to ``n`` exactly, with no experiment dropped.
+
+    A positive fraction that floors to zero is refused. An empty split reads
+    downstream as "no validation needed" rather than "lost to rounding", so a
+    caller who means it has to ask for ``0.0`` explicitly.
+    """
+    n_train = int(np.floor(train * n))
+    n_val = int(np.floor(val * n))
+    n_test = n - n_train - n_val
+
+    for name, frac, count in (
+        ("train", train, n_train),
+        ("val", val, n_val),
+        ("test", test, n_test),
+    ):
+        if frac > 0.0 and count == 0:
+            raise ValueError(
+                f"split_dataset: {name} fraction {frac} produced 0 experiments out of "
+                f"n={n} after floor rounding. Either increase n, raise the {name} "
+                f"fraction, or set {name}=0.0 explicitly to skip this split."
+            )
+    return n_train, n_val, n_test
+
+
+def _subset(
+    dataset: Dataset,
+    experiments: tuple[Experiment, ...],
+    idxs: Sequence[int],
+) -> Dataset:
+    """Re-bucket the experiments at ``idxs``, or hand back an empty ``Dataset``.
+
+    Bucketed from scratch rather than sliced out of the parent's buckets, so
+    each split's bucket structure suits its own contents.
+
+    An empty split carries no payloads and no ``_experiments``, which is what
+    makes it unsplittable again rather than silently splittable into nothing.
+    """
+    if not idxs:
+        return Dataset(
+            bucket_payloads=(),
+            state_to_output=dataset.state_to_output,
+            output_channel_names=dataset.output_channel_names,
+            covariate_names=dataset.covariate_names,
+        )
+    return make_dataset(
+        [experiments[int(i)] for i in idxs],
+        state_to_output=dataset.state_to_output,
+        output_channel_names=dataset.output_channel_names,
     )
 
 
@@ -464,11 +574,7 @@ def split_dataset(
     tuple[Dataset, Dataset, Dataset]
         ``(train_dataset, val_dataset, test_dataset)``.
     """
-    if any(f < 0.0 or f > 1.0 for f in (train, val, test)):
-        raise ValueError("train, val, and test fractions must each be in [0, 1]")
-    total = train + val + test
-    if not np.isclose(total, 1.0):
-        raise ValueError(f"train + val + test fractions must sum to 1.0, got {total}")
+    _validate_fractions(train, val, test)
 
     experiments = dataset._experiments
     if not experiments:
@@ -476,51 +582,16 @@ def split_dataset(
             "split_dataset requires the source experiments; the provided Dataset has none "
             "(was it constructed manually without _experiments?)"
         )
+
     n = len(experiments)
+    n_train, n_val, n_test = _split_counts(n, train, val, test)
     perm = np.asarray(jr.permutation(key, n)).tolist()
-    n_train = int(np.floor(train * n))
-    n_val = int(np.floor(val * n))
-    n_test = n - n_train - n_val
-
-    # A positive fraction that floors to zero hands back an empty split, which
-    # downstream code reads as "no validation needed" rather than "lost to
-    # rounding". Refuse, and make the caller ask for 0.0 explicitly.
-    for name, frac, count in (
-        ("train", train, n_train),
-        ("val", val, n_val),
-        ("test", test, n_test),
-    ):
-        if frac > 0.0 and count == 0:
-            raise ValueError(
-                f"split_dataset: {name} fraction {frac} produced 0 experiments out of "
-                f"n={n} after floor rounding. Either increase n, raise the {name} "
-                f"fraction, or set {name}=0.0 explicitly to skip this split."
-            )
-
     splits_idx = (
         perm[:n_train],
         perm[n_train : n_train + n_val],
         perm[n_train + n_val : n_train + n_val + n_test],
     )
-
-    out: list[Dataset] = []
-    for idxs in splits_idx:
-        if idxs:
-            split_exps = [experiments[int(i)] for i in idxs]
-            out.append(
-                make_dataset(
-                    split_exps,
-                    state_to_output=dataset.state_to_output,
-                    output_channel_names=dataset.output_channel_names,
-                )
-            )
-        else:
-            out.append(
-                Dataset(
-                    bucket_payloads=(),
-                    state_to_output=dataset.state_to_output,
-                    output_channel_names=dataset.output_channel_names,
-                    covariate_names=dataset.covariate_names,
-                )
-            )
-    return cast(tuple[Dataset, Dataset, Dataset], tuple(out))
+    return cast(
+        tuple[Dataset, Dataset, Dataset],
+        tuple(_subset(dataset, experiments, idxs) for idxs in splits_idx),
+    )

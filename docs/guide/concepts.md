@@ -229,8 +229,11 @@ Both constructors are keyword-only and both require `key=`. To write
 your own, subclass [`Predictor`](/api/predictors#predictor) directly
 with whatever fields you need. The
 [getting-started example](/guide/getting-started#a-runnable-example)
-does this with a one-scalar `OmegaPredictor`. Concrete predictors are
-final; you compose them rather than overriding their methods.
+does this with a one-scalar `OmegaPredictor`, and
+[Custom predictors](/guide/custom-predictors) is the full procedure:
+static fields, re-initialisation, freezing, and serialisation. Concrete
+predictors are final; you compose them rather than overriding their
+methods.
 
 ## BoundedPredictor
 

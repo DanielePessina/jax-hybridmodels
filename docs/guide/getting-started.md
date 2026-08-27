@@ -303,6 +303,8 @@ the [mechanistic crystallisation example](/examples/crystallisation-mechanistic)
   choice is the way it is. Read this second.
 - [Training](/guide/training). Multi-phase schedules, restart tournaments,
   population search, and freezing.
+- [Custom predictors](/guide/custom-predictors). Writing a predictor
+  family of your own, once `MLPPredictor` is the wrong prior.
 - [Recommendations](/guide/recommendations). Choosing bounds, solver
   tolerances, and the traps that cost a debugging session.
 - [API reference](/api/). Every public symbol.

@@ -11,9 +11,11 @@ docs/
 │   ├── getting-started.md
 │   ├── concepts.md
 │   ├── training.md
+│   ├── custom-predictors.md
 │   └── recommendations.md
 ├── examples/                     # Hand-written walkthroughs
 │   ├── crystallisation.md        # Featured first; canonical end-to-end
+│   ├── custom-predictor.md
 │   └── pendulum.md
 ├── api/                          # AUTO-GENERATED, do not edit by hand
 │   ├── index.md

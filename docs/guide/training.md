@@ -258,6 +258,11 @@ believed was frozen trained anyway.
 instead, which is usually what you want. All three return a new mask and
 compose in any order. See [Trainable masks](/api/trainable).
 
+A predictor you wrote yourself may hold arrays that must never train, a
+fixed basis or a precomputed grid. It cannot declare them fixed; the
+mask does it. See
+[Custom predictors](/guide/custom-predictors#freezing-arrays-you-never-want-trained).
+
 ## Progress display
 
 `ui=` overrides the config's `verbose` flag.
