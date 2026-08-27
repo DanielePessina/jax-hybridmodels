@@ -532,6 +532,134 @@ class TestPhaseOptimiserSwitch:
         assert cfg.reset_optimiser_state == (False, False)
 
 
+class TestConfigValidation:
+    """The ``__post_init__`` rules that had no test.
+
+    Each is a guard against a config that would otherwise be accepted and
+    then quietly do the wrong thing, so the raise is the contract.
+    """
+
+    def _kwargs(self, **overrides):
+        base = dict(
+            steps=(2,),
+            lr=(1e-2,),
+            optimizer=("adamw",),
+            reset_optimiser_state=(False,),
+            length_schedule=(1.0,),
+            verbose=False,
+        )
+        base.update(overrides)
+        return base
+
+    def test_empty_steps_raises(self):
+        # The phase count is len(steps), so zero phases means the run loop
+        # never executes and the caller gets an empty history with no hint why.
+        with pytest.raises(ValueError, match="at least one phase"):
+            OptaxTrainingConfig(
+                **self._kwargs(
+                    steps=(), lr=(), optimizer=(), reset_optimiser_state=(), length_schedule=()
+                )
+            )
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("lr", (1e-2, 1e-3)),
+            ("optimizer", ("adamw", "adamw")),
+            ("reset_optimiser_state", (False, False)),
+            ("length_schedule", (1.0, 1.0)),
+        ],
+    )
+    def test_phase_keyed_length_mismatch_raises(self, field, value):
+        # These four do not broadcast: a length that disagrees with steps
+        # would silently truncate or index out of range at a phase boundary.
+        with pytest.raises(ValueError, match="phase-keyed field"):
+            OptaxTrainingConfig(**self._kwargs(**{field: value}))
+
+    @pytest.mark.parametrize("n", [0, 1, -1])
+    def test_penalty_grid_points_below_two_raises(self, n):
+        # Two is one point per box edge. Fewer cannot span the box, so the
+        # collocation grid would sample the interior only.
+        with pytest.raises(ValueError, match="penalty_grid_points"):
+            OptaxTrainingConfig(**self._kwargs(penalty_grid_points=n))
+
+    @pytest.mark.parametrize("fraction", [0.0, -0.1, 1.5])
+    def test_length_schedule_outside_the_unit_interval_raises(self, fraction):
+        # The fraction indexes a prefix of the observation times. Zero would
+        # score nothing and above one would claim more timestamps than exist.
+        with pytest.raises(ValueError, match="length_schedule"):
+            OptaxTrainingConfig(**self._kwargs(length_schedule=(fraction,)))
+
+    def test_length_schedule_of_exactly_one_is_allowed(self):
+        # The interval is (0, 1], so the default has to pass.
+        assert OptaxTrainingConfig(**self._kwargs(length_schedule=(1.0,))).length_schedule == (1.0,)
+
+
+class TestBestSnapshotIsPreUpdate:
+    """``restore_best`` must return the parameters the winning loss was measured at.
+
+    ``avg_data`` is computed from the pre-update predictors, then the update
+    is applied. Snapshotting after the update would hand back a model whose
+    loss is not the reported minimum, and ``loss_history`` would no longer
+    describe the returned model.
+    """
+
+    STEPS = 25
+    LR = 0.35  # high enough to overshoot, so the minimum lands mid-run
+
+    def _run(self, dataset, *, restore_best):
+        return train_with_optax(
+            OmegaPredictor(0.55),
+            dataset,
+            OptaxTrainingConfig(
+                steps=(self.STEPS,),
+                lr=(self.LR,),
+                optimizer=("adamw",),
+                reset_optimiser_state=(False,),
+                length_schedule=(1.0,),
+                restore_best=restore_best,
+                verbose=False,
+            ),
+            simulate_fn=make_oscillator_simulate_fn(),
+            solver=solver_config(),
+            key=jr.PRNGKey(0),
+        )
+
+    def _loss_of(self, dataset, predictor) -> float:
+        predictions = predict_dataset(
+            predictor, dataset, simulate_fn=make_oscillator_simulate_fn(), solver=solver_config()
+        )
+        total = sum(
+            float(masked_mse(pred, bp))
+            for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True)
+        )
+        return total / len(dataset.bucket_payloads)
+
+    def test_returned_model_scores_the_minimum_of_the_history(self):
+        dataset = make_oscillator_dataset()
+        history, trained = self._run(dataset, restore_best=True)
+        # Anti-vacuity: if the run were monotone the argmin would be the last
+        # step and a post-update snapshot would be nearly indistinguishable.
+        argmin = min(range(len(history)), key=history.__getitem__)
+        assert argmin < len(history) - 1, "lr was meant to overshoot the minimum"
+        assert self._loss_of(dataset, trained) == pytest.approx(min(history), rel=1e-5)
+
+    def test_restore_best_false_returns_the_final_step_instead(self):
+        dataset = make_oscillator_dataset()
+        best_history, best_model = self._run(dataset, restore_best=True)
+        last_history, last_model = self._run(dataset, restore_best=False)
+
+        # restore_best is a choice about what to hand back, not about how to
+        # train, so the trajectory must be identical.
+        assert best_history == last_history
+        assert len(last_history) == self.STEPS
+
+        # The argmin is mid-run, so the final parameters are a different point
+        # in the trajectory. No ordering is asserted between their losses: the
+        # last update can land anywhere, and often lands better.
+        assert float(last_model.omega) != float(best_model.omega)
+
+
 class TestRestoreBestAcrossHorizons:
     """``restore_best`` must not compare losses measured over different horizons.
 
