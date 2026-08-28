@@ -94,7 +94,6 @@ def main() -> None:
     experiments = _build_experiments()
     dataset = make_dataset(
         experiments,
-        state_to_output=_state_to_output,
         output_channel_names=("x",),
     )
     print(f"dataset has {len(dataset.bucket_payloads)} bucket(s)")
@@ -124,7 +123,13 @@ def main() -> None:
         out_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
     )
 
-    preds = predict_dataset(predictor, dataset, simulate_fn=_simulate_fn, solver=solver)
+    preds = predict_dataset(
+        predictor,
+        dataset,
+        simulate_fn=_simulate_fn,
+        state_to_output=_state_to_output,
+        solver=solver,
+    )
 
     for i, (bp, pred) in enumerate(zip(dataset.bucket_payloads, preds, strict=True)):
         loss = masked_mse(pred, bp)

@@ -52,7 +52,53 @@ tolerance change must change the compiled solve.
 | `adjoint` | `diffrax.AbstractAdjoint` | How gradients are taken back through the solve. See ``ADJOINT_REGISTRY`` for what each choice costs. |
 | `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See :meth:`stepsize_controller`. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L104)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L105)</small>
+
+#### `SolverConfig.diffeqsolve()`
+
+```python
+diffeqsolve(
+    self,
+    term: 'diffrax.AbstractTerm',
+    ts: 'Array',
+    y0: 'Array',
+    args: 'Any' = None,
+) -> diffrax.Solution
+```
+
+Run the solve this config describes, so ``simulate_fn`` stays thin.
+
+Wraps the invocation boilerplate every example hand-wrote —
+``SaveAt(ts=...)``, ``stepsize_controller()``, ``max_steps``, and —
+crucially — forwards ``self.adjoint``, which most hand-written
+examples forgot and hardcoded ``diffrax.DirectAdjoint()`` instead.
+Keeping the adjoint live means ``SolverConfig.adjoint`` is honoured
+everywhere, and the Backsolve caveat (it cannot differentiate
+through values closed over in the vector field) applies as
+documented in ``ADJOINT_REGISTRY``.
+
+The crystallisation example deliberately keeps its call manual: its
+config sets ``dt0=None`` with a live per-trajectory step fallback,
+and it coerces ``atol`` to the x64 state dtype, neither of which
+this helper encodes. For the common case — an explicit ``dt0`` and
+scalar/array tolerances — this is the whole invocation.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `term` |  | The diffrax term, usually ``diffrax.ODETerm(vector_field)`` where ``vector_field`` is the user's physics. The user still owns the physics; this folds only the invocation. |
+| `ts` |  | The observation times ``[T]``. The solver integrates from ``ts[0]`` to ``ts[-1]`` and saves at exactly ``ts``. |
+| `y0` |  | Full initial state ``[S]``. |
+| `args` |  | Optional static-or-traced value passed to the vector field's ``args`` (e.g. the predictors pytree, for Backsolve). |
+
+**Returns**
+
+| Item | Type | Description |
+| --- | --- | --- |
+| `diffrax.Solution` |  | The diffrax solution; call ``.ys`` for the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L169)</small>
 
 #### `SolverConfig.stepsize_controller()`
 
@@ -72,7 +118,7 @@ I-control, so this reproduces the ``PIDController(rtol, atol)`` the
 examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L146)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L147)</small>
 
 #### `SolverConfig.to_dict()`
 
@@ -86,7 +132,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L168)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L228)</small>
 
 ---
 
@@ -135,7 +181,7 @@ After registration, ``SolverConfig(solver=cls(), ...).to_dict()`` emits
 Re-registering an existing name overwrites without warning. Calling code
 owns the naming.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L65)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L66)</small>
 
 ---
 
@@ -182,4 +228,4 @@ Register a diffrax adjoint class under ``name`` for round-trip serialisation.
 Same contract as :func:`register_solver`. Re-registering an existing
 name overwrites without warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L56)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L57)</small>

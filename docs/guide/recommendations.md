@@ -307,6 +307,6 @@ The barrier is deliberate. It makes the seed visible at every call site.
 
 ## What's next
 
-- [Crystallisation walkthrough](/examples/crystallisation-notebook). All
+- The [crystallisation walkthrough](/examples/crystallisation). All
   of the above, applied.
 - [API reference](/api/). Every public symbol, by module.

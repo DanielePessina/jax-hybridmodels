@@ -3,8 +3,8 @@
 Two entry points, same signature.
 
 ```python
-history, trained = train_with_optax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None)
-history, trained = train_with_evosax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None)
+history, trained = train_with_optax(predictors, dataset, config, *, simulate_fn, state_to_output, solver, trainable=None, key, ui=None)
+history, trained = train_with_evosax(predictors, dataset, config, *, simulate_fn, state_to_output, solver, trainable=None, key, ui=None)
 ```
 
 `train_with_optax` follows gradients. `train_with_evosax` runs a
@@ -34,7 +34,7 @@ the same length as `steps`. There is no scalar broadcast, so you spell
 out the learning rate for each phase.
 
 ```python
-from hybridmodels.training.optax import OptaxTrainingConfig
+from hybridmodels import OptaxTrainingConfig
 
 config = OptaxTrainingConfig(
     steps=(200, 800),
@@ -102,13 +102,13 @@ with different weights incomparable.
 
 Random initialisation can be unlucky. A bad draw can put the integrator
 in a stiff regime it cannot escape within `max_steps`, and training
-never gets started. The **tournament** re-initialises the predictors,
-trains the candidate for a few steps, scores it with a forward-only
-pass, and hands it to the main loop if the score is finite. If the
-attempt fails it tries again with a fresh key, up to
-`tournament_attempts` times. It keeps the first candidate that survives,
-not the best-scoring one, so it is an escape from a bad draw rather than
-a search over good ones.
+never gets started. The **tournament** re-initialises the predictors
+several times from different keys, trains each candidate for a few
+steps, scores it with a forward-only pass on the data term alone, and
+keeps the **best-scoring** candidate. If an attempt raises a diffrax
+error or produces a non-finite score it is dropped and the next key is
+tried, up to `tournament_attempts` times. Ties keep the earlier attempt,
+so the result is a deterministic function of the seed.
 
 ```python
 config = OptaxTrainingConfig(
@@ -168,7 +168,7 @@ the loss has many local minima, or when the trainable part is a handful
 of kinetic constants rather than a network.
 
 ```python
-from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
+from hybridmodels import EvosaxTrainingConfig, train_with_evosax
 
 config = EvosaxTrainingConfig(
     algorithm="CMA_ES",
@@ -181,7 +181,9 @@ config = EvosaxTrainingConfig(
     verbose=True,
 )
 history, trained = train_with_evosax(
-    predictors, dataset, config, simulate_fn=simulate_fn, solver=solver, key=key,
+    predictors, dataset, config,
+    simulate_fn=simulate_fn, state_to_output=state_to_output,
+    solver=solver, key=key,
 )
 ```
 
@@ -216,10 +218,10 @@ sequence instead.
 ```python
 # Coarse global search.
 hist1, predictors = train_with_evosax(predictors, dataset, evo_config,
-                                      simulate_fn=simulate_fn, solver=solver, key=k1)
+    simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver, key=k1)
 # Local refinement with gradients.
 hist2, predictors = train_with_optax(predictors, dataset, opt_config,
-                                     simulate_fn=simulate_fn, solver=solver, key=k2)
+    simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver, key=k2)
 ```
 
 Both accept the same `trainable=` mask, so freezing carries across
@@ -243,7 +245,8 @@ mask = freeze_paths(mask, ("0.inner.mlp.layers.0.weight",))           # one spec
 
 history, trained = train_with_optax(
     predictors, dataset, config,
-    simulate_fn=simulate_fn, solver=solver, trainable=mask, key=key,
+    simulate_fn=simulate_fn, state_to_output=state_to_output,
+    solver=solver, trainable=mask, key=key,
 )
 ```
 

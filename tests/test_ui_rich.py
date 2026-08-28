@@ -17,6 +17,7 @@ from _harness import (
     OmegaPredictor,
     make_oscillator_dataset,
     make_oscillator_simulate_fn,
+    oscillator_state_to_output,
     recording_console,
     solver_config,
 )
@@ -142,6 +143,7 @@ def test_train_with_optax_verbose_true_runs_with_rich_ui_default(monkeypatch) ->
         ds,
         _trivial_config(verbose=True),
         simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -163,6 +165,7 @@ def test_train_with_optax_verbose_false_silent_on_stdout(capsys) -> None:
         ds,
         _trivial_config(verbose=False),
         simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )

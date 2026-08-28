@@ -1,6 +1,8 @@
 """``NeuralNPolynomial``: composition of a coefficient network and exponents.
 
-Experimental, and not re-exported from ``hybridmodels.predictors``.
+A public predictive family alongside ``MLPPredictor`` and ``KANPredictor``:
+one scalar polynomial per output channel whose coefficients come from a
+trainable inner ``Predictor``.
 
 A ``NeuralNPolynomial`` predictor evaluates one scalar polynomial per
 output channel. Its *coefficients* come from a trainable inner

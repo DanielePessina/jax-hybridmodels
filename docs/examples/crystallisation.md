@@ -158,22 +158,16 @@ branch. See
 ## Step 3: build the dataset
 
 ```python
-from hybridmodels import make_dataset
+from hybridmodels import describe_buckets, make_dataset
 
-dataset = make_dataset(
-    experiments,
-    state_to_output=state_to_output,
-    output_channel_names=("conc", "d43"),
-)
-print(f"{len(dataset.bucket_payloads)} buckets")
-for i, bp in enumerate(dataset.bucket_payloads):
-    print(f"  bucket {i}: ts={tuple(bp.ts.shape)}, n_obs={int(bp.n_obs)}")
+dataset = make_dataset(experiments, output_channel_names=("conc", "d43"))
+print(describe_buckets(dataset))
 ```
 
 Two buckets. The 17 °C pair merge to length 9, since `d43_time_min=270`
 already sits in the concentration grid; the 21 °C pair to length 7, their
-`d43` times each adding an entry. Each bucket compiles once and is reused
-for the whole run.
+`d43` times each already sitting in the concentration grid. Each bucket
+compiles once and is reused for the whole run.
 
 ## Step 4: two bounded predictors
 
@@ -321,8 +315,7 @@ The moments span roughly 18 decades during an integration, so `atol`
 gets one entry per state component.
 
 ```python
-from hybridmodels import SolverConfig
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from hybridmodels import OptaxTrainingConfig, SolverConfig, train_with_optax
 
 solver = SolverConfig(
     solver=diffrax.Tsit5(),
@@ -351,7 +344,8 @@ flattens.
 ```python
 history, trained_predictors = train_with_optax(
     predictors, dataset, config,
-    simulate_fn=simulate_fn, solver=solver, key=jr.PRNGKey(0),
+    simulate_fn=simulate_fn, state_to_output=state_to_output,
+    solver=solver, key=jr.PRNGKey(0),
 )
 print(f"final loss: {history[-1]:.6f}")
 ```
@@ -365,7 +359,8 @@ after that runs at full speed.
 from hybridmodels import predict_dataset
 
 predictions = predict_dataset(
-    trained_predictors, dataset, simulate_fn=simulate_fn, solver=solver,
+    trained_predictors, dataset, simulate_fn=simulate_fn,
+    state_to_output=state_to_output, solver=solver,
 )
 # One [N, T, D] array per bucket, in the same order as dataset.bucket_payloads.
 # The buckets differ in T, so they cannot be stacked into one tensor.

@@ -32,6 +32,7 @@ from hybridmodels import (
     ChannelObs,
     MLPPredictor,
     SolverConfig,
+    ramp_profile,
 )
 
 T_REF: float = 298.15  # K (25 °C); centring temperature for the Arrhenius form
@@ -111,45 +112,51 @@ def simulate_fn(
         log10(k(T, pH)) = log10(k_param(T)) + Δlog10(T, pH)
 
     where ``k_param`` is the centred-Arrhenius trunk and ``Δlog10`` a
-    bounded MLP residual. Covariates are constant in time, so ``k`` is read
-    once at the top of the call and closed over by the vector field.
+    bounded MLP residual.
+
+    The temperature is **not** constant in time: each experiment's
+    covariates carry the parameters of a flat-ramp-flat heating profile
+    (``ramp_t0``, ``ramp_t1``, ``T_lo``, ``T_hi``), and the profile is
+    evaluated inside the vector field at the solver's continuous ``t``.
+    That is the ``hybridmodels.profiles`` pattern: profile parameters
+    ride as ordinary scalar covariates, the pure-JAX profile callable
+    produces the time-varying value, and the predictor's input dict is
+    mixed at every step (``T(t)`` overrides the ``temperature_C`` key).
     """
     parametric, residual = predictors
     log_k_ref, Ea = parametric()  # [2] in physical units (sigmoid-bounded)
 
-    T_C = covariates["temperature_C"]
     pH = covariates["pH"]
-    T_K = T_C + 273.15
-
-    # log10 conversion: Arrhenius is naturally base-e; one /ln(10) at the end.
-    log10_k_param = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
-
-    inputs = {"temperature_C": T_C, "pH": pH}
-    delta_log10_k = jnp.squeeze(residual(inputs))
-
-    log10_k = log10_k_param + delta_log10_k
-    k = jnp.power(10.0, log10_k)
+    T_profile = ramp_profile(
+        t0=covariates["ramp_t0"],
+        t1=covariates["ramp_t1"],
+        v0=covariates["T_lo"],
+        v1=covariates["T_hi"],
+    )
 
     def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+        T_C = T_profile(t)
+        T_K = T_C + 273.15
+
+        # log10 conversion: Arrhenius is naturally base-e; one /ln(10) at
+        # the end.
+        log10_k_param = (
+            log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)
+        ) / jnp.log(10.0)
+
+        # The input dict is rebuilt at every solver step: T(t) changes
+        # with t, so the residual must be re-read at the current value.
+        delta_log10_k = jnp.squeeze(residual({"temperature_C": T_C, "pH": pH}))
+        k = jnp.power(10.0, log10_k_param + delta_log10_k)
+
         # Guards the integrator's rare negative excursions near the
         # asymptote. Mass conservation is exact analytically.
         Ca = jnp.maximum(y[0], 0.0)
         rate = k * Ca
         return jnp.stack([-rate, rate])
 
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        solver.solver,
-        t0=ts[0],
-        t1=ts[-1],
-        dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-        max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
-    )
-    return jnp.asarray(sol.ys)
+    term = diffrax.ODETerm(vector_field)
+    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
 
 
 def build_predictors(*, key: Array) -> tuple[ArrheniusKinetics, BoundedPredictor]:

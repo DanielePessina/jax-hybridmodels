@@ -1,6 +1,6 @@
 # jax-hybridmodels
 
-A JAX/Equinox library for hybrid models: trainable function approximators (MLP, KAN, ...) composed with user-written ODE dynamics and trained on irregular time-series experiments. Crystallisation kinetics is the canonical example, not the scope.
+A JAX/Equinox library for hybrid models: trainable function approximators (MLP, KAN, ...) composed with user-written ODE dynamics, trained on regular and irregular time-series experiments via bucketed data, with correct jit/vmap/autodiff and extension points at every seam (custom predictors, losses, optimisers, regularisers, and training loops). Crystallisation kinetics is the canonical example, not the scope.
 
 ## Documentation
 
@@ -9,11 +9,31 @@ The documentation site is built with VitePress and deployed to GitHub Pages at
 
 Site sections:
 
-- Guide: Getting Started, Concepts, Training, Recommendations.
-- Examples: the [Crystallisation walkthrough](https://danielepessina.github.io/jax-hybridmodels/examples/crystallisation) (canonical end-to-end), and a [Harmonic Oscillator](https://danielepessina.github.io/jax-hybridmodels/examples/pendulum) sanity check with a known optimum.
+- Guide: Getting Started, Concepts, Training, Custom Predictors, Extending, Recommendations.
+- Examples:
+  - [Custom training loop](https://danielepessina.github.io/jax-hybridmodels/examples/custom-loop) — write your own loop against the public gradient kernels.
+  - [Crystallisation walkthrough](https://danielepessina.github.io/jax-hybridmodels/examples/crystallisation) — canonical end-to-end.
+  - [SBML hybrid kinetics](https://danielepessina.github.io/jax-hybridmodels/examples/sbml-hybrid) — an external mechanistic model with a neural rate.
+  - [Neural polynomial kinetics](https://danielepessina.github.io/jax-hybridmodels/examples/supersaturation-poly) — a `NeuralNPolynomial` rate law in supersaturation.
+  - Plus hybrid-ODE, batch reactor, RL, custom-predictor, and a [Harmonic Oscillator](https://danielepessina.github.io/jax-hybridmodels/examples/pendulum) sanity check with a known optimum.
 - API Reference: per-module pages auto-generated from docstrings.
 
 The full source tree for the site lives under [`docs/`](./docs).
+
+### Examples
+
+The examples under [`examples/`](./examples) are plain scripts (no notebook
+runtime). Run one directly, or through the docs page that embeds it:
+
+```bash
+uv run python examples/custom_loop/train_custom_loop.py
+uv run python examples/sbml_hybrid/train_sbml_hybrid.py
+uv run python examples/pendulum/train_harmonic.py --no-plot
+uv run python examples/supersaturation_poly/train_supersaturation_poly.py
+```
+
+A CI workflow (`.github/workflows/examples.yml`) compiles every example and
+smoke-runs the fast ones on each push.
 
 ### Local preview
 
@@ -100,7 +120,15 @@ Removing a symbol is the same in reverse: drop it from `__all__`,
 fails CI if a public symbol exists in `__all__` but no `PAGES` group, so
 new exports cannot ship undocumented.
 
-## Installation (development)
+## Installation
+
+### From PyPI (once published)
+
+```bash
+uv add hybridmodels
+```
+
+### Development
 
 ```bash
 uv sync
@@ -109,6 +137,17 @@ uv sync
 This installs `hybridmodels` in editable mode together with `jax`,
 `equinox`, `diffrax`, `optax`, `evosax`, `jaxkan`, and the small CLI/UI
 dependencies.
+
+## Contributing
+
+Run the verification gate before pushing:
+
+```bash
+uv run ruff check .        # lint
+uv run ty check src        # typecheck
+uv run pytest -q           # 477 tests
+npm --prefix docs run docs:build   # docs site
+```
 
 ## License
 

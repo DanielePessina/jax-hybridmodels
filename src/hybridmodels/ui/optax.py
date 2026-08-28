@@ -123,13 +123,17 @@ class RichTrainingUI:
         self._final_loss = None
         self._run_active = True
         # Reset per-phase / compile / message state so a reused instance
-        # does not bleed prior-run rows into the new run.
+        # does not bleed prior-run rows into the new run. ``_compile_first_done``
+        # is deliberately kept: an ensemble runs one training loop per member
+        # through the same instance, and once a compile has completed the
+        # phase-progress slot must stay live for the later members instead of
+        # reverting to the compile panel. A genuinely new compile still shows
+        # the panel, because ``on_compile_start`` raises ``_compile_active``.
         self._phase_idx = None
         self._phase_progress_bar = None
         self._phase_task_id = None
         self._phase_history = []
         self._compile_active = False
-        self._compile_first_done = False
         self._messages.clear()
 
         # Stop any stale Live (defensive: shouldn't happen but cheap to guard).
@@ -161,7 +165,7 @@ class RichTrainingUI:
         self._refresh()
 
     def on_phase_start(
-        self, *, phase_idx: int, phase_steps: int, lr: float, optimizer: str
+        self, *, phase_idx: int, phase_steps: int, lr: float, optimizer: Any
     ) -> None:
         self._phase_idx = int(phase_idx)
         self._phase_steps = int(phase_steps)

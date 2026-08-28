@@ -11,6 +11,7 @@ Pass them by name via training-config `loss="mse"` (resolved through [`LOSS_REGI
 - [`bal_mse`](#bal_mse)
 - [`bal_mle`](#bal_mle)
 - [`LOSS_REGISTRY`](#loss_registry)
+- [`resolve_loss_fn`](#resolve_loss_fn)
 
 ---
 
@@ -45,7 +46,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 | `channel_idx` |  | Trailing-axis indices to keep. ``None`` keeps all ``D`` channels. |
 | `channel_weights` |  | Per-channel multipliers; length must match ``channel_idx`` (or ``D`` when ``channel_idx`` is ``None``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L99)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L100)</small>
 
 ---
 
@@ -75,7 +76,7 @@ Nothing is averaged. The result is a sum of log-likelihoods and grows
 linearly with the number of observations. Use ``bal_mle`` for the
 per-experiment averaged version.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L139)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L140)</small>
 
 ---
 
@@ -106,7 +107,7 @@ Per-experiment, per-channel denominators are clamped to ``1`` with
 channel does not divide by zero. Mask gating has already zeroed the
 matching numerator, so that contribution is exactly ``0.0``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L165)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L166)</small>
 
 ---
 
@@ -132,7 +133,7 @@ reduction as ``bal_mse``, with ``_gaussian_nll_terms`` (which reads
 ``bp.yvar``) in place of the pointwise squared error. Returns the bucket
 mean of the per-experiment, channel-weighted, time-averaged NLLs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L199)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L200)</small>
 
 ---
 
@@ -161,3 +162,49 @@ dict(iterable) -> new dictionary initialized as if via:
         d[k] = v
 dict(**kwargs) -> new dictionary initialized with the name=value pairs
     in the keyword argument list.  For example:  dict(one=1, two=2)
+
+---
+
+<a id="resolve_loss_fn"></a>
+
+### `resolve_loss_fn()`
+
+<small>`from hybridmodels.losses import resolve_loss_fn` &nbsp;·&nbsp; also re-exported as `hybridmodels.resolve_loss_fn`</small>
+
+```python
+resolve_loss_fn(
+    loss: 'Callable[..., Array] | str',
+    channel_idx: 'tuple[int, ...] | None',
+    channel_weights: 'tuple[float, ...] | None',
+) -> Callable[[Array, BucketPayload], Array]
+```
+
+Turn a training config's ``loss`` field into a ``(pred_obs, bp) -> scalar``.
+
+``loss`` is either a ``LOSS_REGISTRY`` key, matched case- and
+whitespace-insensitively, or a callable already in the right shape.
+
+With neither ``channel_idx`` nor ``channel_weights`` the resolved
+function is returned as-is rather than wrapped. That identity matters: a
+user loss written to the bare ``(pred_obs, bp)`` signature would raise
+``TypeError`` on the unexpected keywords if it were wrapped
+unconditionally.
+
+How channel selection composes depends on the loss:
+
+- A registry name, or a callable whose signature accepts
+  ``channel_idx``/``channel_weights``, is called with them as keyword
+  arguments (the built-ins reduce with the weights inside their own
+  per-channel sum).
+- A plain ``(pred_obs, bp)`` callable is *projected* instead: the
+  selected channels are sliced out of ``pred_obs`` and ``bp`` before the
+  call, so any ``(pred_obs, bp)`` loss composes with ``channel_idx``.
+  ``channel_weights`` cannot be projected this way — per-channel
+  weighting must happen inside a loss's own reduction — so a plain
+  callable combined with ``channel_weights`` raises rather than
+  silently ignoring the weights.
+
+Lives here rather than in the training modules because it is registry
+lookup and channel binding, not training logic, and both loops need it.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L234)</small>

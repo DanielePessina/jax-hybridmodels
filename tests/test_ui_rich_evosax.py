@@ -19,6 +19,7 @@ from _harness import (
     QuadraticPredictor,
     quadratic_dataset,
     quadratic_simulate_fn,
+    quadratic_state_to_output,
     recording_console,
     solver_config,
 )
@@ -146,7 +147,7 @@ def test_train_with_evosax_verbose_true_runs_with_rich_ui_default(monkeypatch) -
 
     record_console = recording_console()
 
-    def _factory():
+    def _factory(log_every: int | None = None):
         return RichEvosaxUI(console=record_console)
 
     monkeypatch.setattr(evosax_module, "RichEvosaxUI", _factory)
@@ -166,6 +167,7 @@ def test_train_with_evosax_verbose_true_runs_with_rich_ui_default(monkeypatch) -
         ds,
         config,
         simulate_fn=quadratic_simulate_fn,
+        state_to_output=quadratic_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -196,6 +198,7 @@ def test_train_with_evosax_verbose_false_silent_on_stdout(capsys) -> None:
         ds,
         config,
         simulate_fn=quadratic_simulate_fn,
+        state_to_output=quadratic_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )

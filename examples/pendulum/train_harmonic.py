@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import diffrax
 import jax.numpy as jnp
@@ -32,9 +33,12 @@ from hybridmodels import (
     ChannelObs,
     Experiment,
     SolverConfig,
+    compute_metrics,
+    evaluate_predictor,
     make_dataset,
     make_experiment,
     predict_dataset,
+    print_metrics,
 )
 from hybridmodels.predictors.base import Predictor
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
@@ -44,9 +48,7 @@ from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402
     apply_default_style,
-    compute_diagnostics,
     parity_plot,
-    print_diagnostics,
     trajectory_plot,
 )
 
@@ -148,19 +150,7 @@ def _simulate_fn(
         return jnp.stack([y[1], -omega_sq * y[0]])
 
     term = diffrax.ODETerm(vector_field)
-    sol = diffrax.diffeqsolve(
-        term,
-        solver.solver,
-        t0=ts[0],
-        t1=ts[-1],
-        dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-        max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
-    )
-    return jnp.asarray(sol.ys)
+    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
 
 
 def _true_position(omega: float, t: Array, x0: float, v0: float) -> Array:
@@ -202,8 +192,31 @@ def _build_experiments(noise_key: Array) -> list[Experiment]:
 
 def _read_omega(predictor: BoundedPredictor) -> float:
     """Pull the bounded ``omega`` value out of the predictor for reporting."""
-    out = predictor({"dummy": jnp.asarray(0.0)})
-    return float(jnp.asarray(out).reshape(()))
+    return evaluate_predictor(predictor, {"dummy": 0.0})
+
+
+def _parity_diagnostics(predictions, dataset):
+    """Masked obs/pred pairs per channel for ``parity_plot``.
+
+    ``compute_metrics`` keeps only summary stats; the scatter needs the raw
+    value pairs, so re-walk the buckets' masks here.
+    """
+    metrics = compute_metrics(predictions, dataset)
+    out: dict[str, SimpleNamespace] = {}
+    for d, name in enumerate(dataset.output_channel_names):
+        obs_chunks: list = []
+        pred_chunks: list = []
+        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
+            mask = bp.mask[..., d]
+            obs_chunks.append(bp.y_observed[..., d][mask])
+            pred_chunks.append(pred[..., d][mask])
+        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
+        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
+        m = metrics[name]
+        out[name] = SimpleNamespace(
+            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
+        )
+    return out
 
 
 def main() -> None:
@@ -233,7 +246,6 @@ def main() -> None:
     experiments = _build_experiments(k_data)
     dataset = make_dataset(
         experiments,
-        state_to_output=_state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     print(f"  {len(experiments)} experiments, {len(dataset.bucket_payloads)} bucket(s)")
@@ -269,6 +281,7 @@ def main() -> None:
         dataset,
         config,
         simulate_fn=_simulate_fn,
+        state_to_output=_state_to_output,
         solver=solver,
         key=k_train,
     )
@@ -284,14 +297,16 @@ def main() -> None:
     # predict_dataset returns one [N, T, D] array per bucket; the helpers
     # walk it in lockstep with the dataset.
     print("\n[diagnostics] per-channel parity stats over the training set")
-    predictions = predict_dataset(trained, dataset, simulate_fn=_simulate_fn, solver=solver)
-    diag = compute_diagnostics(predictions, dataset)
-    print_diagnostics(diag)
+    predictions = predict_dataset(
+        trained, dataset, simulate_fn=_simulate_fn, state_to_output=_state_to_output, solver=solver
+    )
+    metrics = compute_metrics(predictions, dataset)
+    print_metrics(metrics)
 
     if not args.no_plot:
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         parity_plot(
-            diag,
+            _parity_diagnostics(predictions, dataset),
             title="Pendulum parity (trained model)",
             save_path=args.plot_dir / "parity.png",
         )
@@ -300,6 +315,7 @@ def main() -> None:
             dataset,
             predictors=trained,
             simulate_fn=_simulate_fn,
+            state_to_output=_state_to_output,
             solver=solver,
             max_experiments=len(experiments),
             title="Pendulum trajectories (trained model)",

@@ -7,10 +7,6 @@ import pytest
 from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment, split_dataset
 
 
-def _identity_state_to_output(state):
-    return state
-
-
 def _zero_y0(_cov, _chan):
     return jnp.zeros((1,))
 
@@ -31,7 +27,7 @@ def _dataset(n: int, *, mixed_lens: bool = False):
         n_ts = 2 + (i % 3) if mixed_lens else 2
         exps.append(_make_exp(i, n_ts=n_ts))
     return make_dataset(
-        exps, state_to_output=_identity_state_to_output, output_channel_names=("c",)
+        exps, output_channel_names=("c",)
     )
 
 
@@ -104,7 +100,6 @@ class TestSplitDataset:
         ds = _dataset(10)
         train, val, test = split_dataset(ds, key=jr.key(0))
         for split in (train, val, test):
-            assert split.state_to_output is ds.state_to_output
             assert split.output_channel_names == ds.output_channel_names
             assert split.covariate_names == ds.covariate_names
 
@@ -161,7 +156,6 @@ class TestSplitWithoutExperiments:
     def test_split_raises_on_empty_experiments(self):
         ds = Dataset(
             bucket_payloads=(),
-            state_to_output=_identity_state_to_output,
             output_channel_names=("c",),
             covariate_names=("a",),
         )

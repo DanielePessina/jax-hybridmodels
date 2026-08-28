@@ -435,7 +435,6 @@ def fit_per_bin(experiments, bin_of_exp, predictors_init, mask_p1, solver):
         bin_exps = [e for i, e in enumerate(experiments) if bin_of_exp[i] == bin_idx]
         bin_ds = make_dataset(
             bin_exps,
-            state_to_output=_state_to_output,
             output_channel_names=OUTPUT_CHANNELS,
         )
         _hist, preds = train_with_evosax(
@@ -443,6 +442,7 @@ def fit_per_bin(experiments, bin_of_exp, predictors_init, mask_p1, solver):
             bin_ds,
             _cfg_baseline(),
             simulate_fn=simulate_fn_baseline,
+            state_to_output=_state_to_output,
             solver=solver,
             trainable=mask_p1,
             key=jr.PRNGKey(bin_idx),
@@ -463,6 +463,7 @@ def fit_joint_arrhenius(dataset, predictors_init, mask_p1, solver):
         dataset,
         _cfg_baseline(),
         simulate_fn=simulate_fn_baseline,
+        state_to_output=_state_to_output,
         solver=solver,
         trainable=mask_p1,
         key=jr.PRNGKey(0),
@@ -479,6 +480,7 @@ def fit_linear_ph_arrhenius(dataset, predictors_init_linph, mask_linph, solver):
         dataset,
         _cfg_baseline(),
         simulate_fn=simulate_fn_linear_ph,
+        state_to_output=_state_to_output,
         solver=solver,
         trainable=mask_linph,
         key=jr.PRNGKey(0),
@@ -498,6 +500,7 @@ def fit_hybrid(predictors_p1, dataset, mask_p2, solver):
         dataset,
         _cfg_p2(),
         simulate_fn=simulate_fn,
+        state_to_output=_state_to_output,
         solver=solver,
         trainable=mask_p2,
         key=jr.PRNGKey(1),
@@ -597,7 +600,6 @@ def main():
     experiments, bin_of_exp = _build_experiments()
     dataset = make_dataset(
         experiments,
-        state_to_output=_state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
 

@@ -68,7 +68,7 @@ class TrainingUI(Protocol):
         ...
 
     def on_phase_start(
-        self, *, phase_idx: int, phase_steps: int, lr: float, optimizer: str
+        self, *, phase_idx: int, phase_steps: int, lr: float, optimizer: Any
     ) -> None:
         """Fires at the start of each phase; ``phase_steps`` is the per-phase step budget."""
         ...
@@ -82,12 +82,13 @@ class TrainingUI(Protocol):
     ) -> None:
         """Fires after each training step. ``step_idx`` counts within the phase.
 
-        ``loss`` is the **data** term alone, the series ``restore_best``
-        and early stopping act on; a penalty whose weight ramps between
-        phases would make successive values incomparable. ``penalty``
-        reports the unweighted bound penalty next to it, defaulting to
-        ``0.0`` so a UI written against the earlier signature still
-        satisfies this protocol.
+        ``loss`` is the data term (plus any configured trajectory penalty,
+        which is charged inside the bucket forward pass) — the series
+        ``restore_best`` and early stopping act on; a bound-penalty weight
+        that ramps between phases would make successive values
+        incomparable. ``penalty`` reports the unweighted bound penalty next
+        to it, defaulting to ``0.0`` so a UI written against the earlier
+        signature still satisfies this protocol.
         """
         ...
 

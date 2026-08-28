@@ -94,6 +94,7 @@ def test_convergence_recovers_omega():
         ds,
         config,
         simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -118,6 +119,7 @@ def test_multi_phase_runs_and_improves():
         ds,
         config_phase0,
         simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -135,6 +137,7 @@ def test_multi_phase_runs_and_improves():
         ds,
         config_two_phase,
         simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -167,6 +170,7 @@ def test_length_schedule_does_not_recompile():
         ds,
         config,
         simulate_fn=counted_simulate,
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -190,6 +194,7 @@ def test_missing_key_raises():
             ds,
             config,
             simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
         )
 
@@ -227,6 +232,7 @@ def test_tournament_reduces_across_seed_variance():
             ds,
             config_no_tournament,
             simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
             key=jr.PRNGKey(seed),
         )
@@ -237,6 +243,7 @@ def test_tournament_reduces_across_seed_variance():
             ds,
             config_tournament,
             simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
             key=jr.PRNGKey(seed),
         )
@@ -279,6 +286,7 @@ def test_tournament_falls_back_when_all_attempts_fail():
             ds,
             config,
             simulate_fn=_nan_simulate_fn,
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
             key=jr.PRNGKey(0),
         )
@@ -301,6 +309,7 @@ def test_recording_ui_lifecycle_events_fire():
         ds,
         config,
         simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
         ui=ui,
@@ -331,6 +340,7 @@ def test_silent_default_when_no_ui_and_verbose_false(capsys):
         ds,
         config,
         simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -392,6 +402,7 @@ class TestPenaltyWiring:
             ds,
             config,
             simulate_fn=_bounded_simulate_fn() if bounded else make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
             key=jr.PRNGKey(0),
             ui=ui,
@@ -621,13 +632,18 @@ class TestBestSnapshotIsPreUpdate:
                 verbose=False,
             ),
             simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
             key=jr.PRNGKey(0),
         )
 
     def _loss_of(self, dataset, predictor) -> float:
         predictions = predict_dataset(
-            predictor, dataset, simulate_fn=make_oscillator_simulate_fn(), solver=solver_config()
+            predictor,
+            dataset,
+            simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
+            solver=solver_config(),
         )
         total = sum(
             float(masked_mse(pred, bp))
@@ -699,14 +715,17 @@ class TestRestoreBestAcrossHorizons:
             )
         return make_dataset(
             experiments,
-            state_to_output=oscillator_state_to_output,
             output_channel_names=("position",),
         )
 
     def _full_length_loss(self, dataset: Dataset, predictor) -> float:
         """Data loss over the whole window, the quantity a user cares about."""
         predictions = predict_dataset(
-            predictor, dataset, simulate_fn=make_oscillator_simulate_fn(), solver=solver_config()
+            predictor,
+            dataset,
+            simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
+            solver=solver_config(),
         )
         total = sum(
             float(masked_mse(pred, bp))
@@ -728,6 +747,7 @@ class TestRestoreBestAcrossHorizons:
                 verbose=False,
             ),
             simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
             key=jr.PRNGKey(0),
         )
@@ -845,11 +865,16 @@ class TestTournamentSelection:
             dataset,
             self._config(attempts),
             simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
             solver=solver_config(),
             key=jr.PRNGKey(self.KEY_SEED),
         )
         predictions = predict_dataset(
-            trained, dataset, simulate_fn=make_oscillator_simulate_fn(), solver=solver_config()
+            trained,
+            dataset,
+            simulate_fn=make_oscillator_simulate_fn(),
+            state_to_output=oscillator_state_to_output,
+            solver=solver_config(),
         )
         return sum(
             float(masked_mse(pred, bp))

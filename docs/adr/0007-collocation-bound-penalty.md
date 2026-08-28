@@ -32,7 +32,7 @@ A penalty that reads as satisfied when the predictor is dead is worse than no pe
 
 Collocation is trajectory-blind. It reports saturation anywhere in the declared box, including regions the training trajectories never visited. For catching extrapolation failure before deployment that is a feature. For "did *this* solve push an input outside its range" it is the wrong instrument, because that question is genuinely trajectory-dependent and needs the penalty computed where the state actually goes.
 
-Answering it means widening `simulate_fn` to return `(states, penalty)`, which is an ADR-0005 change. Deferred (SPEC §2.3) until a case demands it, and gated behind an explicit opt-in flag when it lands, never auto-detected by inspecting what `simulate_fn` returned, which would make the contract depend on runtime shape.
+Answering it lands via the opt-in trajectory-aware penalty (ADR-0009): the penalty rides in extra ODE state components whose time-integral is charged by `trajectory_penalty_fn`, without widening `simulate_fn`'s signature. `simulate_fn` still returns the full state; the accumulated penalty components are stripped in `state_to_output`.
 
 Note also that carrying a penalty as an extra integrated ODE state does not by itself solve this. It gets the quantity to the end of the solve, but `state_to_output` then projects to `[T, D]` and the loss sees only that, so the penalty is dropped. Accumulating it and extracting it are separate problems, and only the second is a contract change.
 

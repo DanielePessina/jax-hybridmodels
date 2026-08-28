@@ -41,7 +41,7 @@ enough when every experiment shares the same unknown constant.
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
-from hybridmodels.predictors.base import Predictor
+from hybridmodels import Predictor
 
 class OmegaPredictor(Predictor):
     """One trainable scalar; ignores its input."""
@@ -127,7 +127,8 @@ mask = freeze_paths(mask, ("0.inner.frequencies",))  # that one: False
 
 history, trained = train_with_optax(
     predictors, dataset, config,
-    simulate_fn=simulate_fn, solver=solver, trainable=mask, key=key,
+    simulate_fn=simulate_fn, state_to_output=state_to_output,
+    solver=solver, trainable=mask, key=key,
 )
 ```
 

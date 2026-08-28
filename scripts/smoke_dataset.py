@@ -84,7 +84,6 @@ def main() -> None:
     experiments = _build_experiments()
     dataset = make_dataset(
         experiments,
-        state_to_output=_state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     _print_buckets("full", dataset)

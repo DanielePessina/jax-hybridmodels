@@ -9,175 +9,118 @@ Self-contained: the data generator, the physics and the models are defined
 here rather than imported, so it reads top to bottom. The script version is
 ``train_hybrid_ode.py`` in the same directory.
 
-Run interactively: ``uv run marimo edit examples/hybrid_ode/notebook.py``
 Run as script:     ``uv run python examples/hybrid_ode/notebook.py``
+
+# Fitting a hybrid ODE model
+
+## The situation this library is for
+
+You have measurements of something that changes over time, and a
+differential equation you partly believe:
+
+$$
+\frac{dy}{dt} = f(y, t; \theta)
+$$
+
+Some of $f$ comes from conservation laws or a mechanism you trust. Some
+does not: a rate constant varies with temperature in a way nobody has
+written down, or a term is missing altogether. You want the missing
+parts learned from data without discarding the parts you know.
+
+That is a **hybrid model**: mechanistic structure in closed form,
+unknown pieces replaced by trainable networks. It is worth the trouble
+because a model that keeps its structure extrapolates, and because its
+parameters keep their physical meaning after fitting. The last section
+shows what a fitted rate constant becomes when you skip the correction
+and let the mechanistic parameter absorb the error instead.
+
+## What this library provides
+
+Three things, all awkward by hand.
+
+**Physical quantities stay inside their ranges.** A rate constant cannot
+be negative; a mole fraction lives in $[0, 1]$. An optimiser that does
+not know this proposes values that make the solver diverge, and clipping
+is not the fix: a clip has zero derivative outside the range, so it
+destroys the gradient that would pull the parameter back, exactly when
+it is needed. This library reparameterises instead, so an out-of-range
+value cannot be represented at all.
+
+**Irregular measurements need no padding or interpolation.** Two
+instruments rarely agree on when they sampled, and solvers want
+rectangular arrays. The library takes a per-experiment union of
+timestamps, marks the holes with a mask, and groups experiments by
+length so each group is one compiled solve.
+
+**Trainable pieces compose with mechanistic terms.** A network can sit
+above the solver, inside the vector field, or both, and the training
+loop is never told which.
+
+## What this library is not
+
+Not a neural ODE library. A trainable network inside a vector field is
+one thing you can build here, and
+[diffrax](https://docs.kidger.site/diffrax/) and
+[Equinox](https://docs.kidger.site/equinox/) already document that
+technique. This notebook uses it in one line without explaining it.
+
+Assumed: Python, and some experience fitting models to data. Not
+assumed: JAX, Equinox, diffrax, or the chemistry.
 """
 
 # ruff: noqa: F722
 
-import marimo
+from pathlib import Path
 
-__generated_with = "0.23.4"
-app = marimo.App(width="medium")
+import diffrax
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+import matplotlib.pyplot as plt
+import numpy as np
 
-
-@app.cell(hide_code=True)
-def _intro(mo):
-    mo.md(r"""
-    # Fitting a hybrid ODE model
-
-    ## The situation this library is for
-
-    You have measurements of something that changes over time, and a
-    differential equation you partly believe:
-
-    $$
-    \frac{dy}{dt} = f(y, t; \theta)
-    $$
-
-    Some of $f$ comes from conservation laws or a mechanism you trust. Some
-    does not: a rate constant varies with temperature in a way nobody has
-    written down, or a term is missing altogether. You want the missing
-    parts learned from data without discarding the parts you know.
-
-    That is a **hybrid model**: mechanistic structure in closed form,
-    unknown pieces replaced by trainable networks. It is worth the trouble
-    because a model that keeps its structure extrapolates, and because its
-    parameters keep their physical meaning after fitting. The last section
-    shows what a fitted rate constant becomes when you skip the correction
-    and let the mechanistic parameter absorb the error instead.
-
-    ## What this library provides
-
-    Three things, all awkward by hand.
-
-    **Physical quantities stay inside their ranges.** A rate constant cannot
-    be negative; a mole fraction lives in $[0, 1]$. An optimiser that does
-    not know this proposes values that make the solver diverge, and clipping
-    is not the fix: a clip has zero derivative outside the range, so it
-    destroys the gradient that would pull the parameter back, exactly when
-    it is needed. This library reparameterises instead, so an out-of-range
-    value cannot be represented at all.
-
-    **Irregular measurements need no padding or interpolation.** Two
-    instruments rarely agree on when they sampled, and solvers want
-    rectangular arrays. The library takes a per-experiment union of
-    timestamps, marks the holes with a mask, and groups experiments by
-    length so each group is one compiled solve.
-
-    **Trainable pieces compose with mechanistic terms.** A network can sit
-    above the solver, inside the vector field, or both, and the training
-    loop is never told which.
-
-    ## What this library is not
-
-    Not a neural ODE library. A trainable network inside a vector field is
-    one thing you can build here, and
-    [diffrax](https://docs.kidger.site/diffrax/) and
-    [Equinox](https://docs.kidger.site/equinox/) already document that
-    technique. This notebook uses it in one line without explaining it.
-
-    Assumed: Python, and some experience fitting models to data. Not
-    assumed: JAX, Equinox, diffrax, or the chemistry.
-    """)
-    return
+from hybridmodels import (
+    BoundedPredictor,
+    BoundScaler,
+    ChannelObs,
+    MLPPredictor,
+    SolverConfig,
+    Warp,
+    make_dataset,
+    make_experiment,
+    predict_dataset,
+    register_warp,
+)
+from hybridmodels.penalties import bound_penalty, collocation_grids
+from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 
-@app.cell
-def _imports():
-    import diffrax
-    import jax
-    import jax.numpy as jnp
-    import jax.random as jr
-    import marimo as mo
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    from hybridmodels import (
-        BoundedPredictor,
-        BoundScaler,
-        ChannelObs,
-        MLPPredictor,
-        SolverConfig,
-        Warp,
-        make_dataset,
-        make_experiment,
-        predict_dataset,
-        register_warp,
-    )
-    from hybridmodels.penalties import bound_penalty, collocation_grids
-    from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
-
-    return (
-        BoundScaler,
-        BoundedPredictor,
-        ChannelObs,
-        MLPPredictor,
-        OptaxTrainingConfig,
-        SolverConfig,
-        Warp,
-        bound_penalty,
-        collocation_grids,
-        diffrax,
-        jax,
-        jnp,
-        jr,
-        make_dataset,
-        make_experiment,
-        mo,
-        np,
-        plt,
-        predict_dataset,
-        register_warp,
-        train_with_optax,
-    )
-
-
-@app.cell(hide_code=True)
-def _system_md(mo):
-    mo.md(r"""
-    ---
+def main() -> None:
+    Path("examples/hybrid_ode/figures").mkdir(parents=True, exist_ok=True)
 
     # 1. The system, and the two gaps in the model
+    # --------------------------------------------
+    # A two-dimensional system: a rotation at fixed frequency w, damped at
+    # rate k, with a cubic coupling on top.
+    #
+    #     dy/dt = [[-k, w], [-w, -k]] y  +  C y^3        w = 1
+    #
+    # The model keeps the rotation and treats w as known. Two things it will
+    # not know.
+    #
+    # The damping rate depends on temperature. Each experiment runs at one
+    # of six temperature levels, and the true rate follows Arrhenius:
+    #
+    #     k(T) = k_ref * exp( -(Ea/R) * (1/T - 1/T_ref) )
+    #
+    # Across the six levels k runs from 0.0063 to 0.276, a factor of 44.
+    # Remember that number: it is why k needs a logarithmic axis in section 3.
+    #
+    # The cubic coupling is missing entirely. C y^3 has no counterpart in
+    # the model, so a network has to reproduce its effect from trajectories
+    # alone. In a real problem you would know neither; here they are
+    # synthesised so there is something to check the fit against.
 
-    A two-dimensional system: a rotation at fixed frequency $\omega$,
-    damped at rate $k$, with a cubic coupling on top.
-
-    $$
-    \frac{dy}{dt} =
-    \begin{bmatrix} -k & \omega \\ -\omega & -k \end{bmatrix} y
-    \;+\; C y^{3},
-    \qquad \omega = 1
-    $$
-
-    The model keeps the rotation and treats $\omega$ as known. Two things it
-    will not know:
-
-    **The damping rate depends on temperature.** Each experiment runs at one
-    of six temperature levels, and the true rate follows Arrhenius:
-
-    $$
-    k(T) = k_{\mathrm{ref}} \exp\!\left(
-      -\frac{E_a}{R}\left(\frac{1}{T} - \frac{1}{T_{\mathrm{ref}}}\right)
-    \right)
-    $$
-
-    Across the six levels $k$ runs from 0.0063 to 0.276, a factor of 44.
-    Remember that number: it is why $k$ needs a logarithmic axis in
-    section 3.
-
-    **The cubic coupling is missing entirely.** $C y^3$ has no counterpart
-    in the model, so a network has to reproduce its effect from
-    trajectories alone.
-
-    In a real problem you would know neither. Here they are synthesised so
-    there is something to check the fit against.
-    """)
-    return
-
-
-@app.cell
-def _physics(diffrax, jnp):
     OMEGA_TRUE = 1.0
     COUPLING = jnp.array([[0.0, 0.6], [-0.6, 0.0]])
     K_REF = 0.05
@@ -224,81 +167,32 @@ def _physics(diffrax, jnp):
     for _t in TEMPERATURES:
         print(f"  {_t:6.1f} K   k = {float(true_k(_t)):.5f}")
     print(f"  ratio hottest / coldest = {float(true_k(340.0) / true_k(280.0)):.1f}")
-    return (
-        CHANNELS,
-        COUPLING,
-        OMEGA_TRUE,
-        TEMPERATURES,
-        solve_reference,
-        true_field,
-        true_k,
-    )
-
-
-@app.cell(hide_code=True)
-def _data_md(mo):
-    mo.md(r"""
-    ---
 
     # 2. Getting data into the library
+    # ----------------------------------------------------------
+    #
+    # Data enters as one `Experiment` per run, holding covariates (the
+    # temperature), one `ChannelObs` per measured quantity (each with its
+    # own timestamps, values and variances), and a `y0_fn` returning the
+    # full state at t = 0. `make_dataset` then takes the union of each
+    # experiment's channel timestamps, writes each channel's values into
+    # the rows where it was measured, records a boolean mask over the real
+    # cells, and stacks experiments whose union has the same length into
+    # one bucket. One bucket is one vectorised compiled solve.
+    #
+    # The same physics is sampled two ways. Rectangular: every experiment
+    # on the same 20-point grid, both channels measured every time.
+    # Irregular: each experiment gets its own end time in [6, 9], its own
+    # drawn sample times, and each channel thinned independently to 8 or
+    # 12 samples. The union length is n1 + n2 - 1, so three possible
+    # lengths appear: 15, 19 and 23.
 
-    ## The containers
-
-    Data enters as one `Experiment` per run. An `Experiment` holds:
-
-    - **covariates**: constants describing that run. Here, the
-      temperature it was held at.
-    - **channels**: one `ChannelObs` per measured quantity, each with
-      its own timestamps, values and variances. Channels are allowed to
-      disagree about when they were measured.
-    - **y0_fn**: a function returning the full state at $t = 0$. The
-      full state can be larger than what you measure. Here both
-      components are measured, so it reads them off the first sample.
-
-    `make_dataset` then does the bookkeeping this library is built around.
-    Per experiment it takes the **union** of its channels' timestamps,
-    writes each channel's values into the rows where it was measured, and
-    records a boolean **mask** marking the real cells. Experiments whose
-    union has the same length stack into one **bucket**.
-
-    Buckets are what the solver sees: one bucket is one vectorised compiled
-    solve. JAX compiles once per distinct input shape, so the number of
-    distinct union lengths is the number of compilations. Nothing is padded
-    out to the longest experiment and nothing is interpolated into a hole.
-
-    ## Two sampling layouts
-
-    The same physics sampled two ways, so the difference the library makes
-    is visible.
-
-    **Rectangular.** Every experiment on the same 20-point grid, both
-    channels measured every time.
-
-    **Irregular.** Each experiment gets its own end time in $[6, 9]$, its
-    own drawn sample times, and each channel thinned independently to 8 or
-    12 samples, which is the normal laboratory situation. The union length
-    is `n1 + n2 - 1`, the shared $t = 0$ counting once, so there are three
-    possible lengths: 15, 19 and 23.
-
-    $t = 0$ stays in every channel in both layouts, so `y0_fn` can read
-    the initial state off the first observation. Relaxing that needs an
-    encoder, which is the latent-ODE problem rather than this one.
-    """)
-    return
-
-
-@app.cell
-def _keys(jr):
     # JAX has no global RNG: every random draw takes an explicit key, and
     # splitting one root key is how a run stays reproducible. Split the
     # same way train_hybrid_ode.py does, so this notebook reproduces the
     # numbers quoted on the documentation page.
     k_data, k_rate_init, k_res_init, k_train = jr.split(jr.PRNGKey(0), 4)
-    return k_data, k_rate_init, k_res_init, k_train
 
-
-@app.cell
-def _builders(CHANNELS, ChannelObs, jnp, make_dataset, make_experiment):
     NOISE_STD = 0.03
 
     def y0_from_first_samples(covariates, channels):
@@ -307,7 +201,9 @@ def _builders(CHANNELS, ChannelObs, jnp, make_dataset, make_experiment):
 
     def build_experiment(ts_per_channel, values_per_channel, temperature, exp_id):
         channels = {
-            name: ChannelObs(ts=ts, values=vals, variance=jnp.full(ts.shape, NOISE_STD**2))
+            name: ChannelObs(
+                ts=ts, values=vals, variance=jnp.full(ts.shape, NOISE_STD**2)
+            )
             for name, ts, vals in zip(CHANNELS, ts_per_channel, values_per_channel, strict=True)
         }
         return make_experiment(
@@ -329,7 +225,6 @@ def _builders(CHANNELS, ChannelObs, jnp, make_dataset, make_experiment):
     def build_dataset(experiments):
         return make_dataset(
             experiments,
-            state_to_output=state_to_output,
             output_channel_names=CHANNELS,
         )
 
@@ -343,24 +238,6 @@ def _builders(CHANNELS, ChannelObs, jnp, make_dataset, make_experiment):
             )
         return "\n".join(lines)
 
-    return NOISE_STD, build_dataset, build_experiment, describe_buckets
-
-
-@app.cell
-def _rect_data(
-    NOISE_STD,
-    TEMPERATURES,
-    build_dataset,
-    build_experiment,
-    describe_buckets,
-    jax,
-    jnp,
-    jr,
-    k_data,
-    solve_reference,
-    true_field,
-    true_k,
-):
     N_EXPERIMENTS = 24
 
     rect_ts = jnp.linspace(0.0, 8.0, 20)
@@ -387,25 +264,7 @@ def _rect_data(
     )
     print("rectangular sampling")
     print(describe_buckets(rect_dataset))
-    return N_EXPERIMENTS, rect_dataset, rect_observed, rect_ts
 
-
-@app.cell
-def _irr_data(
-    CHANNELS,
-    NOISE_STD,
-    N_EXPERIMENTS,
-    TEMPERATURES,
-    build_dataset,
-    build_experiment,
-    describe_buckets,
-    jnp,
-    jr,
-    k_data,
-    solve_reference,
-    true_field,
-    true_k,
-):
     SAMPLES_PER_CHANNEL = (8, 12)
 
     irr_experiments = []
@@ -452,23 +311,12 @@ def _irr_data(
     print("first experiment, samples per channel:")
     for _name in CHANNELS:
         print(f"  {_name}: {irr_experiments[0].channels[_name].ts.shape[0]}")
-    return irr_dataset, irr_experiments
 
-
-@app.cell(hide_code=True)
-def _mask_md(mo):
-    mo.md(r"""
-    One bucket against three, and a mask that goes from completely full
-    to about half full. The figure below makes the second case concrete:
-    black cells are real measurements, white cells are positions on the
-    union axis where *the other* channel was measured and this one was
-    not. Nothing is interpolated to fill them; the loss skips them.
-    """)
-    return
-
-
-@app.cell
-def _mask_plot(irr_dataset, np, plt, rect_dataset):
+    # One bucket against three, and a mask that goes from completely full
+    # to about half full. The figure below makes the second case concrete:
+    # black cells are real measurements, white cells are positions on the
+    # union axis where the *other* channel was measured and this one was
+    # not. Nothing is interpolated to fill them; the loss skips them.
     fig_mask, axes_mask = plt.subplots(4, 1, figsize=(9, 5.2))
     _panels = [
         (rect_dataset.bucket_payloads[0], 0, "rectangular, y1"),
@@ -478,7 +326,10 @@ def _mask_plot(irr_dataset, np, plt, rect_dataset):
     ]
     for _ax, (_bp, _d, _label) in zip(axes_mask, _panels, strict=True):
         _ax.imshow(
-            np.asarray(_bp.mask[:, :, _d]), aspect="auto", cmap="binary", interpolation="nearest"
+            np.asarray(_bp.mask[:, :, _d]),
+            aspect="auto",
+            cmap="binary",
+            interpolation="nearest",
         )
         _ax.set_ylabel(_label, fontsize=7)
         _ax.set_xticks([])
@@ -486,12 +337,9 @@ def _mask_plot(irr_dataset, np, plt, rect_dataset):
     axes_mask[-1].set_xlabel("position on the union timestamp axis")
     fig_mask.suptitle("Mask: black is measured, white is a hole")
     fig_mask.tight_layout()
-    fig_mask
-    return
+    fig_mask.savefig("examples/hybrid_ode/figures/mask_layout.png")
+    plt.close(fig_mask)
 
-
-@app.cell
-def _raw_plot(irr_experiments, plt, rect_observed, rect_ts):
     fig_raw, axes_raw = plt.subplots(1, 4, figsize=(13, 3.0))
     for _i in range(rect_observed.shape[0]):
         axes_raw[0].plot(rect_ts, rect_observed[_i, :, 0], lw=0.8, alpha=0.6)
@@ -504,78 +352,29 @@ def _raw_plot(irr_experiments, plt, rect_observed, rect_ts):
     axes_raw[1].legend(fontsize=8)
     fig_raw.suptitle("Left: one shared grid. Right: the two channels rarely share a timestamp.")
     fig_raw.tight_layout()
-    fig_raw
-    return
-
-
-@app.cell(hide_code=True)
-def _bounds_md(mo):
-    mo.md(r"""
-    ---
+    fig_raw.savefig("examples/hybrid_ode/figures/raw_data.png")
+    plt.close(fig_raw)
 
     # 3. Keeping physical quantities in range
-
-    ## Why not just clip
-
-    Suppose you constrain a rate constant to $(10^{-3}, 1)$ by clipping
-    whatever the network emits. The forward pass is right and the backward
-    pass is broken: a clip has zero derivative outside the range, so once
-    the network proposes 1.5 the gradient telling it to come down is
-    multiplied by zero. The parameter sticks at its bound, and nothing
-    raises.
-
-    `BoundScaler` reparameterises instead, composing with a network like
-    this:
-
-    ```
-    physical input -> to_latent -> network -> from_latent -> physical output
-    ```
-
-    The network in the middle sees normalised, unbounded numbers and never
-    has to clamp itself. `from_latent` squashes an unbounded $z$ into
-    $[\ell, u]$:
-
-    $$
-    x = \ell + (u - \ell)\,\sigma(z / T)
-    $$
-
-    $\sigma$ lands in $(0, 1)$, so an out-of-range value is not
-    representable: nothing to clip, nothing to check.
-
-    `to_latent` is the inverse, used on inputs. Its logit has poles at the
-    ends of the box, and clipping there would bring back the original
-    disease, so the library continues the logit linearly outside a narrow
-    band. Values stay finite, the gradient stays non-zero and points the
-    right way, and the join is smooth enough that an adaptive solver notices
-    nothing.
-
-    ## The cost, and the choice of squash
-
-    Reparameterising is not free. The derivative of `from_latent` carries a
-    factor $\sigma'(z/T)$, and for a logistic sigmoid in float32 that
-    **underflows to exactly zero** past $|z/T| \approx 15$. A network pushed
-    hard against a bound stops receiving any signal to come back, for good.
-
-    Hence a choice of squash, by name:
-
-    | name | tail of $\lvert du/dz \rvert$ | dead at |
-    |---|---|---|
-    | `sigmoid` | $e^{-\lvert z \rvert}$ | $z \approx 17$ |
-    | `algebraic` | $\lvert z \rvert^{-3}/2$ | $z \approx 3 \times 10^{3}$ |
-    | `softsign` | $\lvert z \rvert^{-2}/2$ | $z \approx 10^{7}$ |
-
-    Polynomial decay does not make saturation free: escaping $z = 100$ under
-    a $c/z^2$ gradient takes $10^6$ times as long as escaping $z = 1$. It
-    turns an impossible recovery into a slow one.
-
-    Below, the left panel is what the model can express, the right is
-    whether it can still learn once it is out there. Note the log scale.
-    """)
-    return
-
-
-@app.cell
-def _squash_plot(BoundScaler, jax, jnp, np, plt):
+    # ---------------------------------------------------
+    #
+    # Bounds hold by reparameterisation, not by clipping: `BoundScaler`
+    # wraps a network so the output is `x = lo + (hi - lo) * sigma(z / T)`,
+    # and an out-of-range value is not representable. `to_latent` is the
+    # exact inverse, continued linearly outside a narrow band so the logit
+    # poles at the box ends do not kill the gradient.
+    #
+    # Reparameterising is not free: the derivative carries sigma'(z/T),
+    # which for a logistic sigmoid in float32 underflows to zero past
+    # |z/T| ~ 15. The choice of squash trades that:
+    #
+    #     squash     tail of |du/dz|    dead at
+    #     sigmoid    e^-|z|             z ~ 17
+    #     algebraic  |z|^-3 / 2         z ~ 3e3
+    #     softsign   |z|^-2 / 2         z ~ 1e7
+    #
+    # Below, the left panel is what the model can express, the right is
+    # whether it can still learn once it is out there. Note the log scale.
     fig_sq, axes_sq = plt.subplots(1, 2, figsize=(10, 3.4))
     _z = jnp.linspace(-25.0, 25.0, 801)
     for _name in ("sigmoid", "algebraic", "softsign"):
@@ -594,34 +393,17 @@ def _squash_plot(BoundScaler, jax, jnp, np, plt):
     )
     axes_sq[1].legend(fontsize=8)
     fig_sq.tight_layout()
-    fig_sq
-    return
+    fig_sq.savefig("examples/hybrid_ode/figures/squash_survival.png")
+    plt.close(fig_sq)
 
-
-@app.cell(hide_code=True)
-def _warp_md(mo):
-    mo.md(r"""
-    ## Choosing the axis: warps
-
-    The rates here run from 0.0063 to 0.276. Give the rate network an output
-    box of $(10^{-3}, 1)$ under linear normalisation and its midpoint is
-    $0.5$, so every rate in the data sits in the bottom 3% of the range,
-    where the sigmoid is steepest and only large negative latents reach.
-
-    A **warp** reparameterises the physical axis before normalising. It
-    changes what "halfway between the bounds" means without changing which
-    values are reachable: under `warp="log10"` the midpoint is $10^{-2}$ and
-    the data covers the middle of the box.
-
-    Warp and squash are independent. The warp lays out the box, the squash
-    decides what happens near an edge. Shipped warps: `linear`, `log`,
-    `log10`.
-    """)
-    return
-
-
-@app.cell
-def _warp_plot(BoundScaler, jnp, np, plt):
+    # Choosing the axis: warps
+    #
+    # The rates here run from 0.0063 to 0.276. A linear box over
+    # (1e-3, 1) has midpoint 0.5, so every rate in the data sits in the
+    # bottom 3% of the range, where the sigmoid is steepest and only large
+    # negative latents reach. A warp reparameterises the physical axis
+    # before normalising: under warp="log10" the midpoint is 1e-2 and the
+    # data covers the middle of the box. Warp and squash are independent.
     _linear = BoundScaler(bounds=((1e-3, 1.0),), transform="sigmoid")
     _log10 = BoundScaler(bounds=((1e-3, 1.0),), transform="sigmoid", warp="log10")
     _z = jnp.linspace(-6.0, 6.0, 400)[:, None]
@@ -638,42 +420,23 @@ def _warp_plot(BoundScaler, jnp, np, plt):
     )
     ax_warp.legend(fontsize=8)
     fig_warp.tight_layout()
-    fig_warp
-    return
+    fig_warp.savefig("examples/hybrid_ode/figures/warp_comparison.png")
+    plt.close(fig_warp)
 
-
-@app.cell(hide_code=True)
-def _symlog_md(mo):
-    mo.md(r"""
-    ## Registering a warp of your own
-
-    The residual's output box straddles zero, so `log10` is unusable, and a
-    linear box spends resolution evenly, including on large corrections that
-    should never happen if the mechanistic part is any good.
-
-    What is wanted is an axis linear near zero and logarithmic in the tails.
-    That is not shipped, so register it: warps and squashes live in
-    name-keyed registries and adding one is a function call.
-
-    $$
-    \mathrm{forward}(x) = \operatorname{sign}(x)\,
-      \log\!\left(1 + \frac{|x|}{\varepsilon}\right)
-    $$
-
-    `forward(0) = 0`, so the box midpoint stays at zero and a fresh residual
-    network starts near no correction rather than at some arbitrary interior
-    point.
-
-    A scaler stores its warp **by name**, which is what keeps a saved model
-    to a JSON sidecar plus an array file. So a custom warp must be
-    registered before a model referencing it can load.
-    `register_bound_transform` is the same idea for squashes.
-    """)
-    return
-
-
-@app.cell
-def _register_symlog(Warp, jnp, register_warp):
+    # Registering a warp of your own
+    #
+    # The residual's output box straddles zero, so log10 is unusable, and
+    # a linear box spends resolution evenly, including on large corrections
+    # that should never happen if the mechanistic part is any good. What is
+    # wanted is an axis linear near zero and logarithmic in the tails, so
+    # register one: warps and squashes live in name-keyed registries.
+    #
+    #     forward(x) = sign(x) log(1 + |x| / eps)
+    #
+    # forward(0) = 0, so the box midpoint stays at zero and a fresh residual
+    # network starts near no correction. A scaler stores its warp by name,
+    # which keeps a saved model to a JSON sidecar; a custom warp must be
+    # registered before a model referencing it can load.
     SYMLOG_EPS = 0.25
 
     register_warp(
@@ -685,49 +448,23 @@ def _register_symlog(Warp, jnp, register_warp):
         ),
     )
     print("registered warp 'symlog'")
-    return
-
-
-@app.cell(hide_code=True)
-def _model_md(mo):
-    mo.md(r"""
-    ---
 
     # 4. The model, and where each network sits
-
-    Two gaps, two networks, on opposite sides of the solver.
-
-    | | learns | called | on the solver tape |
-    |---|---|---|---|
-    | `rate_net` | $T \mapsto k$ | once per experiment | no |
-    | `residual_net` | $y \mapsto \text{correction}$ | once per solver step | yes |
-
-    A covariate does not change during a trajectory, so anything depending
-    only on covariates is computed **before** the solve and closed over as a
-    constant. Its cost is then independent of the step count and it never
-    appears on the tape the backward pass walks. A term depending on the
-    state has to run inside. (That is a neural ODE, which diffrax and
-    Equinox document; this notebook uses it and moves on.)
-
-    The library is never told which is which. Both are ordinary calls, and
-    you place them by writing the code.
-
-    `BoundedPredictor` bundles each network with its two scalers, and
-    `input_keys` says how the covariate dict becomes a vector. That declared
-    order travels with the saved model, so a reload site knows what the
-    predictor expects without consulting the code that built it.
-    """)
-    return
-
-
-@app.cell
-def _models(
-    BoundScaler,
-    BoundedPredictor,
-    MLPPredictor,
-    k_rate_init,
-    k_res_init,
-):
+    # -----------------------------------------------------
+    #
+    # Two gaps, two networks, on opposite sides of the solver.
+    #
+    #     rate_net:     T -> k             once per experiment, off the tape
+    #     residual_net: y -> correction    once per solver step, on the tape
+    #
+    # A covariate does not change during a trajectory, so anything
+    # depending only on covariates is computed before the solve and closed
+    # over as a constant. The library is never told which is which; both
+    # are ordinary calls placed by writing the code.
+    #
+    # `BoundedPredictor` bundles each network with its two scalers, and
+    # `input_keys` says how the covariate dict becomes a vector. That
+    # declared order travels with the saved model.
     TEMPERATURE_BOUNDS = ((270.0, 350.0),)
     K_BOUNDS = ((1e-3, 1.0),)
     STATE_BOUNDS = ((-2.0, 2.0), (-2.0, 2.0))
@@ -751,6 +488,7 @@ def _models(
     residual_net = BoundedPredictor(
         input_keys=("y1", "y2"),
         in_scaler=BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
+        out_scaler=BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
         inner=MLPPredictor(
             in_size=2,
             out_size=2,
@@ -759,49 +497,26 @@ def _models(
             activation_name="softplus",
             key=k_res_init,
         ),
-        # softsign, because a correction term visits the edge of its box
-        # early in training and sigmoid's gradient would be gone by then.
-        out_scaler=BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
     )
 
     # The convention for the trainable object is a tuple. Any pytree the
-    # library can walk is accepted: a dict, a NamedTuple, a bare module.
-    # It never inspects the container, which is why dropping the residual
-    # later is a one-line change.
+    # library can walk is accepted; it never inspects the container, which
+    # is why dropping the residual later is a one-line change.
     predictors = (rate_net, residual_net)
-    print(f"rate_net expects {rate_net.input_keys}, residual_net expects {residual_net.input_keys}")
-    return (predictors,)
+    print(
+        f"rate_net expects {rate_net.input_keys}, "
+        f"residual_net expects {residual_net.input_keys}"
+    )
 
-
-@app.cell(hide_code=True)
-def _simulate_md(mo):
-    mo.md(r"""
-    ## simulate_fn
-
-    The one function you always write yourself. Its contract is fixed:
-
-    ```
-    simulate_fn(predictors, ts, covariates, y0, solver) -> [T, S]
-    ```
-
-    Given the trainable object, one experiment's timestamps, covariates and
-    initial state, return the full state at every timestamp. Everything
-    inside is yours: the library never inspects the physics, it vectorises,
-    compiles and differentiates this call. The two placements are visible in
-    the first four lines.
-
-    `SolverConfig` collects the numerical choices so they save with the
-    model. `adjoint` picks how gradients come back through the solve.
-    `DirectAdjoint`, the default, stores the whole forward trajectory, which
-    is usually the memory bottleneck once a network sits in the vector
-    field, so this example uses `RecursiveCheckpointAdjoint` and its
-    $O(\log n)$ checkpoints instead.
-    """)
-    return
-
-
-@app.cell
-def _simulate(OMEGA_TRUE, diffrax, jnp):
+    # simulate_fn: the one function you always write yourself. Its contract
+    # is fixed:
+    #
+    #     simulate_fn(predictors, ts, covariates, y0, solver) -> [T, S]
+    #
+    # Everything inside is yours; the library vectorises, compiles and
+    # differentiates this call. The two placements are visible in the first
+    # four lines. `adjoint` picks how gradients come back through the solve;
+    # RecursiveCheckpointAdjoint trades recomputation for O(log n) storage.
     def simulate_fn(predictors_, ts, covariates, y0, solver):
         rate_net_ = predictors_[0]
         residual_net_ = predictors_[1] if len(predictors_) > 1 else None
@@ -831,11 +546,6 @@ def _simulate(OMEGA_TRUE, diffrax, jnp):
         )
         return jnp.asarray(sol.ys)
 
-    return (simulate_fn,)
-
-
-@app.cell
-def _solver_cfg(SolverConfig, diffrax):
     solver = SolverConfig(
         solver=diffrax.Tsit5(),
         rtol=1e-4,
@@ -845,108 +555,33 @@ def _solver_cfg(SolverConfig, diffrax):
         adjoint=diffrax.RecursiveCheckpointAdjoint(),
     )
     print(solver)
-    return (solver,)
-
-
-@app.cell(hide_code=True)
-def _train_md(mo):
-    mo.md(r"""
-    ---
 
     # 5. Training
+    # -----------------------------------------------------------
+    #
+    # A two-phase curriculum: fit the first part of every trajectory, then
+    # all of it (`length_schedule`), with a lower learning rate in phase
+    # two and a fresh minimum for `restore_best` at the phase boundary.
+    #
+    # The saturation penalty is charged on the latent, not the physical
+    # output, and evaluated on a collocation grid over each predictor's
+    # declared input box rather than along the trajectories, so it reports
+    # saturation anywhere in the box the model claims to be valid on.
+    # `penalty_weight` is a length-1 tuple and broadcasts across both
+    # phases.
+    #
+    # In the original interactive version these two values were UI controls
+    # (a slider and a dropdown); a script fixes them at the defaults.
+    steps = 400
+    penalty_weight = 1e-3
 
-    ## Phases
-
-    Fitting a trajectory over a long window is hard for a reason unrelated
-    to the optimiser: early on the model is wrong, the predicted trajectory
-    leaves the data almost immediately, and the late-time loss is dominated
-    by that divergence rather than anything the parameters can fix locally.
-
-    The fix is a curriculum. Fit the first part of every trajectory, then
-    all of it, which is `length_schedule`, one entry per phase.
-
-    ```python
-    OptaxTrainingConfig(
-        steps=(200, 400),
-        lr=(5e-3, 1e-3),
-        optimizer=("adamw", "adamw"),
-        reset_optimiser_state=(False, False),
-        length_schedule=(0.4, 1.0),
-    )
-    ```
-
-    Every phase-keyed field is a tuple of the same length, spelled out
-    rather than broadcast, so a schedule cannot be silently truncated.
-
-    `length_schedule` masks the **loss** to the first fraction of each
-    trajectory. It does not shorten the integration, so an early step costs
-    the same as a late one; what changes is which residuals the optimiser
-    sees.
-
-    One consequence. A phase at 0.4 and a phase at 1.0 measure different
-    quantities, so their losses are not comparable, and `restore_best`
-    resets its running minimum whenever `length_schedule` changes. Without
-    that reset the minimum lands in the shortest phase every time and you
-    get back the least-trained point in the run.
-
-    ## The saturation penalty
-
-    Bounds hold by construction, so a violation cannot be represented. The
-    remaining failure mode is the opposite one: a network **pinned** against
-    a bound, where the squash derivative has decayed and the gradient that
-    would pull it back is gone.
-
-    Two details make the penalty work. It is charged on the **latent**, not
-    the physical output, which would inherit the same $\sigma'(z/T)$ factor
-    on its backward pass and die exactly where saturation is worst. Reading
-    $|z|/T$ gives a gradient linear in the overshoot that never underflows.
-
-    And it is evaluated on a **collocation grid** over each predictor's
-    declared input box rather than along the trajectories. That
-    trajectory-blindness cuts both ways: it reports saturation anywhere in
-    the box the model claims to be valid on, catching extrapolation trouble
-    before deployment, but it cannot say whether one particular solve pushed
-    an input out of range.
-
-    `penalty_weight` is a length-1 tuple and broadcasts across every phase;
-    give it one entry per phase to ramp it.
-
-    Move the controls and everything downstream recomputes.
-    """)
-    return
-
-
-@app.cell
-def _controls(mo):
-    steps = mo.ui.slider(start=100, stop=1200, step=100, value=400, label="final-phase steps")
-    penalty_weight = mo.ui.dropdown(
-        options={"0 (off)": 0.0, "1e-4": 1e-4, "1e-3": 1e-3, "1e-2": 1e-2},
-        value="1e-3",
-        label="saturation penalty weight",
-    )
-    mo.vstack([steps, penalty_weight])
-    return penalty_weight, steps
-
-
-@app.cell
-def _train_irregular(
-    OptaxTrainingConfig,
-    irr_dataset,
-    k_train,
-    penalty_weight,
-    predictors,
-    simulate_fn,
-    solver,
-    steps,
-    train_with_optax,
-):
     config = OptaxTrainingConfig(
-        steps=(steps.value // 2, steps.value),
+        steps=(steps // 2, steps),
         lr=(5e-3, 1e-3),
         optimizer=("adamw", "adamw"),
         reset_optimiser_state=(False, False),
         length_schedule=(0.4, 1.0),
-        penalty_weight=(penalty_weight.value,),
+        penalty_weight=(penalty_weight,),
         penalty_grid_points=7,
         loss="mse",
         verbose=False,
@@ -956,18 +591,15 @@ def _train_irregular(
         irr_dataset,
         config,
         simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
         solver=solver,
         key=k_train,
     )
     print(f"{len(history)} steps, final data loss {history[-1]:.5f}")
-    return config, history, trained
 
-
-@app.cell
-def _loss_plot(history, plt, steps):
     fig_loss, ax_loss = plt.subplots(figsize=(7, 3.2))
     ax_loss.plot(history, lw=1.0)
-    ax_loss.axvline(steps.value // 2, color="0.6", ls="--", lw=0.8)
+    ax_loss.axvline(steps // 2, color="0.6", ls="--", lw=0.8)
     ax_loss.set(
         xlabel="step",
         ylabel="data loss (masked MSE)",
@@ -975,69 +607,32 @@ def _loss_plot(history, plt, steps):
         title="The step at the dashed line is the horizon widening, not the fit degrading",
     )
     fig_loss.tight_layout()
-    fig_loss
-    return
+    fig_loss.savefig("examples/hybrid_ode/figures/loss_curve.png")
+    plt.close(fig_loss)
 
-
-@app.cell(hide_code=True)
-def _loss_note(mo):
-    mo.md(r"""
-    `loss_history` from the Optax trainer is the raw per-step data loss
-    and can go up, as it does at the phase boundary. The Evosax trainer
-    returns best-so-far, which cannot. Same type, same position in the
-    return tuple, different meaning.
-
-    The penalty is excluded from this series. Including it would move
-    "best" whenever only the weight changed and would make runs with
-    different weights incomparable.
-    """)
-    return
-
-
-@app.cell
-def _penalty_readout(bound_penalty, collocation_grids, trained):
+    # `loss_history` from the Optax trainer is the raw per-step data loss
+    # and can go up, as it does at the phase boundary. The Evosax trainer
+    # returns best-so-far, which cannot. The penalty is excluded from this
+    # series, so runs with different penalty weights stay comparable.
     print("saturation penalty at the end of the run, by leaf:")
     for _name, _leaf in zip(("rate_net", "residual_net"), trained, strict=True):
         print(f"  {_name:13s} {float(bound_penalty((_leaf,), collocation_grids((_leaf,)))):.4e}")
-    return
 
-
-@app.cell(hide_code=True)
-def _penalty_note(mo):
-    mo.md(r"""
-    With the default settings the residual network reads exactly zero
-    and the rate network reads a small non-zero value. That split is the
-    penalty working rather than a problem. `rate_net` is declared valid
-    over 270 to 350 K, the data only reaches 340 K, and the fitted
-    network extrapolates hard enough at the warm end to press against
-    the top of its $k$ box. The training loss cannot see that, because
-    no experiment is there.
-
-    Set the weight to zero above and re-read the numbers to see what the
-    term was holding back.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _rate_md(mo):
-    mo.md(r"""
-    ---
+    # With the default settings the residual network reads exactly zero and
+    # the rate network reads a small non-zero value. That split is the
+    # penalty working rather than a problem: `rate_net` is declared valid
+    # over 270 to 350 K, the data only reaches 340 K, and the fitted
+    # network extrapolates hard enough at the warm end to press against the
+    # top of its k box. Set the weight to zero to see what the term held
+    # back.
 
     # 6. Did it recover the physics?
-
-    ## The network above the solver
-
-    `rate_net` never sees $k$. It sees trajectories and a temperature
-    label. If the fitted $k(T)$ tracks the Arrhenius law across the
-    levels, the covariate dependence was genuinely recovered rather than
-    memorised per experiment.
-    """)
-    return
-
-
-@app.cell
-def _rate_table(TEMPERATURES, jnp, trained, true_k):
+    # ---------------------------------------------------
+    #
+    # `rate_net` never sees k directly. It sees trajectories and a
+    # temperature label. If the fitted k(T) tracks the Arrhenius law across
+    # the levels, the covariate dependence was genuinely recovered rather
+    # than memorised per experiment.
     fitted_rates = []
     print("  temperature   true k     fitted k    ratio")
     for _t in TEMPERATURES:
@@ -1045,11 +640,7 @@ def _rate_table(TEMPERATURES, jnp, trained, true_k):
         _fitted = float(trained[0]({"temperature": jnp.asarray(_t)}).reshape(()))
         fitted_rates.append(_fitted)
         print(f"    {_t:6.1f}    {_truth:.5f}    {_fitted:.5f}    {_fitted / _truth:5.2f}")
-    return (fitted_rates,)
 
-
-@app.cell
-def _rate_plot(TEMPERATURES, fitted_rates, jnp, np, plt, trained, true_k):
     _dense = np.linspace(270.0, 350.0, 120)
     _curve = [float(trained[0]({"temperature": jnp.asarray(t)}).reshape(())) for t in _dense]
 
@@ -1062,23 +653,12 @@ def _rate_plot(TEMPERATURES, fitted_rates, jnp, np, plt, trained, true_k):
     ax_rate.set(xlabel="temperature (K)", ylabel="k", yscale="log", title="Recovered rate law")
     ax_rate.legend(fontsize=8)
     fig_rate.tight_layout()
-    fig_rate
-    return
+    fig_rate.savefig("examples/hybrid_ode/figures/recovered_rate_law.png")
+    plt.close(fig_rate)
 
-
-@app.cell(hide_code=True)
-def _residual_md(mo):
-    mo.md(r"""
-    ## The network inside the solver
-
-    Compared against $C y^3$ on a grid over the region the trajectories
-    occupy. The residual is only identifiable where data went.
-    """)
-    return
-
-
-@app.cell
-def _residual_check(COUPLING, jnp, np, plt, trained):
+    # The network inside the solver, compared against C y^3 on a grid over
+    # the region the trajectories occupy. The residual is only identifiable
+    # where data went.
     _axis = jnp.linspace(-0.8, 1.0, 9)
     _grid = jnp.stack(jnp.meshgrid(_axis, _axis, indexing="ij"), axis=-1).reshape(-1, 2)
     _truth = (COUPLING @ (_grid**3).T).T
@@ -1096,19 +676,18 @@ def _residual_check(COUPLING, jnp, np, plt, trained):
         _ax.set(xlabel="true correction", ylabel="fitted", title=f"component {_d + 1}")
     fig_res.suptitle("Residual network against the cubic coupling it never saw")
     fig_res.tight_layout()
-    fig_res
-    return
+    fig_res.savefig("examples/hybrid_ode/figures/residual_vs_cubic.png")
+    plt.close(fig_res)
 
-
-@app.cell
-def _predictions(irr_dataset, predict_dataset, simulate_fn, solver, trained):
-    irr_predictions = predict_dataset(trained, irr_dataset, simulate_fn=simulate_fn, solver=solver)
+    irr_predictions = predict_dataset(
+        trained,
+        irr_dataset,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
+    )
     print(f"one array per bucket: {[p.shape for p in irr_predictions]}")
-    return (irr_predictions,)
 
-
-@app.cell
-def _traj_plot(irr_dataset, irr_predictions, np, plt):
     _bp = irr_dataset.bucket_payloads[1]
     _pred = np.asarray(irr_predictions[1])
     _obs = np.asarray(_bp.y_observed)
@@ -1129,41 +708,15 @@ def _traj_plot(irr_dataset, irr_predictions, np, plt):
     axes_traj[0, 0].legend(fontsize=8)
     fig_traj.suptitle("Hybrid fit on irregular data. Only masked-in points are scored.")
     fig_traj.tight_layout()
-    fig_traj
-    return
-
-
-@app.cell(hide_code=True)
-def _compare_md(mo):
-    mo.md(r"""
-    ---
+    fig_traj.savefig("examples/hybrid_ode/figures/hybrid_trajectories.png")
+    plt.close(fig_traj)
 
     # 7. What the structure bought, and what the layout cost
-
-    Two more fits on the same model code.
-
-    **Mechanistic only.** The residual is dropped from the tuple and
-    nothing else changes. Identical data, identical rate network, one
-    term deleted.
-
-    **Rectangular data.** The full hybrid model on the one-bucket
-    dataset from section 2. Same builders, same `simulate_fn`, same
-    config.
-    """)
-    return
-
-
-@app.cell
-def _extra_fits(
-    config,
-    irr_dataset,
-    k_train,
-    predictors,
-    rect_dataset,
-    simulate_fn,
-    solver,
-    train_with_optax,
-):
+    # -------------------------------------------------------------
+    #
+    # Two more fits on the same model code. "Mechanistic only" drops the
+    # residual from the tuple and nothing else changes. "Rectangular data"
+    # runs the full hybrid model on the one-bucket dataset from section 2.
     # Dropping the residual is a one-line change: the tuple gets shorter.
     # simulate_fn already handles a length-one tuple.
     _mech_history, mech_trained = train_with_optax(
@@ -1171,6 +724,7 @@ def _extra_fits(
         irr_dataset,
         config,
         simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
         solver=solver,
         key=k_train,
     )
@@ -1181,25 +735,12 @@ def _extra_fits(
         rect_dataset,
         config,
         simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
         solver=solver,
         key=k_train,
     )
     print(f"hybrid, rectangular:         final data loss {_rect_history[-1]:.5f}")
-    return mech_trained, rect_trained
 
-
-@app.cell
-def _r2_table(
-    irr_dataset,
-    irr_predictions,
-    mech_trained,
-    np,
-    predict_dataset,
-    rect_dataset,
-    rect_trained,
-    simulate_fn,
-    solver,
-):
     def r2_per_channel(predictions, dataset):
         """R^2 per channel over masked-in cells only."""
         out = []
@@ -1214,10 +755,18 @@ def _r2_table(
         return out
 
     mech_predictions = predict_dataset(
-        mech_trained, irr_dataset, simulate_fn=simulate_fn, solver=solver
+        mech_trained,
+        irr_dataset,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
     )
     rect_predictions = predict_dataset(
-        rect_trained, rect_dataset, simulate_fn=simulate_fn, solver=solver
+        rect_trained,
+        rect_dataset,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
     )
 
     print(f"{'model':38s} {'R2 y1':>8s} {'R2 y2':>8s}")
@@ -1228,11 +777,7 @@ def _r2_table(
     ):
         _r2 = r2_per_channel(_preds, _ds)
         print(f"{_label:38s} {_r2[0]:8.3f} {_r2[1]:8.3f}")
-    return
 
-
-@app.cell
-def _mech_rate_table(TEMPERATURES, jnp, mech_trained, trained, true_k):
     print("recovered k, hybrid against mechanistic-only")
     print(f"  {'T (K)':>7s} {'true':>9s} {'hybrid':>9s} {'mech-only':>10s}")
     for _t in TEMPERATURES:
@@ -1240,54 +785,37 @@ def _mech_rate_table(TEMPERATURES, jnp, mech_trained, trained, true_k):
         _hyb = float(trained[0]({"temperature": jnp.asarray(_t)}).reshape(()))
         _mech = float(mech_trained[0]({"temperature": jnp.asarray(_t)}).reshape(()))
         print(f"  {_t:7.1f} {_truth:9.5f} {_hyb:9.5f} {_mech:10.5f}")
-    return
 
-
-@app.cell(hide_code=True)
-def _closing_md(mo):
-    mo.md(r"""
-    ## Reading the two tables
-
-    The fit numbers say the expected thing: a model that keeps its known
-    structure and corrects it beats one that keeps the structure and cannot.
-
-    Both data layouts reach the same trajectory accuracy, which is the point
-    of the bucketing: half a mask is not a handicap. Their recovered rate
-    laws do differ at the cold end, and that is about which trajectories
-    were sampled, not the machinery. The irregular set draws end times up to
-    9 where the rectangular set stops at 8, and a cold experiment barely
-    decays inside either window, so an extra unit of time is worth more
-    there than extra points are.
-
-    The rate table matters more. Removing the residual costs more than
-    accuracy: the rate network is then the only flexible thing left, so it
-    absorbs the missing cubic term into $k$ and the recovered rate law comes
-    out badly wrong, worst at the cold end where the true damping is
-    smallest and the cubic term proportionally largest.
-
-    That is the case for hybrid models, precisely. An unmodelled term does
-    not stay in its own residual; it contaminates whichever parameter is
-    flexible enough to absorb it, usually the one you built the experiment
-    to measure.
-
-    It runs the other way too. Make the residual *more* expressive, swapping
-    `MLPPredictor` for `KANPredictor` in the two builders and nothing else,
-    and it fits the trajectories slightly better while recovering $k$
-    noticeably worse, because it can absorb part of the damping as well. If
-    a fitted parameter is what you came for, the residual wants to be the
-    least expressive thing that closes the gap.
-
-    ## Where to go next
-
-    - `train_hybrid_ode.py` in this directory is the script version,
-      with flags for the variants above.
-    - `examples/crystallisation/notebook.py` puts the same machinery on
-      real experimental data with a population balance.
-    - `examples/batch_reactor/notebook.py` shows a two-stage fit that
-      starts with a global search before switching to gradients.
-    """)
-    return
+    # Reading the two tables
+    # -------------------------------------------------------------
+    #
+    # The fit numbers say the expected thing: a model that keeps its known
+    # structure and corrects it beats one that keeps the structure and
+    # cannot. Both data layouts reach the same trajectory accuracy; their
+    # recovered rate laws do differ at the cold end, which is about which
+    # trajectories were sampled, not the machinery.
+    #
+    # The rate table matters more. Removing the residual costs more than
+    # accuracy: the rate network is then the only flexible thing left, so
+    # it absorbs the missing cubic term into k and the recovered rate law
+    # comes out badly wrong, worst at the cold end. An unmodelled term does
+    # not stay in its own residual; it contaminates whichever parameter is
+    # flexible enough to absorb it, usually the one you built the
+    # experiment to measure.
+    #
+    # Make the residual *more* expressive, swapping `MLPPredictor` for
+    # `KANPredictor`, and it fits the trajectories slightly better while
+    # recovering k noticeably worse, because it can absorb part of the
+    # damping as well. If a fitted parameter is what you came for, the
+    # residual wants to be the least expressive thing that closes the gap.
+    #
+    # Where to go next:
+    # - `train_hybrid_ode.py` in this directory is the script version.
+    # - `examples/crystallisation/notebook.py` uses the same machinery on
+    #   real experimental data with a population balance.
+    # - `examples/batch_reactor/notebook.py` shows a two-stage fit that
+    #   starts with a global search before switching to gradients.
 
 
 if __name__ == "__main__":
-    app.run()
+    main()

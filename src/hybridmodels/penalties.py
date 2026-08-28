@@ -48,6 +48,11 @@ __all__ = (
     "box_violation",
     "collocation_grids",
     "bound_penalty",
+    "attach_penalty_state",
+    "penalty_vector_field",
+    "strip_penalty_state",
+    "penalty_integral",
+    "trajectory_saturation_penalty",
 )
 
 
@@ -268,3 +273,111 @@ def bound_penalty(predictors: Any, grids: tuple[Array, ...]) -> Array:
         latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.to_latent(x)))(grid)
         total = total + leaf.out_scaler.saturation(latents)
     return total
+
+
+# --------------------------------------------------------------------------- #
+# Trajectory-aware penalties (embedded hybrid models).
+#
+# ``bound_penalty`` above is trajectory-blind: it sweeps a synthetic grid of
+# each predictor's *declared input box*. For an *embedded* hybrid model —
+# the predictor runs inside the user's vector field and its output feeds the
+# dynamics (a kinetic parameter, a shape factor) — what matters is whether
+# the model saturates along the trajectories it actually simulates. The
+# penalty then has to be collected inside the solve, as extra ODE state.
+#
+# The recipe (all helpers here are greppable ``penalty*`` names):
+#
+#   1. ``attach_penalty_state(y0, n)`` appends ``n`` zero accumulators to
+#      the initial state, so ``y0`` becomes ``[S_physics, n]``.
+#   2. ``penalty_vector_field(base_rhs, penalty_rhs)`` wraps the physics
+#      with a ``penalty_rhs(t, y, args) -> [n]`` giving the per-call rate
+#      (e.g. ``[saturation(z), input_violation(x)]``). The solver integrates
+#      those rates alongside the physics; the accumulated value is the
+#      *time-integral* of the penalty along the trajectory.
+#   3. ``strip_penalty_state(state, n)`` drops the accumulators in
+#      ``state_to_output`` so the loss sees only the physics.
+#   4. A training config's ``trajectory_penalty_fn`` reads
+#      ``penalty_integral(full_state, n)`` and returns the scalar to charge.
+#
+# Only the solver's state widens; nothing about ``simulate_fn``'s signature,
+# ``state_to_output``'s signature, or the loss protocol changes.
+# --------------------------------------------------------------------------- #
+
+
+def attach_penalty_state(y0: Array, n: int = 1) -> Array:
+    """Append ``n`` zero-valued penalty accumulators to ``y0``.
+
+    The first step of the trajectory-penalty recipe: the ODE state widens
+    from ``[S]`` to ``[S + n]``, where the trailing components are
+    integrated penalty rates supplied by :func:`penalty_vector_field`.
+    ``y0_fn`` should return ``attach_penalty_state(physics_y0, n)``.
+    """
+    zeros = jnp.zeros((n,), dtype=y0.dtype)
+    return jnp.concatenate([jnp.asarray(y0), zeros])
+
+
+def penalty_vector_field(
+    base_rhs: Callable[[Array, Array, Any], Array],
+    penalty_rhs: Callable[[Array, Array, Any], Array],
+) -> Callable[[Array, Array, Any], Array]:
+    """Wrap a physics vector field with per-call penalty rates.
+
+    Returns ``(t, y, args) -> [physics_dot, penalty_rates]``. ``base_rhs``
+    is the user's vector field on the physical components; ``penalty_rhs``
+    returns the ``n`` penalty rates (e.g. ``[saturation(z),
+    input_violation(x)]``) at the current state. The solver integrates both,
+    so the trailing accumulators carry the *time-integral* of the penalty
+    along the trajectory.
+
+    The rates must read the physical components (typically ``y[:-n]``) and
+    are closed over the user's predictors — only the user knows the latent
+    ``z`` or input ``x`` of an embedded predictor at call time.
+    """
+
+    def wrapped(t: Array, y: Array, args: Any) -> Array:
+        phys = base_rhs(t, y, args)
+        rates = penalty_rhs(t, y, args)
+        return jnp.concatenate([jnp.asarray(phys), jnp.asarray(rates)])
+
+    return wrapped
+
+
+def strip_penalty_state(state: Array, n: int = 1) -> Array:
+    """Drop the trailing ``n`` penalty accumulators from a full-state trajectory.
+
+    Use in ``state_to_output``: the loss and the observed channels should
+    see only the physics, not the integrated penalty components. ``state``
+    is ``[..., S + n]``; the result is ``[..., S]``.
+    """
+    return state[..., :-n]
+
+
+def penalty_integral(state: Array, n: int = 1) -> Array:
+    """The accumulated (time-integrated) penalty values at the trajectory's end.
+
+    ``state`` is the full state trajectory ``[..., T, S + n]`` as produced by
+    a :func:`penalty_vector_field` solve. Returns the trailing ``n``
+    components at the final time, ``[..., n]``. The training hook charges
+    these; divide by the time span to get the time-mean instead of the
+    integral.
+    """
+    return state[..., -1, -n:]
+
+
+def trajectory_saturation_penalty(state: Array, out_scaler: Any) -> Array:
+    """Sum over time of output saturation for a predictor whose output *is* the state.
+
+    For a **parallel** hybrid model — the predictor is outside the solver and
+    its output is a predicted channel — the full state already holds the
+    physical outputs. Invert them back to latents with the predictor's
+    ``out_scaler`` and charge :meth:`BoundScaler.saturation` at every time
+    step, summed over time. This is the trajectory-aware counterpart of
+    ``bound_penalty`` for the hoisted case: it fires only where the model
+    actually predicted, not across a synthetic grid.
+
+    ``state`` is ``[..., T, D]`` (or ``[..., T, S]`` projected to the
+    predictor's channel); ``out_scaler`` is the ``BoundScaler`` whose
+    ``from_latent`` produced those outputs.
+    """
+    latents = out_scaler.to_latent(state)
+    return jnp.sum(out_scaler.saturation(latents))

@@ -93,6 +93,7 @@ def trajectory_plot(
     *,
     predictors: Any | None = None,
     simulate_fn: Callable[..., Any] | None = None,
+    state_to_output: Callable[[Any], Any] | None = None,
     solver: Any | None = None,
     n_dense_points: int = 200,
     max_experiments: int = 6,
@@ -106,11 +107,12 @@ def trajectory_plot(
     The predicted curve is drawn one of two ways:
 
     * on the union timestamp axis, straight from ``predictions``. The
-      fallback when the model trio is not supplied, and visibly
+      fallback when the model pieces are not supplied, and visibly
       piecewise-linear between sparse measurement times.
     * on a per-experiment dense grid, re-simulated through
-      ``simulate_fn``. Preferred, and active when ``predictors``,
-      ``simulate_fn`` and ``solver`` are all passed. It runs eagerly
+      ``simulate_fn`` and projected with ``state_to_output``. Preferred,
+      and active when ``predictors``, ``simulate_fn``,
+      ``state_to_output`` and ``solver`` are all passed. It runs eagerly
       without jit, one call per plotted experiment, which is cheap at the
       default caps and scales linearly if you raise them.
 
@@ -121,11 +123,10 @@ def trajectory_plot(
         bucket. Always sets the bucket-walk order, so ``max_experiments``
         picks the same rows in either mode.
     dataset : hybridmodels.Dataset
-        Read for ``output_channel_names``, ``state_to_output``, and the
-        bucket payloads.
-    predictors, simulate_fn, solver : optional
-        The trio that turns on dense re-simulation. Pass the same objects
-        used for ``predict_dataset``; omitting any one falls back.
+        Read for ``output_channel_names`` and the bucket payloads.
+    predictors, simulate_fn, state_to_output, solver : optional
+        The model pieces that turn on dense re-simulation. Pass the same
+        objects used for ``predict_dataset``; omitting any one falls back.
     n_dense_points : int, optional
         Size of the linspace part of the dense grid. The grid itself is
         that linspace unioned with the measured timestamps, so the curve
@@ -143,14 +144,14 @@ def trajectory_plot(
     matplotlib.figure.Figure
     """
     channels = list(dataset.output_channel_names)
-    state_to_output = dataset.state_to_output
     # Bundled into one optional so the type checker narrows once here
-    # rather than three times inside the loop.
-    dense_bundle: tuple[Any, Callable[..., Any], Any] | None = (
-        (predictors, simulate_fn, solver)
+    # rather than four times inside the loop.
+    dense_bundle: tuple[Any, Callable[..., Any], Callable[[Any], Any], Any] | None = (
+        (predictors, simulate_fn, state_to_output, solver)
         if (
             predictors is not None
             and simulate_fn is not None
+            and state_to_output is not None
             and solver is not None
             and n_dense_points > 0
         )
@@ -174,14 +175,14 @@ def trajectory_plot(
             if dense_bundle is not None and ts_obs.size >= 2:
                 # Measured ts keep the curve on every observation, the
                 # linspace fills the gaps. ``np.unique`` also sorts.
-                preds_d, sim_fn_d, solver_d = dense_bundle
+                preds_d, sim_fn_d, state_to_output_d, solver_d = dense_bundle
                 t0, t1 = float(ts_obs[0]), float(ts_obs[-1])
                 dense_grid = np.linspace(t0, t1, n_dense_points)
                 ts_dense = np.unique(np.concatenate([ts_obs, dense_grid]))
                 ts_jax = jnp.asarray(ts_dense)
                 cov_i = {k: v[i] for k, v in bp.covariates.items()}
                 full_state = sim_fn_d(preds_d, ts_jax, cov_i, bp.y0[i], solver_d)
-                y_dense = state_to_output(full_state)
+                y_dense = state_to_output_d(full_state)
                 row["ts_pred"] = ts_dense
                 row["y_pred"] = np.asarray(y_dense)
             rows.append(row)

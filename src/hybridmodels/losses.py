@@ -37,6 +37,7 @@ All four accept ``channel_idx`` (which trailing-``D`` indices to keep) and
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 
 import jax.numpy as jnp
@@ -230,7 +231,7 @@ LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
 """Short name to loss function, so a training config can name its loss as a string."""
 
 
-def _resolve_loss_fn(
+def resolve_loss_fn(
     loss: Callable[..., Array] | str,
     channel_idx: tuple[int, ...] | None,
     channel_weights: tuple[float, ...] | None,
@@ -246,6 +247,20 @@ def _resolve_loss_fn(
     ``TypeError`` on the unexpected keywords if it were wrapped
     unconditionally.
 
+    How channel selection composes depends on the loss:
+
+    - A registry name, or a callable whose signature accepts
+      ``channel_idx``/``channel_weights``, is called with them as keyword
+      arguments (the built-ins reduce with the weights inside their own
+      per-channel sum).
+    - A plain ``(pred_obs, bp)`` callable is *projected* instead: the
+      selected channels are sliced out of ``pred_obs`` and ``bp`` before the
+      call, so any ``(pred_obs, bp)`` loss composes with ``channel_idx``.
+      ``channel_weights`` cannot be projected this way — per-channel
+      weighting must happen inside a loss's own reduction — so a plain
+      callable combined with ``channel_weights`` raises rather than
+      silently ignoring the weights.
+
     Lives here rather than in the training modules because it is registry
     lookup and channel binding, not training logic, and both loops need it.
     """
@@ -254,12 +269,60 @@ def _resolve_loss_fn(
         if key not in LOSS_REGISTRY:
             raise ValueError(f"Unknown loss name {loss!r}; available: {sorted(LOSS_REGISTRY)}")
         base = LOSS_REGISTRY[key]
-    else:
-        base = loss
+        if channel_idx is None and channel_weights is None:
+            return base
+
+        def named_loss(pred_obs: Array, bp: BucketPayload) -> Array:
+            return base(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
+
+        return named_loss
+
     if channel_idx is None and channel_weights is None:
-        return base
+        return loss
 
-    def loss_fn(pred_obs: Array, bp: BucketPayload) -> Array:
-        return base(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
+    if _accepts_channel_kwargs(loss):
 
-    return loss_fn
+        def kwarg_loss(pred_obs: Array, bp: BucketPayload) -> Array:
+            return loss(pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights)
+
+        return kwarg_loss
+
+    if channel_weights is not None:
+        raise ValueError(
+            "channel_weights cannot be applied to a custom loss with the plain "
+            "(pred_obs, bp) signature: per-channel weighting must happen inside "
+            "the loss's own reduction. Either pass a built-in loss name "
+            f"({sorted(LOSS_REGISTRY)}), or accept channel_idx/channel_weights "
+            "in your loss's signature."
+        )
+
+    indices = jnp.asarray(channel_idx)
+
+    def projected_loss(pred_obs: Array, bp: BucketPayload) -> Array:
+        p = pred_obs[..., indices]
+        y = bp.y_observed[..., indices]
+        var = bp.yvar[..., indices]
+        m = bp.mask[..., indices]
+        return loss(p, bp._replace(y_observed=y, yvar=var, mask=m))
+
+    return projected_loss
+
+
+def _accepts_channel_kwargs(loss: Callable[..., Array]) -> bool:
+    """Does the callable accept ``channel_idx``/``channel_weights`` or ``**kwargs``?
+
+    Guiding how channel selection composes with a user loss: a callable that
+    can take the channel arguments receives them as keywords (so the built-in
+    losses reduce with weights inside their own sum); a plain ``(pred_obs,
+    bp)`` callable is projected instead. Signature inspection is cheap and
+    runs once per config, never inside a trace.
+    """
+    try:
+        sig = inspect.signature(loss)
+    except (ValueError, TypeError):
+        return False
+    params = sig.parameters.values()
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+        return True
+    names = set(sig.parameters)
+    return "channel_idx" in names and "channel_weights" in names

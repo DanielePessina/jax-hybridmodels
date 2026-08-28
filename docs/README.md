@@ -13,13 +13,19 @@ docs/
 │   ├── training.md
 │   ├── custom-predictors.md
 │   └── recommendations.md
-├── examples/                     # Hand-written walkthroughs
-│   ├── crystallisation.md        # Featured first; canonical end-to-end
+├── examples/                     # Walkthroughs of the example scripts
+│   ├── custom-loop.md            # Write your own training loop (kernels)
+│   ├── crystallisation.md        # Canonical end-to-end
+│   ├── hybrid-ode.md
+│   ├── batch-reactor.md
+│   ├── batch-reactor-rl.md
+│   ├── sbml-hybrid.md            # External mechanistic model + neural rate
 │   ├── custom-predictor.md
+│   ├── supersaturation-poly.md   # NeuralNPolynomial rate law
 │   └── pendulum.md
 ├── api/                          # AUTO-GENERATED, do not edit by hand
 │   ├── index.md
-│   └── {data,predictors,solver,training,losses,trainable,prediction,serialise,ui,rng}.md
+│   └── {data,predictors,penalties,profiles,schedules,transforms,solver,training,kernels,losses,metrics,trainable,prediction,serialise,ui,rng}.md
 ├── .vitepress/config.ts
 └── package.json
 ```

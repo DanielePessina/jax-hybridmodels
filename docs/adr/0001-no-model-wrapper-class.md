@@ -1,6 +1,6 @@
 # No `Model` wrapper class
 
-A "model" is the loose triple `(predictor, simulate_fn, solver_config)` carried as separate top-level objects, not bundled in a class. The trainable `Predictor` is the only thing serialised; `simulate_fn` is code (re-imported); `SolverConfig` is JSON; `state_to_output` lives on `Dataset`. The source package's hierarchy of `BoundedRegressor → RateComponent → RateRegressorPair + simulate_ode` is collapsed because adding a wrapper class buys nothing. It conflates "trainable thing" with "physics evaluation" and forces every consumer to know about both.
+A "model" is the loose triple-plus carried as separate top-level objects, not bundled in a class: `predictors` (trainable pytree, serialised), `simulate_fn` (code, re-imported), `state_to_output` (code, passed to prediction/training per ADR-0008), and `SolverConfig` (JSON). The source package's hierarchy of `BoundedRegressor → RateComponent → RateRegressorPair + simulate_ode` is collapsed because adding a wrapper class buys nothing. It conflates "trainable thing" with "physics evaluation" and forces every consumer to know about both.
 
 ## Why this is non-obvious
 

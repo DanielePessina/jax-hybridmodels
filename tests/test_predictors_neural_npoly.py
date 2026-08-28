@@ -207,12 +207,14 @@ class TestZeroExponentNonNaN:
         assert jnp.all(jnp.isfinite(out))
 
 
-def test_not_in_public_export() -> None:
-    """``NeuralNPolynomial`` is intentionally absent from the top-level
-    ``hybridmodels`` namespace — it lives in-tree as a future candidate
-    but is not yet supported public API. Pin that absence so a future
-    re-introduction is a deliberate edit, not an accidental leak.
+def test_is_in_public_export() -> None:
+    """``NeuralNPolynomial`` is a supported public predictor family.
+
+    It lives in ``hybridmodels.predictors`` and the top-level namespace,
+    alongside ``MLPPredictor`` and ``KANPredictor``. Pin the export so a
+    future removal is a deliberate edit, not an accidental leak.
     """
     import hybridmodels
 
-    assert not hasattr(hybridmodels, "NeuralNPolynomial")
+    assert hasattr(hybridmodels, "NeuralNPolynomial")
+    assert "NeuralNPolynomial" in hybridmodels.__all__

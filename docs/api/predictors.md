@@ -11,6 +11,7 @@ Predictors are the trainable components of a hybrid model — Equinox modules wi
 - [`BoundedPredictor`](#boundedpredictor)
 - [`MLPPredictor`](#mlppredictor)
 - [`KANPredictor`](#kanpredictor)
+- [`NeuralNPolynomial`](#neuralnpolynomial)
 - [`reinitialize_with_key`](#reinitialize_with_key)
 - [`reinitialize_pytree_with_key`](#reinitialize_pytree_with_key)
 
@@ -485,6 +486,64 @@ transformation stays non-degenerate. Same intent as
 parameterisation.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L252)</small>
+
+---
+
+<a id="neuralnpolynomial"></a>
+
+### `NeuralNPolynomial`
+
+<small>`from hybridmodels.predictors import NeuralNPolynomial` &nbsp;·&nbsp; also re-exported as `hybridmodels.NeuralNPolynomial`</small>
+
+```python
+NeuralNPolynomial(
+    coeff_net: 'Predictor',
+    exponents: 'tuple[float, ...]',
+    in_size: 'int',
+    out_size: 'int',
+) -> None
+```
+
+Polynomial-in-``sum(x)`` whose coefficients come from ``coeff_net``.
+
+Pure composition wrapper. Only the inner ``coeff_net`` is trainable;
+``exponents`` (non-empty), ``in_size`` and ``out_size`` are static
+metadata, so only the inner network's float leaves reach the binary
+checkpoint.
+
+**Coefficient layout**
+
+``coeff_net(x)`` must produce a flat ``[out_size * len(exponents)]``
+vector, validated at construction. ``__call__`` reshapes it row-major
+to ``[out_size, len(exponents)]``, so row ``o`` holds the coefficients
+for output channel ``o``.
+
+**Example**
+
+A 3-term quadratic with two output channels backed by an MLP::
+
+    coeff_net = MLPPredictor(in_size=3, out_size=6, width_size=8,
+                             depth=2, activation_name="tanh", key=key)
+    npoly = NeuralNPolynomial(coeff_net=coeff_net,
+                              exponents=(0.0, 1.0, 2.0),
+                              in_size=3, out_size=2)
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/neural_npoly.py#L47)</small>
+
+#### `NeuralNPolynomial.initialized_with_key()`
+
+```python
+initialized_with_key(self, key: 'Array') -> 'NeuralNPolynomial'
+```
+
+Re-initialise the inner ``coeff_net``; keep the polynomial structure.
+
+Calls straight through to :func:`reinitialize_with_key`, which
+prefers the inner predictor's own ``initialized_with_key`` and falls
+back to elementwise sampling only when it offers no scheme.
+``exponents``, ``in_size`` and ``out_size`` are static.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/neural_npoly.py#L122)</small>
 
 ---
 

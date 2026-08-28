@@ -17,6 +17,7 @@ from typing import Any
 import diffrax
 import equinox as eqx
 import jax.numpy as jnp
+from jaxtyping import Array
 
 SOLVER_REGISTRY: dict[str, type[diffrax.AbstractSolver[Any]]] = {
     "Tsit5": diffrax.Tsit5,
@@ -163,6 +164,65 @@ class SolverConfig(eqx.Module):
             pcoeff=self.pcoeff,
             icoeff=self.icoeff,
             dcoeff=self.dcoeff,
+        )
+
+    def diffeqsolve(
+        self,
+        term: diffrax.AbstractTerm,
+        ts: Array,
+        y0: Array,
+        args: Any = None,
+    ) -> diffrax.Solution:
+        """Run the solve this config describes, so ``simulate_fn`` stays thin.
+
+        Wraps the invocation boilerplate every example hand-wrote —
+        ``SaveAt(ts=...)``, ``stepsize_controller()``, ``max_steps``, and —
+        crucially — forwards ``self.adjoint``, which most hand-written
+        examples forgot and hardcoded ``diffrax.DirectAdjoint()`` instead.
+        Keeping the adjoint live means ``SolverConfig.adjoint`` is honoured
+        everywhere, and the Backsolve caveat (it cannot differentiate
+        through values closed over in the vector field) applies as
+        documented in ``ADJOINT_REGISTRY``.
+
+        The crystallisation example deliberately keeps its call manual: its
+        config sets ``dt0=None`` with a live per-trajectory step fallback,
+        and it coerces ``atol`` to the x64 state dtype, neither of which
+        this helper encodes. For the common case — an explicit ``dt0`` and
+        scalar/array tolerances — this is the whole invocation.
+
+        Parameters
+        ----------
+        term
+            The diffrax term, usually ``diffrax.ODETerm(vector_field)``
+            where ``vector_field`` is the user's physics. The user still
+            owns the physics; this folds only the invocation.
+        ts
+            The observation times ``[T]``. The solver integrates from
+            ``ts[0]`` to ``ts[-1]`` and saves at exactly ``ts``.
+        y0
+            Full initial state ``[S]``.
+        args
+            Optional static-or-traced value passed to the vector field's
+            ``args`` (e.g. the predictors pytree, for Backsolve).
+
+        Returns
+        -------
+        diffrax.Solution
+            The diffrax solution; call ``.ys`` for the state trajectory
+            ``[T, S]`` ``simulate_fn`` must return.
+        """
+        return diffrax.diffeqsolve(
+            term,
+            self.solver,
+            t0=ts[0],
+            t1=ts[-1],
+            dt0=self.dt0,
+            y0=y0,
+            args=args,
+            saveat=diffrax.SaveAt(ts=ts),
+            stepsize_controller=self.stepsize_controller(),
+            adjoint=self.adjoint,
+            max_steps=self.max_steps,
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -15,26 +15,59 @@ dependencies = [
     "jaxkan>=0.3.7",
     "jaxlib>=0.10.0",
     "jaxtyping>=0.3.9",
-    "marimo>=0.23.4",
-    "matplotlib>=3.10.9",
     "numpy>=2.4.4",
-    "openpyxl>=3.1.5",
     "optax>=0.2.8",
-    "pandas>=3.0.2",
     "rich>=15.0.0",
     "scipy>=1.17.1",
 ]
 
 [project.optional-dependencies]
 examples = [
-    "matplotlib",
-    "openpyxl",
+    "matplotlib>=3.10.9",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.2",
     "rlax>=0.1.9",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# The wheel ships only the package (packages = src/hybridmodels). The sdist
+# ships source + docs/examples markdown and scripts, but deliberately not
+# the dependency tree, build artifacts, figures, or large data files.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/pyproject.toml",
+    "/README.md",
+    "/LICENSE",
+    "/CONTEXT.md",
+    "/SPEC.md",
+    "/docs/**/*.md",
+    "/docs/.vitepress/config.ts",
+    "/docs/package.json",
+    "/docs/adr",
+    "/examples/**/*.py",
+    "/scripts/**/*.py",
+    "/tests/**/*.py",
+]
+exclude = [
+    "/docs/node_modules",
+    "/docs/.vitepress/cache",
+    "/docs/.vitepress/dist",
+    "/docs/public",
+    "/examples/**/__pycache__",
+    "/examples/**/figures",
+    "/examples/**/figures_rl",
+    "/examples/**/artefacts",
+    "/examples/**/data",
+    "/tests/**/__pycache__",
+    "/tests/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hybridmodels"]
 
 [dependency-groups]
 dev = [
@@ -53,11 +86,3 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = []
-
-[tool.ruff.lint.per-file-ignores]
-# marimo notebooks are not ordinary modules. A bare expression on the last
-# line of a cell IS the cell's rendered output (B018), names are resolved
-# across cells by the marimo runtime rather than lexically (F821), and the
-# markdown tables embedded in prose cells carry alignment that reflowing to
-# 100 columns would destroy (E501).
-"examples/**/notebook*.py" = ["B018", "F821", "E501"]

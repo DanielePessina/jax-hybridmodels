@@ -39,7 +39,26 @@ your own: subclass [`Predictor`](/api/predictors#predictor) directly, no
 network needed.
 
 ```python
+import diffrax
+import jax.numpy as jnp
+import jax.random as jr
+from jax import Array
+from jaxtyping import Float
+
+from hybridmodels import (
+    BoundedPredictor,
+    BoundScaler,
+    ChannelObs,
+    SolverConfig,
+    evaluate_predictor,
+    make_dataset,
+    make_experiment,
+    train_with_optax,
+    OptaxTrainingConfig,
+)
 from hybridmodels.predictors.base import Predictor
+
+key, noise_key = jr.split(jr.PRNGKey(0))
 
 class OmegaPredictor(Predictor):
     """One trainable scalar; ignores its input."""
@@ -69,7 +88,6 @@ predictor = BoundedPredictor(
     inner=OmegaPredictor(jr.normal(key)),
     out_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),  # search omega in [0.5, 2.0]
 )
-predictors = (predictor,)
 ```
 
 The `"dummy"` covariate exists only because `BoundedPredictor` requires
@@ -118,15 +136,8 @@ def _simulate_fn(predictor, ts, covariates, y0, solver):
     omega_sq = omega * omega
     def vector_field(t, y, args):
         return jnp.stack([y[1], -omega_sq * y[0]])
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field), solver.solver,
-        t0=ts[0], t1=ts[-1], dt0=solver.dt0 or 0.05, y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=solver.stepsize_controller(),
-        max_steps=solver.max_steps,
-        adjoint=solver.adjoint,
-    )
-    return jnp.asarray(sol.ys)
+    term = diffrax.ODETerm(vector_field)
+    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
 ```
 
 `predictor(covariates)` returns shape `[1]`; `.reshape(())` makes it a
@@ -140,10 +151,7 @@ during the trajectory, and hoisting it keeps it off the solver tape.
 ## Step 4: train and read out $\omega$
 
 ```python
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
-
-dataset = make_dataset(experiments, state_to_output=_state_to_output,
-                       output_channel_names=("position",))
+dataset = make_dataset(experiments, output_channel_names=("position",))
 
 solver = SolverConfig(solver=diffrax.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=4096, dt0=None)
 
@@ -154,19 +162,20 @@ config = OptaxTrainingConfig(
 )
 
 history, trained = train_with_optax(
-    predictors, dataset, config,
-    simulate_fn=_simulate_fn, solver=solver, key=jr.PRNGKey(1),
+    predictor, dataset, config,
+    simulate_fn=_simulate_fn, state_to_output=_state_to_output,
+    solver=solver, key=jr.PRNGKey(1),
 )
 
 # Read out the trained omega.
-recovered = float(trained[0]({"dummy": jnp.asarray(0.0)}).reshape(()))
+recovered = evaluate_predictor(trained, {"dummy": 0.0})
 print(f"recovered omega: {recovered:.4f}  (target: 1.0000, final loss: {history[-1]:.6f})")
 ```
 
 Expected output (default seed):
 
 ```
-recovered omega: 0.9986  (target: 1.0000, final loss: 0.000186)
+recovered omega: 0.9981  (target: 1.0000, final loss: 0.000377)
 ```
 
 ## What this example exercises

@@ -37,20 +37,22 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-D4**: `BucketPayload` is not promoted to a class. It is a `NamedTuple` of stacked `[N, T, ...]` arrays.
 - **R-D5**: Covariates are passed as `dict[str, float]` (scalar per experiment, constant in time, named, with no canonical-order packed array). Stored as 0-d JAX arrays after `make_experiment`. Array-valued covariates remain out of scope for v1.
 - **R-D6**: `y0` is the full model state, constructed at data-import time via a user-supplied `y0_fn` hook and stored on `Experiment`.
-- **R-D7**: `state_to_output` lives on `Dataset`; applied externally to `simulate_fn`'s full-state output, before loss.
+- **R-D7**: `state_to_output` maps a full state trajectory to observed channels and is applied externally to `simulate_fn`'s output, before loss. It is a property of the *model*, passed to prediction and training as a keyword argument — not stored on the `Dataset` ([ADR-0008](./docs/adr/0008-state-to-output-belongs-to-model.md)).
 - **R-D8**: `split_dataset(dataset, *, train, val, test, key)` is provided.
+- **R-D9**: Exogenous time-varying quantities enter through **profile factories** (`hybridmodels.profiles`: `constant_profile`, `step_profile`, `ramp_profile`, `piecewise_linear_profile`). A profile is a pure-JAX callable `t -> Array` evaluated inside the user's vector field at the solver's continuous `t`; its *parameters* (set points, jump/ramp times) travel as ordinary R-D5 scalar covariates, so the data layer, bucketing, and the mandatory `simulate_fn` signature are untouched. The two flat edges are exact: `ramp_profile(t0, t1, v0, v1)` returns `v0` before `t0` and `v1` after `t1`; `piecewise_linear_profile` extends the first/last values outward. Factories validate host-side parameters (`t1 > t0`, strictly increasing knots) and skip validation for traced values so they stay `jit`/`vmap`-safe.
 
 #### Training (Optax)
 
 - **R-T1**: Training step = full pass over all buckets → accumulate gradients → one `optimizer.update`. Bucket ≠ step.
-- **R-T2**: All phase-keyed config fields are required tuples of equal length (no scalar broadcast). Fields: `steps, lr, optimizer, reset_optimiser_state, length_schedule`.
+- **R-T2**: The phase-keyed config fields (`steps, lr, optimizer, reset_optimiser_state, length_schedule`) are tuples of equal length (no scalar broadcast). `steps`, `lr`, `optimizer`, and `reset_optimiser_state` are required with no default; `length_schedule` defaults to `(1.0,)` for a single phase (scoring everything).
 - **R-T3**: `length_schedule` (per-phase fraction in `(0, 1]`) is implemented as a runtime mask cutoff to avoid JIT recompile across phase boundaries.
-- **R-T4**: `reset_optimiser_state` per phase rebuilds the optimiser at that phase boundary. Default `(False,) * n_phases`.
-- **R-T5**: `bucket_step(predictors, bucket_payload, length_mask_fraction)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. It takes no `opt_state`: the optimiser update lives in a separate jitted `apply_update`, which is what the rest of this requirement already says. The bound penalty is *not* computed here; it is charged once per step by `_build_penalty_step`, outside the bucket loop.
+- **R-T4**: `reset_optimiser_state` per phase rebuilds the optimiser at that phase boundary. It is a required per-phase tuple with no default: every phase states explicitly whether it resets, so a phase switch cannot silently keep a stale optimiser.
+- **R-T5**: `bucket_step(predictors, bucket_payload, length_mask_fraction)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. It takes no `opt_state`: the optimiser update lives in a separate jitted `apply_update`, which is what the rest of this requirement already says. The bound penalty is *not* computed here; it is charged once per step by `build_penalty_step` (public in `hybridmodels.training.kernels`), outside the bucket loop.
 - **R-T6**: Shared tournament only ([ADR-0002](./docs/adr/0002-shared-tournament-only.md)). Implicitly enabled when `tournament_steps > 0 AND tournament_attempts > 1`. Reuses the main loop's compiled `bucket_step` and `apply_update`. Every surviving candidate is scored on the data term with a forward-only pass and the **lowest-scoring** one is returned; ties keep the earlier attempt, so the result is a deterministic function of `key`.
 - **R-T7**: Tournament failure handling: on per-attempt failure (diffrax error, non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original `predictors` pytree with a `RuntimeWarning`.
 - **R-T8**: `Predictor.initialized_with_key(key)` is a documented per-leaf protocol used by the tournament; default free-function implementation is `reinitialize_with_key(predictor, key)` for one Module. Across the `predictors` pytree, the tournament splits the per-attempt key by traversal order (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently. Identical-shape sibling predictors get *different* re-init weights.
 - **R-T9**: Per-phase state resets. `patience` and the `restore_best` running minimum are both scoped to a horizon, not to the run. `patience` resets at every phase boundary, so a plateau at the end of one phase cannot stop the next before its new learning rate acts. `best_loss`/`best_predictors` reset at a boundary where `length_schedule` changes, because losses measured over a prefix and losses measured over the full window are not comparable and one running minimum across both lands in the shortest phase. The restored model therefore always comes from the final horizon.
+- **R-T10**: `annealing_schedule` (in `hybridmodels.schedules`) provides epoch-scaled schedule multipliers for custom loops: `schedule(step) -> float` in `[end_value, init_value]` with the run length baked in, built on optax schedule helpers, with kinds `"cosine"`, `"linear"`, `"warmup_cosine"`, `"exponential"`. The stock trainers do not take it (they express strategy changes as phases, R-T2); it composes as `lr = base_lr * schedule(step)`. Named `annealing_schedule` — never "temperature" — to stay distinct from chemistry and `BoundScaler.temperature`.
 
 #### Training (Evosax)
 
@@ -68,8 +70,9 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-P3**: Penalties hinge on the latent, never the physical output. `from_latent`'s derivative underflows to exactly `0.0` past `|z/T| ~ 15`, so a physical-space penalty vanishes exactly where saturation is worst.
 - **R-P4**: See [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md). The default penalty is top-level collocation (`collocation_grids` + `bound_penalty`) over each predictor's declared input box. It requires no change to `simulate_fn`, `BoundedPredictor.__call__`, `predict_bucket`, or the `loss(pred_obs, bp)` contract, and is invariant to pytree nesting.
 - **R-P5**: Penalty weight is opt-in, default zero, and passed to the jitted kernel as a traced 0-d array (like `length_mask_fraction`) so changing it never retraces.
-- **R-P6**: `losses_history`, `restore_best`, early stopping, and the tournament score track the data term alone; the penalty is reported separately via `TrainingUI.on_step_end(penalty=...)`.
+- **R-P6**: `losses_history`, `restore_best`, early stopping, and the tournament score track the data term alone — plus any configured trajectory penalty (R-P8), which is charged inside `bucket_step`'s forward pass and therefore rides in the per-step loss; the **bound** penalty is the one reported separately via `TrainingUI.on_step_end(penalty=...)`.
 - **R-P7**: `penalty_weight` is deliberately not an R-T2 phase-keyed field. Length 1 broadcasts across phases; any other length must equal `len(steps)`. R-T2's enumerated fields all lack a safe default, which is why they are mandatory; `penalty_weight` has an unambiguous off state.
+- **R-P8**: Trajectory-aware penalty, opt-in via `trajectory_penalty_fn(full_state, bp)` + scalar `trajectory_penalty_weight` on both configs, charged in the training step's single forward pass. For embedded predictors the penalty rides in extra ODE state components (whose time-integral is charged; helpers `attach_penalty_state` / `penalty_vector_field` / `strip_penalty_state` / `penalty_integral`); for parallel predictors `trajectory_saturation_penalty` charges output saturation over time. Probe conditions — scenarios to steer toward with no measurements — are all-False-mask experiments (channels carry `values=jnp.array([])`; the `ts` still defines the grid). See [ADR-0009](./docs/adr/0009-trajectory-aware-penalties.md).
 
 #### Trainability filter
 
@@ -81,7 +84,7 @@ This section is the contract. Implementation is judged against these line by lin
 #### RNG
 
 - **R-R1**: Root key must be supplied by the user. Framework raises if missing; never silently defaults `jr.PRNGKey(0)`.
-- **R-R2**: Internal subkeys derived via named folds: `jr.fold_in(root, _id("name"))` where `_id` is a stable hash. Names: `"init"`, `"tournament"`, `"phase_{i}"`, `"evosax_init"`, `"evosax_ask_{gen}"`.
+- **R-R2**: Internal subkeys derived via named folds: `jr.fold_in(root, _id("name"))` where `_id` is a stable hash. Names in use: `"tournament"`, `"tournament_attempt_{i}"`, `"seed_ensemble_tournament"`, `"bootstrap_{s}"`, `"bootstrap_seeds_{s}"`, `"bootstrap_sample_tournament"`, `"evosax_init"`, `"evosax_box_init"`, `"evosax_ask_{gen}"`, `"evosax_tell_{gen}"`.
 - **R-R3**: Bucket visit order is fixed, not shuffled. Source package's per-step shuffle is dropped.
 
 #### UI
@@ -112,9 +115,9 @@ This section is the contract. Implementation is judged against these line by lin
 - Gaussian process regressors; entire Bayesian / variational-inference (`bayes/`) submodule.
 - System embeddings (`EmbeddedMLP*`, `SystemConditionedRatePredictor`).
 - Padded batched-experiments data interface.
-- Time-varying *covariates* at the data layer (`Experiment.covariates` stays constant in time). State-derived and exogenous time-dependent *predictor inputs* remain in scope; they're first-class via dict-mixing inside the user's vector field. See CONTEXT.md "Predictor inputs".
+- Time-varying *covariates* at the data layer (`Experiment.covariates` stays constant in time — scalar parameters only, per R-D5). Time-varying *values* are first-class via the profile factories (R-D9) evaluated inside the user's vector field. See CONTEXT.md "Time profiles" and "Predictor inputs".
 - A `Model` wrapper class.
-- Temperature annealing of any kind.
+- Temperature annealing in the bound scaler (`cosine_temperature_annealing`, `use_temp_annealing`, `initial_temperature`, `temp_cosine_fraction`, `temp_indices`). `BoundScaler.temperature` is a (typically frozen) parameter. This is distinct from R-T10's `annealing_schedule`, which anneals training hyperparameters only.
 - `_build_filter_spec` per-class registry; per-step bucket shuffling.
 - Builder registry for serialisation (deferred until friction is real).
 - Live loss plots, ETA columns, notebook-specific UI layouts.
@@ -127,11 +130,8 @@ This section is the contract. Implementation is judged against these line by lin
 
 - Builder registry for serialisable predictor reconstruction without templates.
 - Sub-batching across population / within-bucket for memory-bound workloads.
-- Time-varying covariate hooks.
-- Trajectory-dependent penalties. The collocation penalty is trajectory-blind by construction: it reports saturation anywhere in the declared box, not whether a particular solve pushed an input out of range. Answering the latter means widening `simulate_fn` to return `(states, penalty)`, an ADR-0005 change, gated behind an explicit opt-in flag rather than auto-detected. Deferred to post-v1 pending a case that needs it.
-- Non-crystallisation example (pendulum), the last deliverable of v1, gating the "domain-agnostic" claim.
+- Array-valued covariates (a profile pre-evaluated on the experiment grid, interpolated by the solver).
 - Builder/loader registries for `state_to_output` / `simulate_fn` to enable Dataset round-trip.
-- `NeuralNPolynomial` framework class. The supersaturation-polynomial form (`sum_i c_i(T) · (S − 1)^p_i`) is implemented in user vector-field code in `examples/crystallisation/train_kinetic.py` (the `coeffs` come from a `BoundedPredictor`; the polynomial expansion is three lines in `vector_field`). Re-evaluate framework-class status when the form needs framework support beyond a user-side three-line expansion. Latent-vs-physical evaluation (Q4 of the 2026-05 grilling) is the design call to revisit.
 
 ---
 
@@ -163,18 +163,24 @@ jax-hybridmodels/                      (repo)
 │       ├── penalties.py                (soft_logit, softclip, clip_ste, box_violation, collocation_grids, bound_penalty)
 │       ├── solver.py                   (SolverConfig, SOLVER_REGISTRY, register_solver)
 │       ├── losses.py                   (masked_mse, masked_mle, bal_mse, bal_mle)
+│       ├── metrics.py                  (compute_metrics, print_metrics, ChannelMetrics)
 │       ├── trainable.py                (default_trainable, trainable_mask, freeze_paths/_modules_of_type/_where)
 │       ├── rng.py                      (named-fold helper)
-│       ├── prediction.py               (predict_bucket, predict_dataset)
+│       ├── prediction.py               (predict_bucket, predict_dataset, predict_dense, ensemble_predictions)
+│       ├── profiles.py                 (constant/step/ramp/piecewise_linear time profiles, R-D9)
+│       ├── schedules.py                (annealing_schedule, R-T10)
 │       ├── serialise.py                (save/load, last-shipped)
+│       ├── penalties.py                (bound_penalty, collocation_grids, trajectory-penalty helpers, R-P8)
 │       ├── predictors/
 │       │   ├── __init__.py
 │       │   ├── base.py                 (Predictor, BoundScaler, BoundedPredictor, reinitialize_with_key, reinitialize_pytree_with_key)
 │       │   ├── mlp.py                  (MLPPredictor)
-│       │   └── kan.py                  (KANPredictor, uses jaxkan)
+│       │   ├── kan.py                  (KANPredictor, uses jaxkan)
+│       │   └── neural_npoly.py         (NeuralNPolynomial)
 │       ├── training/
 │       │   ├── __init__.py
-│       │   ├── optax.py                (train_with_optax, OptaxTrainingConfig, _shared_tournament)
+│       │   ├── kernels.py              (build_bucket_step, build_score_bucket, build_penalty_step, build_apply_update)
+│       │   ├── optax.py                (train_with_optax, OptaxTrainingConfig, _shared_tournament, ensembles)
 │       │   └── evosax.py               (train_with_evosax, EvosaxTrainingConfig, _build_strategy)
 │       └── ui/
 │           ├── __init__.py
@@ -193,14 +199,11 @@ jax-hybridmodels/                      (repo)
 │   └── test_ui_callbacks.py
 └── examples/
     ├── crystallisation/
-    │   ├── loader_excel.py             (depends on openpyxl, isolated)
-    │   ├── ode.py                      (the simulate_fn: moments + concentration; supersaturation polynomial expansion lives here)
-    │   ├── kinetic_predictor.py        (CNT nucleation + power-law growth; predictors tuple of BoundedPredictors)
-    │   ├── mlp_predictor.py            (MLP-based predictors tuple, `(growth_BP, nucleation_BP)`)
-    │   ├── train_optax.py              (end-to-end script, verification target)
-    │   └── train_evosax_kinetic.py
-    └── pendulum/                        (last deliverable, proves domain-agnostic)
-        └── train.py
+    │   ├── train_kinetic.py            (MLP/KAN direct-rate fit; end-to-end script, verification target)
+    │   ├── train_crystallisation_mechanistic.py  (CNT/parametric fit via evosax)
+    │   └── notebook.py                 (walkthrough, plain script since the marimo removal)
+    └── pendulum/
+        └── train_harmonic.py           (proves domain-agnostic; known optimum)
 ```
 
 ### 3.1 `pyproject.toml` (sketch)
@@ -242,7 +245,7 @@ The project is uv-managed. All commands use uv:
 | Add a dev dependency | `uv add --dev <pkg>` |
 | Install the project (editable) | `uv sync` |
 | Run a test file | `uv run pytest tests/test_data_buckets.py` |
-| Run an example | `uv run python examples/crystallisation/train_optax.py` |
+| Run an example | `uv run python examples/crystallisation/train_kinetic.py` |
 | Run a one-off Python | `uv run python -c '...'` |
 | Lint | `uv run ruff check src tests` |
 | Typecheck | `uv run ty check src` |
@@ -355,6 +358,7 @@ def train_with_optax(
     config: OptaxTrainingConfig,
     *,
     simulate_fn,
+    state_to_output,                 # [T, S] -> [T, D]; model-side, not on the Dataset (ADR-0008)
     solver: SolverConfig,            # required
     trainable=None,                  # PyTree[bool] | None, same shape as predictors; None uses default_trainable
     key,                             # required
@@ -368,6 +372,7 @@ def train_with_evosax(
     config: EvosaxTrainingConfig,
     *,
     simulate_fn,
+    state_to_output,                 # [T, S] -> [T, D]; model-side, not on the Dataset (ADR-0008)
     solver: SolverConfig,            # required
     trainable=None,
     key,
@@ -425,7 +430,6 @@ class BucketPayload(NamedTuple):
 
 class Dataset(eqx.Module):
     bucket_payloads: tuple[BucketPayload, ...]
-    state_to_output: Callable = eqx.field(static=True)
     output_channel_names: tuple[str, ...] = eqx.field(static=True)
     covariate_names: tuple[str, ...] = eqx.field(static=True)
     _experiments: tuple[Experiment, ...] = ()       # private; enables split_dataset re-bucketing
@@ -445,7 +449,6 @@ def make_experiment(
 def make_dataset(
     experiments: Sequence[Experiment],
     *,
-    state_to_output: Callable,
     output_channel_names: tuple[str, ...],
 ) -> Dataset:
     """Builds union timestamps, computes masks, groups by len(union_ts), stacks per bucket."""
@@ -513,6 +516,8 @@ def reinitialize_pytree_with_key(predictors, key) -> "PyTree[eqx.Module]":
 
 `kan.py`: `KANPredictor` wrapping a `jaxkan` model. Static fields: grid size, layer widths, basis kind. Trainable: spline coefficients.
 
+`neural_npoly.py`: `NeuralNPolynomial`, a per-channel scalar polynomial in the (latented) input whose coefficients come from an inner trainable network. Its basis is `sum(inner_input)`, so it cannot separate "coefficients from condition A" from "basis in condition B" in a single predictor (SPEC §2.3, latent-vs-physical basis open question).
+
 ### 5.3 `solver.py`
 
 ```python
@@ -575,9 +580,12 @@ def fold(root_key: Array, name: str) -> Array:
 class OptaxTrainingConfig:
     steps: tuple[int, ...]
     lr: tuple[float, ...]
-    optimizer: tuple[str, ...]                       # "adamw" | "adabelief" per phase
+    optimizer: tuple[OptimizerSpec, ...]             # name | factory(lr) | optax.GradientTransformation per phase
     reset_optimiser_state: tuple[bool, ...]
     length_schedule: tuple[float, ...] = (1.0,)
+    penalty_weight: tuple[float, ...] = (0.0,)        # length-1 broadcasts across phases
+    penalty_grid_points: int = 5
+    penalty_fn: Callable | None = None                # replaces the bound penalty
     loss: Callable | str = "mse"
     channel_idx: tuple[int, ...] | None = None
     channel_weights: tuple[float, ...] | None = None
@@ -588,7 +596,7 @@ class OptaxTrainingConfig:
     restore_best: bool = True
     verbose: bool = True
 
-def train_with_optax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
+def train_with_optax(predictors, dataset, config, *, simulate_fn, state_to_output, solver, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
 ```
 
 ### 5.8 `training/evosax.py`
@@ -596,19 +604,22 @@ def train_with_optax(predictors, dataset, config, *, simulate_fn, solver, traina
 ```python
 @dataclass(frozen=True)
 class EvosaxTrainingConfig:
-    algorithm: str = "CMA_ES"
+    algorithm: str = "CMA_ES"                        # key of ALGORITHM_REGISTRY
     population_size: int = 64
     num_generations: int = 100
     init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
     init_box_extent: float = 2.0
     sigma_init: float = 0.1
+    penalty_weight: float = 0.0
+    penalty_grid_points: int = 5
+    penalty_fn: Callable | None = None
     loss: Callable | str = "mse"
     channel_idx: tuple[int, ...] | None = None
     channel_weights: tuple[float, ...] | None = None
     log_every: int = 1
     verbose: bool = True
 
-def train_with_evosax(predictors, dataset, config, *, simulate_fn, solver, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
+def train_with_evosax(predictors, dataset, config, *, simulate_fn, state_to_output, solver, trainable=None, key, ui=None) -> tuple[list[float], "PyTree[eqx.Module]"]: ...
 ```
 
 ### 5.9 `ui/`
@@ -652,7 +663,7 @@ Tests are the executable spec. Each module gets a test file written before the i
 | `test_ui_callbacks.py` | `SilentUI` produces no stdout; `RichTrainingUI` calls each lifecycle event the right number of times (recorded via a spy) |
 | `test_rng.py` | `fold(root, "name")` is stable across reorderings; missing root key raises |
 
-Verification target (not unit, integration): one `examples/crystallisation/train_optax.py` script that loads your existing thesis Excel data, trains an MLP-rate predictor, and reports a final loss within tolerance of the source-package result.
+Verification target (not unit, integration): one `examples/crystallisation/train_kinetic.py` script that loads your existing thesis Excel data, trains an MLP-rate predictor, and reports a final loss within tolerance of the source-package result.
 
 ---
 
@@ -662,12 +673,12 @@ The source package's verification artifacts live in `hybridcrystals/thesis_train
 
 | Source artifact | New location | Notes |
 |---|---|---|
-| `hybridcrystals/data/irregular.py::IrregularDataset/Batch/_prestack_buckets` | `src/hybridmodels/data.py` | Restructured: per-channel sparse Experiment, Dataset owns `state_to_output` |
+| `hybridcrystals/data/irregular.py::IrregularDataset/Batch/_prestack_buckets` | `src/hybridmodels/data.py` | Restructured: per-channel sparse Experiment; `state_to_output` passed to prediction/training (ADR-0008) |
 | `hybridcrystals/regressor_models.py::BoundedRegressor` | `src/hybridmodels/predictors/base.py::BoundedPredictor` | Composition, no inheritance hierarchy |
 | `hybridcrystals/regressor_models.py::RateRegressorPair` | (deleted) | Multi-rate models compose by unpacking the `predictors` tuple in user vector field. R-A6 |
 | `hybridcrystals/regressors/mlp.py` | `src/hybridmodels/predictors/mlp.py` | Strip embedding-related code |
 | `hybridcrystals/regressors/kan.py` + `regressor_kanx.py` | `src/hybridmodels/predictors/kan.py` | Use `jaxkan` |
-| `hybridcrystals/regressors/polynomial.py::NeuralNPolynomialRegressor` | (deferred to post-v1) | Polynomial form lives in `examples/crystallisation/train_kinetic.py` user vector field; framework class deferred per §2.3 |
+| `hybridcrystals/regressors/polynomial.py::NeuralNPolynomialRegressor` | `src/hybridmodels/predictors/neural_npoly.py` | Now public: exported top level, tested, documented. The latent-vs-physical basis question is open (SPEC §2.3) |
 | `hybridcrystals/mechanistic.py::vector_ode + simulate_ode + ODESimulationOptions` | `examples/crystallisation/ode.py` + `src/hybridmodels/solver.py::SolverConfig` | The `vector_ode` is example code, not framework |
 | `hybridcrystals/losses.py::irregular_*_from_batch` | `src/hybridmodels/losses.py` | Adapt to `(pred_obs, bp)` signature |
 | `hybridcrystals/training/irregular.py` | `src/hybridmodels/training/optax.py` | Drop tournament modes "vmapped"/"serial"/"shared" → keep only shared semantics |
@@ -675,7 +686,7 @@ The source package's verification artifacts live in `hybridcrystals/thesis_train
 | `hybridcrystals/regressor_registry.py::_build_filter_spec` | `src/hybridmodels/trainable.py` | Replaced by composable freezer functions |
 | `hybridcrystals/regressor_constants.py::COVARIATE_BOUNDS / CANONICAL_INPUT_*` | (deleted) | No canonical input order; bounds live with each `BoundedPredictor` instance |
 | `hybridcrystals/thesis_training/rich_ui.py` | `src/hybridmodels/ui/optax.py` | Generalised, single Live + panels |
-| `hybridcrystals/thesis_training/sharedgrowth.py` | `examples/crystallisation/train_optax.py` | Verification script |
+| `hybridcrystals/thesis_training/sharedgrowth.py` | `examples/crystallisation/train_kinetic.py` | Verification script |
 | `hybridcrystals/bayes/*`, `gaussian_process.py`, `_gp_init.py` | (deleted) | Out of scope |
 | `hybridcrystals/regressors/embedded_mlp.py` | (deleted) | Out of scope |
 | `hybridcrystals/data.py::UnscaledBatchedExperiments` | (deleted) | Bucketed-irregular only |
@@ -700,6 +711,6 @@ Implement in this order; each step ships green tests before the next begins.
 12. `training/evosax.py`: single-eval, population vmap, init modes.
 13. `ui/evosax.py`: `RichEvosaxUI`.
 14. `predictors/kan.py`: KAN via `jaxkan`. Serialisation test extended.
-15. `examples/crystallisation/`: port one thesis script end-to-end. This is the verification gate. The supersaturation-polynomial form is implemented as user vector-field code here (per §2.3), not as a framework class.
+15. `examples/crystallisation/`: port one thesis script end-to-end. This is the verification gate. The supersaturation-polynomial form is implemented as user vector-field code here, alongside the now-public `NeuralNPolynomial` framework class (see §7).
 16. `serialise.py`: `save_predictors` / `load_predictors` / `save_run` / `load_run`. Last shipped per R-A5.
 17. `examples/pendulum/`: final deliverable proving domain-agnostic.

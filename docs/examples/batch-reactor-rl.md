@@ -8,7 +8,6 @@ uv run python examples/batch_reactor/train_hybrid.py --no-plot \
 uv run python examples/batch_reactor/train_rl_deactivation.py
 ```
 
-There is a [guided notebook version](/examples/batch-reactor-rl-notebook) of the same material.
 
 ## Parameters as control actions
 

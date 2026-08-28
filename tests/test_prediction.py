@@ -71,7 +71,7 @@ def _experiment(n_steps: int, x0: float, v0: float, exp_id: str):
 def _dataset(shapes=((6, 1.0, 0.0), (6, 0.0, 1.0), (9, 0.5, -0.5))) -> Dataset:
     """Two experiments share a T; the third differs, so there are two buckets."""
     exps = [_experiment(n, x0, v0, f"e{i}") for i, (n, x0, v0) in enumerate(shapes)]
-    return make_dataset(exps, state_to_output=_state_to_output, output_channel_names=("position",))
+    return make_dataset(exps, output_channel_names=("position",))
 
 
 class TestPredictBucket:
@@ -138,7 +138,11 @@ class TestPredictDataset:
     def test_returns_one_array_per_bucket_in_payload_order(self):
         ds = _dataset()
         outs = predict_dataset(
-            OmegaPredictor(OMEGA_TRUE), ds, simulate_fn=_simulate_fn, solver=_solver()
+            OmegaPredictor(OMEGA_TRUE),
+            ds,
+            simulate_fn=_simulate_fn,
+            state_to_output=_state_to_output,
+            solver=_solver(),
         )
         assert isinstance(outs, tuple)
         assert len(outs) == len(ds.bucket_payloads)
@@ -152,7 +156,11 @@ class TestPredictDataset:
         widths = {bp.ts.shape[1] for bp in ds.bucket_payloads}
         assert len(widths) > 1
         outs = predict_dataset(
-            OmegaPredictor(OMEGA_TRUE), ds, simulate_fn=_simulate_fn, solver=_solver()
+            OmegaPredictor(OMEGA_TRUE),
+            ds,
+            simulate_fn=_simulate_fn,
+            state_to_output=_state_to_output,
+            solver=_solver(),
         )
         with pytest.raises(Exception):  # noqa: B017
             jnp.stack(outs)
@@ -161,20 +169,27 @@ class TestPredictDataset:
         ds = _dataset()
         pred = OmegaPredictor(OMEGA_TRUE)
         solver = _solver()
-        outs = predict_dataset(pred, ds, simulate_fn=_simulate_fn, solver=solver)
+        outs = predict_dataset(
+            pred,
+            ds,
+            simulate_fn=_simulate_fn,
+            state_to_output=_state_to_output,
+            solver=solver,
+        )
         for out, bp in zip(outs, ds.bucket_payloads, strict=True):
             direct = predict_bucket(
                 pred,
                 bp,
                 simulate_fn=_simulate_fn,
-                state_to_output=ds.state_to_output,
+                state_to_output=_state_to_output,
                 solver=solver,
             )
             assert jnp.allclose(out, direct)
 
-    def test_uses_the_datasets_own_state_to_output(self):
-        # predict_dataset reads state_to_output off the Dataset rather than
-        # taking it as an argument, so a projector swap must show up.
+    def test_state_to_output_is_an_explicit_parameter(self):
+        # predict_dataset takes the projection as a keyword parameter rather
+        # than reading it off the Dataset, so the caller owns the swap
+        # (ADR-0008).
         ds = _dataset()
         ts = jnp.linspace(0.0, 4.0, 6)
         two_channel = make_experiment(
@@ -188,13 +203,13 @@ class TestPredictDataset:
         )
         both_channels = make_dataset(
             [two_channel],
-            state_to_output=lambda s: s,
             output_channel_names=("position", "velocity"),
         )
         out = predict_dataset(
             OmegaPredictor(OMEGA_TRUE),
             both_channels,
             simulate_fn=_simulate_fn,
+            state_to_output=lambda s: s,
             solver=_solver(),
         )
         assert out[0].shape[-1] == 2
@@ -215,12 +230,24 @@ class TestCompileCaching:
         assert len({bp.ts.shape for bp in ds.bucket_payloads}) == 2
         pred = OmegaPredictor(OMEGA_TRUE)
 
-        predict_dataset(pred, ds, simulate_fn=counting_simulate_fn, solver=_solver())
+        predict_dataset(
+            pred,
+            ds,
+            simulate_fn=counting_simulate_fn,
+            state_to_output=_state_to_output,
+            solver=_solver(),
+        )
         first = traces["n"]
         assert first == 2, "expected one trace per distinct bucket shape"
 
         # Re-running the same shapes must hit the cache and trace nothing.
-        predict_dataset(pred, ds, simulate_fn=counting_simulate_fn, solver=_solver())
+        predict_dataset(
+            pred,
+            ds,
+            simulate_fn=counting_simulate_fn,
+            state_to_output=_state_to_output,
+            solver=_solver(),
+        )
         assert traces["n"] == first
 
     def test_changing_only_parameter_values_does_not_retrace(self):
@@ -231,9 +258,21 @@ class TestCompileCaching:
             return _simulate_fn(predictor, ts, covariates, y0, solver)
 
         ds = _dataset()
-        predict_dataset(OmegaPredictor(1.0), ds, simulate_fn=counting_simulate_fn, solver=_solver())
+        predict_dataset(
+            OmegaPredictor(1.0),
+            ds,
+            simulate_fn=counting_simulate_fn,
+            state_to_output=_state_to_output,
+            solver=_solver(),
+        )
         before = traces["n"]
-        predict_dataset(OmegaPredictor(1.3), ds, simulate_fn=counting_simulate_fn, solver=_solver())
+        predict_dataset(
+            OmegaPredictor(1.3),
+            ds,
+            simulate_fn=counting_simulate_fn,
+            state_to_output=_state_to_output,
+            solver=_solver(),
+        )
         assert traces["n"] == before
 
     def test_prediction_and_training_kernels_do_not_share_a_cache(self):
@@ -241,7 +280,7 @@ class TestCompileCaching:
         # so the two graphs cannot collide. Build a training step over the
         # same bucket and check prediction still traces its own.
         from hybridmodels.trainable import trainable_mask
-        from hybridmodels.training.optax import _build_bucket_step
+        from hybridmodels.training.kernels import build_bucket_step
 
         traces = {"n": 0}
 
@@ -254,9 +293,9 @@ class TestCompileCaching:
         solver = _solver()
         bp = ds.bucket_payloads[0]
 
-        bucket_step = _build_bucket_step(
+        bucket_step = build_bucket_step(
             simulate_fn=counting_simulate_fn,
-            state_to_output=ds.state_to_output,
+            state_to_output=_state_to_output,
             solver=solver,
             loss_fn=lambda p, b: jnp.sum(jnp.where(b.mask, (p - b.y_observed) ** 2, 0.0)),
             trainable=trainable_mask(pred),
@@ -269,7 +308,7 @@ class TestCompileCaching:
             pred,
             bp,
             simulate_fn=counting_simulate_fn,
-            state_to_output=ds.state_to_output,
+            state_to_output=_state_to_output,
             solver=solver,
         )
         assert traces["n"] > after_training, "prediction reused the training trace"

@@ -37,6 +37,7 @@ from _harness import (
     QuadraticPredictor,
     quadratic_dataset,
     quadratic_simulate_fn,
+    quadratic_state_to_output,
     solver_config,
 )
 from jax import Array
@@ -64,7 +65,9 @@ def _eval_loss(predictor: Predictor, ds: Dataset) -> float:
     bp = ds.bucket_payloads[0]
 
     def per_exp(ts, cov, y0):
-        return ds.state_to_output(quadratic_simulate_fn(predictor, ts, cov, y0, solver_config()))
+        return quadratic_state_to_output(
+            quadratic_simulate_fn(predictor, ts, cov, y0, solver_config())
+        )
 
     pred_obs = jax.vmap(per_exp, in_axes=(0, 0, 0))(bp.ts, bp.covariates, bp.y0)
     return float(masked_mse(pred_obs, bp))
@@ -86,6 +89,7 @@ def test_convergence_to_known_minimum() -> None:
         ds,
         config,
         simulate_fn=quadratic_simulate_fn,
+        state_to_output=quadratic_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -110,6 +114,7 @@ def test_best_ever_tracking() -> None:
         ds,
         config,
         simulate_fn=quadratic_simulate_fn,
+        state_to_output=quadratic_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(1),
         ui=ui,
@@ -245,6 +250,7 @@ def test_missing_key_raises() -> None:
             ds,
             config,
             simulate_fn=quadratic_simulate_fn,
+            state_to_output=quadratic_state_to_output,
             solver=solver_config(),
         )
 
@@ -267,6 +273,7 @@ def test_recording_ui_lifecycle_events_fire() -> None:
         ds,
         config,
         simulate_fn=quadratic_simulate_fn,
+        state_to_output=quadratic_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
         ui=ui,
@@ -303,6 +310,7 @@ def test_silent_default_when_no_ui_and_verbose_false(
         ds,
         config,
         simulate_fn=quadratic_simulate_fn,
+        state_to_output=quadratic_state_to_output,
         solver=solver_config(),
         key=jr.PRNGKey(0),
     )
@@ -347,6 +355,7 @@ class TestEvosaxPenalty:
                     verbose=False,
                 ),
                 simulate_fn=quadratic_simulate_fn,
+                state_to_output=quadratic_state_to_output,
                 solver=solver_config(),
                 key=jr.PRNGKey(0),
             )

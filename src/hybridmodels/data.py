@@ -189,23 +189,19 @@ class BucketPayload(NamedTuple):
 
 
 class Dataset(eqx.Module):
-    """All buckets of a dataset, plus the hook that maps model state to observed channels.
+    """All buckets of a dataset, as pure data.
 
     ``bucket_payloads`` is the dispatch list, one compiled kernel per bucket
-    shape. ``state_to_output`` rides along so the loss pipeline can apply it
-    without the user passing it to every call.
+    shape. The ``Dataset`` carries no model-shaped callables: it never sees
+    full simulator states, and ``state_to_output`` — a property of the model,
+    not the data — is passed to prediction and training as a parameter (see
+    ADR-0008).
 
     Attributes
     ----------
     bucket_payloads : tuple[BucketPayload, ...]
         One ``BucketPayload`` per distinct union-axis length, ordered
         ascending by ``T``.
-    state_to_output : Callable[[Array], Array]
-        Pure mapping ``[T, S] -> [T, D]``. It picks out (or derives) the
-        observed channels from the full simulator state, since the state
-        usually carries components no instrument measures. A static field,
-        so it is code rather than data. The framework never serialises it;
-        the user re-imports it on load.
     output_channel_names : tuple[str, ...]
         Channel order along the trailing ``D`` axis of every payload.
         ``make_dataset`` scatters values in this same order.
@@ -219,7 +215,6 @@ class Dataset(eqx.Module):
     """
 
     bucket_payloads: tuple[BucketPayload, ...]
-    state_to_output: Callable[..., Array] = eqx.field(static=True)
     output_channel_names: tuple[str, ...] = eqx.field(static=True)
     covariate_names: tuple[str, ...] = eqx.field(static=True)
     _experiments: tuple[Experiment, ...] = ()
@@ -340,6 +335,13 @@ def _per_experiment_arrays(
     mask = np.zeros((T, D), dtype=bool)
 
     for d, (ts_np, values_np, variance_np) in enumerate(channel_arrays):
+        # A channel with *empty* values is a probe: its timestamps still
+        # define where this experiment is integrated, but no cell is
+        # marked observed, so the loss scores nothing there. This is how
+        # "conditions to simulate with no y_true" (trajectory-penalty
+        # probes) are expressed.
+        if values_np.shape[0] == 0:
+            continue
         for t, v, var in zip(ts_np.tolist(), values_np.tolist(), variance_np.tolist(), strict=True):
             idx = ts_to_idx[float(t)]
             y_observed[idx, d] = v
@@ -412,10 +414,27 @@ def _stack_bucket(
     )
 
 
+def describe_buckets(dataset: Dataset) -> str:
+    """One line per bucket: experiments, length, and how full the mask is.
+
+    A quick human-readable census of the bucketed-irregular structure, for
+    debugging and example output. Each line reports the bucket's ``N``
+    (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
+    fraction of ``[N, T, D]`` cells the mask marks as real observations.
+    """
+    lines = [f"{len(dataset.bucket_payloads)} bucket(s)"]
+    for i, bp in enumerate(dataset.bucket_payloads):
+        n, t, d = bp.y_observed.shape
+        lines.append(
+            f"  bucket {i}: N={n:2d} experiments, T={t:3d} timestamps, "
+            f"D={d} channels, mask {float(bp.mask.mean()):.2f} full"
+        )
+    return "\n".join(lines)
+
+
 def make_dataset(
     experiments: Sequence[Experiment],
     *,
-    state_to_output: Callable[..., Array],
     output_channel_names: tuple[str, ...] | list[str],
 ) -> Dataset:
     """Bucket and stack ``experiments`` into a JAX-traceable ``Dataset``.
@@ -432,14 +451,14 @@ def make_dataset(
        and each group is stacked along a new leading ``N`` axis into one
        ``BucketPayload``. Buckets come out in ascending ``T`` order.
 
+    The ``Dataset`` is pure data: ``state_to_output``, being a property of
+    the model, is passed to prediction and training separately (ADR-0008).
+
     Parameters
     ----------
     experiments
         Non-empty sequence of ``Experiment`` objects, usually built with
         ``make_experiment``.
-    state_to_output
-        Pure mapping ``[T, S] -> [T, D]`` from full simulator state to the
-        observed channels. Stored as a static field on the ``Dataset``.
     output_channel_names
         Channel order for the trailing ``D`` axis. Coerced to a tuple before
         being stored statically on the ``Dataset``.
@@ -466,7 +485,6 @@ def make_dataset(
 
     return Dataset(
         bucket_payloads=bucket_payloads,
-        state_to_output=state_to_output,
         output_channel_names=output_channel_names,
         covariate_names=cov_keys,
         _experiments=tuple(experiments),
@@ -530,15 +548,64 @@ def _subset(
     if not idxs:
         return Dataset(
             bucket_payloads=(),
-            state_to_output=dataset.state_to_output,
             output_channel_names=dataset.output_channel_names,
             covariate_names=dataset.covariate_names,
         )
     return make_dataset(
         [experiments[int(i)] for i in idxs],
-        state_to_output=dataset.state_to_output,
         output_channel_names=dataset.output_channel_names,
     )
+
+
+def make_bootstrap_dataset(
+    dataset: Dataset,
+    *,
+    key: Array,
+    n_experiments: int | None = None,
+) -> Dataset:
+    """Bootstrap resample the dataset's experiments, re-bucketing the result.
+
+    Draws ``n_experiments`` experiments **with replacement** from the
+    source (default: as many as the source holds), then re-buckets via
+    :func:`make_dataset`. Irregular per-channel timestamps are handled
+    automatically: re-bucketing regroups by union-axis length, and a
+    duplicated experiment simply contributes more ``N`` rows to its bucket.
+
+    This is the data half of a bagging ensemble: each call yields one
+    resampled dataset, and training on several of them produces an
+    ensemble whose members saw different resamples.
+
+    Parameters
+    ----------
+    dataset
+        Source dataset. Must carry ``_experiments`` (built by
+        ``make_dataset``), or this raises.
+    key
+        Required ``jr.PRNGKey`` for the resample, never defaulted.
+    n_experiments
+        Number of experiments to draw. Defaults to the source size.
+        Must be at least 1.
+
+    Returns
+    -------
+    Dataset
+        A new dataset of ``n_experiments`` experiments (some duplicated),
+        re-bucketed from scratch.
+    """
+    experiments = dataset._experiments
+    if not experiments:
+        raise ValueError(
+            "make_bootstrap_dataset requires the source experiments; the provided "
+            "Dataset has none (was it constructed manually without _experiments?)"
+        )
+    n = len(experiments)
+    if n_experiments is None:
+        n_experiments = n
+    if n_experiments < 1:
+        raise ValueError(f"make_bootstrap_dataset: n_experiments must be >= 1, got {n_experiments}")
+    idxs = np.asarray(jr.choice(key, n, shape=(n_experiments,), replace=True)).tolist()
+    resampled = tuple(experiments[int(i)] for i in idxs)
+    return make_dataset(resampled, output_channel_names=dataset.output_channel_names)
 
 
 def split_dataset(

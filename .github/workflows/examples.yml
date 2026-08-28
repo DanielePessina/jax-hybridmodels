@@ -1,0 +1,58 @@
+name: examples
+
+# Smoke-tests the example scripts so the converted notebooks and the
+# "write your own loop" / SBML examples do not silently rot. Fast,
+# deterministic examples run end-to-end; every example file is at least
+# compiled and linted on every push to main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install
+        run: uv sync --frozen --extra examples
+
+      - name: Lint examples
+        run: uv run ruff check examples/ scripts/
+
+      - name: Compile every example script
+        run: |
+          uv run python - <<'EOF'
+          import ast
+          import pathlib
+          for p in pathlib.Path("examples").rglob("*.py"):
+              if "__pycache__" in str(p):
+                  continue
+              ast.parse(p.read_text())
+              print("compiled", p)
+          EOF
+
+      - name: Run the custom training loop example
+        run: uv run python examples/custom_loop/train_custom_loop.py
+
+      - name: Run the pendulum sanity example
+        run: uv run python examples/pendulum/train_harmonic.py --no-plot
+
+      - name: Run the SBML-style hybrid example
+        run: uv run python examples/sbml_hybrid/train_sbml_hybrid.py
+
+      - name: Run the neural polynomial kinetics example
+        run: uv run python examples/supersaturation_poly/train_supersaturation_poly.py
+
+      - name: Run the hybrid_ode notebook-script
+        run: uv run python examples/hybrid_ode/notebook.py

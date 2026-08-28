@@ -6,7 +6,6 @@ One script, `examples/hybrid_ode/train_hybrid_ode.py`: a mechanistic model with 
 uv run python examples/hybrid_ode/train_hybrid_ode.py
 ```
 
-There is a [guided notebook version](/examples/hybrid-ode-notebook) of the same material.
 
 ## The problem
 

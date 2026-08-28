@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 
@@ -41,18 +42,18 @@ from hybridmodels import (  # noqa: E402
     KANPredictor,
     MLPPredictor,
     SolverConfig,
+    compute_metrics,
     make_dataset,
     make_experiment,
     predict_dataset,
+    print_metrics,
 )
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402
     apply_default_style,
-    compute_diagnostics,
     parity_plot,
-    print_diagnostics,
     trajectory_plot,
 )
 
@@ -141,6 +142,30 @@ def state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
     ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
     d43 = jnp.clip(jnp.where(jnp.isfinite(ratio) & (ratio > 0.0), ratio, 0.0), 0.0, D43_MAX)
     return jnp.stack([conc, d43], axis=-1)
+
+
+def _parity_diagnostics(predictions, dataset):
+    """Masked obs/pred pairs per channel for ``parity_plot``.
+
+    ``compute_metrics`` keeps only the summary stats; the scatter needs the
+    raw value pairs, so re-walk the mask here.
+    """
+    metrics = compute_metrics(predictions, dataset)
+    out: dict[str, SimpleNamespace] = {}
+    for d, name in enumerate(dataset.output_channel_names):
+        obs_chunks: list = []
+        pred_chunks: list = []
+        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
+            mask = bp.mask[..., d]
+            obs_chunks.append(bp.y_observed[..., d][mask])
+            pred_chunks.append(pred[..., d][mask])
+        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
+        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
+        m = metrics[name]
+        out[name] = SimpleNamespace(
+            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
+        )
+    return out
 
 
 def simulate_fn(
@@ -282,7 +307,6 @@ def main() -> None:
     print("\n[build] dataset")
     dataset = make_dataset(
         experiments,
-        state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     print(f"  {len(dataset.bucket_payloads)} bucket(s)")
@@ -416,6 +440,7 @@ def main() -> None:
             dataset,
             config,
             simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
             solver=solver,
             key=k_train,
         )
@@ -440,16 +465,17 @@ def main() -> None:
             trained_predictors,
             dataset,
             simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
             solver=solver,
         )
-        diag = compute_diagnostics(predictions, dataset)
-        print_diagnostics(diag)
+        metrics = compute_metrics(predictions, dataset)
+        print_metrics(metrics)
 
         if not args.no_plot:
             family_dir = args.plot_dir / label
             family_dir.mkdir(parents=True, exist_ok=True)
             parity_plot(
-                diag,
+                _parity_diagnostics(predictions, dataset),
                 title=f"Crystallisation parity ({label})",
                 save_path=family_dir / "parity.png",
             )
@@ -458,6 +484,7 @@ def main() -> None:
                 dataset,
                 predictors=trained_predictors,
                 simulate_fn=simulate_fn,
+                state_to_output=state_to_output,
                 solver=solver,
                 max_experiments=6,
                 title=f"Crystallisation trajectories ({label}, first 6 experiments)",

@@ -15,10 +15,6 @@ from hybridmodels.data import (
 )
 
 
-def _identity_state_to_output(state):
-    return state
-
-
 def _zero_y0(_covariates, _channels):
     return jnp.zeros((2,))
 
@@ -119,7 +115,7 @@ class TestMakeDatasetUnion:
             exp_id="e",
         )
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("x", "y")
+            [exp], output_channel_names=("x", "y")
         )
         assert len(ds.bucket_payloads) == 1
         bp = ds.bucket_payloads[0]
@@ -137,7 +133,7 @@ class TestMakeDatasetUnion:
             exp_id="e",
         )
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("x", "y")
+            [exp], output_channel_names=("x", "y")
         )
         bp = ds.bucket_payloads[0]
         assert jnp.allclose(bp.ts[0], jnp.array([0.0, 1.0, 2.0]))
@@ -162,7 +158,7 @@ class TestMakeDatasetUnion:
             exp_id="e",
         )
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("x", "y")
+            [exp], output_channel_names=("x", "y")
         )
         bp = ds.bucket_payloads[0]
         assert float(bp.yvar[0, 0, 0]) == pytest.approx(0.1)
@@ -188,7 +184,6 @@ class TestBucketing:
         )
         ds = make_dataset(
             [exp1, exp2],
-            state_to_output=_identity_state_to_output,
             output_channel_names=("x",),
         )
         assert len(ds.bucket_payloads) == 2
@@ -210,7 +205,6 @@ class TestBucketing:
         )
         ds = make_dataset(
             [exp1, exp2],
-            state_to_output=_identity_state_to_output,
             output_channel_names=("x",),
         )
         assert len(ds.bucket_payloads) == 1
@@ -240,7 +234,6 @@ class TestBucketing:
         )
         ds = make_dataset(
             [exp_full, exp_partial],
-            state_to_output=_identity_state_to_output,
             output_channel_names=("x", "y"),
         )
         assert len(ds.bucket_payloads) == 1
@@ -275,7 +268,7 @@ class TestBucketPayloadShapes:
             for i in range(n)
         ]
         ds = make_dataset(
-            exps, state_to_output=_identity_state_to_output, output_channel_names=("x", "y")
+            exps, output_channel_names=("x", "y")
         )
         bp = ds.bucket_payloads[0]
         T, D, S = 2, 2, 4
@@ -293,7 +286,7 @@ class TestBucketPayloadShapes:
     def test_bucket_payload_is_namedtuple(self):
         exp = _make_simple_experiment()
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("c",)
+            [exp], output_channel_names=("c",)
         )
         bp = ds.bucket_payloads[0]
         assert isinstance(bp, BucketPayload)
@@ -323,10 +316,10 @@ class TestOutputChannelOrdering:
             exp_id="e",
         )
         ds_xy = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("x", "y")
+            [exp], output_channel_names=("x", "y")
         )
         ds_yx = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("y", "x")
+            [exp], output_channel_names=("y", "x")
         )
         assert float(ds_xy.bucket_payloads[0].y_observed[0, 0, 0]) == 10.0
         assert float(ds_yx.bucket_payloads[0].y_observed[0, 0, 0]) == 20.0
@@ -335,16 +328,18 @@ class TestOutputChannelOrdering:
 
 
 class TestDatasetMetadata:
-    def test_state_to_output_and_names_stored(self):
+    def test_names_stored_and_dataset_carries_no_state_to_output(self):
         exp = _make_simple_experiment()
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("c",)
+            [exp], output_channel_names=("c",)
         )
-        assert ds.state_to_output is _identity_state_to_output
-        assert ds.output_channel_names == ("c",)
         assert isinstance(ds, Dataset)
+        assert ds.output_channel_names == ("c",)
         # covariate_names follow declared keys (sorted, since order isn't user-controlled).
         assert set(ds.covariate_names) == {"a", "b"}
+        # The Dataset is pure data: the projection is a model property and is
+        # passed to prediction and training separately (ADR-0008).
+        assert not hasattr(ds, "state_to_output")
 
 
 class TestIdempotence:
@@ -354,10 +349,10 @@ class TestIdempotence:
             _make_simple_experiment(exp_id="e2", c_vals=(20.0, 21.0, 22.0)),
         ]
         ds1 = make_dataset(
-            exps, state_to_output=_identity_state_to_output, output_channel_names=("c",)
+            exps, output_channel_names=("c",)
         )
         ds2 = make_dataset(
-            exps, state_to_output=_identity_state_to_output, output_channel_names=("c",)
+            exps, output_channel_names=("c",)
         )
         assert len(ds1.bucket_payloads) == len(ds2.bucket_payloads)
         for bp1, bp2 in zip(ds1.bucket_payloads, ds2.bucket_payloads, strict=True):
@@ -380,7 +375,6 @@ class TestErrors:
         with pytest.raises(ValueError, match="(?i)channel"):
             make_dataset(
                 [exp],
-                state_to_output=_identity_state_to_output,
                 output_channel_names=("x", "y"),
             )
 
@@ -400,13 +394,12 @@ class TestErrors:
         with pytest.raises(ValueError, match="(?i)covariate"):
             make_dataset(
                 [e1, e2],
-                state_to_output=_identity_state_to_output,
                 output_channel_names=("x",),
             )
 
     def test_empty_experiments_raises(self):
         with pytest.raises(ValueError):
-            make_dataset([], state_to_output=_identity_state_to_output, output_channel_names=("x",))
+            make_dataset([], output_channel_names=("x",))
 
 
 class TestNObsCount:
@@ -432,7 +425,6 @@ class TestNObsCount:
         )
         ds = make_dataset(
             [exp1, exp2],
-            state_to_output=_identity_state_to_output,
             output_channel_names=("x", "y"),
         )
         assert len(ds.bucket_payloads) == 1
@@ -457,7 +449,7 @@ class TestDtypePreservation:
             exp_id="e",
         )
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("x",)
+            [exp], output_channel_names=("x",)
         )
         bp = ds.bucket_payloads[0]
         assert bp.ts.dtype == jnp.float32
@@ -478,7 +470,7 @@ class TestDtypePreservation:
             exp_id="e",
         )
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("x",)
+            [exp], output_channel_names=("x",)
         )
         bp = ds.bucket_payloads[0]
         # No silent downcast to float32 — the float16 inputs should round-trip.
@@ -501,7 +493,7 @@ class TestDtypePreservation:
             exp_id="e",
         )
         ds = make_dataset(
-            [exp], state_to_output=_identity_state_to_output, output_channel_names=("x",)
+            [exp], output_channel_names=("x",)
         )
         bp = ds.bucket_payloads[0]
         assert bp.y_observed.dtype == jnp.float16
@@ -515,7 +507,6 @@ class TestNoWarnings:
             warnings.simplefilter("always")
             make_dataset(
                 [exp],
-                state_to_output=_identity_state_to_output,
                 output_channel_names=("c",),
             )
         user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
@@ -524,14 +515,12 @@ class TestNoWarnings:
 
 class TestManualConstruction:
     def test_construct_with_only_public_spec_fields(self):
-        # The four user-facing fields of ``Dataset`` are
-        # ``bucket_payloads``, ``state_to_output``, ``output_channel_names``,
-        # and ``covariate_names``. ``_experiments`` is internal — kept so
-        # ``split_dataset`` can re-bucket subsets — and must not be
-        # required when the user constructs a Dataset manually.
+        # The three user-facing fields of ``Dataset`` are ``bucket_payloads``,
+        # ``output_channel_names``, and ``covariate_names``. ``_experiments``
+        # is internal — kept so ``split_dataset`` can re-bucket subsets — and
+        # must not be required when the user constructs a Dataset manually.
         ds = Dataset(
             bucket_payloads=(),
-            state_to_output=_identity_state_to_output,
             output_channel_names=("c",),
             covariate_names=("a",),
         )

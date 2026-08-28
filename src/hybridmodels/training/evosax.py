@@ -66,11 +66,13 @@ import jax.flatten_util as jfu
 import jax.numpy as jnp
 import jax.random as jr
 from evosax.algorithms.distribution_based.cma_es import CMA_ES
+from evosax.algorithms.distribution_based.sep_cma_es import Sep_CMA_ES
+from evosax.algorithms.distribution_based.simple_es import SimpleES
 from jax import Array
 from scipy.stats import qmc
 
 from hybridmodels.data import BucketPayload, Dataset
-from hybridmodels.losses import _resolve_loss_fn
+from hybridmodels.losses import resolve_loss_fn
 from hybridmodels.penalties import bound_penalty, collocation_grids
 from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
@@ -79,7 +81,29 @@ from hybridmodels.ui.base import EvosaxUI, SilentUI
 from hybridmodels.ui.evosax import RichEvosaxUI
 
 _SUPPORTED_INIT_MODES: tuple[str, ...] = ("warm", "uniform_box", "lhs_box")
-_SUPPORTED_ALGORITHMS: tuple[str, ...] = ("CMA_ES",)
+
+ALGORITHM_REGISTRY: dict[str, type] = {
+    "CMA_ES": CMA_ES,
+    "Sep_CMA_ES": Sep_CMA_ES,
+    "SimpleES": SimpleES,
+}
+"""Name → evosax strategy class. Extend via :func:`register_algorithm`.
+
+Each strategy must construct as ``cls(population_size=..., solution=flat)``
+and carry ``default_params`` with a ``std_init`` field (CMA-ES family) —
+the shipped set all do. ``SimpleES`` additionally accepts a default
+``optimizer`` argument, which this loop leaves at evosax's default.
+"""
+
+
+def register_algorithm(name: str, cls: type) -> None:
+    """Register an evosax strategy class under ``name`` for ``algorithm=``.
+
+    After registration, ``EvosaxTrainingConfig(algorithm=name)`` builds that
+    strategy. Re-registering an existing name overwrites without warning.
+    Mirrors :func:`hybridmodels.solver.register_solver`.
+    """
+    ALGORITHM_REGISTRY[name] = cls
 
 
 @dataclass(frozen=True)
@@ -93,8 +117,9 @@ class EvosaxTrainingConfig:
     Attributes
     ----------
     algorithm
-        Evosax strategy name. Only ``"CMA_ES"`` is wired in. The field
-        exists so another strategy can slot in without an API break.
+        Evosax strategy name, one of the keys of ``ALGORITHM_REGISTRY``:
+        ``"CMA_ES"`` (default), ``"Sep_CMA_ES"``, ``"SimpleES"``. Add
+        another strategy with :func:`register_algorithm`.
     population_size, num_generations
         Loop dimensions. The population is evaluated in parallel through
         ``vmap``; generations run in sequence.
@@ -107,6 +132,22 @@ class EvosaxTrainingConfig:
     penalty_grid_points
         Points per input dimension in the collocation grid the penalty is
         evaluated on.
+    penalty_fn
+        The regulariser added to each individual's fitness, defaulting to
+        :func:`hybridmodels.penalties.bound_penalty` when ``None``. A
+        custom callable ``(predictors, penalty_grids) -> scalar`` replaces
+        the bound penalty.
+    trajectory_penalty_fn
+        Trajectory-aware penalty for **embedded** hybrid models, called as
+        ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]``
+        *including* any penalty accumulators carried in the ODE state. Folded
+        into each individual's fitness. ``None`` (the default) disables it.
+        See ``hybridmodels.penalties`` (``attach_penalty_state`` /
+        ``penalty_vector_field`` / ``strip_penalty_state`` /
+        ``penalty_integral``).
+    trajectory_penalty_weight
+        Scalar weight on ``trajectory_penalty_fn``. ``0.0`` disables it even
+        if a function is set. Non-negative.
     init_box_extent
         Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``.
         Ignored by ``"warm"``.
@@ -133,6 +174,9 @@ class EvosaxTrainingConfig:
     init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
     penalty_weight: float = 0.0
     penalty_grid_points: int = 5
+    penalty_fn: Callable[..., Array] | None = None
+    trajectory_penalty_fn: Callable[..., Array] | None = None
+    trajectory_penalty_weight: float = 0.0
     init_box_extent: float = 2.0
     sigma_init: float = 0.1
     loss: Callable[..., Array] | str = "mse"
@@ -142,10 +186,10 @@ class EvosaxTrainingConfig:
     verbose: bool = True
 
     def __post_init__(self) -> None:
-        if self.algorithm not in _SUPPORTED_ALGORITHMS:
+        if self.algorithm not in ALGORITHM_REGISTRY:
             raise ValueError(
                 f"EvosaxTrainingConfig.algorithm={self.algorithm!r} is not supported; "
-                f"available: {list(_SUPPORTED_ALGORITHMS)}"
+                f"available: {sorted(ALGORITHM_REGISTRY)}"
             )
         if self.init not in _SUPPORTED_INIT_MODES:
             raise ValueError(
@@ -156,6 +200,17 @@ class EvosaxTrainingConfig:
             raise ValueError(
                 "EvosaxTrainingConfig.penalty_weight must be non-negative; "
                 f"got {self.penalty_weight}"
+            )
+        if self.trajectory_penalty_weight < 0.0:
+            raise ValueError(
+                "EvosaxTrainingConfig.trajectory_penalty_weight must be "
+                f"non-negative; got {self.trajectory_penalty_weight}"
+            )
+        if self.trajectory_penalty_weight != 0.0 and self.trajectory_penalty_fn is None:
+            raise ValueError(
+                "EvosaxTrainingConfig.trajectory_penalty_weight is non-zero but "
+                "trajectory_penalty_fn is None. Provide a "
+                "(full_state, bp) -> scalar function to charge."
             )
         if self.population_size <= 0:
             raise ValueError("EvosaxTrainingConfig.population_size must be > 0")
@@ -172,8 +227,11 @@ def _build_single_eval(
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
+    penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
     penalty_grids: tuple[Array, ...],
     penalty_weight: float,
+    trajectory_penalty_fn: Callable[[Array, BucketPayload], Array] | None = None,
+    trajectory_penalty_weight: float = 0.0,
 ) -> Callable[[Array], Array]:
     """Return the per-individual loss closure ``single_eval(flat) -> scalar``.
 
@@ -186,6 +244,11 @@ def _build_single_eval(
     Loss aggregation across buckets is a **simple sum**, so a bucket with
     more experiments weighs more. That matches how the same dataset scores
     end to end, which keeps the ranking honest.
+
+    ``trajectory_penalty_fn`` reads the full state ``[N, T, S]`` (penalty
+    accumulators included) and is folded into the fitness alongside the
+    collocation penalty. ``None`` keeps the eval identical to a plain
+    data+bound fit.
     """
 
     def single_eval(flat: Array) -> Array:
@@ -193,25 +256,31 @@ def _build_single_eval(
         predictor = eqx.combine(params, static_predictor)
 
         def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
-            full_state = simulate_fn(predictor, ts, covariates, y0, solver)
-            return state_to_output(full_state)
+            return simulate_fn(predictor, ts, covariates, y0, solver)
 
         total = jnp.asarray(0.0)
         for bp in bucket_payloads:
-            pred_obs = jax.vmap(per_experiment, in_axes=(0, 0, 0))(bp.ts, bp.covariates, bp.y0)
+            full_state = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
+                bp.ts, bp.covariates, bp.y0
+            )
+            pred_obs = jax.vmap(state_to_output)(full_state)
             total = total + loss_fn(pred_obs, bp)
+            if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
+                total = total + trajectory_penalty_weight * trajectory_penalty_fn(
+                    full_state, bp
+                )
         if penalty_weight > 0.0:
-            # CMA-ES searches the latent space with nothing holding it in
+            # The search roams the latent space with nothing holding it in
             # range, and the squash keeps the physical output legal however
             # far the latent drifts, so an individual parked deep in
-            # saturation looks mediocre rather than broken. Charging
-            # saturation makes the search prefer individuals with gradient
+            # saturation looks mediocre rather than broken. Charging the
+            # penalty makes the search prefer individuals with gradient
             # left, which matters if optax polishes the result later.
             #
             # Folded into the fitness because evosax ranks by one scalar
             # with no aux channel. The weight is a closed-over Python float,
             # never traced, so it stays out of the vmap.
-            total = total + penalty_weight * bound_penalty(predictor, penalty_grids)
+            total = total + penalty_weight * penalty_fn(predictor, penalty_grids)
         return total
 
     return single_eval
@@ -224,13 +293,27 @@ def _build_strategy(
 ) -> tuple[Any, Any]:
     """Instantiate the evosax strategy and return ``(strategy, params)``.
 
-    Only ``CMA_ES`` is wired in. The returned ``params`` are CMA-ES's
-    frozen hyperparameters with ``std_init`` set to ``config.sigma_init``.
+    The strategy class comes from ``ALGORITHM_REGISTRY``. The returned
+    ``params`` are the strategy's frozen hyperparameters with ``std_init``
+    set to ``config.sigma_init``.
+
+    The ``sigma_init`` override is a property of the CMA-ES family. A
+    strategy whose ``default_params`` lacks ``std_init`` (e.g. many of
+    evosax's gradient-free search strategies) cannot take the override, so
+    it is refused with a message pointing at ``register_algorithm`` rather
+    than letting ``dataclasses.replace`` fail opaquely.
     """
-    if config.algorithm != "CMA_ES":  # defensive; __post_init__ rejects others
-        raise ValueError(f"Unsupported algorithm: {config.algorithm!r}")
-    strategy = CMA_ES(population_size=config.population_size, solution=flat)
-    params = dataclasses.replace(strategy.default_params, std_init=config.sigma_init)
+    strategy_cls = ALGORITHM_REGISTRY[config.algorithm]
+    strategy = strategy_cls(population_size=config.population_size, solution=flat)
+    try:
+        params = dataclasses.replace(strategy.default_params, std_init=config.sigma_init)
+    except TypeError as exc:
+        raise ValueError(
+            f"EvosaxTrainingConfig.algorithm={config.algorithm!r} does not carry a "
+            "std_init hyperparameter, so config.sigma_init cannot be applied. "
+            "Register a CMA-ES-family strategy (e.g. CMA_ES, Sep_CMA_ES, SimpleES) "
+            "via register_algorithm(name, cls)."
+        ) from exc
     return strategy, params
 
 
@@ -271,12 +354,15 @@ def _box_population(
     raise ValueError(f"_box_population called with non-box init {config.init!r}")
 
 
-def _select_ui(ui: EvosaxUI | None, verbose: bool) -> EvosaxUI:
+def _select_ui(ui: EvosaxUI | None, verbose: bool, log_every: int) -> EvosaxUI:
     """Pick the concrete UI. An explicit ``ui`` always wins, and otherwise
-    ``verbose`` toggles between ``RichEvosaxUI`` and ``SilentUI``."""
+    ``verbose`` toggles between ``RichEvosaxUI`` and ``SilentUI``. The
+    config's ``log_every`` throttles the Rich UI's recent-generation table."""
     if ui is not None:
         return ui
-    return RichEvosaxUI() if verbose else SilentUI()
+    if verbose:
+        return RichEvosaxUI(log_every=log_every)
+    return SilentUI()
 
 
 def train_with_evosax(
@@ -285,6 +371,7 @@ def train_with_evosax(
     config: EvosaxTrainingConfig,
     *,
     simulate_fn: Callable[..., Array],
+    state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     trainable: Any = None,
     key: Array,
@@ -298,7 +385,10 @@ def train_with_evosax(
     initial-population modes.
 
     ``predictors`` is a ``PyTree[eqx.Module]`` in any shape. ``key`` is
-    keyword-only and required. ``trainable`` defaults to
+    keyword-only and required. ``state_to_output`` is the pure mapping
+    ``[T, S] -> [T, D]`` from full simulator state to observed channels; a
+    property of the model, passed here rather than stored on the ``Dataset``
+    (ADR-0008). ``trainable`` defaults to
     :func:`hybridmodels.trainable.trainable_mask`, and must select at
     least one scalar.
 
@@ -328,8 +418,7 @@ def train_with_evosax(
     if not bucket_payloads:
         raise ValueError("train_with_evosax: dataset has no bucket payloads")
 
-    loss_fn = _resolve_loss_fn(config.loss, config.channel_idx, config.channel_weights)
-    state_to_output = dataset.state_to_output
+    loss_fn = resolve_loss_fn(config.loss, config.channel_idx, config.channel_weights)
 
     params_pytree, static_predictors = eqx.partition(predictors, trainable)
     flat0, unflatten = jfu.ravel_pytree(params_pytree)
@@ -339,7 +428,7 @@ def train_with_evosax(
             "evosax requires at least one trainable scalar."
         )
 
-    ui_ = _select_ui(ui, config.verbose)
+    ui_ = _select_ui(ui, config.verbose, config.log_every)
     ui_.on_run_start(
         num_generations=int(config.num_generations),
         population_size=int(config.population_size),
@@ -353,8 +442,11 @@ def train_with_evosax(
         state_to_output=state_to_output,
         solver=solver,
         loss_fn=loss_fn,
+        penalty_fn=bound_penalty if config.penalty_fn is None else config.penalty_fn,
         penalty_grids=collocation_grids(predictors, config.penalty_grid_points),
         penalty_weight=float(config.penalty_weight),
+        trajectory_penalty_fn=config.trajectory_penalty_fn,
+        trajectory_penalty_weight=config.trajectory_penalty_weight,
     )
     population_eval = eqx.filter_jit(jax.vmap(single_eval))
 
@@ -387,7 +479,9 @@ def train_with_evosax(
             # Inject the box-init population directly, skipping CMA-ES's
             # first ``ask``. ``tell`` still consumes it below, so mean and
             # covariance update from the prescribed sample.
-            population = _box_population(flat=flat0, config=config, key=fold(key, "evosax_init"))
+            population = _box_population(
+                flat=flat0, config=config, key=fold(key, "evosax_box_init")
+            )
         else:
             population, state = strategy.ask(ask_key, state, strat_params)
 

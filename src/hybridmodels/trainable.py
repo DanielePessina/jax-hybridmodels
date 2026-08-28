@@ -4,9 +4,11 @@ Trainability is a boolean *mask*: a pytree with exactly the structure of
 ``predictors``, holding a ``bool`` wherever the predictors have a
 parameter array. ``True`` means the optimiser may update that leaf.
 
-Both optimisers take the mask directly, Optax through
-``eqx.filter_value_and_grad(..., filter_spec=mask)`` and Evosax through
-``eqx.partition(predictors, mask)``.
+Both optimisers take the mask directly. Optax partitions the predictors
+into the leaves the mask marks ``True`` and differentiates only those,
+via ``eqx.filter_value_and_grad``; Evosax partitions to derive the flat
+parameter vector via ``eqx.partition(predictors, mask)``. Either way the
+mask's pytree shape is what the partitioner walks.
 
 The default predicate marks every inexact (floating-point) array leaf as
 trainable. The freezers here are free functions ``(mask, predictors) ->
@@ -26,6 +28,7 @@ from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
+import jax.numpy as jnp
 import jax.tree_util as jtu
 
 
@@ -146,3 +149,37 @@ def freeze_where(mask: Any, predictors: Any, fn: Callable[[eqx.Module], bool]) -
         return submask
 
     return jtu.tree_map(_f, mask, predictors, is_leaf=_is_target)
+
+
+def frozen_default_mask(predictors: Any, *classes: type) -> Any:
+    """The default mask with every leaf of ``classes`` frozen.
+
+    Shortcut for the composition every example writes by hand::
+
+        mask = trainable_mask(predictors)
+        mask = freeze_modules_of_type(mask, predictors, BoundScaler)
+
+    Freezing ``BoundScaler`` leaves (their ``temperature``) is the common
+    case, so ``frozen_default_mask(predictors, BoundScaler)`` is the
+    conventional starting mask for a hybrid ODE fit.
+    """
+    mask = trainable_mask(predictors)
+    for cls in classes:
+        mask = freeze_modules_of_type(mask, predictors, cls)
+    return mask
+
+
+def count_trainable_params(predictors: Any, mask: Any) -> int:
+    """Number of trainable scalar parameters selected by ``mask``.
+
+    Sums the sizes of every leaf the mask marks ``True``. Useful for
+    reporting the effective search dimension before a run (e.g. to sanity
+    check an evosax budget or a phase-transition threshold).
+    """
+    total = 0
+    for leaf, m in zip(
+        jtu.tree_leaves(predictors), jtu.tree_leaves(mask), strict=True
+    ):
+        if eqx.is_inexact_array(leaf) and bool(m):
+            total += int(jnp.size(leaf))
+    return total

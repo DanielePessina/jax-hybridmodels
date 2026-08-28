@@ -49,6 +49,7 @@ import argparse
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import diffrax
@@ -72,12 +73,13 @@ from hybridmodels import (
     Experiment,
     MLPPredictor,
     SolverConfig,
-    freeze_modules_of_type,
+    compute_metrics,
+    frozen_default_mask,
     load_predictors,
     make_dataset,
     make_experiment,
     predict_dataset,
-    trainable_mask,
+    print_metrics,
 )
 from hybridmodels.training import OptaxTrainingConfig, train_with_optax
 
@@ -95,9 +97,7 @@ from _model import (  # noqa: E402
 )
 from _shared import (  # noqa: E402
     apply_default_style,
-    compute_diagnostics,
     parity_plot,
-    print_diagnostics,
 )
 
 # Truth, duplicated from train_hybrid.py rather than shared: the two scripts
@@ -378,18 +378,8 @@ def _integrate_interval(
         rate = k_eff * jnp.maximum(y[0], 0.0)
         return jnp.stack([-rate, rate])
 
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        solver.solver,
-        t0=t0,
-        t1=t1,
-        dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-        y0=y,
-        saveat=diffrax.SaveAt(t1=True),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-        max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
-    )
+    # Solve over the single interval and keep the endpoint state.
+    sol = solver.diffeqsolve(diffrax.ODETerm(vector_field), jnp.stack([t0, t1]), y)
     return jnp.asarray(sol.ys)[-1]
 
 
@@ -576,12 +566,34 @@ def agent_trainable(agent: Agent) -> Any:
     """Trainability mask: everything except the scalers' internal arrays.
 
     ``BoundScaler`` carries ``temperature`` as an array leaf. It is
-    configuration, not a parameter, and the same
-    ``freeze_modules_of_type(..., BoundScaler)`` idiom that ``train_hybrid.py``
-    uses keeps the optimiser off it.
+    configuration, not a parameter, and freezing it is the same
+    ``frozen_default_mask`` idiom that ``train_hybrid.py`` uses.
     """
-    mask = trainable_mask(agent)
-    return freeze_modules_of_type(mask, agent, BoundScaler)
+    return frozen_default_mask(agent, BoundScaler)
+
+
+def _parity_diagnostics(predictions, dataset):
+    """Masked obs/pred pairs per channel for ``parity_plot``.
+
+    ``compute_metrics`` keeps only the summary stats; the scatter needs the
+    raw value pairs, so re-walk the mask here.
+    """
+    metrics = compute_metrics(predictions, dataset)
+    out: dict[str, SimpleNamespace] = {}
+    for d, name in enumerate(dataset.output_channel_names):
+        obs_chunks: list = []
+        pred_chunks: list = []
+        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
+            mask = bp.mask[..., d]
+            obs_chunks.append(bp.y_observed[..., d][mask])
+            pred_chunks.append(pred[..., d][mask])
+        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
+        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
+        m = metrics[name]
+        out[name] = SimpleNamespace(
+            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
+        )
+    return out
 
 
 def _gaussian_log_prob(z: Array, mean: Array, log_std: Array) -> Array:
@@ -1325,12 +1337,10 @@ def main() -> None:
     )
     train_dataset = make_dataset(
         train_experiments,
-        state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     val_dataset = make_dataset(
         val_experiments,
-        state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     print(f"  {len(train_experiments)} aged training runs, {len(val_experiments)} validation")
@@ -1363,7 +1373,7 @@ def main() -> None:
     # ---- Baseline 2: fitted exponential decay ------------------------------ #
     print("\n[baseline] trunk + fitted exponential decay scalar (optax)")
     exponential = ExponentialDecay(key=k_exp)
-    mask_exp = freeze_modules_of_type(trainable_mask(exponential), exponential, BoundScaler)
+    mask_exp = frozen_default_mask(exponential, BoundScaler)
     history_exp, exponential = train_with_optax(
         exponential,
         train_dataset,
@@ -1377,6 +1387,7 @@ def main() -> None:
             verbose=False,
         ),
         simulate_fn=make_simulate_fn(trunk, kind="exponential"),
+        state_to_output=state_to_output,
         solver=solver,
         trainable=mask_exp,
         key=k_exp,
@@ -1386,9 +1397,7 @@ def main() -> None:
     # ---- Baseline 3: the same policy, trained by backprop ------------------ #
     print("\n[baseline] trunk + the activity BoundedPredictor (optax backprop through the solve)")
     gradient_policy = build_policy(key=k_grad)
-    mask_grad = freeze_modules_of_type(
-        trainable_mask(gradient_policy), gradient_policy, BoundScaler
-    )
+    mask_grad = frozen_default_mask(gradient_policy, BoundScaler)
     history_grad, gradient_policy = train_with_optax(
         gradient_policy,
         train_dataset,
@@ -1402,6 +1411,7 @@ def main() -> None:
             verbose=False,
         ),
         simulate_fn=make_simulate_fn(trunk, kind="policy"),
+        state_to_output=state_to_output,
         solver=solver,
         trainable=mask_grad,
         key=k_grad,
@@ -1443,11 +1453,25 @@ def main() -> None:
     train_predictions: dict[str, list[np.ndarray]] = {}
     for name, (predictors, kind) in models.items():
         simulate = make_simulate_fn(trunk, kind=kind)
-        val_pred = predict_dataset(predictors, val_dataset, simulate_fn=simulate, solver=solver)
-        train_pred = predict_dataset(predictors, train_dataset, simulate_fn=simulate, solver=solver)
-        diag_val = compute_diagnostics(val_pred, val_dataset)["Ca"]
-        diag_train = compute_diagnostics(train_pred, train_dataset)["Ca"]
-        table.append((name, diag_train.r2, diag_val.r2, diag_val.rmse))
+        val_pred = predict_dataset(
+            predictors,
+            val_dataset,
+            simulate_fn=simulate,
+            state_to_output=state_to_output,
+            solver=solver,
+        )
+        train_pred = predict_dataset(
+            predictors,
+            train_dataset,
+            simulate_fn=simulate,
+            state_to_output=state_to_output,
+            solver=solver,
+        )
+        diag_val = compute_metrics(val_pred, val_dataset)["Ca"]
+        diag_train = compute_metrics(train_pred, train_dataset)["Ca"]
+        table.append(
+            (name, float(diag_train.r2), float(diag_val.r2), float(diag_val.rmse))
+        )
         val_predictions[name] = [
             np.asarray(val_pred[0][i, :, 0]) for i in range(len(val_experiments))
         ]
@@ -1514,18 +1538,17 @@ def main() -> None:
         _saturation_plot(
             val_agent, episodes, solver=solver, save_path=args.plot_dir / "05_latent_saturation.png"
         )
-        diag = compute_diagnostics(
-            predict_dataset(
-                val_agent.policy,
-                val_dataset,
-                simulate_fn=make_simulate_fn(trunk, kind="policy"),
-                solver=solver,
-            ),
+        val_policy_pred = predict_dataset(
+            val_agent.policy,
             val_dataset,
+            simulate_fn=make_simulate_fn(trunk, kind="policy"),
+            state_to_output=state_to_output,
+            solver=solver,
         )
-        print_diagnostics(diag)
+        diag = compute_metrics(val_policy_pred, val_dataset)
+        print_metrics(diag)
         parity_plot(
-            diag,
+            _parity_diagnostics(val_policy_pred, val_dataset),
             title="PPO policy parity (aged validation)",
             save_path=args.plot_dir / "06_parity_ppo.png",
         )

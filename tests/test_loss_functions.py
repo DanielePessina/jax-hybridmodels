@@ -20,11 +20,11 @@ from jax import Array
 from hybridmodels.data import BucketPayload
 from hybridmodels.losses import (
     LOSS_REGISTRY,
-    _resolve_loss_fn,
     bal_mle,
     bal_mse,
     masked_mle,
     masked_mse,
+    resolve_loss_fn,
 )
 
 
@@ -254,7 +254,7 @@ class TestMaskedNanGradients:
 
 
 class TestResolveLossFn:
-    """``_resolve_loss_fn`` turns a config's ``loss`` field into a callable.
+    """``resolve_loss_fn`` turns a config's ``loss`` field into a callable.
 
     It had no direct test while living duplicated in the two training
     modules, and the string path was reachable from the suite only through a
@@ -270,19 +270,19 @@ class TestResolveLossFn:
 
     @pytest.mark.parametrize("name", ["mse", "mle", "bal_mse", "bal_mle"])
     def test_registry_names_resolve_to_their_function(self, name):
-        assert _resolve_loss_fn(name, None, None) is LOSS_REGISTRY[name]
+        assert resolve_loss_fn(name, None, None) is LOSS_REGISTRY[name]
 
     @pytest.mark.parametrize("spelling", ["MSE", "  mse", "Mse  "])
     def test_names_are_case_and_whitespace_insensitive(self, spelling):
-        assert _resolve_loss_fn(spelling, None, None) is LOSS_REGISTRY["mse"]
+        assert resolve_loss_fn(spelling, None, None) is LOSS_REGISTRY["mse"]
 
     def test_unknown_name_raises_listing_what_is_available(self):
         with pytest.raises(ValueError, match="Unknown loss name"):
-            _resolve_loss_fn("rmse", None, None)
+            resolve_loss_fn("rmse", None, None)
         # The message has to name the alternatives; a bare rejection leaves
         # the user guessing at the registry contents.
         with pytest.raises(ValueError, match="bal_mle"):
-            _resolve_loss_fn("rmse", None, None)
+            resolve_loss_fn("rmse", None, None)
 
     def test_callable_passes_through_untouched_without_channel_args(self):
         # Identity, not a wrapper: a user loss that takes no channel kwargs
@@ -290,21 +290,21 @@ class TestResolveLossFn:
         def custom(pred_obs, bp):
             return jnp.asarray(0.0)
 
-        assert _resolve_loss_fn(custom, None, None) is custom
+        assert resolve_loss_fn(custom, None, None) is custom
 
     def test_channel_args_are_bound_onto_a_registry_loss(self):
         bp = self._bp()
         pred = jnp.array([[[1.0, 99.0]]])
         # Keeping only channel 0 must hide the large error on channel 1.
-        restricted = _resolve_loss_fn("mse", (0,), None)
+        restricted = resolve_loss_fn("mse", (0,), None)
         assert float(restricted(pred, bp)) == pytest.approx(0.0)
         assert float(masked_mse(pred, bp)) > 1.0
 
     def test_channel_weights_reach_the_underlying_loss(self):
         bp = self._bp()
         pred = jnp.array([[[3.0, 2.0]]])
-        singly = _resolve_loss_fn("mse", None, (1.0, 1.0))
-        doubly = _resolve_loss_fn("mse", None, (2.0, 2.0))
+        singly = resolve_loss_fn("mse", None, (1.0, 1.0))
+        doubly = resolve_loss_fn("mse", None, (2.0, 2.0))
         assert float(doubly(pred, bp)) == pytest.approx(2.0 * float(singly(pred, bp)))
 
     def test_channel_args_are_bound_onto_a_custom_callable(self):
@@ -315,7 +315,34 @@ class TestResolveLossFn:
             seen["channel_weights"] = channel_weights
             return jnp.asarray(0.0)
 
-        wrapped = _resolve_loss_fn(custom, (1,), (0.5,))
+        wrapped = resolve_loss_fn(custom, (1,), (0.5,))
         assert wrapped is not custom
         wrapped(jnp.zeros((1, 1, 2)), self._bp())
         assert seen == {"channel_idx": (1,), "channel_weights": (0.5,)}
+
+    def test_plain_callable_with_channel_idx_is_projected(self):
+        # A custom loss with the bare (pred_obs, bp) signature must still
+        # compose with channel_idx: the selected channels are sliced out of
+        # pred_obs and the payload before the call, so the loss never sees
+        # the channels that were excluded.
+        def custom(pred_obs, bp):
+            return jnp.sum((pred_obs - bp.y_observed) ** 2)
+
+        bp = self._bp()  # y_observed = [[[1.0, 2.0]]], mask all True
+        pred = jnp.array([[[3.0, 99.0]]])
+        wrapped = resolve_loss_fn(custom, (0,), None)
+        # Only channel 0 is scored, so the 99.0 error on channel 1 is hidden.
+        assert float(wrapped(pred, bp)) == pytest.approx(4.0)
+        assert float(custom(pred, bp)) > 100.0
+
+    def test_plain_callable_with_channel_weights_raises(self):
+        # Per-channel weights must be applied inside a loss's own reduction,
+        # which an opaque (pred_obs, bp) callable cannot do. Refuse loudly
+        # rather than silently dropping the weights.
+        def custom(pred_obs, bp):
+            return jnp.sum((pred_obs - bp.y_observed) ** 2)
+
+        with pytest.raises(ValueError, match="channel_weights"):
+            resolve_loss_fn(custom, None, (0.5, 0.5))
+        with pytest.raises(ValueError, match="channel_weights"):
+            resolve_loss_fn(custom, (0,), (0.5,))

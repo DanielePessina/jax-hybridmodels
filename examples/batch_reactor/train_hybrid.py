@@ -11,6 +11,13 @@ phases:
   adds ``Δlog10(k)(T, pH)`` on top of it, picking up the pH dependence the
   parametric cannot represent.
 
+The temperature is not constant in time: each experiment runs a
+flat-ramp-flat heating profile (jacket heat-up, two flat edges), whose
+parameters travel as ordinary covariates. This is the
+``hybridmodels.profiles`` pattern — the model's ``simulate_fn`` evaluates
+``ramp_profile(...)(t)`` inside the vector field, so a ramp sweeps a band
+of temperatures within a single run instead of pinning one point.
+
 Verification checkpoints print at each transition, with loose asserts to
 catch wiring errors. The state hooks, trunk class, vector field and
 predictor builder live in ``_model.py``, shared with
@@ -27,6 +34,7 @@ import argparse
 import sys
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import diffrax
 import equinox as eqx
@@ -46,12 +54,16 @@ from hybridmodels import (
     ChannelObs,
     Experiment,
     SolverConfig,
-    freeze_modules_of_type,
+    compute_metrics,
+    count_trainable_params,
+    evaluate_predictor,
+    frozen_default_mask,
     make_dataset,
     make_experiment,
     predict_dataset,
+    print_metrics,
+    ramp_profile,
     save_predictors,
-    trainable_mask,
 )
 from hybridmodels.training import (
     EvosaxTrainingConfig,
@@ -74,9 +86,7 @@ from _model import (  # noqa: E402
 )
 from _shared import (  # noqa: E402
     apply_default_style,
-    compute_diagnostics,
     parity_plot,
-    print_diagnostics,
 )
 
 EA_TRUE: float = 30.0  # kJ/mol; rate doubles ~per 10 °C around T_REF
@@ -92,6 +102,14 @@ T_C_RANGE: tuple[float, float] = (15.0, 35.0)
 PH_RANGE: tuple[float, float] = (4.5, 7.5)
 N_TRAIN_EXPERIMENTS: int = 9
 VALIDATION_POINTS: tuple[tuple[float, float], ...] = ((20.0, 5.3), (30.0, 6.8))
+
+# Heating ramp per experiment: the reactor jacket ramps from T_lo to T_hi
+# between ramp_t0 and ramp_t1, flat on both edges. The ramp parameters are
+# the experiment covariates; the profile callable lives in
+# ``hybridmodels.profiles``.
+RAMP_HALF_WIDTH: float = 3.0  # °C, each experiment sweeps T_C ± 3
+RAMP_T0: float = 0.5
+RAMP_T1: float = 4.5  # T_MAX = 5.0, so both flat edges are visible
 
 # Per-experiment observations
 T_MAX: float = 5.0
@@ -123,11 +141,39 @@ def _k_true(temperature_C: ArrayLike, pH: ArrayLike) -> Array:
 
 
 def _true_ca_trajectory(
-    ts: Float[Array, " T"], temperature_C: float, pH: float
+    ts: Float[Array, " T"],
+    *,
+    ramp_t0: float,
+    ramp_t1: float,
+    T_lo: float,
+    T_hi: float,
+    pH: float,
 ) -> Float[Array, " T"]:
-    """Closed-form ``Ca(t) = Ca0 * exp(-k * t)`` for the true rate."""
-    k = float(_k_true(temperature_C, pH))
-    return CA0 * jnp.exp(-k * jnp.asarray(ts))
+    """Truth ``Ca(t)`` under the heating ramp: ``dCa/dt = -k_true(T(t), pH) · Ca``.
+
+    The rate changes as the temperature ramps, so there is no closed form;
+    the truth is integrated with diffrax at tight tolerances. ``T(t)`` is
+    the same ``ramp_profile`` the model's ``simulate_fn`` evaluates, so
+    truth and model disagree only in ``k_true`` vs the fitted rate.
+    """
+    T_profile = ramp_profile(t0=ramp_t0, t1=ramp_t1, v0=T_lo, v1=T_hi)
+
+    def field(t: Array, y: Array, args: object) -> Array:
+        return -_k_true(T_profile(t), pH) * y
+
+    sol = diffrax.diffeqsolve(
+        diffrax.ODETerm(field),
+        diffrax.Tsit5(),
+        t0=float(ts[0]),
+        t1=float(ts[-1]),
+        dt0=0.01,
+        y0=jnp.asarray(CA0, dtype=jnp.float32),
+        saveat=diffrax.SaveAt(ts=ts),
+        stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-10),
+        max_steps=10_000,
+    )
+    # Scalar state: ``ys`` is already ``[T]``.
+    return jnp.asarray(sol.ys)
 
 
 def _add_heteroscedastic_noise(
@@ -155,24 +201,43 @@ def _lhs_design(seed: int, n: int = N_TRAIN_EXPERIMENTS) -> list[tuple[float, fl
 
 def _make_experiment_for(
     *,
-    temperature_C: float,
+    ramp_t0: float,
+    ramp_t1: float,
+    T_lo: float,
+    T_hi: float,
     pH: float,
     noise_key: Array,
     exp_id: str,
 ) -> Experiment:
-    """Build one synthetic experiment at fixed ``(T, pH)``.
+    """Build one synthetic experiment on a heating ramp.
 
-    Closed-form ``Ca(t) = Ca0 · exp(-k_true · t)``, then heteroscedastic
-    noise on top to make the observations.
+    ``Ca(t)`` is integrated under ``k_true(T(t), pH)`` with the temperature
+    ramping from ``T_lo`` to ``T_hi`` over ``[ramp_t0, ramp_t1]``, then
+    heteroscedastic noise on top to make the observations. The ramp
+    parameters are the covariates — the same keys the model's
+    ``simulate_fn`` reads.
     """
     ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    clean = _true_ca_trajectory(ts, temperature_C=temperature_C, pH=pH)
+    clean = _true_ca_trajectory(
+        ts,
+        ramp_t0=ramp_t0,
+        ramp_t1=ramp_t1,
+        T_lo=T_lo,
+        T_hi=T_hi,
+        pH=pH,
+    )
     noisy = _add_heteroscedastic_noise(clean, key=noise_key)
     sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
     variance = sigma**2
     channels = {"Ca": ChannelObs(ts=ts, values=noisy, variance=variance)}
     return make_experiment(
-        covariates={"temperature_C": float(temperature_C), "pH": float(pH)},
+        covariates={
+            "ramp_t0": float(ramp_t0),
+            "ramp_t1": float(ramp_t1),
+            "T_lo": float(T_lo),
+            "T_hi": float(T_hi),
+            "pH": float(pH),
+        },
         channels=channels,
         y0_fn=y0_fn,
         exp_id=exp_id,
@@ -184,7 +249,11 @@ def _build_datasets(
     doe_seed: int,
     noise_key: Array,
 ) -> tuple[list[Experiment], list[Experiment]]:
-    """Synthesise the 9 training experiments (LHS) + 2 validation experiments."""
+    """Synthesise the 9 training experiments (LHS) + 2 validation experiments.
+
+    The LHS design is over the ramp *midpoint* ``T_C`` and ``pH``; each
+    experiment then sweeps ``T_C ± RAMP_HALF_WIDTH`` during its run.
+    """
     train_design = _lhs_design(seed=doe_seed)
     train_experiments: list[Experiment] = []
     for i, (T_C, pH) in enumerate(train_design):
@@ -193,7 +262,10 @@ def _build_datasets(
         k_i = jr.fold_in(noise_key, i)
         train_experiments.append(
             _make_experiment_for(
-                temperature_C=T_C,
+                ramp_t0=RAMP_T0,
+                ramp_t1=RAMP_T1,
+                T_lo=T_C - RAMP_HALF_WIDTH,
+                T_hi=T_C + RAMP_HALF_WIDTH,
                 pH=pH,
                 noise_key=k_i,
                 exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}",
@@ -205,7 +277,10 @@ def _build_datasets(
         k_j = jr.fold_in(noise_key, 1000 + j)
         val_experiments.append(
             _make_experiment_for(
-                temperature_C=T_C,
+                ramp_t0=RAMP_T0,
+                ramp_t1=RAMP_T1,
+                T_lo=T_C - RAMP_HALF_WIDTH,
+                T_hi=T_C + RAMP_HALF_WIDTH,
                 pH=pH,
                 noise_key=k_j,
                 exp_id=f"val_{j:02d}_T{T_C:.1f}_pH{pH:.2f}",
@@ -223,7 +298,7 @@ def _trajectory_grid_plot(
     save_path: Path,
 ) -> None:
     """3x3 grid of ``Ca(t)``: truth solid, observations scattered, prediction
-    dashed. One panel per experiment, labelled with its ``(T, pH)``.
+    dashed. One panel per experiment, labelled with its ramp band and pH.
     """
     n = len(experiments)
     if n != 9:
@@ -232,9 +307,20 @@ def _trajectory_grid_plot(
     fig, axes = plt.subplots(3, 3, figsize=(10.5, 9.0), sharex=True, sharey=True)
     ts_dense = np.linspace(0.0, T_MAX, 200)
     for ax, exp, pred in zip(axes.flatten(), experiments, predictions_per_exp, strict=True):
-        T_C = float(exp.covariates["temperature_C"])
-        pH = float(exp.covariates["pH"])
-        clean = np.asarray(_true_ca_trajectory(jnp.asarray(ts_dense), T_C, pH))
+        cov = exp.covariates
+        T_lo = float(cov["T_lo"])
+        T_hi = float(cov["T_hi"])
+        pH = float(cov["pH"])
+        clean = np.asarray(
+            _true_ca_trajectory(
+                jnp.asarray(ts_dense),
+                ramp_t0=float(cov["ramp_t0"]),
+                ramp_t1=float(cov["ramp_t1"]),
+                T_lo=T_lo,
+                T_hi=T_hi,
+                pH=pH,
+            )
+        )
         ts_obs = np.asarray(exp.channels["Ca"].ts)
         ca_obs = np.asarray(exp.channels["Ca"].values)
         ax.plot(ts_dense, clean, color="black", linewidth=1.4, label="truth")
@@ -249,7 +335,7 @@ def _trajectory_grid_plot(
             label="observed",
         )
         ax.plot(ts_obs, pred[:, 0], color="C3", linestyle="--", linewidth=1.4, label="predicted")
-        ax.set_title(f"T={T_C:.1f}°C, pH={pH:.2f}", fontsize=9)
+        ax.set_title(f"T {T_lo:.0f}→{T_hi:.0f}°C, pH={pH:.2f}", fontsize=9)
         ax.set_ylim(-0.05, 1.1)
     for ax in axes[-1]:
         ax.set_xlabel("t")
@@ -329,10 +415,20 @@ def _k_vs_ph_reveal_plot(
                 label=f"hybrid (T={T_C_lines[1]:.0f}°C)" if T_C == T_C_lines[1] else None,
             )
 
-    train_T = np.array([float(e.covariates["temperature_C"]) for e in train_experiments])
+    train_T = np.array(
+        [
+            (float(e.covariates["T_lo"]) + float(e.covariates["T_hi"])) / 2.0
+            for e in train_experiments
+        ]
+    )
     train_pH = np.array([float(e.covariates["pH"]) for e in train_experiments])
     train_log10k = np.log10(np.asarray(_k_true(train_T, train_pH)))
-    val_T = np.array([float(e.covariates["temperature_C"]) for e in val_experiments])
+    val_T = np.array(
+        [
+            (float(e.covariates["T_lo"]) + float(e.covariates["T_hi"])) / 2.0
+            for e in val_experiments
+        ]
+    )
     val_pH = np.array([float(e.covariates["pH"]) for e in val_experiments])
     val_log10k = np.log10(np.asarray(_k_true(val_T, val_pH)))
     ax.scatter(
@@ -419,9 +515,15 @@ def _verify_truth_helper() -> None:
 
 def _verify_dataset_shapes(train_ds, val_ds, train_design, val_design) -> None:
     """Bucket layout and DOE coverage."""
-    print(f"  LHS training (T, pH) samples ({len(train_design)}):")
+    print(
+        f"  LHS training (T_mid, pH) samples ({len(train_design)}), "
+        f"ramp ±{RAMP_HALF_WIDTH:.0f}°C:"
+    )
     for i, (T_C, pH) in enumerate(train_design):
-        print(f"    [{i}] T={T_C:.2f}°C, pH={pH:.3f}")
+        print(
+            f"    [{i}] T={T_C:.2f}°C, pH={pH:.3f}  "
+            f"(sweeps {T_C - RAMP_HALF_WIDTH:.1f}→{T_C + RAMP_HALF_WIDTH:.1f}°C)"
+        )
     print(f"  Validation (T, pH) samples ({len(val_design)}):")
     for j, (T_C, pH) in enumerate(val_design):
         print(f"    [{j}] T={T_C:.2f}°C, pH={pH:.3f}")
@@ -442,9 +544,7 @@ def _verify_predictors_at_init(
     parametric, residual = predictors
     log_k_ref, Ea = parametric()
     print(f"  parametric init: log_k_ref={float(log_k_ref):.3f}, Ea={float(Ea):.2f} kJ/mol")
-    delta = float(
-        jnp.squeeze(residual({"temperature_C": jnp.asarray(25.0), "pH": jnp.asarray(K_SAT_PH50)}))
-    )
+    delta = evaluate_predictor(residual, {"temperature_C": 25.0, "pH": K_SAT_PH50})
     print(f"  residual init at (T=25°C, pH=5.85): Δlog10(k)={delta:+.3f}  (expect ≈ 0)")
     assert abs(delta) < 0.5, f"fresh-init residual should be near 0, got {delta}"
 
@@ -480,19 +580,28 @@ def _residual_weights_signature(residual: BoundedPredictor) -> Array:
     return jnp.concatenate([leaf.reshape(-1) for leaf in leaves if eqx.is_inexact_array(leaf)])
 
 
-def _count_trainable_params(predictors: object, mask: object) -> int:
-    """Count scalar parameters whose mask leaf is True.
+def _parity_diagnostics(predictions, dataset):
+    """Masked obs/pred pairs per channel for ``parity_plot``.
 
-    Walks both trees in lockstep. Mask leaves are plain ``bool``, not JAX
-    arrays, so a ``leaf.dtype == bool_`` filter would drop them all.
+    ``compute_metrics`` keeps only the summary stats; the scatter needs the
+    raw value pairs, so re-walk the mask here.
     """
-    pred_leaves = jax.tree_util.tree_leaves(predictors)
-    mask_leaves = jax.tree_util.tree_leaves(mask)
-    n = 0
-    for pred, m in zip(pred_leaves, mask_leaves, strict=True):
-        if eqx.is_inexact_array(pred) and bool(m):
-            n += int(pred.size)
-    return n
+    metrics = compute_metrics(predictions, dataset)
+    out: dict[str, SimpleNamespace] = {}
+    for d, name in enumerate(dataset.output_channel_names):
+        obs_chunks: list = []
+        pred_chunks: list = []
+        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
+            mask = bp.mask[..., d]
+            obs_chunks.append(bp.y_observed[..., d][mask])
+            pred_chunks.append(pred[..., d][mask])
+        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
+        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
+        m = metrics[name]
+        out[name] = SimpleNamespace(
+            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
+        )
+    return out
 
 
 def main() -> None:
@@ -536,12 +645,10 @@ def main() -> None:
     train_experiments, val_experiments = _build_datasets(doe_seed=args.doe_seed, noise_key=k_noise)
     train_dataset = make_dataset(
         train_experiments,
-        state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     val_dataset = make_dataset(
         val_experiments,
-        state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
     )
     print("[verify §9.2] dataset shapes")
@@ -570,11 +677,9 @@ def main() -> None:
     residual_weights_pre_p1 = _residual_weights_signature(predictors[1])
 
     print("\n[phase 1] evosax — parametric trunk only (residual MLP frozen)")
-    mask_p1 = trainable_mask(predictors)
-    mask_p1 = freeze_modules_of_type(mask_p1, predictors, BoundedPredictor)
-    mask_p1 = freeze_modules_of_type(mask_p1, predictors, BoundScaler)
+    mask_p1 = frozen_default_mask(predictors, BoundedPredictor, BoundScaler)
 
-    n_trainable_p1 = _count_trainable_params(predictors, mask_p1)
+    n_trainable_p1 = count_trainable_params(predictors, mask_p1)
     print(f"  trainable scalars (Phase 1): {n_trainable_p1} (expect 2)")
     assert n_trainable_p1 == 2, (
         f"Phase 1 should train exactly the parametric latent (2 scalars), got {n_trainable_p1}"
@@ -595,6 +700,7 @@ def main() -> None:
         train_dataset,
         config_p1,
         simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
         solver=solver,
         trainable=mask_p1,
         key=k_p1,
@@ -624,20 +730,22 @@ def main() -> None:
             predictors_p1,
             train_dataset,
             simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
             solver=solver,
         )
         val_predictions_p1 = predict_dataset(
             predictors_p1,
             val_dataset,
             simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
             solver=solver,
         )
-        diag_train_p1 = compute_diagnostics(train_predictions_p1, train_dataset)
-        diag_val_p1 = compute_diagnostics(val_predictions_p1, val_dataset)
+        diag_train_p1 = compute_metrics(train_predictions_p1, train_dataset)
+        diag_val_p1 = compute_metrics(val_predictions_p1, val_dataset)
         print("  training diagnostics (parametric only):")
-        print_diagnostics(diag_train_p1)
+        print_metrics(diag_train_p1)
         print("  validation diagnostics (parametric only):")
-        print_diagnostics(diag_val_p1)
+        print_metrics(diag_val_p1)
 
         train_pred_per_exp = [
             np.asarray(train_predictions_p1[0][i]) for i in range(N_TRAIN_EXPERIMENTS)
@@ -649,7 +757,7 @@ def main() -> None:
             save_path=args.plot_dir / "01_trajectory_grid_phase1.png",
         )
         parity_plot(
-            diag_train_p1,
+            _parity_diagnostics(train_predictions_p1, train_dataset),
             title="Phase 1 parity (training set)",
             save_path=args.plot_dir / "02_parity_phase1.png",
         )
@@ -663,11 +771,9 @@ def main() -> None:
         )
 
     print("\n[phase 2] optax — residual MLP only (parametric frozen)")
-    mask_p2 = trainable_mask(predictors_p1)
-    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, ArrheniusKinetics)
-    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, BoundScaler)
+    mask_p2 = frozen_default_mask(predictors_p1, ArrheniusKinetics, BoundScaler)
 
-    n_trainable_p2 = _count_trainable_params(predictors_p1, mask_p2)
+    n_trainable_p2 = count_trainable_params(predictors_p1, mask_p2)
     print(f"  trainable scalars (Phase 2): {n_trainable_p2} (16-neuron MLP weights+biases)")
     assert n_trainable_p2 > n_trainable_p1, (
         "Phase 2 should train strictly more scalars than Phase 1 (parametric is frozen, "
@@ -690,6 +796,7 @@ def main() -> None:
         train_dataset,
         config_p2,
         simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
         solver=solver,
         trainable=mask_p2,
         key=k_p2,
@@ -742,20 +849,22 @@ def main() -> None:
             predictors_p2,
             train_dataset,
             simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
             solver=solver,
         )
         val_predictions_p2 = predict_dataset(
             predictors_p2,
             val_dataset,
             simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
             solver=solver,
         )
-        diag_train_p2 = compute_diagnostics(train_predictions_p2, train_dataset)
-        diag_val_p2 = compute_diagnostics(val_predictions_p2, val_dataset)
+        diag_train_p2 = compute_metrics(train_predictions_p2, train_dataset)
+        diag_val_p2 = compute_metrics(val_predictions_p2, val_dataset)
         print("  training diagnostics (hybrid):")
-        print_diagnostics(diag_train_p2)
+        print_metrics(diag_train_p2)
         print("  validation diagnostics (hybrid):")
-        print_diagnostics(diag_val_p2)
+        print_metrics(diag_val_p2)
 
         train_pred_per_exp_p2 = [
             np.asarray(train_predictions_p2[0][i]) for i in range(N_TRAIN_EXPERIMENTS)
@@ -767,7 +876,7 @@ def main() -> None:
             save_path=args.plot_dir / "04_trajectory_grid_phase2.png",
         )
         parity_plot(
-            diag_train_p2,
+            _parity_diagnostics(train_predictions_p2, train_dataset),
             title="Phase 2 parity (training set)",
             save_path=args.plot_dir / "05_parity_phase2.png",
         )

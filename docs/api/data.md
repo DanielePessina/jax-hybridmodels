@@ -12,7 +12,9 @@ The data layer turns irregular, sparse experiment records into a JAX-traceable [
 - [`BucketPayload`](#bucketpayload)
 - [`Dataset`](#dataset)
 - [`make_dataset`](#make_dataset)
+- [`make_bootstrap_dataset`](#make_bootstrap_dataset)
 - [`split_dataset`](#split_dataset)
+- [`describe_buckets`](#describe_buckets)
 
 ---
 
@@ -116,7 +118,7 @@ moment initialised to zero being the common case.
 | `y0_fn` |  | Hook ``(covariates, channels) -> [S]`` building the full initial state, where ``S`` is the state dimension the user's ``simulate_fn`` integrates. |
 | `exp_id` |  | Optional human-readable id copied to ``Experiment.exp_id``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L228)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L223)</small>
 
 ---
 
@@ -191,25 +193,25 @@ n_obs : Int[Array, ""]
 ```python
 Dataset(
     bucket_payloads: 'tuple[BucketPayload, ...]',
-    state_to_output: 'Callable[..., Array]',
     output_channel_names: 'tuple[str, ...]',
     covariate_names: 'tuple[str, ...]',
     _experiments: 'tuple[Experiment, ...]' = (),
 ) -> None
 ```
 
-All buckets of a dataset, plus the hook that maps model state to observed channels.
+All buckets of a dataset, as pure data.
 
 ``bucket_payloads`` is the dispatch list, one compiled kernel per bucket
-shape. ``state_to_output`` rides along so the loss pipeline can apply it
-without the user passing it to every call.
+shape. The ``Dataset`` carries no model-shaped callables: it never sees
+full simulator states, and ``state_to_output`` — a property of the model,
+not the data — is passed to prediction and training as a parameter (see
+ADR-0008).
 
 **Attributes**
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `bucket_payloads` | `tuple[BucketPayload, ...]` | One ``BucketPayload`` per distinct union-axis length, ordered ascending by ``T``. |
-| `state_to_output` | `Callable[[Array], Array]` | Pure mapping ``[T, S] -> [T, D]``. It picks out (or derives) the observed channels from the full simulator state, since the state usually carries components no instrument measures. A static field, so it is code rather than data. The framework never serialises it; the user re-imports it on load. |
 | `output_channel_names` | `tuple[str, ...]` | Channel order along the trailing ``D`` axis of every payload. ``make_dataset`` scatters values in this same order. |
 | `covariate_names` | `tuple[str, ...]` | Covariate keys, sorted. Matches each ``Experiment.covariates`` key set. Sorting makes dict iteration deterministic. |
 | `_experiments` | `tuple[Experiment, ...]` | Source experiments, kept so ``split_dataset`` can re-bucket each split. Empty when a ``Dataset`` is built by hand from raw payloads, and ``split_dataset`` then raises. |
@@ -227,7 +229,6 @@ without the user passing it to every call.
 ```python
 make_dataset(
     experiments: 'Sequence[Experiment]',
-    state_to_output: 'Callable[..., Array]',
     output_channel_names: 'tuple[str, ...] | list[str]',
 ) -> Dataset
 ```
@@ -246,12 +247,14 @@ Three steps run in order.
    and each group is stacked along a new leading ``N`` axis into one
    ``BucketPayload``. Buckets come out in ascending ``T`` order.
 
+The ``Dataset`` is pure data: ``state_to_output``, being a property of
+the model, is passed to prediction and training separately (ADR-0008).
+
 **Parameters**
 
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `experiments` |  | Non-empty sequence of ``Experiment`` objects, usually built with ``make_experiment``. |
-| `state_to_output` |  | Pure mapping ``[T, S] -> [T, D]`` from full simulator state to the observed channels. Stored as a static field on the ``Dataset``. |
 | `output_channel_names` |  | Channel order for the trailing ``D`` axis. Coerced to a tuple before being stored statically on the ``Dataset``. |
 
 **Returns**
@@ -260,7 +263,51 @@ Three steps run in order.
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with ``_experiments`` kept so ``split_dataset`` can re-bucket subsets. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L415)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L435)</small>
+
+---
+
+<a id="make_bootstrap_dataset"></a>
+
+### `make_bootstrap_dataset()`
+
+<small>`from hybridmodels.data import make_bootstrap_dataset` &nbsp;·&nbsp; also re-exported as `hybridmodels.make_bootstrap_dataset`</small>
+
+```python
+make_bootstrap_dataset(
+    dataset: 'Dataset',
+    key: 'Array',
+    n_experiments: 'int | None' = None,
+) -> Dataset
+```
+
+Bootstrap resample the dataset's experiments, re-bucketing the result.
+
+Draws ``n_experiments`` experiments **with replacement** from the
+source (default: as many as the source holds), then re-buckets via
+:func:`make_dataset`. Irregular per-channel timestamps are handled
+automatically: re-bucketing regroups by union-axis length, and a
+duplicated experiment simply contributes more ``N`` rows to its bucket.
+
+This is the data half of a bagging ensemble: each call yields one
+resampled dataset, and training on several of them produces an
+ensemble whose members saw different resamples.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `dataset` |  | Source dataset. Must carry ``_experiments`` (built by ``make_dataset``), or this raises. |
+| `key` |  | Required ``jr.PRNGKey`` for the resample, never defaulted. |
+| `n_experiments` |  | Number of experiments to draw. Defaults to the source size. Must be at least 1. |
+
+**Returns**
+
+| Item | Type | Description |
+| --- | --- | --- |
+| `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L560)</small>
 
 ---
 
@@ -304,4 +351,25 @@ payloads and no ``_experiments``, so it cannot be split again.
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L544)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L611)</small>
+
+---
+
+<a id="describe_buckets"></a>
+
+### `describe_buckets()`
+
+<small>`from hybridmodels.data import describe_buckets` &nbsp;·&nbsp; also re-exported as `hybridmodels.describe_buckets`</small>
+
+```python
+describe_buckets(dataset: 'Dataset') -> 'str'
+```
+
+One line per bucket: experiments, length, and how full the mask is.
+
+A quick human-readable census of the bucketed-irregular structure, for
+debugging and example output. Each line reports the bucket's ``N``
+(experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
+fraction of ``[N, T, D]`` cells the mask marks as real observations.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L417)</small>

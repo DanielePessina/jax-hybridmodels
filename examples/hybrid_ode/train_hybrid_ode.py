@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import diffrax
 import jax.numpy as jnp
@@ -66,7 +67,10 @@ from hybridmodels import (
     MLPPredictor,
     SolverConfig,
     Warp,
+    compute_metrics,
+    evaluate_predictor,
     predict_dataset,
+    print_metrics,
     register_warp,
 )
 from hybridmodels.penalties import bound_penalty, collocation_grids
@@ -84,13 +88,12 @@ from _data import (  # noqa: E402
     describe_buckets,
     irregular_experiments,
     rectangular_experiments,
+    state_to_output,
     true_k,
 )
 from _shared import (  # noqa: E402
     apply_default_style,
-    compute_diagnostics,
     parity_plot,
-    print_diagnostics,
     trajectory_plot,
 )
 
@@ -210,19 +213,8 @@ def simulate_fn(
             return mechanistic
         return mechanistic + residual_net(y)
 
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        solver.solver,
-        t0=ts[0],
-        t1=ts[-1],
-        dt0=solver.dt0,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=solver.stepsize_controller(),
-        max_steps=solver.max_steps,
-        adjoint=solver.adjoint,
-    )
-    return jnp.asarray(sol.ys)
+    term = diffrax.ODETerm(vector_field)
+    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
 
 
 def report_rate_net(rate_net: BoundedPredictor) -> None:
@@ -235,8 +227,32 @@ def report_rate_net(rate_net: BoundedPredictor) -> None:
     print("  temperature   true k     fitted k    ratio")
     for temperature in TEMPERATURES:
         truth = float(true_k(temperature))
-        fitted = float(rate_net({"temperature": jnp.asarray(temperature)}).reshape(()))
+        fitted = evaluate_predictor(rate_net, {"temperature": temperature})
         print(f"    {temperature:6.1f}    {truth:.5f}    {fitted:.5f}    {fitted / truth:5.2f}")
+
+
+def _parity_diagnostics(predictions, dataset):
+    """Masked obs/pred pairs per channel for ``parity_plot``.
+
+    ``compute_metrics`` keeps only the summary stats; the scatter needs the
+    raw value pairs, so re-walk the mask here.
+    """
+    metrics = compute_metrics(predictions, dataset)
+    out: dict[str, SimpleNamespace] = {}
+    for d, name in enumerate(dataset.output_channel_names):
+        obs_chunks: list = []
+        pred_chunks: list = []
+        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
+            mask = bp.mask[..., d]
+            obs_chunks.append(bp.y_observed[..., d][mask])
+            pred_chunks.append(pred[..., d][mask])
+        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
+        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
+        m = metrics[name]
+        out[name] = SimpleNamespace(
+            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
+        )
+    return out
 
 
 def report_residual_net(residual_net: BoundedPredictor) -> None:
@@ -325,7 +341,13 @@ def main() -> None:
     )
     print("[train] two phases, saturation penalty on")
     history, trained = train_with_optax(
-        predictors, dataset, config, simulate_fn=simulate_fn, solver=solver, key=k_train
+        predictors,
+        dataset,
+        config,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
+        key=k_train,
     )
     print(f"  loss at phase starts: {history[0]:.4f} -> {history[args.steps // 2]:.4f}")
     print(f"  final loss: {history[-1]:.5f}")
@@ -344,17 +366,19 @@ def main() -> None:
         print("\n[residual network] recovered cubic coupling")
         report_residual_net(trained[1])
 
-    predictions = predict_dataset(trained, dataset, simulate_fn=simulate_fn, solver=solver)
-    diag = compute_diagnostics(predictions, dataset)
+    predictions = predict_dataset(
+        trained, dataset, simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver
+    )
+    metrics = compute_metrics(predictions, dataset)
     print()
-    print_diagnostics(diag)
+    print_metrics(metrics)
 
     if not args.no_plot:
         variant = "mechanistic" if args.mechanistic_only else args.inner
         suffix = f"{args.data}_{variant}"
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         parity_plot(
-            diag,
+            _parity_diagnostics(predictions, dataset),
             title=f"Hybrid ODE parity ({suffix})",
             save_path=args.plot_dir / f"parity_{suffix}.png",
         )
@@ -363,6 +387,7 @@ def main() -> None:
             dataset,
             predictors=trained,
             simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
             solver=solver,
             max_experiments=4,
             title=f"Hybrid ODE trajectories ({suffix})",

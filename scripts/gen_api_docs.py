@@ -51,7 +51,9 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "BucketPayload",
             "Dataset",
             "make_dataset",
+            "make_bootstrap_dataset",
             "split_dataset",
+            "describe_buckets",
         ),
     ),
     (
@@ -63,6 +65,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "BoundedPredictor",
             "MLPPredictor",
             "KANPredictor",
+            "NeuralNPolynomial",
             "reinitialize_with_key",
             "reinitialize_pytree_with_key",
         ),
@@ -71,11 +74,18 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "penalties",
         "Penalties: Gradient-Safe Bound Handling",
         (
+            "attach_penalty_state",
+            "bound_penalty",
+            "box_violation",
+            "clip_ste",
+            "collocation_grids",
+            "penalty_integral",
+            "penalty_vector_field",
             "soft_inverse",
             "soft_logit",
             "softclip",
-            "clip_ste",
-            "box_violation",
+            "strip_penalty_state",
+            "trajectory_saturation_penalty",
         ),
     ),
     (
@@ -107,8 +117,23 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "OptaxTrainingConfig",
             "train_with_optax",
+            "train_seed_ensemble",
+            "train_bootstrap_ensemble",
             "EvosaxTrainingConfig",
             "train_with_evosax",
+            "register_algorithm",
+        ),
+    ),
+    (
+        "kernels",
+        "Training Kernels: Build Your Own Loop",
+        (
+            "apply_length_mask",
+            "predict_bucket_obs",
+            "build_bucket_step",
+            "build_score_bucket",
+            "build_penalty_step",
+            "build_apply_update",
         ),
     ),
     (
@@ -120,6 +145,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "bal_mse",
             "bal_mle",
             "LOSS_REGISTRY",
+            "resolve_loss_fn",
         ),
     ),
     (
@@ -131,6 +157,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "freeze_paths",
             "freeze_modules_of_type",
             "freeze_where",
+            "frozen_default_mask",
+            "count_trainable_params",
         ),
     ),
     (
@@ -139,7 +167,34 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "predict_bucket",
             "predict_dataset",
+            "predict_dense",
+            "ensemble_predictions",
+            "evaluate_predictor",
         ),
+    ),
+    (
+        "metrics",
+        "Metrics: Per-Channel Evaluation",
+        (
+            "ChannelMetrics",
+            "compute_metrics",
+            "print_metrics",
+        ),
+    ),
+    (
+        "profiles",
+        "Profiles: Time-Varying Inputs",
+        (
+            "constant_profile",
+            "step_profile",
+            "ramp_profile",
+            "piecewise_linear_profile",
+        ),
+    ),
+    (
+        "schedules",
+        "Schedules: Epoch-Scaled Annealing",
+        ("annealing_schedule",),
     ),
     (
         "serialise",
@@ -574,6 +629,22 @@ PAGE_INTROS: dict[str, str] = {
         'Pass them by name via training-config `loss="mse"` (resolved through '
         "[`LOSS_REGISTRY`](#loss_registry)) or as a callable for custom losses."
     ),
+    "kernels": (
+        "The compiled pieces the stock trainers are assembled from. "
+        "`build_bucket_step` is the jitted per-bucket `(loss, grads)` kernel "
+        "(one trace per bucket shape); `build_score_bucket` is a forward-only "
+        "scorer; `build_penalty_step` charges a regulariser once per step "
+        "outside the bucket loop; `build_apply_update` is the single optimiser "
+        "update. Write your own loop by composing these over "
+        "`dataset.bucket_payloads` in Python."
+    ),
+    "metrics": (
+        "Per-channel evaluation of trained predictions, mirroring the loss "
+        "mask discipline: only cells the bucket mask marks as real "
+        "measurements count. `compute_metrics(predictions, dataset)` returns "
+        "one `ChannelMetrics` per output channel with MSE, RMSE, MAE and R^2; "
+        "`print_metrics` renders them as a table."
+    ),
     "trainable": (
         "Trainability is encoded as a boolean PyTree mask matching the "
         "predictors pytree's structure. The training loop calls "
@@ -619,9 +690,9 @@ PAGE_INTROS: dict[str, str] = {
         "code doesn't change the keys downstream of unchanged names — "
         "compare to `jax.random.split`, which is positional and very "
         "fragile under refactors.\n\n"
-        'Names used internally: `"init"`, `"tournament"`, `"phase_{i}"`, '
-        '`"evosax_init"`, `"evosax_ask_{gen}"`. User code can fold its own '
-        "names off the same root without collisions."
+        'Names used internally: `"tournament"`, `"tournament_attempt_{i}"`, '
+        '`"evosax_init"`, `"evosax_ask_{gen}"`, `"evosax_tell_{gen}"`. User '
+        "code can fold its own names off the same root without collisions."
     ),
 }
 
@@ -660,7 +731,7 @@ def render_index() -> str:
     parts = [
         "# API Reference",
         "",
-        "The public surface is split across ten pages, grouped by concern. "
+        "The public surface is split across the pages below, grouped by concern. "
         "Every symbol below is also re-exported at the top level — "
         "`from hybridmodels import MLPPredictor` works exactly like "
         "`from hybridmodels.predictors import MLPPredictor`.",

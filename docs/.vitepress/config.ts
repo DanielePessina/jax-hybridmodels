@@ -24,7 +24,7 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
-      { text: 'Examples', link: '/examples/crystallisation-notebook' },
+      { text: 'Examples', link: '/examples/custom-loop' },
       { text: 'API', link: '/api/' },
     ],
 
@@ -34,31 +34,36 @@ export default defineConfig({
         { text: 'Concepts', link: '/guide/concepts' },
         { text: 'Training', link: '/guide/training' },
         { text: 'Custom Predictors', link: '/guide/custom-predictors' },
+        { text: 'Extending', link: '/guide/extending' },
+        { text: 'Ensembles', link: '/guide/ensembles' },
         { text: 'Recommendations', link: '/guide/recommendations' },
       ],
-      // The two embedded marimo notebooks are the canonical example docs.
-      // The earlier hybrid-MLP and mechanistic crystallisation walk-throughs
-      // and the harmonic-oscillator page are intentionally not listed here —
-      // their content has been folded into the combined crystallisation
-      // notebook. The pages still exist on disk; they're just unlinked.
+      // Examples are plain scripts single-sourced into the docs. The
+      // earlier marimo notebook pages were converted to scripts and the
+      // notebook-specific pages removed.
       '/examples/': [
-        { text: 'Crystallisation', link: '/examples/crystallisation-notebook' },
+        { text: 'Custom training loop', link: '/examples/custom-loop' },
+        { text: 'Crystallisation', link: '/examples/crystallisation' },
+        { text: 'Hybrid ODE', link: '/examples/hybrid-ode' },
         { text: 'Batch reactor', link: '/examples/batch-reactor' },
         { text: 'Batch reactor RL', link: '/examples/batch-reactor-rl' },
-        { text: 'Batch reactor RL notebook', link: '/examples/batch-reactor-rl-notebook' },
-        { text: 'Hybrid ODE', link: '/examples/hybrid-ode' },
-        { text: 'Hybrid ODE notebook', link: '/examples/hybrid-ode-notebook' },
+        { text: 'SBML hybrid kinetics', link: '/examples/sbml-hybrid' },
         { text: 'Custom predictor', link: '/examples/custom-predictor' },
+        { text: 'Neural polynomial kinetics', link: '/examples/supersaturation-poly' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },
         { text: 'Data', link: '/api/data' },
         { text: 'Predictors', link: '/api/predictors' },
         { text: 'Penalties', link: '/api/penalties' },
+        { text: 'Profiles', link: '/api/profiles' },
+        { text: 'Schedules', link: '/api/schedules' },
         { text: 'Transforms', link: '/api/transforms' },
         { text: 'Solver', link: '/api/solver' },
         { text: 'Training', link: '/api/training' },
+        { text: 'Training Kernels', link: '/api/kernels' },
         { text: 'Losses', link: '/api/losses' },
+        { text: 'Metrics', link: '/api/metrics' },
         { text: 'Trainable Masks', link: '/api/trainable' },
         { text: 'Prediction', link: '/api/prediction' },
         { text: 'Serialise', link: '/api/serialise' },

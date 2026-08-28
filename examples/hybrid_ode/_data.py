@@ -32,7 +32,16 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float
 
-from hybridmodels import ChannelObs, Dataset, Experiment, make_dataset, make_experiment
+from hybridmodels import (
+    ChannelObs,
+    Dataset,
+    Experiment,
+    # Re-exported for ``train_hybrid_ode.py``; ``describe_buckets`` lives in
+    # the library now.
+    describe_buckets,  # noqa: F401
+    make_dataset,
+    make_experiment,
+)
 
 OMEGA_TRUE: float = 1.0  # rotation frequency, known to the model
 COUPLING: Float[Array, "2 2"] = jnp.array([[0.0, 0.6], [-0.6, 0.0]])  # learnt, not given
@@ -193,21 +202,8 @@ def irregular_experiments(
 
 
 def build_dataset(experiments: list[Experiment]) -> Dataset:
-    """Bucket a list of experiments with this example's projector and channels."""
+    """Bucket a list of experiments with this example's channels."""
     return make_dataset(
         experiments,
-        state_to_output=state_to_output,
         output_channel_names=CHANNELS,
     )
-
-
-def describe_buckets(dataset: Dataset) -> str:
-    """One line per bucket: how many experiments, how long, how full the mask is."""
-    lines = [f"{len(dataset.bucket_payloads)} bucket(s)"]
-    for i, bp in enumerate(dataset.bucket_payloads):
-        n, t, d = bp.y_observed.shape
-        lines.append(
-            f"  bucket {i}: N={n:2d} experiments, T={t:3d} timestamps, "
-            f"D={d} channels, mask {float(bp.mask.mean()):.2f} full"
-        )
-    return "\n".join(lines)

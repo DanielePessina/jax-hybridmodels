@@ -118,15 +118,17 @@ instance plus its tolerances, step budget, and adjoint. The **adjoint**
 is the strategy Diffrax uses to get gradients back out of the
 integration; see [Concepts](/guide/concepts#solverconfig).
 
-[`make_dataset`](/api/data#make_dataset) turns your experiments plus
-`state_to_output` into a [`Dataset`](/api/data#dataset). It merges each
-experiment's per-channel timestamps into one axis, records which cells
-are real observations, and groups experiments by axis length.
+[`make_dataset`](/api/data#make_dataset) turns your experiments into a
+[`Dataset`](/api/data#dataset). It merges each experiment's per-channel
+timestamps into one axis, records which cells are real observations, and
+groups experiments by axis length. `state_to_output` is passed to
+training and prediction, not to the dataset.
 
 [`train_with_optax`](/api/training#train_with_optax) and
 [`train_with_evosax`](/api/training#train_with_evosax) both take
-`(predictors, dataset, config)` plus `simulate_fn`, `solver`, and a
-random `key`, and both return `(loss_history, trained_predictors)`.
+`(predictors, dataset, config)` plus `simulate_fn`, `state_to_output`,
+`solver`, and a random `key`, and both return
+`(loss_history, trained_predictors)`.
 
 ## A runnable example
 
@@ -142,21 +144,11 @@ import jax.random as jr
 from jax import Array
 from jaxtyping import Float
 
-from hybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    ChannelObs,
-    SolverConfig,
-    make_dataset,
-    make_experiment,
-)
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
-
+import hybridmodels as hm
 
 # 1. A predictor holding one trainable scalar. It ignores its input,
 #    because every experiment shares the same omega.
-class OmegaPredictor(Predictor):
+class OmegaPredictor(hm.Predictor):
     omega_lat: Array
 
     def __init__(self, omega_lat: Array | float = 0.0) -> None:
@@ -172,11 +164,11 @@ class OmegaPredictor(Predictor):
 key = jr.PRNGKey(0)
 k_init, k_noise, k_train = jr.split(key, 3)
 
-predictor = BoundedPredictor(
+predictor = hm.BoundedPredictor(
     input_keys=("dummy",),
-    in_scaler=BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid"),
+    in_scaler=hm.BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid"),
     inner=OmegaPredictor(jr.normal(k_init)),
-    out_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
+    out_scaler=hm.BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
 )
 predictors = (predictor,)
 
@@ -189,23 +181,11 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
     def vector_field(t, y, args):
         return jnp.stack([y[1], -omega * omega * y[0]])
 
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        solver.solver,
-        t0=ts[0],
-        t1=ts[-1],
-        dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=solver.stepsize_controller(),
-        max_steps=solver.max_steps,
-        adjoint=solver.adjoint,
-    )
-    return jnp.asarray(sol.ys)
+    return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
 
 
 # 4. state_to_output: the state is (position, velocity); only position
-#    is measured.
+#    is measured. It belongs to the model, and is passed to training.
 def state_to_output(state):
     return state[..., :1]
 
@@ -218,10 +198,10 @@ for i, (x0, v0) in enumerate([(1.0, 0.0), (0.0, 1.0), (0.5, -0.5)]):
     clean = x0 * jnp.cos(ts) + v0 * jnp.sin(ts)
     noisy = clean + NOISE_STD * jr.normal(jr.fold_in(k_noise, i), ts.shape)
     experiments.append(
-        make_experiment(
+        hm.make_experiment(
             covariates={"dummy": 0.0},
             channels={
-                "position": ChannelObs(
+                "position": hm.ChannelObs(
                     ts=ts,
                     values=noisy,
                     variance=jnp.full(ts.shape, NOISE_STD**2),
@@ -232,15 +212,11 @@ for i, (x0, v0) in enumerate([(1.0, 0.0), (0.0, 1.0), (0.5, -0.5)]):
         )
     )
 
-dataset = make_dataset(
-    experiments,
-    state_to_output=state_to_output,
-    output_channel_names=("position",),
-)
+dataset = hm.make_dataset(experiments, output_channel_names=("position",))
 
 
 # 6. Solver settings and training budget.
-solver = SolverConfig(
+solver = hm.SolverConfig(
     solver=diffrax.Tsit5(),
     rtol=1e-6,
     atol=1e-8,
@@ -248,7 +224,7 @@ solver = SolverConfig(
     dt0=None,
 )
 
-config = OptaxTrainingConfig(
+config = hm.OptaxTrainingConfig(
     steps=(300,),
     lr=(5e-2,),
     optimizer=("adamw",),
@@ -258,21 +234,22 @@ config = OptaxTrainingConfig(
     verbose=False,
 )
 
-history, trained = train_with_optax(
+history, trained = hm.train_with_optax(
     predictors,
     dataset,
     config,
     simulate_fn=simulate_fn,
+    state_to_output=state_to_output,
     solver=solver,
     key=k_train,
 )
 
-recovered = float(trained[0]({"dummy": jnp.asarray(0.0)}).reshape(()))
+recovered = hm.evaluate_predictor(trained[0], {"dummy": 0.0})
 print(f"final loss: {history[-1]:.6f}")
 print(f"recovered omega: {recovered:.4f} (target: 1.0000)")
 ```
 
-With the seed above this prints a final loss of `0.000252` and
+With the seed above this prints a final loss near `0.00025` and
 `recovered omega: 1.0013`.
 
 Two details in that script recur everywhere.
@@ -290,7 +267,7 @@ run states its own seed.
 
 Replace `OmegaPredictor` with an `MLPPredictor`, add real covariates and
 channels, and write a real vector field, and you have the
-[crystallisation walkthrough](/examples/crystallisation-notebook).
+the [crystallisation walkthrough](/examples/crystallisation).
 
 Some models have no network at all. Their trainable part is a handful of
 kinetic constants feeding a classical rate law. That works the same way,

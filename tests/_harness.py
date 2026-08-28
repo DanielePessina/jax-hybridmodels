@@ -104,9 +104,8 @@ def true_position(omega: float, t: Array, x0: float, v0: float) -> Array:
 def oscillator_state_to_output(state: Array) -> Array:
     """Project ``[T, S]`` onto the single observed channel, position.
 
-    A module-level function, never a per-call closure: ``Dataset`` holds this
-    as an ``eqx`` static field, so a fresh object per call would change the
-    static-field identity and cost retraces.
+    A module-level function so every call site passes the same object; a
+    fresh closure per call would cost retraces inside compiled kernels.
     """
     return state[..., 0:1]
 
@@ -132,7 +131,6 @@ def make_oscillator_dataset(
         )
     return make_dataset(
         experiments,
-        state_to_output=oscillator_state_to_output,
         output_channel_names=("position",),
     )
 
@@ -196,6 +194,11 @@ class QuadraticPredictor(Predictor):
         return self.theta
 
 
+def quadratic_state_to_output(state: Array) -> Array:
+    """Project ``[T, S]`` to ``[T, D]`` as the identity: every state component is observed."""
+    return state
+
+
 def quadratic_dataset() -> Dataset:
     """One bucket holding one experiment, T=1, D=4, mask all True."""
     ts = jnp.array([0.0], dtype=jnp.float32)
@@ -208,7 +211,6 @@ def quadratic_dataset() -> Dataset:
     )
     return make_dataset(
         [exp],
-        state_to_output=lambda state: state,
         output_channel_names=tuple(f"c{i}" for i in range(N_DIM)),
     )
 

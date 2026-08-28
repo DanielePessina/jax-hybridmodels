@@ -90,8 +90,8 @@ mask.
 - [`BucketPayload`](/api/data#bucketpayload). One bucket, as stacked
   arrays with a leading `N` axis: `ts [N, T]`, `y_observed [N, T, D]`,
   `yvar [N, T, D]`, `mask [N, T, D]`, `covariates`, `y0 [N, S]`.
-- [`Dataset`](/api/data#dataset). The tuple of buckets plus
-  `state_to_output` and the channel and covariate names.
+- [`Dataset`](/api/data#dataset). The tuple of buckets plus the channel
+  and covariate names. Pure data: it carries no model-shaped callables.
 
 You build `Experiment`s. The library builds `BucketPayload`s and the
 `Dataset`.
@@ -320,7 +320,12 @@ covariates. You mix in:
 - values derived from the current state, such as
   `y[CONC_IDX] / covariates["c_sat"]`;
 - values that depend on time from outside the model, such as a
-  programmed temperature ramp `T0 + rate * t`.
+  programmed temperature ramp. The ready-made profile factories in
+  `hybridmodels.profiles` (`constant_profile`, `step_profile`,
+  `ramp_profile`, `piecewise_linear_profile`) return the pure-JAX
+  callable `t -> value`; their parameters travel as ordinary covariates,
+  so a ramp is `hm.ramp_profile(t0=cov["ramp_t0"], t1=cov["ramp_t1"],
+  v0=cov["T_lo"], v1=cov["T_hi"])(t)`.
 
 Key collision is intentional. A time-varying input may reuse a
 covariate's name, which is how you feed `T(t)` to a predictor that
@@ -352,8 +357,11 @@ concentration, and the output is `[conc, d43]`, where `d43` is derived
 as `mu4 / mu3`. So this is a projection and a derivation, not just a
 slice.
 
-You pass it to [`make_dataset`](/api/data#make_dataset), which stores it
-on the [`Dataset`](/api/data#dataset) and applies it before any loss.
+You pass it to the prediction and training entry points
+(`predict_bucket`, `predict_dataset`, `train_with_optax`,
+`train_with_evosax`), which apply it to each simulated state before the
+loss runs. It belongs to the model, not the data (see ADR-0008): the
+`Dataset` never sees raw states, so it does not carry this callable.
 
 ## y0_fn
 

@@ -180,7 +180,7 @@ result.
 ## Step 4: train with evosax (CMA-ES)
 
 ```python
-from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
+from hybridmodels import EvosaxTrainingConfig, train_with_evosax
 
 predictor = KineticParameters(key=k_init)
 
@@ -196,7 +196,8 @@ config = EvosaxTrainingConfig(
 )
 history, trained_predictor = train_with_evosax(
     predictor, dataset, config,
-    simulate_fn=simulate_fn, solver=solver, key=k_train,
+    simulate_fn=simulate_fn, state_to_output=state_to_output,
+    solver=solver, key=k_train,
 )
 print(f"final best loss: {history[-1]:.6f}")
 ```
