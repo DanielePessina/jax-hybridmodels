@@ -26,7 +26,9 @@ examples = [
     "matplotlib>=3.10.9",
     "openpyxl>=3.1.5",
     "pandas>=3.0.2",
+    "python-libsbml>=5.20.4",
     "rlax>=0.1.9",
+    "sympy>=1.14",
 ]
 
 [build-system]

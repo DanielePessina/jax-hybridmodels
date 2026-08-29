@@ -1,34 +1,52 @@
 # SBML hybrid kinetics
 
-An *external* mechanistic model — the kind you would load from an SBML
-file — plugged into a `hybridmodels` fit, with one of its rate parameters
+A published, curated SBML model — Fujita et al., *Sci. Signal.* 2010, the
+EGF/ERK cascade (9 species, 11 reactions) — loaded from an actual `.xml`
+file and plugged into a `hybridmodels` fit, with one of its rate parameters
 supplied by a neural `BoundedPredictor`.
 
-The mechanistic core is a Michaelis-Menten system. The true maximum
-velocity `Vmax` depends on the enzyme level `E` via `Vmax(E) = 2E`. We
-keep the known physics (Michaelis-Menten with known `Km`) and let an MLP
-*learn* `Vmax` as a function of `E` from noisy S/P time-series across
-experiments at different enzyme levels — the crystallisation pattern
-(known physics for structure, a network for the unknown rate law) applied
-to a standard systems-biology model.
+The file is parsed with a small hand-rolled converter (`sbml_loader.py`):
+`python-libsbml` gives the MathML AST for every kinetic law, `sympy`
+converts it into an expression, and `sympy.lambdify(..., "jax")` turns each
+reaction's rate law into a callable JAX function. The converter is ~300
+lines, example-local, and reads the SBML's own structure: species, global
+and local parameters, stoichiometry, initial assignments, and
+state-dependent assignment rules (which the example uses as its measurement
+model — the paper's scaled "total" readouts `pEGFR_tot`, `pAkt_tot`,
+`pS6_tot`).
 
-The example documents how to swap the hand-written core for a real SBML
-file via `jaxkineticmodel`:
+The hybrid twist is the crystallisation pattern applied to a systems
+biology model: the SBML supplies the known structure (stoichiometry and
+published kinetics), and an MLP learns the one *unknown rate law* — how
+the EGF-EGFR association constant depends on the EGF dose. Reaction `v1`
+is reversible mass-action,
 
-```python
-from jaxkineticmodel.load_sbml.sbml_model import SBMLModel
-kmodel = SBMLModel("model.xml").get_kinetic_model()  # kmodel(ts, y0, params) -> ys
+```
+v1 = Cell * (EGF * EGFR * k1 - EGF_EGFR * k2)
 ```
 
-The external model replaces the whole integration block — it carries its
-own diffrax solver, tolerances, and adjoint — so `simulate_fn` injects the
-neural rate into its params and calls it directly.
+so the example declares the forward constant `k1` unknown and lets the
+network supply it as `Vmax(dose)` (the reverse constant `k2` stays from the
+file). The truth is `Vmax(dose) = 2 * dose`. Data is simulated from the
+SBML at four EGF doses with noisy readouts; the fit must recover the rate
+law from the dose-response time series alone.
+
+Two numerical lessons are documented in the example's docstring:
+
+- **Keep the reverse term.** An irreversible uptake law drives EGFR to
+  exactly zero, and the solver grinds on the resulting kink (some parameter
+  values take >50k steps and fail). The reversible law has a well-defined
+  equilibrium everywhere.
+- **Kvaerno3, not Kvaerno5.** Kvaerno5's Newton solve diverges at specific
+  parameter values (sharp threshold behaviour); Kvaerno3 integrates the
+  whole parameter space in under ~100 steps.
 
 ```bash
 uv run python examples/sbml_hybrid/train_sbml_hybrid.py
 ```
 
-Note: `jaxkineticmodel` currently pins `jax==0.4.35` / `optax==0.2.3`,
-which conflict with `hybridmodels`' `jax>=0.10` / `optax>=0.2.8`, so it
-must run in a separate environment. The recipe — not the dependency — is
-the point.
+Dependencies (`python-libsbml`, `sympy`) are in the `examples` extra:
+
+```bash
+uv sync --extra examples
+```

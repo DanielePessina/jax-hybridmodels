@@ -1,41 +1,40 @@
-"""Hybrid kinetics: a mechanistic SBML-style core with a neural rate.
+"""Hybrid kinetics from a real SBML file: the Fujita 2010 EGF/ERK model.
 
-Shows how an *external* mechanistic model — the kind you'd load from an
-SBML file — plugs into a ``hybridmodels`` fit, with one of its rate
-parameters supplied by a neural ``BoundedPredictor``.
+Loads a published, curated SBML model (Fujita et al., Sci. Signal. 2010 —
+the EGF/ERK cascade, 9 species, 11 reactions) with a small hand-rolled
+``python-libsbml`` + ``sympy`` converter (``sbml_loader.py``), then applies
+the crystallisation pattern: the SBML file supplies the *structure* (known
+stoichiometry and kinetics), and an MLP ``BoundedPredictor`` learns one
+*unknown rate law* — how the EGF-EGFR association constant depends on the
+EGF dose.
 
-The mechanistic core here is a hand-written Michaelis-Menten system that
-stands in for an external kinetic model. With **jaxkineticmodel**
-installed, the swap is:
+Concretely, reaction ``v1`` in the file is reversible mass-action with a
+fixed forward constant::
 
-    from jaxkineticmodel.load_sbml.sbml_model import SBMLModel
-    kmodel = SBMLModel("model.xml").get_kinetic_model()
-    # kmodel(ts, y0, params) -> ys : a full solver wrapper, carrying its
-    # own diffrax solver, tolerances, and adjoint.
+    v1 = Cell * (EGF * EGFR * k1 - EGF_EGFR * k2)
 
-The external model **replaces the whole integration block**, not just the
-vector field: it owns its solver, so inside ``simulate_fn`` you call it
-directly instead of ``solver.diffeqsolve``. To make a rate neural, inject
-the predictor's output into the params dict you hand it:
+We declare the forward constant unknown and let the network supply it as
+``Vmax(dose)``, keeping the reverse constant ``k2`` from the file. The
+truth is ``Vmax(dose) = 2 * dose``. Data: simulate the SBML (with ``Vmax``
+set to the truth) at four EGF doses, observe the paper's scaled readouts
+``pEGFR_tot``, ``pAkt_tot``, ``pS6_tot`` (the SBML's own assignment rules),
+add noise. The fit then has to recover ``Vmax(dose)`` from the dose-response
+time series alone — the same shape as the crystallisation example (learn
+``Vmax(E)``), with the mechanistic core coming from an actual SBML file
+instead of a hand-written vector field.
 
-    def simulate_fn(predictors, ts, covariates, y0, solver):
-        params = {**kmodel.parameters, "Vmax": predictors[0](covariates).reshape(())}
-        return kmodel(ts, y0, params)   # hybridmodels' ``solver`` is unused
+Two numerical lessons from building this example:
 
-That is exactly what the hand-written ``simulate_fn`` below does, except it
-uses ``solver.diffeqsolve`` because the core here is a bare vector field.
-(Caveat: jaxkineticmodel currently pins ``jax==0.4.35`` and
-``optax==0.2.3``, which conflict with ``hybridmodels``' ``jax>=0.10`` /
-``optax>=0.2.8``, so run it in a separate environment; the recipe is what
-matters.)
-
-The hybrid twist: the true maximum velocity ``Vmax`` depends on the enzyme
-level ``E`` via ``Vmax(E) = 2 E``. We give the model a fixed mechanistic
-form (Michaelis-Menten with known ``Km``) and let an MLP
-``BoundedPredictor`` *learn* ``Vmax`` as a function of ``E`` from noisy
-S/P time-series across experiments at different enzyme levels. This is the
-crystallisation pattern — known physics for the structure, a network for
-the unknown rate law — applied to a standard systems-biology model.
+- **Keep the reverse term.** An irreversible uptake law drives EGFR to
+  exactly zero and the solver grinds on the resulting kink (the EGFR
+  turnover rate fighting a zero binding flux) — some parameter values then
+  take >50k steps and ``diffeqsolve`` fails. The reversible law has a
+  well-defined equilibrium at every parameter value.
+- **Kvaerno3, not Kvaerno5.** Both are implicit, but Kvaerno5's Newton
+  solve diverges at specific parameter values (a sharp threshold: Vmax
+  0.5445 fails, 0.54450196 succeeds), while Kvaerno3 integrates the whole
+  parameter space in 50-100 steps. jaxkineticmodel's default is Kvaerno5;
+  that choice does not survive contact with this model.
 
 Run:
     uv run python examples/sbml_hybrid/train_sbml_hybrid.py
@@ -46,114 +45,122 @@ from __future__ import annotations
 import diffrax
 import jax
 import jax.numpy as jnp
+import sympy as sp
 from jax import Array
+from sbml_loader import SBMLKineticModel
 
 import hybridmodels as hm
 from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
 from hybridmodels.solver import SolverConfig
 
-# ---------------------------------------------------------------------------
-# The mechanistic core (would come from an SBML file via jaxkineticmodel).
-# ---------------------------------------------------------------------------
+SBML_PATH = "examples/sbml_hybrid/Fujita_SciSignal2010.xml"
 
-KM_TRUE: float = 1.0
-# The unknown rate law the network must recover.
-TRUE_VMAX_SLOPE: float = 2.0
-ENZYME_LEVELS: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0)
-N_TIMESTEPS: int = 40
-T_MAX: float = 8.0
-NOISE_STD: float = 0.02
-S0: float = 2.0
+DOSES: tuple[float, ...] = (0.05, 0.1, 0.2, 0.4)  # EGF dose per experiment
+N_TIMESTEPS = 40
+T_MAX = 300.0  # pEGFR_tot peaks ~t=100, pS6_tot only after ~t=250
+NOISE_STD = 0.02  # relative to each channel's range
 
 
-def mechanistic_core(t: Array, y: Array, args) -> Array:
-    """A bare kinetic vector field: ``(t, y, (params, ...)) -> dy/dt``.
+def build_hybrid_model() -> SBMLKineticModel:
+    """Load the SBML and swap v1's fixed association constant for a neural one.
 
-    This is the shape a hand-written core takes. jaxkineticmodel's public
-    ``get_kinetic_model()`` instead returns a full solver wrapper
-    ``(ts, y0, params) -> ys`` — the swap point is the integration block,
-    as documented in the module docstring.
+    The published law is reversible mass-action::
+
+        v1 = Cell * (EGF * EGFR * k1 - EGF_EGFR * k2)
+
+    We treat the forward constant ``k1`` as the unknown rate law and let the
+    network supply it as ``Vmax(dose)``, keeping the reverse constant ``k2``
+    from the file. Keeping the reverse term matters numerically: an
+    irreversible uptake law drives EGFR to exactly zero, and the solver then
+    grinds on the resulting kink (the EGFR turnover rate fights a zero
+    binding flux); the reversible law has a well-defined equilibrium at
+    every parameter value.
     """
-    params, _boundary, _assignments = args
-    vmax, km = params["Vmax"], params["Km"]
-    s = y[0]
-    rate = vmax * s / (km + s)  # Michaelis-Menten
-    return jnp.stack([-rate, rate])
+    model = SBMLKineticModel.from_file(SBML_PATH)
+    egf, egfr, e_egfr = sp.Symbol("EGF"), sp.Symbol("EGFR"), sp.Symbol("EGF_EGFR")
+    model.replace_flux(
+        "v1_reaction_1",
+        expr=sp.Symbol("Cell") * (
+            sp.Symbol("Vmax") * egf * egfr - sp.Symbol("reaction_1_k2") * e_egfr
+        ),
+        extra_params=("Vmax",),
+    )
+    return model
 
 
-def build_dataset() -> Dataset:
-    """One experiment per enzyme level; S and P observed on a shared grid.
+def build_dataset(model: SBMLKineticModel) -> Dataset:
+    """One experiment per EGF dose; the paper's scaled readouts, noisy.
 
-    The true Vmax(E) = 2E drives the data; the network never sees E's role
-    beyond the covariate it is asked to map to Vmax.
+    The truth is ``Vmax(dose) = 2 * dose``; the network never sees the dose's
+    role beyond the covariate it is asked to map to Vmax.
     """
     key = jax.random.PRNGKey(0)
     ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
+
+    clean = {}
+    for d in DOSES:
+        params = {**model.params, "EGF": float(d), "Vmax": 2.0 * d}
+        ys = model.integrate(_solver(), ts, model.y0, params)
+        clean[d] = model.output_fn(ys, model.params)
+
+    noise_std = {k: NOISE_STD * float(jnp.max(jnp.abs(v))) for k, v in clean.items()}
+
     experiments = []
-    for e in ENZYME_LEVELS:
-        vmax_true = TRUE_VMAX_SLOPE * e
-        y0 = jnp.asarray([S0, 0.0], dtype=jnp.float32)
-
-        def vector_field(t, y, args):
-            params, _bc, _ar = args
-            vmax, km = params["Vmax"], params["Km"]
-            rate = vmax * y[0] / (km + y[0])
-            return jnp.stack([-rate, rate])
-
-
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(vector_field),
-            diffrax.Tsit5(),
-            t0=ts[0],
-            t1=ts[-1],
-            dt0=0.05,
-            y0=y0,
-            args=({"Vmax": vmax_true, "Km": KM_TRUE}, None, None),
-            saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-10),
-            max_steps=4096,
+    for i, d in enumerate(DOSES):
+        key = jax.random.fold_in(jax.random.PRNGKey(0), i)
+        obs = clean[d] + jnp.stack(
+            [noise_std[d] * jax.random.normal(key, ts.shape) for _ in range(3)],
+            axis=-1,
         )
-        ys = jnp.asarray(sol.ys)
-        s_obs = ys[:, 0] + NOISE_STD * jax.random.normal(key, ts.shape)
-        p_obs = ys[:, 1] + NOISE_STD * jax.random.normal(key, ts.shape)
         experiments.append(
             make_experiment(
-                covariates={"enzyme": float(e)},
+                covariates={"dose": float(d)},
                 channels={
-                    "S": ChannelObs(ts=ts, values=s_obs),
-                    "P": ChannelObs(ts=ts, values=p_obs),
+                    name: ChannelObs(ts=ts, values=obs[:, k])
+                    for k, name in enumerate(("pEGFR_tot", "pAkt_tot", "pS6_tot"))
                 },
-                y0_fn=lambda c, ch: jnp.asarray([S0, 0.0], dtype=jnp.float32),
-                exp_id=f"E_{e:g}",
+                y0_fn=lambda c, ch: model.y0,
+                exp_id=f"dose_{d:g}",
             )
         )
-    return make_dataset(experiments, output_channel_names=("S", "P"))
+    return make_dataset(experiments, output_channel_names=("pEGFR_tot", "pAkt_tot", "pS6_tot"))
+
+
+def _solver() -> SolverConfig:
+    return SolverConfig(
+        solver=diffrax.Kvaerno3(),
+        rtol=1e-4,
+        atol=1e-6,
+        max_steps=50_000,
+        dt0=1.0,  # start big; the fast transient is short, PID adapts
+    )
 
 
 # ---------------------------------------------------------------------------
-# The hybrid model: mechanistic core + a neural rate parameter.
+# The hybrid model: SBML core + a neural rate parameter.
 # ---------------------------------------------------------------------------
 
 
 def simulate_fn(predictors, ts, covariates, y0, solver):
-    """Integrate with ``Vmax`` supplied by the network, everything else fixed."""
+    """Integrate the SBML core with ``Vmax`` supplied by the network."""
 
     def vector_field(t, y, args):
-        # The network maps the enzyme covariate to a bounded Vmax.
-        vmax_neural = predictors[0]({"enzyme": covariates["enzyme"]}).reshape(())
+        vmax = predictors[0]({"dose": covariates["dose"]}).reshape(())
         params, bc, ar = args
-        params = {**params, "Vmax": vmax_neural}
-        return mechanistic_core(t, y, (params, bc, ar))
+        params = {**params, "Vmax": vmax}
+        return model.vector_field(t, y, (params, bc, ar))
 
-
-    params = {"Vmax": 1.0, "Km": KM_TRUE}
+    params = {**model.params, "EGF": covariates["dose"]}
     sol = solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0, args=(params, None, None))
     return jnp.asarray(sol.ys)
 
 
+model = build_hybrid_model()
+
+
 def state_to_output(state: Array) -> Array:
-    """Both species are measured."""
-    return state
+    """The SBML's own readouts: the scaled 'total' assignment rules."""
+    return model.output_fn(state, model.params)
 
 
 # ---------------------------------------------------------------------------
@@ -162,27 +169,20 @@ def state_to_output(state: Array) -> Array:
 
 
 def main() -> None:
-    ds = build_dataset()
+    ds = build_dataset(model)
     print(hm.describe_buckets(ds))
 
-    # An MLP with one bounded output: Vmax in [0.5, 10].
+    # An MLP with one bounded output: Vmax in [0.05, 1.0].
     predictor = hm.BoundedPredictor(
-        input_keys=("enzyme",),
-        in_scaler=hm.BoundScaler(bounds=((0.0, 3.0),)),
+        input_keys=("dose",),
+        in_scaler=hm.BoundScaler(bounds=((0.03, 0.5),)),
         inner=hm.MLPPredictor(
             in_size=1, out_size=1, width_size=16, depth=2,
             activation_name="tanh", key=jax.random.PRNGKey(0),
         ),
-        out_scaler=hm.BoundScaler(bounds=((0.5, 10.0),)),
+        out_scaler=hm.BoundScaler(bounds=((0.05, 1.0),)),
     )
     predictors = (predictor,)
-    solver = SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-7,
-        atol=1e-9,
-        max_steps=4096,
-        dt0=0.05,
-    )
     mask = hm.trainable_mask(predictors)
 
     history, trained = hm.train_with_optax(
@@ -197,7 +197,7 @@ def main() -> None:
         ),
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
-        solver=solver,
+        solver=_solver(),
         trainable=mask,
         key=jax.random.PRNGKey(0),
     )
@@ -205,17 +205,17 @@ def main() -> None:
     # Diagnostics on the held-in data.
     preds = hm.predict_dataset(
         trained, ds, simulate_fn=simulate_fn,
-        state_to_output=state_to_output, solver=solver,
+        state_to_output=state_to_output, solver=_solver(),
     )
     hm.print_metrics(
         hm.compute_metrics(preds, ds), header=f"fit (final data loss {history[-1]:.3e})"
     )
 
-    # The recovered rate law vs truth: Vmax(E) should be ~2E.
-    print("\nrecovered Vmax(E) vs truth 2E:")
-    for e in ENZYME_LEVELS:
-        learned = hm.evaluate_predictor(trained[0], {"enzyme": float(e)})
-        print(f"  E={e:4.1f}  learned Vmax={learned:6.3f}  truth={TRUE_VMAX_SLOPE * e:6.3f}")
+    # The recovered rate law vs truth: Vmax(dose) should be ~2 * dose.
+    print("\nrecovered Vmax(dose) vs truth 2*dose:")
+    for d in DOSES:
+        learned = hm.evaluate_predictor(trained[0], {"dose": float(d)})
+        print(f"  dose={d:4.2f}  learned Vmax={learned:6.3f}  truth={2.0 * d:6.3f}")
 
 
 if __name__ == "__main__":
