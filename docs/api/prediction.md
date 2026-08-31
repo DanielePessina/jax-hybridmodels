@@ -46,7 +46,7 @@ in ``predict_dataset``, never inside the compiled region.
 | `predictors` | `PyTree[eqx.Module]` | The trainable part of the model, typically a tuple of ``BoundedPredictor`` leaves. Forwarded to ``simulate_fn`` unchanged. |
 | `bp` | `BucketPayload` | One bucket. Its ``ts``, ``covariates``, and ``y0`` are vmapped along ``N``. |
 | `simulate_fn` |  | User-supplied integrator with signature ``(predictors, ts, covariates, y0, solver) -> [T, S]``. |
-| `state_to_output` |  | Pure ``[T, S] -> [T, D]`` map from full state to observed channels. A property of the model, passed explicitly (ADR-0008). |
+| `state_to_output` |  | Pure ``[T, S] -> [T, D]`` map from full state to observed channels. A property of the model, passed explicitly. |
 | `solver` |  | ``SolverConfig``. All its fields are static, so it enters the compiled kernel as configuration rather than as data. |
 
 **Returns**
@@ -83,7 +83,7 @@ is a tuple rather than one array, because buckets differ precisely in
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `state_to_output` |  | Pure mapping ``[T, S] -> [T, D]`` from full simulator state to the observed channels. A property of the model, passed here rather than stored on the ``Dataset`` (ADR-0008). |
+| `state_to_output` |  | Pure mapping ``[T, S] -> [T, D]`` from full simulator state to the observed channels. A property of the model, passed here rather than stored on the ``Dataset``. |
 
 **Returns**
 

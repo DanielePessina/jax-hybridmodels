@@ -574,7 +574,7 @@ def _shared_tournament(
 
 
 def _tournament_enabled(config: OptaxTrainingConfig) -> bool:
-    """The tournament is enabled implicitly, never by its own flag (ADR-0002).
+    """The tournament is enabled implicitly, never by its own flag.
 
     One attempt has nothing to choose between, and zero steps trains no
     candidate, so either alone makes it a no-op.
@@ -757,7 +757,7 @@ def train_with_optax(
 
     ``state_to_output`` is the pure mapping ``[T, S] -> [T, D]`` from full
     simulator state to observed channels. It is a property of the model,
-    passed here rather than stored on the ``Dataset`` (ADR-0008).
+    passed here rather than stored on the ``Dataset``.
 
     ``trainable`` is a boolean mask matching ``predictors``. Omitting it
     defaults to :func:`hybridmodels.trainable.trainable_mask`, which marks

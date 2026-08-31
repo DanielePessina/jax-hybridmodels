@@ -63,9 +63,6 @@ This penalty is not a feasibility mechanism. Reparameterisation enforces the
 physical bounds; the penalty keeps the predictor away from a saturated region
 where optimization becomes slow.
 
-For the full picture — measured points, penalty-only points, the trajectory
-penalty, and choosing between them — see [Penalties and bounds](/guide/penalties).
-
 ## Initialization and freezing
 
 Construct predictors with an explicit JAX key. The default trainability mask
@@ -81,8 +78,3 @@ Every predictor must round-trip through Equinox serialization. A custom
 predictor with a special initialization scheme can implement
 `initialized_with_key(self, key)` for tournament restarts.
 
-## Next steps
-
-- [Custom predictors](/guide/custom-predictors)
-- [Recommendations](/guide/recommendations)
-- [Predictors API](/api/predictors)

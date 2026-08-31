@@ -135,7 +135,7 @@ class RandomFourierPredictor(Predictor):
     activation. Holding them still is the caller's job, via the
     trainability mask built in :func:`_build_mask`; a module cannot
     declare a field untrainable, because trainability is a mask over the
-    pytree rather than a property of a class (ADR-0003).
+    pytree rather than a property of a class.
 
     ``bandwidth`` is the standard deviation of the frequency draw. It
     sets the length scale the features can resolve: large values fit

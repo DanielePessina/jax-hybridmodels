@@ -93,9 +93,3 @@ For a dataset, every experiment must use the same shape for a given key. The
 vector is passed to `simulate_fn` unchanged. Use its components in the vector
 field or pass the vector to an array-based custom predictor.
 
-## Next steps
-
-- [Data and buckets](/guide/data)
-- [Predictors and bounds](/guide/predictors)
-- [Training](/guide/training)
-- [Custom predictors](/guide/custom-predictors)

@@ -196,10 +196,3 @@ recovered $\omega$ lands within about 1% of `OMEGA_TRUE`. If it does not,
 the integrator and loss path has a wiring bug, usually in
 `state_to_output` or `y0_fn`.
 
-## What's next
-
-- [Crystallisation walkthrough](/examples/crystallisation). The real
-  problem.
-- [Concepts](/guide/concepts). Pytree conventions, predictor inputs
-  versus covariates, bound scaling.
-- [API reference](/api/). Every public symbol, by module.

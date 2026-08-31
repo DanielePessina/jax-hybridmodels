@@ -388,7 +388,7 @@ def validate_penalty_points(
     measured points, extras, or both; an uncovered leaf would otherwise be
     a silent no-penalty, the failure mode this penalty exists to prevent.
     For embedded predictors (state-derived inputs) the trajectory penalty
-    (ADR-0009) is the instrument, and the error says so.
+    is the instrument, and the error says so.
 
     Point-shape mismatches are checked unconditionally, so a user cannot
     carry a silently-wrong extras array into a run that later enables it.
@@ -426,7 +426,7 @@ def validate_penalty_points(
                 f"penalty: leaf {idx} (input_keys={leaf.input_keys!r}) has no penalty "
                 "points: its inputs do not all resolve to dataset covariates and no "
                 "entry was given in penalty_points for it. Add penalty_points for "
-                "this leaf, or use trajectory_penalty_fn (see ADR-0009) for "
+                "this leaf, or use trajectory_penalty_fn for "
                 "embedded predictors."
             )
 
@@ -491,7 +491,7 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
     reaches, including regions no training trajectory visited when the
     points say so (a ``box_grid`` sweep, user extras); for "did *this*
     solve push an input out of range" the trajectory-aware penalty
-    (ADR-0009) is the right instrument.
+    is the right instrument.
 
     Parameters
     ----------

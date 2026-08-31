@@ -547,7 +547,7 @@ use).
   9-experiment dataset. Add only if convergence is unreliable in practice.
 - Multi-phase optax (phase 2 is a single phase). Adding phases would muddy
   the "evosax → optax" narrative.
-- Updates to `SPEC.md`, ADRs, or `CONTEXT.md`. This example exercises only
+- Updates to `SPEC.md` or `CONTEXT.md`. This example exercises only
   existing requirements (R-A2, R-F1, R-F3, R-E5) and introduces no new
   domain language.
 

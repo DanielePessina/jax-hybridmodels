@@ -72,8 +72,3 @@ The run format does not store `simulate_fn`, `state_to_output`, `Dataset`, or
 the trainability mask. Keep those in importable user code and rebuild them
 when you resume or evaluate a run.
 
-## Next steps
-
-- [Model interface](/guide/model-interface)
-- [Custom predictors](/guide/custom-predictors)
-- [Troubleshooting](/guide/troubleshooting)

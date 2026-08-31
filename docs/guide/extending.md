@@ -51,7 +51,7 @@ wherever you run.
 `state_to_output` maps the full state `[T, S]` to the observed channels
 `[T, D]`. It is a plain callable, and it belongs to the model, not the
 data: pass it to `predict_*` and `train_with_*`. (It used to live on the
-`Dataset`; see ADR-0008.) Swap it to change what a run measures.
+`Dataset`.) Swap it to change what a run measures.
 
 ## Custom losses
 
@@ -90,9 +90,6 @@ once per step, outside the bucket loop, with the per-leaf point arrays the
 default penalty would evaluate at. Use it for weight decay, a
 monotonicity term, or anything else the bound penalty does not express.
 Both `OptaxTrainingConfig` and `EvosaxTrainingConfig` take it.
-
-For the design of the default penalty — measured points, penalty-only
-points, coverage — see [Penalties and bounds](/guide/penalties).
 
 ## Trajectory-aware penalties (embedded hybrid models)
 
@@ -155,7 +152,7 @@ over time.
 for" are just experiments with no observations: give each channel
 `values=jnp.array([])` (its `ts` still defines the integration grid, and
 the mask is all-False, so the data loss is zero and only the trajectory
-penalty fires). See ADR-0009.
+penalty fires).
 
 ## Custom training loops
 
@@ -237,7 +234,7 @@ the tuple.
 `Getting Started` lists the five things that go into a working model:
 the experiments (dataset), `simulate_fn`, `state_to_output`, the
 predictors, and the solver. The library keeps them apart on purpose —
-ADR-0001 rejects a `Model` wrapper class — but nothing stops you from
+Nothing stops you from
 bunching them up in your own container and passing that around:
 
 ```python

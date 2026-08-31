@@ -75,8 +75,3 @@ and static fields. Rebuild the template with the original bounds, warps,
 activation names, and dimensions. Training configs containing executable
 callables are returned as metadata markers and must be rebound explicitly.
 
-## Next steps
-
-- [Recommendations](/guide/recommendations)
-- [Model interface](/guide/model-interface)
-- [Extending hybridmodels](/guide/extending)

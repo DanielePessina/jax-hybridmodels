@@ -129,7 +129,7 @@ an implicit default.
 
 ``state_to_output`` is the pure mapping ``[T, S] -> [T, D]`` from full
 simulator state to observed channels. It is a property of the model,
-passed here rather than stored on the ``Dataset`` (ADR-0008).
+passed here rather than stored on the ``Dataset``.
 
 ``trainable`` is a boolean mask matching ``predictors``. Omitting it
 defaults to :func:`hybridmodels.trainable.trainable_mask`, which marks
@@ -338,7 +338,7 @@ initial-population modes.
 keyword-only and required. ``state_to_output`` is the pure mapping
 ``[T, S] -> [T, D]`` from full simulator state to observed channels; a
 property of the model, passed here rather than stored on the ``Dataset``
-(ADR-0008). ``trainable`` defaults to
+``trainable`` defaults to
 :func:`hybridmodels.trainable.trainable_mask`, and must select at
 least one scalar.
 

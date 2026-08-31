@@ -394,15 +394,3 @@ terminal size worse, which is the same least-expressive-model lesson the
 [hybrid ODE](/examples/hybrid-ode#results) and [custom
 predictor](/examples/custom-predictor#results) examples show.
 
-## What's next
-
-- [Crystallisation (mechanistic)](/examples/crystallisation-mechanistic).
-  Same dataset and ODE, four fitted scalars instead of two networks,
-  trained by CMA-ES.
-- [Harmonic oscillator](/examples/pendulum). A synthetic counterpart with
-  a known correct answer.
-- [Recommendations](/guide/recommendations). Bounds, tolerances,
-  freezing, guarded division.
-- [Training](/guide/training). Phases, tournaments, population search.
-- [API: Data](/api/data), [API: Predictors](/api/predictors),
-  [API: Training](/api/training).

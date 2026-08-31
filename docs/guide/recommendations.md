@@ -318,8 +318,3 @@ inside the vector field. If you do that, say so loudly in a comment.
 `train_with_optax(predictors, dataset, config, key)` raises `TypeError`.
 The barrier is deliberate. It makes the seed visible at every call site.
 
-## What's next
-
-- The [crystallisation walkthrough](/examples/crystallisation). All
-  of the above, applied.
-- [API reference](/api/). Every public symbol, by module.

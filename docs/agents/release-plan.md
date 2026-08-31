@@ -1,6 +1,6 @@
 # Release plan — `hybridmodels` v1 → publication
 
-Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), the ADRs, and [`build-plan.md`](./build-plan.md). This document is the **release-readiness and reframing plan**: it covers JAX-correctness hardening, the extensibility seams (public training kernels, injectable optimizer, penalty hook, evosax algorithms), folding example patterns into the library, the docs rewrite, the marimo→scripts migration, new examples, and SPEC/ADR reconciliation. Each workstream ends with a verifiable exit criterion. Nothing here reopens ADR-0001..0007 except where noted and gated behind a new ADR.
+Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), and [`build-plan.md`](./build-plan.md). This document is the **release-readiness and reframing plan**: it covers JAX-correctness hardening, the extensibility seams (public training kernels, injectable optimizer, penalty hook, evosax algorithms), folding example patterns into the library, the docs rewrite, the marimo→scripts migration, new examples, and SPEC reconciliation. Each workstream ends with a verifiable exit criterion. Nothing here reopens recorded SPEC decisions except where noted and gated behind an explicit SPEC amendment.
 
 ## Locked decisions (from the grilling session)
 
@@ -10,7 +10,7 @@ Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), the A
 | Q2 | Extensibility = public `hybridmodels.training.kernels` + config hooks (optimizer injectable, penalty hook). Not a full engine abstraction. |
 | Q3 | Fold only the 4 strong pure-library patterns: `metrics`, `diffrax_solve`, `describe_buckets`+`count_trainable_params`, `evaluate`+`default_trainable`. Defer plotting/synthetic-data/symlog/bespoke plots. |
 | Q4 | Optimizer: `(name | factory(learning_rate)->GradientTransformation | raw GradientTransformation)`. Names and factories are wrapped in `inject_hyperparams`; a raw instance is returned as-is and an lr change on one requires a reset. |
-| Q5 | `state_to_output` moves **off the Dataset** onto the model/prediction call. Dataset becomes pure data. ADR-worthy. |
+| Q5 | `state_to_output` moves **off the Dataset** onto the model/prediction call. Dataset becomes pure data. A recorded SPEC decision (R-D7). |
 | Q6 | Evosax: add an algorithm registry + register more strategies (keep CMA-ES default). |
 | Q7 | Examples reordered: code-first (custom training loop) then worked examples. jaxkineticmodel joins the others, not flagship. |
 | Q8 | Convert the 4 marimo notebooks to plain scripts; delete marimo dependency, HTML embeds, orphaned html, ruff/ty exemptions, skills. Single-source scripts into VitePress docs. |
@@ -43,7 +43,7 @@ Exit criterion: a user can write a custom training loop against public `hybridmo
 Exit criterion: each folded helper is in `src/`, has tests, and is used by the migrated examples (proving it's not dead).
 
 1. **`hybridmodels.metrics`** — masked per-channel MSE/RMSE/MAE/R². Today 4 implementations: `_shared/_diagnostics.py:49-106`, `crystallisation/notebook.py:1002-1036`, `batch_reactor/notebook.py:1228-1252`, `hybrid_ode/notebook.py:1203-1214`. API: `compute_metrics(predictions, bp_or_dataset) -> per-channel metrics dataclass`. Plots stay out of the library.
-2. **`diffrax_solve`** — a public helper that wraps `ODETerm`/`SaveAt(ts=...)`/`stepsize_controller()`/`max_steps`/`adjoint`/`jnp.asarray(sol.ys)`. Name is chosen for greppability: `diffrax_solve`. Lives beside `prediction.py` or on `SolverConfig` as a method. Keeps `simulate_fn` user-written (ADR-0005) — only the invocation is folded. Used by all migrated examples; kills ~18 boilerplate copies.
+2. **`diffrax_solve`** — a public helper that wraps `ODETerm`/`SaveAt(ts=...)`/`stepsize_controller()`/`max_steps`/`adjoint`/`jnp.asarray(sol.ys)`. Name is chosen for greppability: `diffrax_solve`. Lives beside `prediction.py` or on `SolverConfig` as a method. Keeps `simulate_fn` user-written — only the invocation is folded. Used by all migrated examples; kills ~18 boilerplate copies.
 3. **`describe_buckets(dataset) -> str`** in `data.py` — ~8 sites, two already named `describe_buckets`.
 4. **`count_trainable_params(predictors, mask)`** next to `trainable.py` — 2 identical sites.
 5. **`evaluate(predictor, covariates) -> float`** — predictor→float readout, ~6 sites.
@@ -54,7 +54,7 @@ Exit criterion: each folded helper is in `src/`, has tests, and is used by the m
 
 Exit criterion: VitePress site builds clean; landing reframed; every stale/wrong doc fixed; API pages regenerated.
 
-1. **Reframe the landing** around the actual selling points: (a) regular & irregular data via bucketing, (b) embedding neural networks inside an ODE solver, (c) correct jit/vmap/autodiff, (d) extensibility/modularity where relevant. Tone per the equinox/diffrax/pysr research: "in a nutshell" landing, anti-magic rhetoric, "switch things out in the obvious way", stated expectations, "you own the physics" (ADR-0005).
+1. **Reframe the landing** around the actual selling points: (a) regular & irregular data via bucketing, (b) embedding neural networks inside an ODE solver, (c) correct jit/vmap/autodiff, (d) extensibility/modularity where relevant. Tone per the equinox/diffrax/pysr research: "in a nutshell" landing, anti-magic rhetoric, "switch things out in the obvious way", stated expectations, "you own the physics".
 2. **Structure** — adopt the Kidger template: Landing → Getting started → Usage (data & bucketing, writing a simulate_fn, predictors & state_to_output, custom losses, custom training loops, extending hybridmodels) → Examples → API (Basic/Advanced split) → FAQ/Tricks/Citation. Add an **"Extending hybridmodels"** page (the extension-points bullet page; "It's completely possible to hack your own training setup").
 3. **Fix the stale/wrong content**:
    - `docs/guide/training.md:101-111` — tournament keeps the **best** candidate, not the first survivor (code + tests pin best-scoring-wins).
@@ -85,9 +85,9 @@ Exit criterion: each new example runs end-to-end and is documented.
 
 ### WS7 — Release readiness
 
-Exit criterion: SPEC/ADR reconciled, test gaps closed, README updated, package publishes to PyPI.
+Exit criterion: spec and code reconciled, test gaps closed, README updated, package publishes to PyPI.
 
-1. **SPEC/ADR reconciliation** — reconcile `NeuralNPolynomial` built-but-deferred; update §3 layout; config sketches; R-T2/R-T4 defaults; add a short ADR for the WS2/WS3/WS5 decisions that are hard to reverse (state_to_output off the Dataset is ADR-worthy; optimizer-injection + kernels-public are softer, document in CONTEXT).
+1. **SPEC reconciliation** — reconcile `NeuralNPolynomial` built-but-deferred; update §3 layout; config sketches; R-T2/R-T4 defaults; record the WS2/WS3/WS5 decisions that are hard to reverse in SPEC (state_to_output off the Dataset is R-D7; optimizer-injection + kernels-public are softer, document in CONTEXT).
 2. **Test-gap closure** — `trainable=` end-to-end through a trainer; custom-loss callable through a trainer; dict/tuple-shaped predictor pytrees through `train_with_*`/`predict_*`; standalone custom-`Predictor` serialisation round-trip in pytest (not just the example).
 3. **README** — update the docs/commands sections to reflect the marimo removal and new structure.
 4. **Version + publish** — `hybridmodels` is available on PyPI; set version, build, publish.

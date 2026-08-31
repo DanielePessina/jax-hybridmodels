@@ -447,7 +447,7 @@ class TestDatasetMetadata:
         # covariate_names follow declared keys (sorted, since order isn't user-controlled).
         assert set(ds.covariate_names) == {"a", "b"}
         # The Dataset is pure data: the projection is a model property and is
-        # passed to prediction and training separately (ADR-0008).
+        # passed to prediction and training separately.
         assert not hasattr(ds, "state_to_output")
 
 

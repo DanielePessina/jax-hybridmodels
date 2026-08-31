@@ -225,8 +225,7 @@ class Dataset(eqx.Module):
     ``bucket_payloads`` is the dispatch list, one compiled kernel per bucket
     shape. The ``Dataset`` carries no model-shaped callables: it never sees
     full simulator states, and ``state_to_output`` — a property of the model,
-    not the data — is passed to prediction and training as a parameter (see
-    ADR-0008).
+    not the data — is passed to prediction and training as a parameter.
 
     Attributes
     ----------
@@ -513,7 +512,7 @@ def make_dataset(
        ``BucketPayload``. Buckets come out in ascending ``T`` order.
 
     The ``Dataset`` is pure data: ``state_to_output``, being a property of
-    the model, is passed to prediction and training separately (ADR-0008).
+    the model, is passed to prediction and training separately.
 
     Parameters
     ----------

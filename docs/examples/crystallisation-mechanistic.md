@@ -237,12 +237,3 @@ Only the trainable component and the training loop change.
 | Default budget      | 600 gradient steps                  | 80 generations × 64 individuals     |
 | Param count         | ~thousands per branch               | 4                                   |
 
-## What's next
-
-- [Crystallisation (hybrid MLP)](/examples/crystallisation). The
-  end-to-end walkthrough.
-- [Recommendations](/guide/recommendations). Bounds, tolerances,
-  freezing, guarded division.
-- [Training](/guide/training). Optax, evosax, and the tournament.
-- [API: Training](/api/training). Full reference for
-  `EvosaxTrainingConfig` and `train_with_evosax`.

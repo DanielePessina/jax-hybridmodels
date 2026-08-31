@@ -1,6 +1,6 @@
 # Build plan — `hybridmodels` v1
 
-Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), the ADRs in [`docs/adr/`](../adr/), and the umbrella PRD at GitHub issue [#1](https://github.com/DanielePessina/jax-hybridmodels/issues/1).
+Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), and the umbrella PRD at GitHub issue [#1](https://github.com/DanielePessina/jax-hybridmodels/issues/1).
 
 This document is the **fine-grained, orchestrator-driven execution plan** for shipping `hybridmodels` v1 against the locked spec. Read alongside SPEC.md §8 (build order — coarse) and §6 (test plan).
 
@@ -23,10 +23,10 @@ Two roles. Both are Claude. The orchestrator does not write source or test code 
 
 ### Subagent (one Claude per module-cycle)
 
-- Receives a prompt that names the spec sections, ADRs, and source-package files it must read first.
+- Receives a prompt that names the spec sections and source-package files it must read first.
 - Performs **one red→green TDD cycle for one module**: write the test file, run it red, implement, run it green.
 - Does **not** commit. Hands the orchestrator a list of changed files and a one-line summary fit for a commit body.
-- Does **not** push, edit `MEMORY.md`, or modify CLAUDE.md / SPEC.md / ADRs.
+- Does **not** push, edit `MEMORY.md`, or modify CLAUDE.md / SPEC.md.
 
 ### Two ways to spawn a subagent
 
@@ -343,8 +343,7 @@ You are working on jax-hybridmodels, a JAX/Equinox library being TDD-built per a
 2. /Users/danielepessina/code/jax-hybridmodels/AGENTS.md
 3. /Users/danielepessina/code/jax-hybridmodels/SPEC.md  (focus: §<relevant section> + REQUIREMENTS R-<relevant ids>)
 4. /Users/danielepessina/code/jax-hybridmodels/CONTEXT.md  (terms used: <term1>, <term2>, ...)
-5. /Users/danielepessina/code/jax-hybridmodels/docs/adr/<relevant ADRs>.md
-6. /Users/danielepessina/code/jax-hybridmodels/docs/agents/build-plan.md  (this phase: §<phase number>)
+5. /Users/danielepessina/code/jax-hybridmodels/docs/agents/build-plan.md  (this phase: §<phase number>)
 
 ## Source-package reference
 
@@ -366,7 +365,7 @@ The source package is *behaviour reference*, not structure reference. The new pa
 - All `eqx.Module` configuration in `eqx.field(static=True)`; only float arrays as dynamic leaves.
 - Predictors must round-trip through `eqx.tree_serialise_leaves`. If you add a predictor, also extend `tests/test_predictors_serialise.py`'s parametrise list.
 - No new abstractions beyond what the spec names. If tempted, stop and write a question instead.
-- Do NOT commit. Do NOT push. Do NOT touch CLAUDE.md / SPEC.md / ADRs / MEMORY.md.
+- Do NOT commit. Do NOT push. Do NOT touch CLAUDE.md / SPEC.md / MEMORY.md.
 
 ## Definition of done for this run
 

@@ -66,7 +66,7 @@ def predict_bucket(
         ``(predictors, ts, covariates, y0, solver) -> [T, S]``.
     state_to_output
         Pure ``[T, S] -> [T, D]`` map from full state to observed channels.
-        A property of the model, passed explicitly (ADR-0008).
+        A property of the model, passed explicitly.
     solver
         ``SolverConfig``. All its fields are static, so it enters the
         compiled kernel as configuration rather than as data.
@@ -104,7 +104,7 @@ def predict_dataset(
     state_to_output
         Pure mapping ``[T, S] -> [T, D]`` from full simulator state to the
         observed channels. A property of the model, passed here rather than
-        stored on the ``Dataset`` (ADR-0008).
+        stored on the ``Dataset``.
 
     Returns
     -------

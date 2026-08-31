@@ -111,7 +111,7 @@ That cuts both ways. It reports saturation wherever the point set
 reaches, including regions no training trajectory visited when the
 points say so (a ``box_grid`` sweep, user extras); for "did *this*
 solve push an input out of range" the trajectory-aware penalty
-(ADR-0009) is the right instrument.
+is the right instrument.
 
 **Parameters**
 
@@ -550,7 +550,7 @@ With the penalty on, every ``BoundedPredictor`` leaf must be covered by
 measured points, extras, or both; an uncovered leaf would otherwise be
 a silent no-penalty, the failure mode this penalty exists to prevent.
 For embedded predictors (state-derived inputs) the trajectory penalty
-(ADR-0009) is the instrument, and the error says so.
+is the instrument, and the error says so.
 
 Point-shape mismatches are checked unconditionally, so a user cannot
 carry a silently-wrong extras array into a run that later enables it.

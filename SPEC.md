@@ -1,8 +1,8 @@
 # jax-hybridmodels architecture specification
 
-**Status:** v1 build order (§8) complete and green; the package is in pre-1.0 refinement. Locked through interactive grilling on 2026-05-03; amended 2026-08-26 to reinstate bound penalties (§2.2, R-P1..R-P7, [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md)); amended 2026-08-31 to reverse the collocation default for measured points plus user penalty-only points (same ADR, rewritten), and to document the evosax history divergence (R-P6).
+**Status:** v1 build order (§8) complete and green; the package is in pre-1.0 refinement. Locked through interactive grilling on 2026-05-03; amended 2026-08-26 to reinstate bound penalties (§2.2, R-P1..R-P7); amended 2026-08-31 to reverse the collocation default for measured points plus user penalty-only points (R-P4), and to document the evosax history divergence (R-P6).
 
-This spec is the architectural source of truth. It pairs with [`CONTEXT.md`](./CONTEXT.md) (the domain glossary) and the ADRs in [`docs/adr/`](./docs/adr/). Read CONTEXT.md first if any term here looks unfamiliar.
+This spec is the architectural source of truth. It pairs with [`CONTEXT.md`](./CONTEXT.md), the domain glossary. Read CONTEXT.md first if any term here looks unfamiliar.
 
 ---
 
@@ -22,7 +22,7 @@ This section is the contract. Implementation is judged against these line by lin
 
 #### Architecture
 
-- **R-A1**: There is no `Model` wrapper class. A "model" is the loose triple `(predictors, simulate_fn, solver_config)` where `predictors` is a `PyTree[eqx.Module]`. See [ADR-0001](./docs/adr/0001-no-model-wrapper-class.md), [ADR-0006](./docs/adr/0006-predictors-as-pytree.md).
+- **R-A1**: There is no `Model` wrapper class. A "model" is the loose triple `(predictors, simulate_fn, solver_config)` where `predictors` is a `PyTree[eqx.Module]`.
 - **R-A2**: `simulate_fn` is a pure user-written function with the mandatory signature in §4.2. Its first argument is `predictors: PyTree[eqx.Module]`, runtime-permissive (any pytree shape: tuple, list, dict, NamedTuple, single Module). The canonical convention shown in CONTEXT.md and `examples/crystallisation/train_kinetic.py` is a tuple, single-predictor case = `(BP,)`. The framework supplies vmap, jit, and gradient flow; the user supplies physics. The function is passed into training/prediction routines.
 - **R-A3**: Composition over inheritance everywhere. Predictors follow Equinox's abstract/final pattern. No method overriding.
 - **R-A4**: Bound-scaling is decoupled from `Predictor`. Implemented as composition (`BoundedPredictor` wraps a `Predictor` with input/output `BoundScaler`s).
@@ -37,7 +37,7 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-D4**: `BucketPayload` is not promoted to a class. It is a `NamedTuple` of stacked `[N, T, ...]` arrays.
 - **R-D5**: Covariates are passed as `dict[str, float | Array]` (scalar or rank-1 vector per experiment, constant in time, named, with no canonical-order packed array). Stored as 0-d or 1-d JAX arrays after `make_experiment`. Each covariate key must have the same shape across a dataset.
 - **R-D6**: `y0` is the full model state, constructed at data-import time via a user-supplied `y0_fn` hook and stored on `Experiment`.
-- **R-D7**: `state_to_output` maps a full state trajectory to observed channels and is applied externally to `simulate_fn`'s output, before loss. It is a property of the *model*, passed to prediction and training as a keyword argument — not stored on the `Dataset` ([ADR-0008](./docs/adr/0008-state-to-output-belongs-to-model.md)).
+- **R-D7**: `state_to_output` maps a full state trajectory to observed channels and is applied externally to `simulate_fn`'s output, before loss. It is a property of the *model*, passed to prediction and training as a keyword argument — not stored on the `Dataset`.
 - **R-D8**: `split_dataset(dataset, *, train, val, test, key)` is provided.
 - **R-D9**: Exogenous time-varying quantities enter through **profile factories** (`hybridmodels.profiles`: `constant_profile`, `step_profile`, `ramp_profile`, `piecewise_linear_profile`). A profile is a pure-JAX callable `t -> Array` evaluated inside the user's vector field at the solver's continuous `t`; its *parameters* travel as ordinary R-D5 covariates, so the data layer, bucketing, and the mandatory `simulate_fn` signature are untouched. The two flat edges are exact: `ramp_profile(t0, t1, v0, v1)` returns `v0` before `t0` and `v1` after `t1`; `piecewise_linear_profile` extends the first/last values outward. Factories validate host-side parameters (`t1 > t0`, strictly increasing knots) and skip validation for traced values so they stay `jit`/`vmap`-safe.
 
@@ -48,7 +48,7 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-T3**: `length_schedule` (per-phase fraction in `(0, 1]`) is implemented as a runtime mask cutoff to avoid JIT recompile across phase boundaries.
 - **R-T4**: `reset_optimiser_state` per phase rebuilds the optimiser at that phase boundary. It is a required per-phase tuple with no default: every phase states explicitly whether it resets, so a phase switch cannot silently keep a stale optimiser.
 - **R-T5**: `bucket_step(predictors, bucket_payload, length_mask_fraction)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. It takes no `opt_state`: the optimiser update lives in a separate jitted `apply_update`, which is what the rest of this requirement already says. The bound penalty is *not* computed here; it is charged once per step by `build_penalty_step` (public in `hybridmodels.training.kernels`), outside the bucket loop.
-- **R-T6**: Shared tournament only ([ADR-0002](./docs/adr/0002-shared-tournament-only.md)). Implicitly enabled when `tournament_steps > 0 AND tournament_attempts > 1`. Reuses the main loop's compiled `bucket_step` and `apply_update`. Every surviving candidate is scored on the data term with a forward-only pass and the **lowest-scoring** one is returned; ties keep the earlier attempt, so the result is a deterministic function of `key`.
+- **R-T6**: Shared tournament only. Implicitly enabled when `tournament_steps > 0 AND tournament_attempts > 1`. Reuses the main loop's compiled `bucket_step` and `apply_update`. Every surviving candidate is scored on the data term with a forward-only pass and the **lowest-scoring** one is returned; ties keep the earlier attempt, so the result is a deterministic function of `key`.
 - **R-T7**: Tournament failure handling: on per-attempt failure (diffrax error, non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original `predictors` pytree with a `RuntimeWarning`.
 - **R-T8**: `Predictor.initialized_with_key(key)` is a documented per-leaf protocol used by the tournament; default free-function implementation is `reinitialize_with_key(predictor, key)` for one Module. Across the `predictors` pytree, the tournament splits the per-attempt key by traversal order (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently. Identical-shape sibling predictors get *different* re-init weights.
 - **R-T9**: Per-phase state resets. `patience` and the `restore_best` running minimum are both scoped to a horizon, not to the run. `patience` resets at every phase boundary, so a plateau at the end of one phase cannot stop the next before its new learning rate acts. `best_loss`/`best_predictors` reset at a boundary where `length_schedule` changes, because losses measured over a prefix and losses measured over the full window are not comparable and one running minimum across both lands in the shortest phase. The restored model therefore always comes from the final horizon.
@@ -68,15 +68,15 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-P1**: Bounds stay enforced by reparameterisation; the penalty is an *additional* term, never the feasibility mechanism. A physical bound violation remains unrepresentable.
 - **R-P2**: `BoundScaler.to_latent` guards `logit` with a linear continuation (`soft_logit`), not `jnp.clip`. Rationale: a hard clip has exactly zero derivative outside the box, and sitting mid-graph that zero propagates to every upstream parameter, silently dropping state-derived sensitivities from the ODE adjoint. Inside `[logit_eps, 1-logit_eps]` the map is exactly the previous one.
 - **R-P3**: Penalties hinge on the latent, never the physical output. `from_latent`'s derivative underflows to exactly `0.0` past `|z/T| ~ 15`, so a physical-space penalty vanishes exactly where saturation is worst.
-- **R-P4**: See [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md). The default penalty is evaluated at *points*: the measured points (the input vectors the loss actually sees at observed cells, gathered by `data_penalty_points` and following the length-mask prefix per phase) plus any user-supplied penalty-only points (`penalty_points`, positional per `BoundedPredictor` leaf in traversal order, physical units, no measurements needed). `box_grid(in_scaler, n_per_dim)` is the collocation-as-extension recipe: a deterministic tensor-product sweep of the input box, uniform in *warped* coordinates so log warps cover decades evenly. It requires no change to `simulate_fn`, `BoundedPredictor.__call__`, `predict_bucket`, or the `loss(pred_obs, bp)` contract, and is invariant to pytree nesting. When the penalty is enabled, every leaf must have at least one point source (measured, extras, or both), else the run raises pointing at the trajectory penalty for embedded predictors.
+- **R-P4**: The default penalty is evaluated at *points*: the measured points (the input vectors the loss actually sees at observed cells, gathered by `data_penalty_points` and following the length-mask prefix per phase) plus any user-supplied penalty-only points (`penalty_points`, positional per `BoundedPredictor` leaf in traversal order, physical units, no measurements needed). `box_grid(in_scaler, n_per_dim)` is the collocation-as-extension recipe: a deterministic tensor-product sweep of the input box, uniform in *warped* coordinates so log warps cover decades evenly. It requires no change to `simulate_fn`, `BoundedPredictor.__call__`, `predict_bucket`, or the `loss(pred_obs, bp)` contract, and is invariant to pytree nesting. When the penalty is enabled, every leaf must have at least one point source (measured, extras, or both), else the run raises pointing at the trajectory penalty for embedded predictors.
 - **R-P5**: Penalty weight is opt-in, default zero. In the Optax path it is passed to the jitted penalty kernel as a traced 0-d array (like `length_mask_fraction`) so changing it never retraces; the Evosax path folds a closed-over Python float into the fitness (never traced, so it stays out of the population vmap).
 - **R-P6**: `losses_history`, `restore_best`, early stopping, and the tournament score track the data term alone — plus any configured trajectory penalty (R-P8), which is charged inside `bucket_step`'s forward pass and therefore rides in the per-step loss; the **bound** penalty is the one reported separately via `TrainingUI.on_step_end(penalty=...)`. Evosax is the documented exception: it ranks by one scalar with no aux channel, so its `losses_history` (best-so-far) folds the bound penalty in when configured — same type, same position, different meaning from the Optax series, and the docstring says so.
 - **R-P7**: `penalty_weight` is deliberately not an R-T2 phase-keyed field. Length 1 broadcasts across phases; any other length must equal `len(steps)`. R-T2's enumerated fields all lack a safe default, which is why they are mandatory; `penalty_weight` has an unambiguous off state. Convention: the weight is relative to the per-bucket-averaged data term — the penalty is a mean over its points, charged once per step onto the averaged data gradient — so the same weight means the same thing whatever the dataset or point-count size.
-- **R-P8**: Trajectory-aware penalty, opt-in via `trajectory_penalty_fn(full_state, bp)` + scalar `trajectory_penalty_weight` on both configs, charged in the training step's single forward pass. For embedded predictors the penalty rides in extra ODE state components (whose time-integral is charged; helpers `attach_penalty_state` / `penalty_vector_field` / `strip_penalty_state` / `penalty_integral`); for parallel predictors `trajectory_saturation_penalty` charges output saturation over time. Probe conditions — scenarios to steer toward with no measurements — are all-False-mask experiments (channels carry `values=jnp.array([])`; the `ts` still defines the grid). See [ADR-0009](./docs/adr/0009-trajectory-aware-penalties.md).
+- **R-P8**: Trajectory-aware penalty, opt-in via `trajectory_penalty_fn(full_state, bp)` + scalar `trajectory_penalty_weight` on both configs, charged in the training step's single forward pass. For embedded predictors the penalty rides in extra ODE state components (whose time-integral is charged; helpers `attach_penalty_state` / `penalty_vector_field` / `strip_penalty_state` / `penalty_integral`); for parallel predictors `trajectory_saturation_penalty` charges output saturation over time. Probe conditions — scenarios to steer toward with no measurements — are all-False-mask experiments (channels carry `values=jnp.array([])`; the `ts` still defines the grid).
 
 #### Trainability filter
 
-- **R-F1**: A boolean PyTree mask matching the `predictors` pytree structure is the canonical filter. Same shape consumed by both Optax (`eqx.filter_value_and_grad(..., filter_spec=mask)`) and Evosax (`eqx.partition(predictors, mask)`). See [ADR-0003](./docs/adr/0003-trainability-filter-as-pytree.md).
+- **R-F1**: A boolean PyTree mask matching the `predictors` pytree structure is the canonical filter. Same shape consumed by both Optax (`eqx.filter_value_and_grad(..., filter_spec=mask)`) and Evosax (`eqx.partition(predictors, mask)`).
 - **R-F2**: Default predicate: `eqx.is_inexact_array` (all float arrays trainable).
 - **R-F3**: Freezers are free functions that return a new mask: `freeze_paths`, `freeze_modules_of_type`, `freeze_where`. No `Predictor.set_trainable(...)` method.
 - **R-F4**: Adding new trainability behaviour = adding a function, never a class.
@@ -147,14 +147,9 @@ jax-hybridmodels/                      (repo)
 ├── AGENTS.md                           (orientation for any AI/agent collaborator)
 ├── CLAUDE.md                           (Claude Code-specific entry point)
 ├── docs/
-│   └── adr/
-│       ├── 0001-no-model-wrapper-class.md
-│       ├── 0002-shared-tournament-only.md
-│       ├── 0003-trainability-filter-as-pytree.md
-│       ├── 0004-bucketed-irregular-only.md
-│       ├── 0005-simulate-fn-mandatory-signature.md
-│       ├── 0006-predictors-as-pytree.md
-│       └── 0007-collocation-bound-penalty.md
+│   ├── api/                            (generated API reference)
+│   ├── guide/                          (concepts, predictors, penalties, training, ...)
+│   └── examples/                       (per-example walkthroughs)
 ├── src/
 │   └── hybridmodels/
 │       ├── __init__.py                 (lazy public API re-exports)
@@ -358,7 +353,7 @@ def train_with_optax(
     config: OptaxTrainingConfig,
     *,
     simulate_fn,
-    state_to_output,                 # [T, S] -> [T, D]; model-side, not on the Dataset (ADR-0008)
+    state_to_output,                 # [T, S] -> [T, D]; model-side, not on the Dataset
     solver: SolverConfig,            # required
     trainable=None,                  # PyTree[bool] | None, same shape as predictors; None uses default_trainable
     key,                             # required
@@ -372,7 +367,7 @@ def train_with_evosax(
     config: EvosaxTrainingConfig,
     *,
     simulate_fn,
-    state_to_output,                 # [T, S] -> [T, D]; model-side, not on the Dataset (ADR-0008)
+    state_to_output,                 # [T, S] -> [T, D]; model-side, not on the Dataset
     solver: SolverConfig,            # required
     trainable=None,
     key,
@@ -702,7 +697,7 @@ The source package's verification artifacts live in `hybridcrystals/thesis_train
 
 | Source artifact | New location | Notes |
 |---|---|---|
-| `hybridcrystals/data/irregular.py::IrregularDataset/Batch/_prestack_buckets` | `src/hybridmodels/data.py` | Restructured: per-channel sparse Experiment; `state_to_output` passed to prediction/training (ADR-0008) |
+| `hybridcrystals/data/irregular.py::IrregularDataset/Batch/_prestack_buckets` | `src/hybridmodels/data.py` | Restructured: per-channel sparse Experiment; `state_to_output` passed to prediction/training |
 | `hybridcrystals/regressor_models.py::BoundedRegressor` | `src/hybridmodels/predictors/base.py::BoundedPredictor` | Composition, no inheritance hierarchy |
 | `hybridcrystals/regressor_models.py::RateRegressorPair` | (deleted) | Multi-rate models compose by unpacking the `predictors` tuple in user vector field. R-A6 |
 | `hybridcrystals/regressors/mlp.py` | `src/hybridmodels/predictors/mlp.py` | Strip embedding-related code |

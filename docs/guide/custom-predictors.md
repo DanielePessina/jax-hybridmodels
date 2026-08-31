@@ -112,8 +112,7 @@ The name is discovered by `hasattr`, so there is nothing to register.
 ## Freezing arrays you never want trained
 
 Trainability is a boolean pytree matching your predictors, one flag per
-array leaf, not a property of a class
-([ADR-0003](https://github.com/DanielePessina/jax-hybridmodels/blob/main/docs/adr/0003-trainability-filter-as-pytree.md)).
+array leaf, not a property of a class.
 A module therefore cannot declare one of its own arrays fixed. The
 caller freezes it:
 
@@ -205,11 +204,3 @@ Before you train:
 - [ ] Bounds and named inputs live in a `BoundedPredictor`, not in the
       class.
 
-## What's next
-
-- [Custom predictor example](/examples/custom-predictor). The full
-  procedure applied to a random-Fourier-features regressor inside a
-  hybrid ODE.
-- [Predictors API](/api/predictors). `Predictor`, `BoundedPredictor`,
-  `BoundScaler`, and the re-init helpers.
-- [Trainable masks](/api/trainable). The three freezing functions.

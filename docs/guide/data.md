@@ -95,8 +95,3 @@ train, validation, test = hm.split_dataset(
 
 Use `make_bootstrap_dataset` for sampling experiments with replacement.
 
-## Next steps
-
-- [Model interface](/guide/model-interface)
-- [Training](/guide/training)
-- [Losses API](/api/losses)

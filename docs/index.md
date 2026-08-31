@@ -79,10 +79,3 @@ For a checkout of the repository:
 uv sync
 ```
 
-## Next steps
-
-- [Getting started](/guide/getting-started) — fit a harmonic oscillator.
-- [Concepts](/guide/concepts) — learn the core terminology.
-- [Training](/guide/training) — choose Optax or Evosax.
-- [Examples](/examples/pendulum) — run complete scripts.
-- [API reference](/api/) — inspect the public API.

@@ -263,17 +263,3 @@ kinetic constants feeding a classical rate law. The same interfaces apply,
 and population search is often a good fit for this small parameter set. See
 the [mechanistic crystallisation example](/examples/crystallisation-mechanistic).
 
-## Next steps
-
-- [Concepts](/guide/concepts). The vocabulary, and why each design
-  choice is the way it is. Read this second.
-- [Model interface](/guide/model-interface). The callable boundaries.
-- [Data and buckets](/guide/data). Sparse channels and vector covariates.
-- [Predictors and bounds](/guide/predictors). Scaling and initialization.
-- [Training](/guide/training). Multi-phase schedules, restart tournaments,
-  population search, and freezing.
-- [Custom predictors](/guide/custom-predictors). Writing a predictor
-  family of your own, once `MLPPredictor` is the wrong prior.
-- [Recommendations](/guide/recommendations). Choosing bounds, solver
-  tolerances, and common failure modes.
-- [API reference](/api/). Every public symbol.

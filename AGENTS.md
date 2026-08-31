@@ -1,23 +1,22 @@
 # Agent orientation — jax-hybridmodels
 
-You are working on a **JAX/Equinox library for hybrid (ODE + neural) models**. The v1 build order in SPEC.md §8 is complete and the suite is green; work now is refinement, correctness, and release readiness rather than first implementation. The design is locked in the sense that ADRs are not up for casual revision — but SPEC.md does grow, deliberately, when a decision genuinely needs revisiting (see ADR-0007 for a worked example of reversing a documented non-requirement).
+You are working on a **JAX/Equinox library for hybrid (ODE + neural) models**. The v1 build order in SPEC.md §8 is complete and the suite is green; work now is refinement, correctness, and release readiness rather than first implementation. The design is locked in the sense that SPEC.md's recorded decisions are not up for casual revision — but SPEC.md does grow, deliberately, when a decision genuinely needs revisiting (the penalty redesign is a worked example of reversing a documented choice).
 
 ## Read these first, in order
 
 1. **[`SPEC.md`](./SPEC.md)** — architectural specification. The `REQUIREMENTS` section is the contract. The `Build order (TDD)` section tells you what to implement next.
 2. **[`CONTEXT.md`](./CONTEXT.md)** — domain glossary. Every term used in SPEC and code is defined here.
-3. **[`docs/adr/`](./docs/adr/)** — architectural decision records. Read these before proposing structural changes; the decisions captured there are not up for casual revision.
 
 ## Core invariants (do not break)
 
-- **No `Model` wrapper class.** A "model" is the loose triple `(predictor, simulate_fn, solver_config)`. ([ADR-0001](./docs/adr/0001-no-model-wrapper-class.md))
-- **`simulate_fn` is user-written.** It has a mandatory signature (SPEC §4.2). The framework owns vmap/jit/grad; the user owns physics. ([ADR-0005](./docs/adr/0005-simulate-fn-mandatory-signature.md))
-- **Bucketed-irregular is the only data interface.** No padded `UnscaledBatchedExperiments` pathway. ([ADR-0004](./docs/adr/0004-bucketed-irregular-only.md))
+- **No `Model` wrapper class.** A "model" is the loose triple `(predictor, simulate_fn, solver_config)`.
+- **`simulate_fn` is user-written.** It has a mandatory signature (SPEC §4.2). The framework owns vmap/jit/grad; the user owns physics.
+- **Bucketed-irregular is the only data interface.** No padded `UnscaledBatchedExperiments` pathway.
 - **Composition over inheritance** for predictors, per Equinox's abstract/final pattern. No method overriding.
 - **All predictors must round-trip** through `eqx.tree_serialise_leaves`. This is enforced by `tests/test_predictors_serialise.py` and applies to every new predictor.
-- **Trainability is a boolean PyTree mask**, not a per-class registry. ([ADR-0003](./docs/adr/0003-trainability-filter-as-pytree.md))
+- **Trainability is a boolean PyTree mask**, not a per-class registry.
 - **Training step = full pass over all buckets → accumulate gradients → one optimizer update.** Bucket ≠ step.
-- **Shared-tournament-only.** No vmapped or serial tournament modes. ([ADR-0002](./docs/adr/0002-shared-tournament-only.md))
+- **Shared-tournament-only.** No vmapped or serial tournament modes.
 - **RNG: root key is user-supplied, never defaulted.** Internal subkeys via `rng.fold(root, "name")` (named folds, not chained splits).
 
 ## Toolchain — uv only
@@ -44,7 +43,7 @@ If you need a one-off Python invocation, use `uv run python -c '...'`.
 - **Do not invent abstractions.** If you're tempted to add a class hierarchy, a registry, a wrapper, or a callback layer that isn't in SPEC.md, surface it as a question instead. The spec is intentionally minimal; the user has explicitly rejected over-architecting (Karpathy guidelines were invoked during design).
 - **Surface assumptions.** If the spec is ambiguous on a concrete decision, ask before implementing. Don't fill in defaults silently.
 - **Update `CONTEXT.md` if a term changes meaning.** It's an inline glossary, not a frozen artifact.
-- **Add an ADR** only when (a) the decision is hard to reverse, (b) it would surprise a future reader, (c) there's a real tradeoff. Format in `docs/adr/` next to the existing ones.
+- **Record decisions in SPEC.md.** If a decision is hard to reverse, would surprise a future reader, or carries a real tradeoff, say so explicitly in SPEC.md — there are no separate decision documents.
 
 ## Cross-package context
 

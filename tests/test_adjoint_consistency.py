@@ -10,7 +10,7 @@ error accumulation differ.
 These are integration tests over the public surface (``predict_bucket``,
 ``masked_mse``), not unit tests of inner kernels. The ``simulate_fn``
 they drive forwards ``solver.adjoint`` into the diffrax call — the
-documented contract (ADR-0005: the user owns physics, the framework owns
+documented contract (the user owns physics, the framework owns
 jit/vmap/grad).
 
 One real constraint is pinned here because it is easy to trip over.

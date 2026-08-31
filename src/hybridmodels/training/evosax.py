@@ -422,7 +422,7 @@ def train_with_evosax(
     keyword-only and required. ``state_to_output`` is the pure mapping
     ``[T, S] -> [T, D]`` from full simulator state to observed channels; a
     property of the model, passed here rather than stored on the ``Dataset``
-    (ADR-0008). ``trainable`` defaults to
+    ``trainable`` defaults to
     :func:`hybridmodels.trainable.trainable_mask`, and must select at
     least one scalar.
 

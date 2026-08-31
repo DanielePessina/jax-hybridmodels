@@ -82,8 +82,7 @@ and the returned model would be the least-trained one in the run.
 
 `penalty_weight` charges the objective for predictors pinned against
 their bounds, evaluated at the measured points plus any penalty-only
-points. See
-[Penalties and bounds](/guide/penalties).
+points.
 
 ```python
 config = OptaxTrainingConfig(
@@ -293,8 +292,3 @@ to hang.
 - Use [`fold`](/api/rng#fold) instead of `jr.split` for named subkeys in
   your own code, so inserting a consumer does not shift the others.
 
-## What's next
-
-- [Recommendations](/guide/recommendations). Bounds, tolerances, and the
-  traps.
-- [Training API](/api/training). Full reference for both configs.

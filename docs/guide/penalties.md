@@ -110,7 +110,7 @@ run raises:
 ValueError: penalty: leaf 1 (input_keys=('temperature_C', 'supersaturation')) has
 no penalty points: its inputs do not all resolve to dataset covariates and no
 entry was given in penalty_points for it. Add penalty_points for this leaf, or
-use trajectory_penalty_fn (see ADR-0009) for embedded predictors.
+use trajectory_penalty_fn for embedded predictors.
 ```
 
 The first clause covers **embedded** predictors — leaves whose inputs are
@@ -134,7 +134,7 @@ where the predictor sits:
   derivatives are the per-call penalty rates; the solver integrates them, and
   `trajectory_penalty_fn` charges the time-integral. Helpers:
   `attach_penalty_state`, `penalty_vector_field`, `strip_penalty_state`,
-  `penalty_integral`. See [Extending](/guide/extending#trajectory-aware-penalties).
+  `penalty_integral`.
 - **Parallel** predictors are evaluated above the solve, so no state change is
   needed: `trajectory_saturation_penalty` charges saturation of the predicted
   output channel over time.
@@ -168,9 +168,3 @@ def weight_decay(predictors, points):
 config = hm.OptaxTrainingConfig(..., penalty_fn=weight_decay, penalty_weight=(0.1,))
 ```
 
-## Further reading
-
-- [Predictors and bounds](/guide/predictors)
-- [Training: the saturation penalty in context](/guide/training#the-saturation-penalty)
-- [Extending: the trajectory-penalty recipe](/guide/extending#trajectory-aware-penalties)
-- [Penalties API](/api/penalties)

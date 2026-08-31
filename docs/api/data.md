@@ -121,7 +121,7 @@ moment initialised to zero being the common case.
 | `y0_fn` |  | Hook ``(covariates, channels) -> [S]`` building the full initial state, where ``S`` is the state dimension the user's ``simulate_fn`` integrates. |
 | `exp_id` |  | Optional human-readable id copied to ``Experiment.exp_id``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L254)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L253)</small>
 
 ---
 
@@ -208,8 +208,7 @@ All buckets of a dataset, as pure data.
 ``bucket_payloads`` is the dispatch list, one compiled kernel per bucket
 shape. The ``Dataset`` carries no model-shaped callables: it never sees
 full simulator states, and ``state_to_output`` — a property of the model,
-not the data — is passed to prediction and training as a parameter (see
-ADR-0008).
+not the data — is passed to prediction and training as a parameter.
 
 **Attributes**
 
@@ -252,7 +251,7 @@ Three steps run in order.
    ``BucketPayload``. Buckets come out in ascending ``T`` order.
 
 The ``Dataset`` is pure data: ``state_to_output``, being a property of
-the model, is passed to prediction and training separately (ADR-0008).
+the model, is passed to prediction and training separately.
 
 **Parameters**
 
@@ -267,7 +266,7 @@ the model, is passed to prediction and training separately (ADR-0008).
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with ``_experiments`` kept so ``split_dataset`` can re-bucket subsets. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L496)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L495)</small>
 
 ---
 
@@ -311,7 +310,7 @@ ensemble whose members saw different resamples.
 | --- | --- | --- |
 | `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L642)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L641)</small>
 
 ---
 
@@ -355,7 +354,7 @@ payloads and no ``_experiments``, so it cannot be split again.
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L693)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L692)</small>
 
 ---
 
@@ -376,4 +375,4 @@ debugging and example output. Each line reports the bucket's ``N``
 (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
 fraction of ``[N, T, D]`` cells the mask marks as real observations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L478)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L477)</small>

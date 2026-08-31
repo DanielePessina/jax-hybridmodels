@@ -209,9 +209,3 @@ The parity scatter is noise-floor tight, and the trajectories show the
 fit's worst point: the two coldest runs (least decay in the window), where
 the rate law's relative error concentrates.
 
-## What's next
-
-- [Custom predictors](/guide/custom-predictors). The procedure and the
-  checklist, without this example's physics.
-- [Predictors API](/api/predictors). `Predictor`, `BoundedPredictor`,
-  and the re-init helpers.

@@ -218,7 +218,7 @@ class TestPredictDataset:
     def test_state_to_output_is_an_explicit_parameter(self):
         # predict_dataset takes the projection as a keyword parameter rather
         # than reading it off the Dataset, so the caller owns the swap
-        # (ADR-0008).
+        #
         ds = _dataset()
         ts = jnp.linspace(0.0, 4.0, 6)
         two_channel = make_experiment(

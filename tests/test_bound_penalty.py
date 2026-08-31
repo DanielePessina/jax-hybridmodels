@@ -11,7 +11,7 @@ the data (a deployment region, a future operating point, ...).
 The property that earns this design its place is *pytree invariance*: the
 penalty must find every ``BoundedPredictor`` leaf regardless of how the
 user chose to nest them, because the framework's whole contract is that
-``predictors`` is any pytree (ADR-0006). These tests pin that, plus the
+``predictors`` is any pytree. These tests pin that, plus the
 gradient behaviour that makes the penalty worth adding at all.
 """
 
@@ -252,7 +252,7 @@ class TestBoundPenaltyPytreeInvariance:
         assert float(bound_penalty(bp, points)) >= 0.0
 
     def test_a_bounded_predictor_nested_inside_another_is_found(self):
-        # ADR-0007 claims nesting invariance. An is_leaf-stopped traversal
+        # The penalty claims nesting invariance. An is_leaf-stopped traversal
         # only delivers that for nesting in *containers*: it halts at the
         # outermost BoundedPredictor, so an inner one declares a box that is
         # never penalised.
