@@ -62,9 +62,12 @@ class ChannelObs(eqx.Module):
     channels can be sampled at completely different rates.
     ``make_dataset`` later merges them onto a shared time axis.
 
-    All three arrays share the leading dimension ``Tc``. ``ts`` may be
-    unsorted, since ``_per_experiment_arrays`` sorts when it builds the
-    union axis, but must not repeat a time within one channel.
+    For observed channels, all three arrays share the leading dimension
+    ``Tc``. A probe channel may instead provide nonempty ``ts`` with empty
+    ``values``; its timestamps define the integration grid while contributing
+    no observations. ``ts`` may be unsorted, since
+    ``_per_experiment_arrays`` sorts when it builds the union axis, but must
+    not repeat a time within one channel.
 
     Attributes
     ----------
@@ -98,8 +101,34 @@ class ChannelObs(eqx.Module):
         ts_arr = jnp.asarray(ts)
         values_arr = jnp.asarray(values)
         var_arr = jnp.asarray(variance)
+        if ts_arr.ndim != 1 or values_arr.ndim != 1:
+            raise ValueError(
+                "ChannelObs ts and values must both be rank-1 arrays; got "
+                f"ts.ndim={ts_arr.ndim}, values.ndim={values_arr.ndim}."
+            )
+        if values_arr.shape[0] != 0 and ts_arr.shape != values_arr.shape:
+            raise ValueError(
+                "ChannelObs ts and values must have the same length; got "
+                f"{ts_arr.shape[0]} and {values_arr.shape[0]}"
+            )
         if var_arr.ndim == 0:
             var_arr = jnp.broadcast_to(var_arr, values_arr.shape)
+        elif var_arr.ndim != 1 or var_arr.shape != values_arr.shape:
+            raise ValueError(
+                "ChannelObs variance must be scalar or rank-1 with the same "
+                f"length as values; got shape {var_arr.shape} for values shape {values_arr.shape}."
+            )
+        ts_np = np.asarray(ts_arr)
+        values_np = np.asarray(values_arr)
+        var_np = np.asarray(var_arr)
+        if not np.all(np.isfinite(ts_np)):
+            raise ValueError("ChannelObs timestamps must be finite")
+        if not np.all(np.isfinite(values_np)):
+            raise ValueError("ChannelObs values must be finite")
+        if np.unique(ts_np).size != ts_np.size:
+            raise ValueError("ChannelObs timestamps must not repeat")
+        if np.any(var_np <= 0.0) or not np.all(np.isfinite(var_np)):
+            raise ValueError("ChannelObs variance must be finite and strictly positive")
         self.ts = ts_arr
         self.values = values_arr
         self.variance = var_arr
@@ -115,9 +144,10 @@ class Experiment(eqx.Module):
     Attributes
     ----------
     covariates : dict[str, Array]
-        Named scalar conditions of the run that do not change with time,
-        such as ``temperature_C`` or ``loading``. Every experiment passed to
-        one ``make_dataset`` call must define the same keys.
+        Named scalar or rank-1 vector conditions of the run that do not
+        change with time, such as ``temperature_C`` or a feed composition.
+        Every experiment passed to one ``make_dataset`` call must define the
+        same keys and shapes.
     y0 : Float[Array, "S"]
         Full model state at ``t=0``, of length ``S``. Built by the user's
         ``y0_fn`` hook when the experiment is constructed. The state may
@@ -165,9 +195,10 @@ class BucketPayload(NamedTuple):
         real ``ChannelObs`` entry, ``False`` where the union axis carries a
         time at which that channel was not measured. Every loss reads this
         to know which cells count.
-    covariates : dict[str, Float[Array, "N"]]
+    covariates : dict[str, Array]
         Per-key covariate stacked across the bucket. Same keys as on
-        ``Experiment.covariates``, with an ``N`` axis added.
+        ``Experiment.covariates``, with an ``N`` axis added; scalar values
+        have shape ``[N]`` and vectors have shape ``[N, K]``.
     y0 : Float[Array, "N S"]
         Per-experiment full initial state, stacked.
     n_obs : Int[Array, ""]
@@ -183,7 +214,7 @@ class BucketPayload(NamedTuple):
     y_observed: Float[Array, "N T D"]
     yvar: Float[Array, "N T D"]
     mask: Bool[Array, "N T D"]
-    covariates: dict[str, Float[Array, " N"]]
+    covariates: dict[str, Array]
     y0: Float[Array, "N S"]
     n_obs: Int[Array, ""]
 
@@ -222,7 +253,7 @@ class Dataset(eqx.Module):
 
 def make_experiment(
     *,
-    covariates: dict[str, float],
+    covariates: dict[str, float | Array],
     channels: dict[str, ChannelObs],
     y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array],
     exp_id: str = "",
@@ -239,8 +270,9 @@ def make_experiment(
     Parameters
     ----------
     covariates
-        Scalar run conditions, constant in time. Values are converted to
-        0-d ``jnp`` arrays.
+        Scalar or rank-1 vector run conditions, constant in time. Values are
+        converted to JAX arrays; a given key must have one consistent shape
+        across a dataset.
     channels
         Sparse observations keyed by channel name.
     y0_fn
@@ -250,8 +282,17 @@ def make_experiment(
     exp_id
         Optional human-readable id copied to ``Experiment.exp_id``.
     """
-    cov_arr: dict[str, Array] = {k: jnp.asarray(v) for k, v in covariates.items()}
+    cov_arr: dict[str, Array] = {}
+    for key, value in covariates.items():
+        array = jnp.asarray(value)
+        if array.ndim not in (0, 1):
+            raise ValueError(
+                f"Experiment covariate {key!r} must be scalar or rank-1; got shape {array.shape}"
+            )
+        cov_arr[key] = array
     y0 = jnp.asarray(y0_fn(cov_arr, channels))
+    if y0.ndim != 1:
+        raise ValueError(f"Experiment y0 must be rank-1; got shape {y0.shape}")
     return Experiment(covariates=cov_arr, y0=y0, channels=channels, exp_id=exp_id)
 
 
@@ -300,9 +341,9 @@ def _per_experiment_arrays(
     _ExperimentArrays
         See that class for the per-field shapes.
     """
-    # One pass caches each channel's host-side arrays, accumulates dtypes, and
-    # collects the union timestamp set. The scatter loop below reuses the
-    # cached arrays instead of re-running np.asarray on the eqx-leaf data.
+    # One pass caches each channel's host-side arrays and accumulates dtypes.
+    # The union pass below reuses the cached arrays instead of re-running
+    # np.asarray on the eqx-leaf data.
     channel_arrays: list[
         tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any]]
     ] = []
@@ -319,7 +360,19 @@ def _per_experiment_arrays(
         ts_dtypes.append(ts_np.dtype)
         val_dtypes.append(values_np.dtype)
         var_dtypes.append(variance_np.dtype)
-        union_ts.update(float(t) for t in ts_np.tolist())
+
+    # A decimal timestamp such as 0.1 has different exact binary values in
+    # float32 and float64. Quantize keys to the least precise floating dtype
+    # present so the same physical timestamp is not split into two union rows
+    # merely because channels used different dtypes. Storage still uses the
+    # result dtype selected below.
+    float_ts_dtypes = [dtype for dtype in ts_dtypes if dtype.kind == "f"]
+    if float_ts_dtypes:
+        key_dtype = np.dtype(f"float{min(dtype.itemsize for dtype in float_ts_dtypes) * 8}")
+    else:
+        key_dtype = np.result_type(*ts_dtypes) if ts_dtypes else np.dtype(np.float32)
+    for ts_np, _values_np, _variance_np in channel_arrays:
+        union_ts.update(float(np.asarray(t, dtype=key_dtype)) for t in ts_np.tolist())
 
     sorted_ts = sorted(union_ts)
     ts_to_idx = {t: i for i, t in enumerate(sorted_ts)}
@@ -343,7 +396,7 @@ def _per_experiment_arrays(
         if values_np.shape[0] == 0:
             continue
         for t, v, var in zip(ts_np.tolist(), values_np.tolist(), variance_np.tolist(), strict=True):
-            idx = ts_to_idx[float(t)]
+            idx = ts_to_idx[float(np.asarray(t, dtype=key_dtype))]
             y_observed[idx, d] = v
             yvar[idx, d] = var
             mask[idx, d] = True
@@ -372,6 +425,7 @@ def _validate_experiments(
     ``jnp.stack``, with nothing to say which experiment caused it.
     """
     cov_keys = tuple(sorted(experiments[0].covariates.keys()))
+    cov_shapes = {key: tuple(jnp.asarray(experiments[0].covariates[key]).shape) for key in cov_keys}
     for exp in experiments:
         exp_keys = tuple(sorted(exp.covariates.keys()))
         if exp_keys != cov_keys:
@@ -379,6 +433,13 @@ def _validate_experiments(
                 f"Inconsistent covariate keys: experiment {exp.exp_id!r} has "
                 f"{list(exp_keys)}, expected {list(cov_keys)}"
             )
+        for key in cov_keys:
+            shape = tuple(jnp.asarray(exp.covariates[key]).shape)
+            if shape != cov_shapes[key]:
+                raise ValueError(
+                    f"Inconsistent covariate shape for {key!r}: experiment "
+                    f"{exp.exp_id!r} has {shape}, expected {cov_shapes[key]}"
+                )
         missing = [c for c in output_channel_names if c not in exp.channels]
         if missing:
             raise ValueError(
@@ -472,11 +533,19 @@ def make_dataset(
     if not experiments:
         raise ValueError("make_dataset requires at least one experiment")
     output_channel_names = tuple(output_channel_names)
+    if not output_channel_names:
+        raise ValueError("make_dataset requires at least one output channel")
+    if len(set(output_channel_names)) != len(output_channel_names):
+        raise ValueError("output_channel_names must not contain duplicates")
     cov_keys = _validate_experiments(experiments, output_channel_names)
 
     by_len: dict[int, list[tuple[_ExperimentArrays, Experiment]]] = defaultdict(list)
     for exp in experiments:
         arrays = _per_experiment_arrays(exp, output_channel_names)
+        if arrays.ts.shape[0] == 0:
+            raise ValueError(
+                f"Experiment {exp.exp_id!r} has no timestamps across the requested channels"
+            )
         by_len[arrays.ts.shape[0]].append((arrays, exp))
 
     # Ascending T, so bucket order is a deterministic function of the data
@@ -505,10 +574,12 @@ def _validate_fractions(train: float, val: float, test: float) -> None:
 
 
 def _split_counts(n: int, train: float, val: float, test: float) -> tuple[int, int, int]:
-    """Experiment counts per split. Train and val floor, test takes the remainder.
+    """Experiment counts per split, preserving explicitly empty splits.
 
-    Giving test the remainder rather than its own floor is what makes the
-    three sum to ``n`` exactly, with no experiment dropped.
+    For the normal three-way split, train and val floor and test takes the
+    remainder. When ``test == 0.0``, test is forced to stay empty and any
+    rounding remainder is assigned to the larger fractional remainder of
+    train or val.
 
     A positive fraction that floors to zero is refused. An empty split reads
     downstream as "no validation needed" rather than "lost to rounding", so a
@@ -516,7 +587,18 @@ def _split_counts(n: int, train: float, val: float, test: float) -> tuple[int, i
     """
     n_train = int(np.floor(train * n))
     n_val = int(np.floor(val * n))
-    n_test = n - n_train - n_val
+    if test == 0.0:
+        remainder = n - n_train - n_val
+        if remainder:
+            fractional_train = train * n - n_train
+            fractional_val = val * n - n_val
+            if fractional_train >= fractional_val:
+                n_train += remainder
+            else:
+                n_val += remainder
+        n_test = 0
+    else:
+        n_test = n - n_train - n_val
 
     for name, frac, count in (
         ("train", train, n_train),

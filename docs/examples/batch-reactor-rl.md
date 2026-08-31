@@ -119,6 +119,19 @@ Reference returns: the true deactivation law scores 5.73 against its own noisy d
 
 **The gradient fit edges out PPO.** On a problem this smooth that was the expected outcome, and it is the accurate conclusion: PPO reaches essentially the same model while never touching the adjoint. If the claim were that RL fits better, this page would be an advert rather than a result.
 
+The 600-update default run in pictures:
+
+![Recovered catalyst activity against the hidden truth, one panel per experiment](assets/batch-reactor-rl/04_activity_recovery.png)
+
+![Aged validation runs: Ca against every model](assets/batch-reactor-rl/02_val_trajectories.png)
+
+The activity figure is the honest summary: the truth is a cubic-Hill
+plateau, the fitted exponential is a curve that cannot bend twice, and
+both policies track the plateau — while staying inside their structural
+activity box, no clipping anywhere. The trajectory figure shows why the
+frozen trunk (grey) is worse than predicting the mean on aged runs: it
+runs the batch nearly to completion when fouling has already stalled it.
+
 ## Over-parameterisation, shown rather than described
 
 Training return climbs to 7.49, which is 1.31 times what the true law scores on the same data. Validation return peaks at 6.54 around update 130 and then falls back to 6.3.

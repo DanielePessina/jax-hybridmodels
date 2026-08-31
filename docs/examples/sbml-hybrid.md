@@ -50,3 +50,18 @@ Dependencies (`python-libsbml`, `sympy`) are in the `examples` extra:
 ```bash
 uv sync --extra examples
 ```
+
+## Results
+
+Default settings, seed 0, 120 steps. The three scaled readouts fit to the
+noise floor (`R^2 >= 0.86`, 0.99 on the two fast channels), and the
+association law comes out close to the truth `Vmax(dose) = 2 * dose` —
+recovered from the dose-response time series alone, with the SBML
+structure supplying everything else.
+
+![Predicted against observed SBML readouts](assets/sbml-hybrid/parity.png)
+
+![Learned association constant against the truth](assets/sbml-hybrid/recovered_vmax.png)
+
+`pS6_tot` trails the other two channels: it peaks only after `t = 250`,
+so its terminal ramp is under-sampled at `T_MAX = 300`.

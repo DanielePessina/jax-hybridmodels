@@ -38,9 +38,11 @@ siblings get different fresh weights when the tournament restarts a run.
 
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
@@ -222,18 +224,42 @@ class BoundScaler(eqx.Module):
             )
         bounds = tuple((float(low), float(high)) for low, high in bounds)
         check_bounds(bounds, warp)
+        temperature_arr = jnp.asarray(temperature)
+        if temperature_arr.ndim not in (0, 1) or (
+            temperature_arr.ndim == 1 and temperature_arr.shape[0] != len(bounds)
+        ):
+            raise ValueError(
+                "BoundScaler temperature must be a positive scalar or a vector "
+                f"with one entry per bound; got shape {temperature_arr.shape}."
+            )
+        try:
+            valid_temperature = bool(
+                jnp.all(jnp.isfinite(temperature_arr)) & jnp.all(temperature_arr > 0.0)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "BoundScaler temperature must be finite and strictly positive"
+            ) from exc
+        if not valid_temperature:
+            raise ValueError("BoundScaler temperature must be finite and strictly positive")
+        if not math.isfinite(float(logit_eps)) or not 0.0 < float(logit_eps) < 0.5:
+            raise ValueError(
+                "BoundScaler logit_eps must be finite and lie strictly between 0 and 0.5"
+            )
         self.bounds = bounds
         self.transform = transform
         self.warp = warp
         # Resolved once here, not per call: jnp ops inside a jit trace are
         # staged out, so warping the edges lazily would hand back tracers.
         self.warped_bounds = warp_bounds(bounds, warp)
-        self.temperature = jnp.asarray(temperature)
+        self.temperature = temperature_arr
         self.logit_eps = float(logit_eps)
         # Resolved to a float now, not looked up per call. The static field
         # stays JSON-friendly, and a saved scaler keeps the knee it trained
         # with even if the registry default later changes.
         self.z_knee = float(BOUND_TRANSFORMS[transform].knee) if z_knee is None else float(z_knee)
+        if not math.isfinite(self.z_knee) or self.z_knee < 0.0:
+            raise ValueError("BoundScaler z_knee must be finite and non-negative")
 
     def _lows_highs(self) -> tuple[Array, Array]:
         """Box edges in *physical* units, as two ``[len(bounds)]`` arrays."""
@@ -273,6 +299,19 @@ class BoundScaler(eqx.Module):
         :meth:`input_violation` when an input can leave its box.
         """
         warp = WARPS[self.warp]
+        if warp.requires_positive:
+            nonpositive = jnp.any(x <= 0.0)
+            try:
+                if bool(nonpositive):
+                    raise ValueError(
+                        f"BoundScaler warp={self.warp!r} requires strictly positive runtime inputs"
+                    )
+            except jax.errors.TracerBoolConversionError:
+                x = eqx.error_if(
+                    x,
+                    nonpositive,
+                    f"BoundScaler warp={self.warp!r} requires strictly positive runtime inputs",
+                )
         lows, highs = self._warped_edges()
         normalized = (warp.forward(x) - lows) / (highs - lows)
         t = BOUND_TRANSFORMS[self.transform]
@@ -413,6 +452,19 @@ class BoundedPredictor(Predictor):
                     f"input_keys length {len(resolved_keys)} does not match "
                     f"in_scaler.bounds length {n}; they must agree."
                 )
+        inner_in_size = getattr(inner, "in_size", None)
+        if inner_in_size is not None and int(inner_in_size) != n:
+            raise ValueError(
+                "BoundedPredictor inner input dimension must match in_scaler.bounds; "
+                f"got inner.in_size={inner_in_size} and {n} input bounds."
+            )
+        inner_out_size = getattr(inner, "out_size", None)
+        n_outputs = len(out_scaler.bounds)
+        if inner_out_size is not None and int(inner_out_size) != n_outputs:
+            raise ValueError(
+                "BoundedPredictor inner output dimension must match out_scaler.bounds; "
+                f"got inner.out_size={inner_out_size} and {n_outputs} output bounds."
+            )
         self.input_keys = resolved_keys
         self.in_scaler = in_scaler
         self.inner = inner
@@ -437,7 +489,15 @@ class BoundedPredictor(Predictor):
                 f"(matching input_keys={self.input_keys}); got shape {x.shape}.",
             )
         z_in = self.in_scaler.to_latent(x)
-        z_out = self.inner(z_in)
+        z_out = jnp.asarray(self.inner(z_in))
+        if z_out.ndim == 0 and len(self.out_scaler.bounds) == 1:
+            z_out = jnp.reshape(z_out, (1,))
+        z_out = eqx.error_if(
+            z_out,
+            z_out.ndim != 1 or z_out.shape[0] != len(self.out_scaler.bounds),
+            "BoundedPredictor inner output must be rank-1 with one entry per "
+            f"out_scaler bound; got shape {z_out.shape}.",
+        )
         return self.out_scaler.from_latent(z_out)
 
     def initialized_with_key(self, key: Array) -> BoundedPredictor:

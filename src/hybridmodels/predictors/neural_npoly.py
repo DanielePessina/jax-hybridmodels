@@ -35,6 +35,7 @@ Design choices
 
 from __future__ import annotations
 
+import math
 from typing import cast
 
 import equinox as eqx
@@ -91,18 +92,31 @@ class NeuralNPolynomial(Predictor):
         """
         if not exponents:
             raise ValueError("exponents must contain at least one entry.")
+        resolved_exponents = tuple(float(e) for e in exponents)
+        if any(
+            not math.isfinite(e) or e < 0.0 or not e.is_integer() for e in resolved_exponents
+        ):
+            raise ValueError(
+                "exponents must be finite, non-negative integers for a real polynomial"
+            )
 
-        expected_out = int(out_size) * len(exponents)
+        expected_out = int(out_size) * len(resolved_exponents)
         actual_out = getattr(coeff_net, "out_size", None)
-        if actual_out is None or int(actual_out) != expected_out:
+        if actual_out is not None and int(actual_out) != expected_out:
             raise ValueError(
                 "coeff_net.out_size must equal out_size * len(exponents) = "
-                f"{int(out_size)} * {len(exponents)} = {expected_out}; "
+                f"{int(out_size)} * {len(resolved_exponents)} = {expected_out}; "
                 f"got coeff_net.out_size={actual_out!r}."
+            )
+        actual_in = getattr(coeff_net, "in_size", None)
+        if actual_in is not None and int(actual_in) != int(in_size):
+            raise ValueError(
+                "coeff_net.in_size must equal NeuralNPolynomial.in_size; "
+                f"got {actual_in} and {int(in_size)}."
             )
 
         self.coeff_net = coeff_net
-        self.exponents = tuple(float(e) for e in exponents)
+        self.exponents = resolved_exponents
         self.in_size = int(in_size)
         self.out_size = int(out_size)
 
@@ -114,7 +128,8 @@ class NeuralNPolynomial(Predictor):
         ``basis = sum(x)``. ``exponents`` is a static tuple, so its
         per-call array conversion folds into a compile-time constant.
         """
-        coeffs = jnp.asarray(self.coeff_net(x)).reshape((self.out_size, len(self.exponents)))
+        coeffs_flat = jnp.asarray(self.coeff_net(x)).reshape((self.out_size * len(self.exponents),))
+        coeffs = coeffs_flat.reshape((self.out_size, len(self.exponents)))
         basis = jnp.sum(x)
         powers = basis ** jnp.asarray(self.exponents)
         return jnp.einsum("od,d->o", coeffs, powers)

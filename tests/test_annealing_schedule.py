@@ -87,6 +87,13 @@ def test_exponential_decays_geometrically_to_end_value():
     assert float(sched(50)) == pytest.approx(0.01, abs=1e-4)
 
 
+def test_exponential_with_zero_end_value_reaches_zero():
+    sched = annealing_schedule("exponential", total_epochs=10, end_value=0.0)
+    assert float(sched(0)) == pytest.approx(1.0)
+    assert float(sched(10)) == pytest.approx(0.0)
+    assert float(sched(50)) == pytest.approx(0.0)
+
+
 def test_step_holds_after_the_run_ends():
     """A schedule evaluated past its budget stays at the end value, so a
     loop that runs a couple of steps beyond ``total_epochs`` cannot blow up

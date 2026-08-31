@@ -188,3 +188,13 @@ class TestPositiveFractionMustNotRoundToZero:
         assert len(train._experiments) == 10
         assert val.bucket_payloads == ()
         assert test.bucket_payloads == ()
+
+    def test_zero_test_fraction_stays_empty_after_floor_rounding(self):
+        # A zero test fraction must never receive the remainder left by
+        # flooring the other two fractions. This is a common train/validation
+        # setup and silently leaking one experiment into test is misleading.
+        ds = _dataset(4)
+        train, val, test = split_dataset(ds, train=0.7, val=0.3, test=0.0, key=jr.key(0))
+        assert len(train._experiments) == 3
+        assert len(val._experiments) == 1
+        assert test.bucket_payloads == ()

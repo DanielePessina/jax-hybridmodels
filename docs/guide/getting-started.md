@@ -1,23 +1,12 @@
 # Getting started
 
-## What problem this solves
+## What this package does
 
-You have measurements of something changing over time. You believe an
-ordinary differential equation (ODE) governs it. You can write down
-part of that ODE from first principles, and part of it you cannot: a
-rate that depends on temperature in some unknown way, a correction term
-you know is missing, a growth law nobody has derived.
+Use `hybridmodels` when part of your differential equation is known and part
+is represented by a trainable function. You write the ODE simulation. The
+library handles the predictor PyTree, bucketed observations, and training.
 
-`hybridmodels` fits the part you cannot write down while keeping the
-part you can. This is a **hybrid** modelling package.
-[Diffrax](https://docs.kidger.site/diffrax/) already lets you put a
-neural network in a vector field and differentiate through the solver;
-this library is built on it and does not re-teach it. What it adds is
-the machinery around that: physical ranges that hold by construction,
-ragged per-channel measurements handled without padding, and a training
-loop shaped for both.
-
-Concretely, you supply four things:
+You supply four things:
 
 1. Your measurements, grouped into **experiments** (one experiment is
    one run of the real thing, with its own conditions and its own
@@ -79,8 +68,8 @@ two are library types you fill in.
 the real thing, built with
 [`make_experiment`](/api/data#make_experiment). It holds:
 
-- **covariates**, the conditions that stay fixed for the whole run
-  (temperature, pH, initial loading), given as a dict of named scalars;
+  - **covariates**, the conditions that stay fixed for the whole run
+    (temperature, pH, initial loading, or a feature vector);
 - **channels**, one per measured quantity. Each channel is a
   [`ChannelObs`](/api/data#channelobs) carrying its own timestamps, its
   own values, and a variance. Two channels in one experiment can be
@@ -90,7 +79,7 @@ the real thing, built with
   measured, and this is where you supply their starting values.
 
 **2. A `simulate_fn`.** Your function, with a
-[signature the library fixes](/guide/concepts#simulate-fn):
+[signature the library fixes](/guide/model-interface):
 `(predictors, ts, covariates, y0, solver) -> [T, S]`. It integrates one
 experiment and returns the full state at every requested time. Inside,
 you write the vector field (the right-hand side of your ODE) and call
@@ -116,7 +105,7 @@ a tuple, even when there is only one.
 **5. A [`SolverConfig`](/api/solver#solverconfig).** The Diffrax solver
 instance plus its tolerances, step budget, and adjoint. The **adjoint**
 is the strategy Diffrax uses to get gradients back out of the
-integration; see [Concepts](/guide/concepts#solverconfig).
+integration; see [Recommendations](/guide/recommendations).
 
 [`make_dataset`](/api/data#make_dataset) turns your experiments into a
 [`Dataset`](/api/data#dataset). It merges each experiment's per-channel
@@ -270,18 +259,21 @@ channels, and write a real vector field, and you have the
 the [crystallisation walkthrough](/examples/crystallisation).
 
 Some models have no network at all. Their trainable part is a handful of
-kinetic constants feeding a classical rate law. That works the same way,
-and is usually better fitted by population search than by gradients. See
+kinetic constants feeding a classical rate law. The same interfaces apply,
+and population search is often a good fit for this small parameter set. See
 the [mechanistic crystallisation example](/examples/crystallisation-mechanistic).
 
 ## Next steps
 
 - [Concepts](/guide/concepts). The vocabulary, and why each design
   choice is the way it is. Read this second.
+- [Model interface](/guide/model-interface). The callable boundaries.
+- [Data and buckets](/guide/data). Sparse channels and vector covariates.
+- [Predictors and bounds](/guide/predictors). Scaling and initialization.
 - [Training](/guide/training). Multi-phase schedules, restart tournaments,
   population search, and freezing.
 - [Custom predictors](/guide/custom-predictors). Writing a predictor
   family of your own, once `MLPPredictor` is the wrong prior.
 - [Recommendations](/guide/recommendations). Choosing bounds, solver
-  tolerances, and the traps that cost a debugging session.
+  tolerances, and common failure modes.
 - [API reference](/api/). Every public symbol.

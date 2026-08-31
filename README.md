@@ -1,6 +1,9 @@
 # jax-hybridmodels
 
-A JAX/Equinox library for hybrid models: trainable function approximators (MLP, KAN, ...) composed with user-written ODE dynamics, trained on regular and irregular time-series experiments via bucketed data, with correct jit/vmap/autodiff and extension points at every seam (custom predictors, losses, optimisers, regularisers, and training loops). Crystallisation kinetics is the canonical example, not the scope.
+A JAX/Equinox library for combining user-written ODE dynamics with trainable
+predictors. It supports bounded physical quantities, regular and irregular
+time-series experiments, and Optax or Evosax training. Crystallisation
+kinetics is the canonical example, not the scope.
 
 ## Documentation
 
@@ -18,7 +21,9 @@ Site sections:
   - Plus hybrid-ODE, batch reactor, RL, custom-predictor, and a [Harmonic Oscillator](https://danielepessina.github.io/jax-hybridmodels/examples/pendulum) sanity check with a known optimum.
 - API Reference: per-module pages auto-generated from docstrings.
 
-The full source tree for the site lives under [`docs/`](./docs).
+The full source tree for the site lives under [`docs/`](./docs). Start with
+[Getting started](https://danielepessina.github.io/jax-hybridmodels/guide/getting-started),
+then read [Concepts](https://danielepessina.github.io/jax-hybridmodels/guide/concepts).
 
 ### Examples
 
@@ -140,12 +145,12 @@ dependencies.
 
 ## Contributing
 
-Run the verification gate before pushing:
+Run the verification checks before pushing:
 
 ```bash
 uv run ruff check .        # lint
 uv run ty check src        # typecheck
-uv run pytest -q           # 477 tests
+uv run pytest -q           # test suite
 npm --prefix docs run docs:build   # docs site
 ```
 

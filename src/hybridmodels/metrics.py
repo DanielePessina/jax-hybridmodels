@@ -21,13 +21,20 @@ the losses' NaN discipline.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float
+import jax.tree_util as jtu
+from jaxtyping import Array, Bool, Float, Int
 
 from hybridmodels.data import Dataset
 
 
+@partial(
+    jtu.register_dataclass,
+    data_fields=("n", "mse", "rmse", "mae", "r2"),
+    meta_fields=("name",),
+)
 @dataclass(frozen=True)
 class ChannelMetrics:
     """Metrics for a single output channel.
@@ -36,8 +43,9 @@ class ChannelMetrics:
     ----------
     name : str
         Channel name from ``dataset.output_channel_names``.
-    n : int
-        Number of observed (mask=True) cells behind the stats.
+    n : Int[Array, ""]
+        Scalar number of observed (mask=True) cells behind the stats. It is a
+        JAX scalar so the complete metrics result can pass through ``jit``.
     mse, rmse, mae : Float[Array, ""]
         Error of ``predicted - observed`` over the masked cells.
     r2 : Float[Array, ""]
@@ -46,7 +54,7 @@ class ChannelMetrics:
     """
 
     name: str
-    n: int
+    n: Int[Array, ""]
     mse: Float[Array, ""]
     rmse: Float[Array, ""]
     mae: Float[Array, ""]
@@ -82,34 +90,56 @@ def compute_metrics(
 
     out: dict[str, ChannelMetrics] = {}
     for d, name in enumerate(channels):
-        obs_chunks: list[Array] = []
-        pred_chunks: list[Array] = []
+        n = jnp.asarray(0, dtype=jnp.int32)
+        ss_res = jnp.asarray(0.0)
+        abs_error = jnp.asarray(0.0)
+        ss_tot = jnp.asarray(0.0)
+        mean_observed = jnp.asarray(0.0)
         for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
             mask_d: Bool[Array, "N T"] = bp.mask[..., d]
             obs_d: Float[Array, "N T"] = bp.y_observed[..., d]
             pred_d: Float[Array, "N T"] = pred[..., d]
-            obs_chunks.append(obs_d[mask_d])
-            pred_chunks.append(pred_d[mask_d])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        out[name] = _stats_from_pairs(name, obs, pred)
+            obs_safe = jnp.where(mask_d, obs_d, 0.0)
+            pred_safe = jnp.where(mask_d, pred_d, 0.0)
+            residuals = pred_safe - obs_safe
+            count = mask_d.sum().astype(jnp.int32)
+            count_safe = jnp.maximum(count, 1).astype(obs_safe.dtype)
+            mean_obs = obs_safe.sum() / count_safe
+            combined_count = n + count
+            combined_safe = jnp.maximum(combined_count, 1).astype(obs_safe.dtype)
+            delta = mean_obs - mean_observed
+            between = (
+                delta**2 * n.astype(obs_safe.dtype) * count.astype(obs_safe.dtype) / combined_safe
+            )
+            mean_observed = jnp.where(
+                combined_count > 0,
+                (n.astype(obs_safe.dtype) * mean_observed + count.astype(obs_safe.dtype) * mean_obs)
+                / combined_safe,
+                0.0,
+            )
+            n = n + count
+            ss_res = ss_res + jnp.sum(jnp.where(mask_d, residuals**2, 0.0))
+            abs_error = abs_error + jnp.sum(jnp.where(mask_d, jnp.abs(residuals), 0.0))
+            ss_tot = ss_tot + jnp.sum(jnp.where(mask_d, (obs_safe - mean_obs) ** 2, 0.0)) + between
+        out[name] = _stats_from_sufficient_stats(name, n, ss_res, abs_error, ss_tot)
     return out
 
 
-def _stats_from_pairs(name: str, obs: Array, pred: Array) -> ChannelMetrics:
-    """Compute the canonical (MSE, RMSE, MAE, R^2) set from two flat arrays."""
-    n = int(obs.shape[0])
-    if n == 0:
-        nan = jnp.asarray(float("nan"))
-        return ChannelMetrics(name, 0, nan, nan, nan, nan)
-    residuals = pred - obs
-    mse = jnp.mean(residuals**2)
+def _stats_from_sufficient_stats(
+    name: str,
+    n: Array,
+    ss_res: Array,
+    abs_error: Array,
+    ss_tot: Array,
+) -> ChannelMetrics:
+    """Build the canonical metrics from masked sufficient statistics."""
+    denom = jnp.maximum(n, 1).astype(ss_res.dtype)
+    mse = ss_res / denom
     rmse = jnp.sqrt(mse)
-    mae = jnp.mean(jnp.abs(residuals))
-    ss_res = jnp.sum(residuals**2)
-    ss_tot = jnp.sum((obs - jnp.mean(obs)) ** 2)
-    # ss_tot == 0 means constant observed values — R^2 is undefined.
-    r2 = jnp.where(ss_tot > 0.0, 1.0 - ss_res / ss_tot, jnp.asarray(float("nan")))
+    mae = abs_error / denom
+    # ss_tot == 0 means constant observed values — R^2 is undefined. It is
+    # also undefined for a channel with no observations.
+    r2 = jnp.where(n > 0, jnp.where(ss_tot > 0.0, 1.0 - ss_res / ss_tot, jnp.nan), jnp.nan)
     return ChannelMetrics(name, n, mse, rmse, mae, r2)
 
 
@@ -138,6 +168,6 @@ def print_metrics(
         r2_val = float(m.r2)
         r2_str = "    nan " if r2_val != r2_val else f"{r2_val:>8.4f}"
         print(
-            f"  {m.name:<12} {m.n:>6d} {float(m.mse):>13.4e} "
+            f"  {m.name:<12} {int(m.n):>6d} {float(m.mse):>13.4e} "
             f"{float(m.rmse):>13.4e} {float(m.mae):>13.4e} {r2_str}"
         )

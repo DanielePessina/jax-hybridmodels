@@ -49,6 +49,7 @@ include = [
     "/docs/**/*.md",
     "/docs/.vitepress/config.ts",
     "/docs/package.json",
+    "/docs/examples/assets/**",
     "/docs/adr",
     "/examples/**/*.py",
     "/scripts/**/*.py",

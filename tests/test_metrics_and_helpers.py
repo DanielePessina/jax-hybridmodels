@@ -149,6 +149,34 @@ def test_compute_metrics_constant_observations_give_nan_r2():
     assert float(m.r2) != float(m.r2)  # NaN
 
 
+def test_compute_metrics_is_jit_compatible():
+    ds = make_oscillator_dataset()
+    predictions = tuple(bp.y_observed for bp in ds.bucket_payloads)
+    metrics = jax.jit(compute_metrics)(predictions, ds)
+    assert metrics["position"].n == sum(int(jnp.sum(bp.mask)) for bp in ds.bucket_payloads)
+    assert float(metrics["position"].mse) == pytest.approx(0.0)
+
+
+def test_compute_metrics_r2_uses_observations_across_buckets():
+    from hybridmodels.data import BucketPayload
+
+    def payload(value):
+        return BucketPayload(
+            ts=jnp.array([[0.0]]),
+            y_observed=jnp.array([[[value]]]),
+            yvar=jnp.ones((1, 1, 1)),
+            mask=jnp.ones((1, 1, 1), dtype=bool),
+            covariates={},
+            y0=jnp.zeros((1, 1)),
+            n_obs=jnp.array(1, dtype=jnp.int32),
+        )
+
+    bp0, bp1 = payload(0.0), payload(10.0)
+    ds = Dataset(bucket_payloads=(bp0, bp1), output_channel_names=("x",), covariate_names=())
+    metrics = compute_metrics((jnp.zeros_like(bp0.y_observed), jnp.zeros_like(bp1.y_observed)), ds)
+    assert float(metrics["x"].r2) == pytest.approx(-1.0)
+
+
 def _constant_observation_dataset() -> Dataset:
     from hybridmodels.data import ChannelObs, make_dataset, make_experiment
 

@@ -196,6 +196,33 @@ class TestInitializedWithKey:
         )
 
 
+def test_coeff_net_without_size_metadata_is_supported():
+    # Predictor's public contract is callable Array -> Array; size metadata
+    # is optional. NeuralNPolynomial can validate the actual output at call
+    # time instead of rejecting a valid custom predictor at construction.
+    from hybridmodels.predictors.base import Predictor
+
+    class ArrayOnlyPredictor(Predictor):
+        weights: Float[Array, "1 2"]
+
+        def __call__(self, x: Array) -> Array:
+            return x @ self.weights
+
+    npoly = NeuralNPolynomial(
+        coeff_net=ArrayOnlyPredictor(weights=jnp.ones((1, 2))),
+        exponents=(0.0, 1.0),
+        in_size=1,
+        out_size=1,
+    )
+    assert npoly(jnp.array([0.5])).shape == (1,)
+
+
+@pytest.mark.parametrize("exponents", [(-1.0, 0.0), (0.5,)])
+def test_exponents_must_define_a_real_polynomial(exponents):
+    with pytest.raises(ValueError, match="exponents"):
+        _make_npoly(in_size=1, out_size=1, exponents=exponents)
+
+
 class TestZeroExponentNonNaN:
     def test_zero_exponent_at_zero_basis_is_finite(self):
         # x sums to zero so basis = 0; exponent tuple includes 0.0 so the

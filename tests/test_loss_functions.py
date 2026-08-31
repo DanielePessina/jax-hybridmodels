@@ -184,6 +184,21 @@ def test_bal_loss_unchanged_under_experiment_duplication(loss_fn) -> None:
     assert jnp.allclose(base, duplicated, atol=1e-6, rtol=0)
 
 
+@pytest.mark.parametrize("loss_fn", [bal_mse, bal_mle])
+def test_bal_loss_ignores_experiments_with_no_selected_observations(loss_fn) -> None:
+    # Probe experiments are intentionally all-False masks. They should
+    # contribute zero data loss without diluting the measured experiments in
+    # the per-experiment mean.
+    pred = jnp.array([[[2.0], [2.0]], [[99.0], [99.0]]])
+    y = jnp.array([[[1.0], [3.0]], [[0.0], [0.0]]])
+    mask = jnp.array([[[True], [True]], [[False], [False]]])
+    bp_with_probe = _make_bp(y_observed=y, mask=mask)
+
+    bp_observed_only = _make_bp(y_observed=y[:1], mask=mask[:1])
+    expected = loss_fn(pred[:1], bp_observed_only)
+    assert jnp.allclose(loss_fn(pred, bp_with_probe), expected, atol=1e-6, rtol=0)
+
+
 def test_masked_mle_doubling_yvar_yields_predicted_delta() -> None:
     pred, y, mask = _baseline_fixture()
     var_low = 0.5 * jnp.ones_like(y)
@@ -346,3 +361,18 @@ class TestResolveLossFn:
             resolve_loss_fn(custom, None, (0.5, 0.5))
         with pytest.raises(ValueError, match="channel_weights"):
             resolve_loss_fn(custom, (0,), (0.5,))
+
+    @pytest.mark.parametrize("channel_idx", [(2,), (-1,), (0, 2)])
+    def test_channel_idx_out_of_range_raises(self, channel_idx):
+        pred, y, mask = self._bp().y_observed, self._bp().y_observed, self._bp().mask
+        bp = _make_bp(y_observed=y, mask=mask)
+        with pytest.raises(ValueError, match="channel_idx"):
+            masked_mse(pred, bp, channel_idx=channel_idx)
+
+    def test_plain_custom_loss_rejects_out_of_range_channel_idx(self):
+        def custom(pred_obs, bp):
+            return jnp.sum(pred_obs)
+
+        wrapped = resolve_loss_fn(custom, (9,), None)
+        with pytest.raises(ValueError, match="channel_idx"):
+            wrapped(jnp.zeros((1, 1, 1)), self._bp())

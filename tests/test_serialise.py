@@ -42,6 +42,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 import numpy as np
+import optax
 import pytest
 from jaxtyping import Array
 
@@ -51,6 +52,7 @@ from hybridmodels.predictors import (
     BoundScaler,
     KANPredictor,
     MLPPredictor,
+    Predictor,
 )
 from hybridmodels.serialise import (
     load_predictors,
@@ -63,6 +65,20 @@ from hybridmodels.training.evosax import EvosaxTrainingConfig
 from hybridmodels.training.optax import OptaxTrainingConfig
 
 # -- predictor + pytree factories ------------------------------------------
+
+
+class StaticScalePredictor(Predictor):
+    """Custom predictor whose static field changes its effective semantics."""
+
+    weight: Array
+    scale: float = eqx.field(static=True)
+
+    def __init__(self, scale: float) -> None:
+        self.weight = jnp.asarray([2.0])
+        self.scale = scale
+
+    def __call__(self, x: Array) -> Array:
+        return self.weight * self.scale
 
 
 def _mlp(key: Array | None = None) -> MLPPredictor:
@@ -479,6 +495,110 @@ def test_save_run_stringifies_loss_callable(tmp_path: Path) -> None:
     )
     assert isinstance(loaded["optax_config"], OptaxTrainingConfig)
     assert loaded["optax_config"].loss == "hybridmodels.losses.masked_mse"
+
+
+def test_save_run_describes_callable_training_fields(tmp_path: Path) -> None:
+    def optimizer_factory(learning_rate):
+        return optax.adam(learning_rate)
+
+    def penalty_fn(_predictors, _grids):
+        return jnp.asarray(0.0)
+
+    config = OptaxTrainingConfig(
+        steps=(1,),
+        lr=(1e-3,),
+        optimizer=(optimizer_factory,),
+        reset_optimiser_state=(False,),
+        penalty_fn=penalty_fn,
+        verbose=False,
+    )
+    run_dir = tmp_path / "run_callable_fields"
+    save_run(run_dir, predictors=_one_tuple(), solver=_solver(), optax_config=config)
+
+    with (run_dir / "metadata.json").open() as f:
+        metadata = json.load(f)
+    saved = metadata["optax_config"]
+    assert "__callable__" in saved["optimizer"][0]
+    assert "__callable__" in saved["penalty_fn"]
+
+    raw_run_dir = tmp_path / "run_raw_optimizer"
+    raw_config = dataclasses.replace(config, optimizer=(optax.adam(1e-3),))
+    save_run(raw_run_dir, predictors=_one_tuple(), solver=_solver(), optax_config=raw_config)
+    with (raw_run_dir / "metadata.json").open() as f:
+        raw_metadata = json.load(f)
+    assert "__opaque__" in raw_metadata["optax_config"]["optimizer"][0]
+    with pytest.raises(ValueError, match="callable"):
+        load_run(
+            run_dir,
+            predictors_template=_template_for(_one_tuple()),
+            optax_cls=OptaxTrainingConfig,
+        )
+
+
+def test_load_run_rejects_a_template_with_different_static_predictor_metadata(
+    tmp_path: Path,
+) -> None:
+    predictors = _one_tuple()
+    save_dir = tmp_path / "run_static_mismatch"
+    save_run(save_dir, predictors=predictors, solver=_solver())
+
+    wrong_template = (
+        BoundedPredictor(
+            input_keys=("a", "b"),
+            in_scaler=BoundScaler(bounds=((0.0, 10.0), (0.0, 2.0))),
+            inner=_mlp(jr.PRNGKey(99)),
+            out_scaler=BoundScaler(bounds=((0.0, 5.0), (-1.0, 1.0))),
+        ),
+    )
+    with pytest.raises(ValueError, match="static"):
+        load_run(save_dir, predictors_template=wrong_template)
+
+
+def test_load_run_rejects_different_static_metadata_on_custom_predictor(
+    tmp_path: Path,
+) -> None:
+    save_dir = tmp_path / "run_custom_static_mismatch"
+    save_run(save_dir, predictors=StaticScalePredictor(3.0), solver=_solver())
+
+    with pytest.raises(ValueError, match="static"):
+        load_run(save_dir, predictors_template=StaticScalePredictor(99.0))
+
+
+def test_load_run_rejects_a_different_package_version(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run_version_mismatch"
+    save_run(run_dir, predictors=_one_tuple(), solver=_solver())
+    metadata_path = run_dir / "metadata.json"
+    with metadata_path.open() as f:
+        metadata = json.load(f)
+    metadata["version"] = "999.0.0"
+    with metadata_path.open("w") as f:
+        json.dump(metadata, f)
+
+    with pytest.raises(ValueError, match="version"):
+        load_run(run_dir, predictors_template=_template_for(_one_tuple()))
+
+
+def test_load_run_rejects_unknown_training_config_fields(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run_unknown_config_field"
+    save_run(
+        run_dir,
+        predictors=_one_tuple(),
+        solver=_solver(),
+        optax_config=_optax_config(),
+    )
+    metadata_path = run_dir / "metadata.json"
+    with metadata_path.open() as f:
+        metadata = json.load(f)
+    metadata["optax_config"]["future_field"] = True
+    with metadata_path.open("w") as f:
+        json.dump(metadata, f)
+
+    with pytest.raises(ValueError, match="future_field"):
+        load_run(
+            run_dir,
+            predictors_template=_template_for(_one_tuple()),
+            optax_cls=OptaxTrainingConfig,
+        )
 
 
 def test_kan_predictor_round_trip_forward_pass(tmp_path: Path) -> None:

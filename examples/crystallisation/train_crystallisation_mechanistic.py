@@ -174,30 +174,6 @@ def state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
     return jnp.stack([conc, d43], axis=-1)
 
 
-def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``.
-
-    ``compute_metrics`` keeps only the summary stats; the scatter needs the
-    raw value pairs, so re-walk the mask here.
-    """
-    metrics = compute_metrics(predictions, dataset)
-    out: dict[str, SimpleNamespace] = {}
-    for d, name in enumerate(dataset.output_channel_names):
-        obs_chunks: list = []
-        pred_chunks: list = []
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask = bp.mask[..., d]
-            obs_chunks.append(bp.y_observed[..., d][mask])
-            pred_chunks.append(pred[..., d][mask])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        m = metrics[name]
-        out[name] = SimpleNamespace(
-            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
-        )
-    return out
-
-
 def simulate_fn(
     predictor: KineticParameters,
     ts: Float[Array, " T"],
@@ -436,8 +412,24 @@ def main() -> None:
 
     if not args.no_plot:
         args.plot_dir.mkdir(parents=True, exist_ok=True)
+        # ``compute_metrics`` keeps only the summary stats; the scatter needs
+        # the raw value pairs, so re-walk the mask here.
+        parity_data: dict[str, SimpleNamespace] = {}
+        for d, name in enumerate(dataset.output_channel_names):
+            obs_chunks: list = []
+            pred_chunks: list = []
+            for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
+                mask = bp.mask[..., d]
+                obs_chunks.append(bp.y_observed[..., d][mask])
+                pred_chunks.append(pred[..., d][mask])
+            obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
+            pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
+            m = metrics[name]
+            parity_data[name] = SimpleNamespace(
+                name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
+            )
         parity_plot(
-            _parity_diagnostics(predictions, dataset),
+            parity_data,
             title="Crystallisation parity (mechanistic CNT + power-law)",
             save_path=args.plot_dir / "parity_mechanistic.png",
         )

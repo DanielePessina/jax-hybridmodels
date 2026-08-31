@@ -788,28 +788,6 @@ def main() -> None:
     # | Rate laws | learned $\log_{10} G,\ \log_{10} J$ | CNT-J + power-law-G (parametric) |
     # | Trainer | `train_with_optax` (Adam/AdamW) | `train_with_evosax` (CMA-ES) |
     # | Param count | ~thousands per branch | 4 |
-    def channel_stats(obs, pred):
-        n = int(obs.shape[0])
-        if n == 0:
-            return {
-                "n": 0,
-                "mse": float("nan"),
-                "rmse": float("nan"),
-                "mae": float("nan"),
-                "r2": float("nan"),
-            }
-        residuals = pred - obs
-        mse = float(np.mean(residuals**2))
-        ss_tot = float(np.sum((obs - obs.mean()) ** 2))
-        r2 = 1.0 - float(np.sum(residuals**2)) / ss_tot if ss_tot > 0 else float("nan")
-        return {
-            "n": n,
-            "mse": mse,
-            "rmse": float(np.sqrt(mse)),
-            "mae": float(np.mean(np.abs(residuals))),
-            "r2": r2,
-        }
-
     def gather(predictions):
         out: dict[str, dict] = {}
         for _d, _name in enumerate(dataset.output_channel_names):
@@ -821,7 +799,30 @@ def main() -> None:
                 _pred_chunks.append(np.asarray(_pred_b[..., _d])[_mask_d])
             _obs = np.concatenate(_obs_chunks)
             _pred = np.concatenate(_pred_chunks)
-            out[_name] = {**channel_stats(_obs, _pred), "obs": _obs, "pred": _pred}
+            _n = int(_obs.shape[0])
+            if _n == 0:
+                _stats = {
+                    "n": 0,
+                    "mse": float("nan"),
+                    "rmse": float("nan"),
+                    "mae": float("nan"),
+                    "r2": float("nan"),
+                }
+            else:
+                _residuals = _pred - _obs
+                _mse = float(np.mean(_residuals**2))
+                _ss_tot = float(np.sum((_obs - _obs.mean()) ** 2))
+                _r2 = (
+                    1.0 - float(np.sum(_residuals**2)) / _ss_tot if _ss_tot > 0 else float("nan")
+                )
+                _stats = {
+                    "n": _n,
+                    "mse": _mse,
+                    "rmse": float(np.sqrt(_mse)),
+                    "mae": float(np.mean(np.abs(_residuals))),
+                    "r2": _r2,
+                }
+            out[_name] = {**_stats, "obs": _obs, "pred": _pred}
         return out
 
     diag_mlp = gather(predictions_mlp)

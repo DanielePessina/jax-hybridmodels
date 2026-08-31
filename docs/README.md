@@ -23,6 +23,7 @@ docs/
 │   ├── custom-predictor.md
 │   ├── supersaturation-poly.md   # NeuralNPolynomial rate law
 │   └── pendulum.md
+│   └── assets/                   # Committed figures the example pages embed
 ├── api/                          # AUTO-GENERATED, do not edit by hand
 │   ├── index.md
 │   └── {data,predictors,penalties,profiles,schedules,transforms,solver,training,kernels,losses,metrics,trainable,prediction,serialise,ui,rng}.md
@@ -33,6 +34,11 @@ docs/
 `scripts/gen_api_docs.py` regenerates the API reference under `docs/api/`
 from docstrings. Edit the docstrings in `src/hybridmodels/`, never the
 generated markdown.
+
+`scripts/gen_example_figures.py` regenerates the committed figures under
+`docs/examples/assets/` by running every example script with its
+`--plot-dir` pointed there. Rerun it whenever an example's plotting
+changes; `--quick` trades training budgets for iteration speed.
 
 ## Local development
 

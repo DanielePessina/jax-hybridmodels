@@ -34,7 +34,6 @@ import argparse
 import sys
 import warnings
 from pathlib import Path
-from types import SimpleNamespace
 
 import diffrax
 import equinox as eqx
@@ -86,6 +85,7 @@ from _model import (  # noqa: E402
 )
 from _shared import (  # noqa: E402
     apply_default_style,
+    parity_diagnostics,
     parity_plot,
 )
 
@@ -125,19 +125,16 @@ OUTPUT_CHANNELS: tuple[str, ...] = ("Ca",)
 # from the predictor code path.
 
 
-def _k_sat_from_ph(pH: Array | float) -> Array:
-    """Slides' saturation curve. Hidden truth for the pH dependence."""
-    pH_arr = jnp.asarray(pH)
-    return K_SAT_BASELINE + K_SAT_AMPLITUDE / (
-        1.0 + jnp.maximum(pH_arr / K_SAT_PH50, 0.0) ** K_SAT_HILL
-    )
-
-
 def _k_true(temperature_C: ArrayLike, pH: ArrayLike) -> Array:
     """Ground-truth rate constant: pH saturation × Arrhenius centred at T_REF."""
     T_K = jnp.asarray(temperature_C) + 273.15
     arrhenius = jnp.exp(-EA_TRUE / R_GAS * (1.0 / T_K - 1.0 / T_REF))
-    return _k_sat_from_ph(pH) * arrhenius
+    # Slides' saturation curve — the hidden pH dependence.
+    pH_arr = jnp.asarray(pH)
+    k_sat = K_SAT_BASELINE + K_SAT_AMPLITUDE / (
+        1.0 + jnp.maximum(pH_arr / K_SAT_PH50, 0.0) ** K_SAT_HILL
+    )
+    return k_sat * arrhenius
 
 
 def _true_ca_trajectory(
@@ -174,15 +171,6 @@ def _true_ca_trajectory(
     )
     # Scalar state: ``ys`` is already ``[T]``.
     return jnp.asarray(sol.ys)
-
-
-def _add_heteroscedastic_noise(
-    values: Array, *, key: Array, rel: float = NOISE_REL, floor: float = NOISE_FLOOR
-) -> Array:
-    """Slides' noise model: ``σ = rel · max(|values|, floor)``, clipped at 0."""
-    scale = rel * jnp.maximum(jnp.abs(values), floor)
-    noisy = values + scale * jr.normal(key, values.shape)
-    return jnp.clip(noisy, 0.0, None)
 
 
 def _lhs_design(seed: int, n: int = N_TRAIN_EXPERIMENTS) -> list[tuple[float, float]]:
@@ -226,7 +214,9 @@ def _make_experiment_for(
         T_hi=T_hi,
         pH=pH,
     )
-    noisy = _add_heteroscedastic_noise(clean, key=noise_key)
+    # Slides' noise model: ``σ = rel · max(|values|, floor)``, clipped at 0.
+    scale = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
+    noisy = jnp.clip(clean + scale * jr.normal(noise_key, clean.shape), 0.0, None)
     sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
     variance = sigma**2
     channels = {"Ca": ChannelObs(ts=ts, values=noisy, variance=variance)}
@@ -242,52 +232,6 @@ def _make_experiment_for(
         y0_fn=y0_fn,
         exp_id=exp_id,
     )
-
-
-def _build_datasets(
-    *,
-    doe_seed: int,
-    noise_key: Array,
-) -> tuple[list[Experiment], list[Experiment]]:
-    """Synthesise the 9 training experiments (LHS) + 2 validation experiments.
-
-    The LHS design is over the ramp *midpoint* ``T_C`` and ``pH``; each
-    experiment then sweeps ``T_C ± RAMP_HALF_WIDTH`` during its run.
-    """
-    train_design = _lhs_design(seed=doe_seed)
-    train_experiments: list[Experiment] = []
-    for i, (T_C, pH) in enumerate(train_design):
-        # Per-experiment noise key folded from the root, so the script stays
-        # deterministic under JAX's key discipline.
-        k_i = jr.fold_in(noise_key, i)
-        train_experiments.append(
-            _make_experiment_for(
-                ramp_t0=RAMP_T0,
-                ramp_t1=RAMP_T1,
-                T_lo=T_C - RAMP_HALF_WIDTH,
-                T_hi=T_C + RAMP_HALF_WIDTH,
-                pH=pH,
-                noise_key=k_i,
-                exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}",
-            )
-        )
-
-    val_experiments: list[Experiment] = []
-    for j, (T_C, pH) in enumerate(VALIDATION_POINTS):
-        k_j = jr.fold_in(noise_key, 1000 + j)
-        val_experiments.append(
-            _make_experiment_for(
-                ramp_t0=RAMP_T0,
-                ramp_t1=RAMP_T1,
-                T_lo=T_C - RAMP_HALF_WIDTH,
-                T_hi=T_C + RAMP_HALF_WIDTH,
-                pH=pH,
-                noise_key=k_j,
-                exp_id=f"val_{j:02d}_T{T_C:.1f}_pH{pH:.2f}",
-            )
-        )
-
-    return train_experiments, val_experiments
 
 
 def _trajectory_grid_plot(
@@ -464,116 +408,6 @@ def _k_vs_ph_reveal_plot(
     plt.close(fig)
 
 
-def _loss_curve_plot(
-    *,
-    history_p1: list[float],
-    history_p2: list[float],
-    save_path: Path,
-) -> None:
-    """Concatenated phase-1 (best-loss-per-gen) + phase-2 (loss-per-step) curve."""
-    fig, ax = plt.subplots(figsize=(8.5, 4.5))
-    n1 = len(history_p1)
-    n2 = len(history_p2)
-    x1 = np.arange(n1)
-    x2 = np.arange(n1, n1 + n2)
-    ax.plot(
-        x1,
-        np.log10(np.asarray(history_p1)),
-        color="C0",
-        linewidth=1.4,
-        label="phase 1 — evosax (best-of-gen)",
-    )
-    ax.plot(
-        x2,
-        np.log10(np.asarray(history_p2)),
-        color="C3",
-        linewidth=1.4,
-        label="phase 2 — optax (per-step)",
-    )
-    ax.axvline(n1 - 0.5, color="gray", linestyle=":", linewidth=1.0)
-    ax.set_xlabel("training progress (generation, then step)")
-    ax.set_ylabel("log10 MSE loss")
-    ax.set_title("Loss curve across the evosax → optax pipeline")
-    ax.grid(True, alpha=0.4)
-    ax.legend(loc="best", frameon=False)
-    fig.tight_layout()
-    fig.savefig(save_path)
-    plt.close(fig)
-
-
-def _verify_truth_helper() -> None:
-    """``_k_true`` returns sane values across ``(T, pH50)``."""
-    k15 = float(_k_true(15.0, K_SAT_PH50))
-    k25 = float(_k_true(25.0, K_SAT_PH50))
-    k35 = float(_k_true(35.0, K_SAT_PH50))
-    print(f"  _k_true(T=15°C, pH=5.85) = {k15:.4f}")
-    print(f"  _k_true(T=25°C, pH=5.85) = {k25:.4f}  (expect ≈ 0.665)")
-    print(f"  _k_true(T=35°C, pH=5.85) = {k35:.4f}")
-    assert 0.6 < k25 < 0.75, f"k_true at T_REF, pH50 should be ≈0.665, got {k25}"
-    assert k15 < k25 < k35, "Arrhenius is monotone increasing in T"
-
-
-def _verify_dataset_shapes(train_ds, val_ds, train_design, val_design) -> None:
-    """Bucket layout and DOE coverage."""
-    print(
-        f"  LHS training (T_mid, pH) samples ({len(train_design)}), "
-        f"ramp ±{RAMP_HALF_WIDTH:.0f}°C:"
-    )
-    for i, (T_C, pH) in enumerate(train_design):
-        print(
-            f"    [{i}] T={T_C:.2f}°C, pH={pH:.3f}  "
-            f"(sweeps {T_C - RAMP_HALF_WIDTH:.1f}→{T_C + RAMP_HALF_WIDTH:.1f}°C)"
-        )
-    print(f"  Validation (T, pH) samples ({len(val_design)}):")
-    for j, (T_C, pH) in enumerate(val_design):
-        print(f"    [{j}] T={T_C:.2f}°C, pH={pH:.3f}")
-    assert len(train_ds.bucket_payloads) == 1, "training dataset should have one bucket"
-    bp_train = train_ds.bucket_payloads[0]
-    print(f"  train bucket: ts={tuple(bp_train.ts.shape)}, n_obs={int(bp_train.n_obs)}")
-    assert bp_train.ts.shape == (N_TRAIN_EXPERIMENTS, N_TIMESTEPS)
-    assert int(bp_train.n_obs) == N_TRAIN_EXPERIMENTS * N_TIMESTEPS
-    bp_val = val_ds.bucket_payloads[0]
-    print(f"  val   bucket: ts={tuple(bp_val.ts.shape)}, n_obs={int(bp_val.n_obs)}")
-    assert bp_val.ts.shape == (len(VALIDATION_POINTS), N_TIMESTEPS)
-
-
-def _verify_predictors_at_init(
-    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
-) -> None:
-    """Sigmoid-midpoint init values, residual contributing about 0 decades."""
-    parametric, residual = predictors
-    log_k_ref, Ea = parametric()
-    print(f"  parametric init: log_k_ref={float(log_k_ref):.3f}, Ea={float(Ea):.2f} kJ/mol")
-    delta = evaluate_predictor(residual, {"temperature_C": 25.0, "pH": K_SAT_PH50})
-    print(f"  residual init at (T=25°C, pH=5.85): Δlog10(k)={delta:+.3f}  (expect ≈ 0)")
-    assert abs(delta) < 0.5, f"fresh-init residual should be near 0, got {delta}"
-
-
-def _verify_sanity_simulation(
-    *,
-    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
-    train_experiments: list[Experiment],
-    solver: SolverConfig,
-) -> None:
-    """One ``simulate_fn`` call returns a monotone-decreasing Ca trace."""
-    exp = train_experiments[0]
-    ts = exp.channels["Ca"].ts
-    cov = {k: jnp.asarray(v) for k, v in exp.covariates.items()}
-    y0 = y0_fn(cov, exp.channels)
-    sim = simulate_fn(predictors, ts, cov, y0, solver)
-    sim_ca = sim[:, 0]
-    print(
-        f"  sim Ca[0]={float(sim_ca[0]):.3f}, Ca[-1]={float(sim_ca[-1]):.3f}, "
-        f"min={float(jnp.min(sim_ca)):.3f}"
-    )
-    assert (sim_ca[1:] <= sim_ca[:-1] + 1e-6).all(), "Ca should be non-increasing"
-    # ``y0_fn`` reads the noisy first observation, so ``sim_ca[0]`` matches
-    # that, not the clean ``CA0``: exact against ``y0[0]``, loose against CA0.
-    assert abs(float(sim_ca[0]) - float(y0[0])) < 1e-6, "diffrax round-trips y0"
-    assert abs(float(sim_ca[0]) - CA0) < 5.0 * NOISE_REL, "Ca starts near CA0"
-    assert float(sim_ca[-1]) < float(sim_ca[0]), "something must have decayed"
-
-
 def _residual_weights_signature(residual: BoundedPredictor) -> Array:
     """Concatenated MLP weight leaves, to check phase 1 left them untouched."""
     leaves = jax.tree_util.tree_leaves(residual.inner)
@@ -581,27 +415,8 @@ def _residual_weights_signature(residual: BoundedPredictor) -> Array:
 
 
 def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``.
-
-    ``compute_metrics`` keeps only the summary stats; the scatter needs the
-    raw value pairs, so re-walk the mask here.
-    """
-    metrics = compute_metrics(predictions, dataset)
-    out: dict[str, SimpleNamespace] = {}
-    for d, name in enumerate(dataset.output_channel_names):
-        obs_chunks: list = []
-        pred_chunks: list = []
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask = bp.mask[..., d]
-            obs_chunks.append(bp.y_observed[..., d][mask])
-            pred_chunks.append(pred[..., d][mask])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        m = metrics[name]
-        out[name] = SimpleNamespace(
-            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
-        )
-    return out
+    """Masked obs/pred pairs per channel for ``parity_plot``; shared helper."""
+    return parity_diagnostics(predictions, dataset)
 
 
 def main() -> None:
@@ -638,11 +453,50 @@ def main() -> None:
     k_noise, k_init, k_p1, k_p2 = jr.split(root_key, 4)
 
     print("[verify §9.1] truth helper")
-    _verify_truth_helper()
+    # ``_k_true`` returns sane values across ``(T, pH50)``.
+    k15 = float(_k_true(15.0, K_SAT_PH50))
+    k25 = float(_k_true(25.0, K_SAT_PH50))
+    k35 = float(_k_true(35.0, K_SAT_PH50))
+    print(f"  _k_true(T=15°C, pH=5.85) = {k15:.4f}")
+    print(f"  _k_true(T=25°C, pH=5.85) = {k25:.4f}  (expect ≈ 0.665)")
+    print(f"  _k_true(T=35°C, pH=5.85) = {k35:.4f}")
+    assert 0.6 < k25 < 0.75, f"k_true at T_REF, pH50 should be ≈0.665, got {k25}"
+    assert k15 < k25 < k35, "Arrhenius is monotone increasing in T"
 
     print("\n[build] synthetic dataset")
+    # The LHS design is over the ramp *midpoint* ``T_C`` and ``pH``; each
+    # experiment then sweeps ``T_C ± RAMP_HALF_WIDTH`` during its run.
     train_design = _lhs_design(seed=args.doe_seed)
-    train_experiments, val_experiments = _build_datasets(doe_seed=args.doe_seed, noise_key=k_noise)
+    train_experiments: list[Experiment] = []
+    for i, (T_C, pH) in enumerate(train_design):
+        # Per-experiment noise key folded from the root, so the script stays
+        # deterministic under JAX's key discipline.
+        k_i = jr.fold_in(k_noise, i)
+        train_experiments.append(
+            _make_experiment_for(
+                ramp_t0=RAMP_T0,
+                ramp_t1=RAMP_T1,
+                T_lo=T_C - RAMP_HALF_WIDTH,
+                T_hi=T_C + RAMP_HALF_WIDTH,
+                pH=pH,
+                noise_key=k_i,
+                exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}",
+            )
+        )
+    val_experiments: list[Experiment] = []
+    for j, (T_C, pH) in enumerate(VALIDATION_POINTS):
+        k_j = jr.fold_in(k_noise, 1000 + j)
+        val_experiments.append(
+            _make_experiment_for(
+                ramp_t0=RAMP_T0,
+                ramp_t1=RAMP_T1,
+                T_lo=T_C - RAMP_HALF_WIDTH,
+                T_hi=T_C + RAMP_HALF_WIDTH,
+                pH=pH,
+                noise_key=k_j,
+                exp_id=f"val_{j:02d}_T{T_C:.1f}_pH{pH:.2f}",
+            )
+        )
     train_dataset = make_dataset(
         train_experiments,
         output_channel_names=OUTPUT_CHANNELS,
@@ -652,7 +506,27 @@ def main() -> None:
         output_channel_names=OUTPUT_CHANNELS,
     )
     print("[verify §9.2] dataset shapes")
-    _verify_dataset_shapes(train_dataset, val_dataset, train_design, list(VALIDATION_POINTS))
+    # Bucket layout and DOE coverage.
+    print(
+        f"  LHS training (T_mid, pH) samples ({len(train_design)}), "
+        f"ramp ±{RAMP_HALF_WIDTH:.0f}°C:"
+    )
+    for i, (T_C, pH) in enumerate(train_design):
+        print(
+            f"    [{i}] T={T_C:.2f}°C, pH={pH:.3f}  "
+            f"(sweeps {T_C - RAMP_HALF_WIDTH:.1f}→{T_C + RAMP_HALF_WIDTH:.1f}°C)"
+        )
+    print(f"  Validation (T, pH) samples ({len(VALIDATION_POINTS)}):")
+    for j, (T_C, pH) in enumerate(VALIDATION_POINTS):
+        print(f"    [{j}] T={T_C:.2f}°C, pH={pH:.3f}")
+    assert len(train_dataset.bucket_payloads) == 1, "training dataset should have one bucket"
+    bp_train = train_dataset.bucket_payloads[0]
+    print(f"  train bucket: ts={tuple(bp_train.ts.shape)}, n_obs={int(bp_train.n_obs)}")
+    assert bp_train.ts.shape == (N_TRAIN_EXPERIMENTS, N_TIMESTEPS)
+    assert int(bp_train.n_obs) == N_TRAIN_EXPERIMENTS * N_TIMESTEPS
+    bp_val = val_dataset.bucket_payloads[0]
+    print(f"  val   bucket: ts={tuple(bp_val.ts.shape)}, n_obs={int(bp_val.n_obs)}")
+    assert bp_val.ts.shape == (len(VALIDATION_POINTS), N_TIMESTEPS)
 
     solver = SolverConfig(
         solver=diffrax.Tsit5(),
@@ -665,14 +539,32 @@ def main() -> None:
     print("\n[build] predictors")
     predictors = build_predictors(key=k_init)
     print("[verify §9.3] predictors at init")
-    _verify_predictors_at_init(predictors)
+    # Sigmoid-midpoint init values, residual contributing about 0 decades.
+    parametric, residual = predictors
+    log_k_ref, Ea = parametric()
+    print(f"  parametric init: log_k_ref={float(log_k_ref):.3f}, Ea={float(Ea):.2f} kJ/mol")
+    delta = evaluate_predictor(residual, {"temperature_C": 25.0, "pH": K_SAT_PH50})
+    print(f"  residual init at (T=25°C, pH=5.85): Δlog10(k)={delta:+.3f}  (expect ≈ 0)")
+    assert abs(delta) < 0.5, f"fresh-init residual should be near 0, got {delta}"
 
     print("[verify §9.4] one sanity simulation")
-    _verify_sanity_simulation(
-        predictors=predictors,
-        train_experiments=train_experiments,
-        solver=solver,
+    # One ``simulate_fn`` call returns a monotone-decreasing Ca trace.
+    exp = train_experiments[0]
+    ts = exp.channels["Ca"].ts
+    cov = {k: jnp.asarray(v) for k, v in exp.covariates.items()}
+    y0 = y0_fn(cov, exp.channels)
+    sim = simulate_fn(predictors, ts, cov, y0, solver)
+    sim_ca = sim[:, 0]
+    print(
+        f"  sim Ca[0]={float(sim_ca[0]):.3f}, Ca[-1]={float(sim_ca[-1]):.3f}, "
+        f"min={float(jnp.min(sim_ca)):.3f}"
     )
+    assert (sim_ca[1:] <= sim_ca[:-1] + 1e-6).all(), "Ca should be non-increasing"
+    # ``y0_fn`` reads the noisy first observation, so ``sim_ca[0]`` matches
+    # that, not the clean ``CA0``: exact against ``y0[0]``, loose against CA0.
+    assert abs(float(sim_ca[0]) - float(y0[0])) < 1e-6, "diffrax round-trips y0"
+    assert abs(float(sim_ca[0]) - CA0) < 5.0 * NOISE_REL, "Ca starts near CA0"
+    assert float(sim_ca[-1]) < float(sim_ca[0]), "something must have decayed"
     # Snapshot, to confirm phase 1 left the residual MLP frozen.
     residual_weights_pre_p1 = _residual_weights_signature(predictors[1])
 
@@ -888,11 +780,36 @@ def main() -> None:
             title="log10 k(pH) — truth vs parametric vs hybrid (Phase 2)",
             save_path=args.plot_dir / "06_k_reveal_phase2.png",
         )
-        _loss_curve_plot(
-            history_p1=history_p1,
-            history_p2=history_p2,
-            save_path=args.plot_dir / "07_loss_curve.png",
+        # Concatenated phase-1 (best-loss-per-gen) + phase-2 (loss-per-step)
+        # curve.
+        fig, ax = plt.subplots(figsize=(8.5, 4.5))
+        n1 = len(history_p1)
+        n2 = len(history_p2)
+        x1 = np.arange(n1)
+        x2 = np.arange(n1, n1 + n2)
+        ax.plot(
+            x1,
+            np.log10(np.asarray(history_p1)),
+            color="C0",
+            linewidth=1.4,
+            label="phase 1 — evosax (best-of-gen)",
         )
+        ax.plot(
+            x2,
+            np.log10(np.asarray(history_p2)),
+            color="C3",
+            linewidth=1.4,
+            label="phase 2 — optax (per-step)",
+        )
+        ax.axvline(n1 - 0.5, color="gray", linestyle=":", linewidth=1.0)
+        ax.set_xlabel("training progress (generation, then step)")
+        ax.set_ylabel("log10 MSE loss")
+        ax.set_title("Loss curve across the evosax → optax pipeline")
+        ax.grid(True, alpha=0.4)
+        ax.legend(loc="best", frameon=False)
+        fig.tight_layout()
+        fig.savefig(args.plot_dir / "07_loss_curve.png")
+        plt.close(fig)
         print(f"\n[plot] figures written to {args.plot_dir}")
 
 

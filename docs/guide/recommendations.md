@@ -1,7 +1,7 @@
 # Recommendations
 
-Practical guidance from the shipped examples. The library enforces none
-of it. All of it will save you a debugging session.
+These are practical defaults from the shipped examples. The library does not
+enforce them; choose different values when your problem requires it.
 
 ## Bounds
 
@@ -37,7 +37,7 @@ the gradient well conditioned across the whole measured range.
 every value below `1e-2` is crushed into a sliver of the latent range.
 `warp="log10"` moves the midpoint to `1e-2` and spreads the decades
 evenly. Bounds stay in physical units either way. See
-[Concepts](/guide/concepts#warp-and-squash-are-two-independent-choices).
+[Predictors and bounds](/guide/predictors).
 
 ### Pin the readout when the box is very wide
 
@@ -185,6 +185,19 @@ inputs = {
 }
 log10_G = growth(inputs)
 log10_J = nucleation(inputs)
+```
+
+Vector covariates stay as vectors in `simulate_fn`. Index them when a
+predictor expects scalar named inputs, or pass a rank-1 array to a predictor
+that accepts vector inputs:
+
+```python
+composition = covariates["feed_composition"]
+inputs = {
+    "temperature_C": covariates["temperature_C"],
+    "component_a": composition[0],
+    "component_b": composition[1],
+}
 ```
 
 ## Training schedule

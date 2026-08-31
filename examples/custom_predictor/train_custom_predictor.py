@@ -55,7 +55,6 @@ import argparse
 import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import diffrax
 import equinox as eqx
@@ -89,6 +88,7 @@ from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402
     apply_default_style,
+    parity_diagnostics,
     parity_plot,
     trajectory_plot,
 )
@@ -241,21 +241,6 @@ def _build_predictor(key: Array, *, n_features: int, bandwidth: float) -> Bounde
     )
 
 
-def _build_mask(predictors: tuple[BoundedPredictor, ...], *, train_bank: bool):
-    """Boolean mask over ``predictors``: everything trains except the bank.
-
-    ``trainable_mask`` marks every floating-point array trainable, which
-    includes ``frequencies`` and ``phases``. ``freeze_paths`` turns those
-    two off by name. A path matching no leaf raises rather than passing
-    silently, so a renamed field fails loudly instead of training an
-    array you believed was fixed.
-    """
-    mask = trainable_mask(predictors)
-    if train_bank:
-        return mask
-    return freeze_paths(mask, BANK_PATHS)
-
-
 def _y0_fn(_cov: dict[str, Array], _channels: dict[str, ChannelObs]) -> Array:
     """Every run starts at the same concentration."""
     return jnp.asarray([Y0], dtype=jnp.float32)
@@ -288,65 +273,10 @@ def _simulate_fn(
     return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
 
 
-def _build_experiments(noise_key: Array) -> list[Experiment]:
-    """One noisy decay curve per temperature, from the closed form.
-
-    All runs share the same timestamp grid, so the dataset collapses to a
-    single fully observed bucket. Irregular sampling is the general case
-    and needs no change to the model code.
-    """
-    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    experiments: list[Experiment] = []
-    rng = noise_key
-    for temperature in TEMPERATURES:
-        rng, k_noise = jr.split(rng)
-        clean = Y0 * jnp.exp(-true_k(temperature) * ts)
-        noisy = clean + NOISE_STD * jr.normal(k_noise, ts.shape)
-        experiments.append(
-            make_experiment(
-                covariates={"temperature": temperature},
-                channels={
-                    "concentration": ChannelObs(
-                        ts=ts,
-                        values=noisy,
-                        variance=jnp.full(ts.shape, NOISE_STD**2),
-                    )
-                },
-                y0_fn=_y0_fn,
-                exp_id=f"decay_T={temperature:.0f}",
-            )
-        )
-    return experiments
-
-
 def _read_k(predictors: tuple[BoundedPredictor, ...], temperature: float) -> float:
     """Evaluate the learned rate at one temperature, in physical units."""
     (rate,) = predictors
     return evaluate_predictor(rate, {"temperature": temperature})
-
-
-def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``.
-
-    ``compute_metrics`` keeps only summary stats; the scatter needs the raw
-    value pairs, so re-walk the mask here.
-    """
-    metrics = compute_metrics(predictions, dataset)
-    out: dict[str, SimpleNamespace] = {}
-    for d, name in enumerate(dataset.output_channel_names):
-        obs_chunks: list = []
-        pred_chunks: list = []
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask = bp.mask[..., d]
-            obs_chunks.append(bp.y_observed[..., d][mask])
-            pred_chunks.append(pred[..., d][mask])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        m = metrics[name]
-        out[name] = SimpleNamespace(
-            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
-        )
-    return out
 
 
 def _print_rate_table(predictors: tuple[BoundedPredictor, ...], header: str) -> None:
@@ -358,23 +288,6 @@ def _print_rate_table(predictors: tuple[BoundedPredictor, ...], header: str) -> 
         learned = _read_k(predictors, temperature)
         rel = abs(learned - truth) / truth
         print(f"    {temperature:7.0f}  {truth:9.4f}  {learned:9.4f}  {rel:9.2%}")
-
-
-def _check_roundtrip(
-    predictors: tuple[BoundedPredictor, ...], *, n_features: int, bandwidth: float
-) -> tuple[BoundedPredictor, ...]:
-    """Save the trained predictors and load them back through a template.
-
-    ``load_predictors`` needs a template with the right structure, which
-    means building the same predictor again with any key. Every static
-    field must be JSON-encodable for this to work, which is why
-    ``bandwidth`` is a plain float and the shapes are plain ints.
-    """
-    template = (_build_predictor(jr.PRNGKey(0), n_features=n_features, bandwidth=bandwidth),)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "custom_predictor.eqx"
-        save_predictors(path, predictors)
-        return load_predictors(path, template)
 
 
 def main() -> None:
@@ -408,7 +321,31 @@ def main() -> None:
     k_data, k_init, k_train = jr.split(root_key, 3)
 
     print("[build] synthetic Arrhenius decay dataset")
-    experiments = _build_experiments(k_data)
+    # One noisy decay curve per temperature, from the closed form. All runs
+    # share the same timestamp grid, so the dataset collapses to a single
+    # fully observed bucket. Irregular sampling is the general case and
+    # needs no change to the model code.
+    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
+    experiments: list[Experiment] = []
+    rng = k_data
+    for temperature in TEMPERATURES:
+        rng, k_noise = jr.split(rng)
+        clean = Y0 * jnp.exp(-true_k(temperature) * ts)
+        noisy = clean + NOISE_STD * jr.normal(k_noise, ts.shape)
+        experiments.append(
+            make_experiment(
+                covariates={"temperature": temperature},
+                channels={
+                    "concentration": ChannelObs(
+                        ts=ts,
+                        values=noisy,
+                        variance=jnp.full(ts.shape, NOISE_STD**2),
+                    )
+                },
+                y0_fn=_y0_fn,
+                exp_id=f"decay_T={temperature:.0f}",
+            )
+        )
     dataset = make_dataset(
         experiments,
         output_channel_names=OUTPUT_CHANNELS,
@@ -428,7 +365,14 @@ def main() -> None:
         dt0=0.1,
     )
     predictors = (_build_predictor(k_init, n_features=args.n_features, bandwidth=args.bandwidth),)
-    mask = _build_mask(predictors, train_bank=args.train_bank)
+    # ``trainable_mask`` marks every floating-point array trainable, which
+    # includes ``frequencies`` and ``phases``. ``freeze_paths`` turns those
+    # two off by name. A path matching no leaf raises rather than passing
+    # silently, so a renamed field fails loudly instead of training an
+    # array you believed was fixed.
+    mask = trainable_mask(predictors)
+    if not args.train_bank:
+        mask = freeze_paths(mask, BANK_PATHS)
     frozen = "none (--train-bank)" if args.train_bank else ", ".join(BANK_PATHS)
     print(f"  RandomFourierPredictor: {args.n_features} features, bandwidth {args.bandwidth}")
     print(f"  frozen leaves: {frozen}")
@@ -462,7 +406,17 @@ def main() -> None:
     _print_rate_table(trained, "\n  rates after training:")
 
     print("\n[serialise] save and reload the trained predictor")
-    reloaded = _check_roundtrip(trained, n_features=args.n_features, bandwidth=args.bandwidth)
+    # ``load_predictors`` needs a template with the right structure, which
+    # means building the same predictor again with any key. Every static
+    # field must be JSON-encodable for this to work, which is why
+    # ``bandwidth`` is a plain float and the shapes are plain ints.
+    template = (
+        _build_predictor(jr.PRNGKey(0), n_features=args.n_features, bandwidth=args.bandwidth),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "custom_predictor.eqx"
+        save_predictors(path, trained)
+        reloaded = load_predictors(path, template)
     drift = max(
         abs(_read_k(reloaded, temperature) - _read_k(trained, temperature))
         for temperature in TEMPERATURES
@@ -478,8 +432,11 @@ def main() -> None:
 
     if not args.no_plot:
         args.plot_dir.mkdir(parents=True, exist_ok=True)
+        # ``compute_metrics`` keeps only summary stats; the scatter needs the
+        # raw value pairs, so re-walk the mask here.
+        parity_data = parity_diagnostics(predictions, dataset)
         parity_plot(
-            _parity_diagnostics(predictions, dataset),
+            parity_data,
             title="Custom predictor parity (trained model)",
             save_path=args.plot_dir / "parity.png",
         )

@@ -49,7 +49,6 @@ import argparse
 import math
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import diffrax
@@ -97,6 +96,7 @@ from _model import (  # noqa: E402
 )
 from _shared import (  # noqa: E402
     apply_default_style,
+    parity_diagnostics,
     parity_plot,
 )
 
@@ -175,19 +175,16 @@ _HALF_LOG_2PI: float = 0.5 * math.log(2.0 * math.pi)
 # Truth helpers. Data generation and plot overlays only, never the model path.
 
 
-def _k_sat_from_ph(pH: ArrayLike) -> Array:
-    """Hidden truth for the pH dependence of the fresh-catalyst rate."""
-    pH_arr = jnp.asarray(pH)
-    return K_SAT_BASELINE + K_SAT_AMPLITUDE / (
-        1.0 + jnp.maximum(pH_arr / K_SAT_PH50, 0.0) ** K_SAT_HILL
-    )
-
-
 def _k_true(temperature_C: ArrayLike, pH: ArrayLike) -> Array:
     """Fresh-catalyst rate constant, unchanged from ``train_hybrid.py``."""
     T_K = jnp.asarray(temperature_C) + 273.15
     arrhenius = jnp.exp(-EA_TRUE / R_GAS * (1.0 / T_K - 1.0 / T_REF))
-    return _k_sat_from_ph(pH) * arrhenius
+    # Hidden truth for the pH dependence of the fresh-catalyst rate.
+    pH_arr = jnp.asarray(pH)
+    k_sat = K_SAT_BASELINE + K_SAT_AMPLITUDE / (
+        1.0 + jnp.maximum(pH_arr / K_SAT_PH50, 0.0) ** K_SAT_HILL
+    )
+    return k_sat * arrhenius
 
 
 def _tau_true(pH: ArrayLike) -> Array:
@@ -222,45 +219,6 @@ def _activity_interval_mean(t0: ArrayLike, t1: ArrayLike, pH: ArrayLike, n: int 
     return jnp.trapezoid(_activity_true(grid, pH), grid) / (t1 - t0)
 
 
-def _aged_ca_trajectory(
-    ts: Float[Array, " T"], temperature_C: float, pH: float
-) -> Float[Array, " T"]:
-    """Dense truth for an aged run, integrated rather than solved in closed form.
-
-    ``dCa/dt = -a_true(t, pH) * k_true(T, pH) * Ca`` has no tidy antiderivative
-    for a cubic-Hill activity, so this integrates it tightly. The tolerances are
-    two orders below the training solver's, so the data is not limited by the
-    integrator that later fits it.
-    """
-    k = float(_k_true(temperature_C, pH))
-
-    def vector_field(t: Array, y: Array, args: object) -> Array:
-        rate = k * _activity_true(t, pH) * jnp.maximum(y[0], 0.0)
-        return jnp.stack([-rate, rate])
-
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        diffrax.Tsit5(),
-        t0=float(ts[0]),
-        t1=float(ts[-1]),
-        dt0=0.01,
-        y0=jnp.array([CA0, 0.0]),
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=1e-9, atol=1e-11),
-        max_steps=100_000,
-    )
-    return jnp.asarray(sol.ys)[:, 0]
-
-
-def _add_heteroscedastic_noise(
-    values: Array, *, key: Array, rel: float = NOISE_REL, floor: float = NOISE_FLOOR
-) -> Array:
-    """``sigma = rel * max(|values|, floor)``, clipped at zero. As in the fresh runs."""
-    scale = rel * jnp.maximum(jnp.abs(values), floor)
-    noisy = values + scale * jr.normal(key, values.shape)
-    return jnp.clip(noisy, 0.0, None)
-
-
 def _lhs_design(seed: int, n: int = N_TRAIN_EXPERIMENTS) -> list[tuple[float, float]]:
     """The same Latin hypercube as ``train_hybrid.py``, so the designs coincide."""
     sampler = qmc.LatinHypercube(d=2, seed=seed)
@@ -285,10 +243,36 @@ def state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
 def _make_aged_experiment(
     *, temperature_C: float, pH: float, noise_key: Array, exp_id: str
 ) -> Experiment:
-    """One aged run at fixed ``(T, pH)``, integrated with the decaying activity."""
+    """One aged run at fixed ``(T, pH)``, integrated with the decaying activity.
+
+    ``dCa/dt = -a_true(t, pH) * k_true(T, pH) * Ca`` has no tidy
+    antiderivative for a cubic-Hill activity, so the dense truth is
+    integrated at tolerances two orders below the training solver's, so the
+    data is not limited by the integrator that later fits it.
+    """
     ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    clean = _aged_ca_trajectory(ts, temperature_C=temperature_C, pH=pH)
-    noisy = _add_heteroscedastic_noise(clean, key=noise_key)
+    k = float(_k_true(temperature_C, pH))
+
+    def vector_field(t: Array, y: Array, args: object) -> Array:
+        rate = k * _activity_true(t, pH) * jnp.maximum(y[0], 0.0)
+        return jnp.stack([-rate, rate])
+
+    sol = diffrax.diffeqsolve(
+        diffrax.ODETerm(vector_field),
+        diffrax.Tsit5(),
+        t0=float(ts[0]),
+        t1=float(ts[-1]),
+        dt0=0.01,
+        y0=jnp.array([CA0, 0.0]),
+        saveat=diffrax.SaveAt(ts=ts),
+        stepsize_controller=diffrax.PIDController(rtol=1e-9, atol=1e-11),
+        max_steps=100_000,
+    )
+    clean = jnp.asarray(sol.ys)[:, 0]
+    # ``sigma = rel * max(|values|, floor)``, clipped at zero. As in the
+    # fresh runs.
+    scale = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
+    noisy = jnp.clip(clean + scale * jr.normal(noise_key, clean.shape), 0.0, None)
     sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
     channels = {"Ca": ChannelObs(ts=ts, values=noisy, variance=sigma**2)}
     return make_experiment(
@@ -562,40 +546,6 @@ def build_agent(*, key: Array) -> Agent:
     )
 
 
-def agent_trainable(agent: Agent) -> Any:
-    """Trainability mask: everything except the scalers' internal arrays.
-
-    ``BoundScaler`` carries ``temperature`` as an array leaf. It is
-    configuration, not a parameter, and freezing it is the same
-    ``frozen_default_mask`` idiom that ``train_hybrid.py`` uses.
-    """
-    return frozen_default_mask(agent, BoundScaler)
-
-
-def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``.
-
-    ``compute_metrics`` keeps only the summary stats; the scatter needs the
-    raw value pairs, so re-walk the mask here.
-    """
-    metrics = compute_metrics(predictions, dataset)
-    out: dict[str, SimpleNamespace] = {}
-    for d, name in enumerate(dataset.output_channel_names):
-        obs_chunks: list = []
-        pred_chunks: list = []
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask = bp.mask[..., d]
-            obs_chunks.append(bp.y_observed[..., d][mask])
-            pred_chunks.append(pred[..., d][mask])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        m = metrics[name]
-        out[name] = SimpleNamespace(
-            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
-        )
-    return out
-
-
 def _gaussian_log_prob(z: Array, mean: Array, log_std: Array) -> Array:
     """Diagonal-Gaussian log density, summed over the action dimension.
 
@@ -606,16 +556,6 @@ def _gaussian_log_prob(z: Array, mean: Array, log_std: Array) -> Array:
     """
     std = jnp.exp(log_std)
     return jnp.sum(-0.5 * ((z - mean) / std) ** 2 - log_std - _HALF_LOG_2PI)
-
-
-def _gaussian_entropy(log_std: Array) -> Array:
-    """Differential entropy of the diagonal Gaussian.
-
-    ``rlax.entropy_loss`` is categorical: it takes unnormalised logits and
-    reduces a softmax entropy. A continuous Gaussian's entropy is a closed form
-    in ``log_std`` alone, so it is computed here rather than borrowed.
-    """
-    return jnp.sum(log_std + _HALF_LOG_2PI_E)
 
 
 def _policy_mean(agent: Agent, obs: Array) -> Array:
@@ -730,23 +670,6 @@ def rollout_batch(
     return jax.tree.map(lambda x: x.reshape((-1,) + x.shape[2:]), per_episode)
 
 
-def _advantages_and_returns(rollout: Rollout) -> tuple[Array, Array]:
-    """GAE advantages and value targets, one row per episode.
-
-    ``discount`` is 1 everywhere except the final step. The return is a fit
-    criterion over a finite horizon, not a control return, so discounting it
-    would down-weight late measurements for no modelling reason. The trailing
-    zero terminates the episode, which stops GAE bootstrapping off a state that
-    has no successor.
-    """
-    discount = jnp.ones((HORIZON,)).at[-1].set(0.0)
-    advantages = jax.vmap(
-        lambda r, v: rlax.truncated_generalized_advantage_estimation(r, discount, GAE_LAMBDA, v)
-    )(rollout.reward, rollout.value)
-    returns = advantages + rollout.value[:, :-1]
-    return advantages, returns
-
-
 class Batch(NamedTuple):
     """Flattened transitions, the granularity PPO minibatches at."""
 
@@ -771,7 +694,11 @@ def _ppo_loss(agent: Agent, batch: Batch) -> tuple[Array, tuple[Array, Array, Ar
     value = jax.vmap(_value, in_axes=(None, 0))(agent, batch.obs)
     value_loss = jnp.mean((value - batch.target) ** 2)
 
-    entropy = _gaussian_entropy(agent.log_std)
+    # Differential entropy of the diagonal Gaussian. ``rlax.entropy_loss`` is
+    # categorical: it takes unnormalised logits and reduces a softmax entropy.
+    # A continuous Gaussian's entropy is a closed form in ``log_std`` alone,
+    # so it is computed here rather than borrowed.
+    entropy = jnp.sum(agent.log_std + _HALF_LOG_2PI_E)
     total = pg_loss + VF_COEF * value_loss - ENT_COEF * entropy
     return total, (pg_loss, value_loss, entropy)
 
@@ -854,7 +781,11 @@ def train_ppo(
     once the training return climbs past ``truth_return`` the policy is fitting
     observation noise, and validation is what prices that.
     """
-    trainable = agent_trainable(agent)
+    # Trainability mask: everything except the scalers' internal arrays.
+    # ``BoundScaler`` carries ``temperature`` as an array leaf. It is
+    # configuration, not a parameter, and freezing it is the same
+    # ``frozen_default_mask`` idiom that ``train_hybrid.py`` uses.
+    trainable = frozen_default_mask(agent, BoundScaler)
     optimiser = optax.chain(
         optax.clip_by_global_norm(MAX_GRAD_NORM),
         optax.adamw(lr),
@@ -879,7 +810,19 @@ def train_ppo(
             penalty_weight=penalty_weight,
             n_samples=n_samples,
         )
-        advantages, targets = _advantages_and_returns(rollout)
+        # GAE advantages and value targets, one row per episode. ``discount``
+        # is 1 everywhere except the final step: the return is a fit criterion
+        # over a finite horizon, not a control return, so discounting it would
+        # down-weight late measurements for no modelling reason. The trailing
+        # zero terminates the episode, which stops GAE bootstrapping off a
+        # state that has no successor.
+        discount = jnp.ones((HORIZON,)).at[-1].set(0.0)
+        advantages = jax.vmap(
+            lambda r, v, discount=discount: rlax.truncated_generalized_advantage_estimation(
+                r, discount, GAE_LAMBDA, v
+            )
+        )(rollout.reward, rollout.value)
+        targets = advantages + rollout.value[:, :-1]
         # Normalising per batch is standard PPO practice; it decouples the step
         # size from the reward scale, which here is set by the noise variance.
         flat_adv = advantages.reshape(-1)
@@ -968,64 +911,13 @@ def episodes_from_experiments(
     )
 
 
-def _verify_truth() -> None:
-    """Check the deactivation truth is severe enough to be worth learning.
-
-    The point of the aged runs is that the batch *stalls*: fouling shuts the
-    reaction down long before the substrate is consumed, so a static rate
-    constant is not slightly wrong, it is wrong about the shape of the curve.
-    These assertions pin that, rather than pinning particular activity values.
-    """
-    a0 = float(_activity_true(0.0, PH_REF))
-    assert abs(a0 - 1.0) < 1e-12, f"activity at t=0 must be exactly 1, got {a0}"
-    print(f"  activity at t=0: {a0:.6f}")
-    print(
-        f"  tau(pH) spans {float(_tau_true(PH_RANGE[0])):.2f} to "
-        f"{float(_tau_true(PH_RANGE[1])):.2f}"
-    )
-
-    assert float(_activity_true(T_MAX, PH_RANGE[0])) < float(_activity_true(T_MAX, PH_RANGE[1])), (
-        "low pH must age the catalyst faster"
-    )
-
-    print(f"  {'pH':>5}{'a(T_MAX)':>10}{'Ca(T_MAX) aged':>16}{'Ca(T_MAX) static':>18}")
-    grid = jnp.linspace(0.0, T_MAX, 4001)
-    for pH in (PH_RANGE[0], PH_REF, PH_RANGE[1]):
-        k = float(_k_true(25.0, pH))
-        integral = float(jnp.trapezoid(_activity_true(grid, pH), grid))
-        aged = math.exp(-k * integral)
-        static = math.exp(-k * T_MAX)
-        print(f"  {pH:>5.1f}{float(_activity_true(T_MAX, pH)):>10.4f}{aged:>16.4f}{static:>18.4f}")
-        # An absolute gap, not a ratio: the static prediction goes to nearly zero
-        # at low pH, where any ratio is huge and says nothing.
-        assert aged - static > 0.25, (
-            f"at pH {pH} the aged batch must stall well short of the static prediction, "
-            f"got Ca={aged:.4f} against {static:.4f} (gap {aged - static:.4f})"
-        )
-        assert aged < 0.75, (
-            f"at pH {pH} the aged batch must still make real progress, got Ca={aged:.4f}; "
-            "a batch that barely reacts carries no information about k"
-        )
-
-    # An exponential fitted through (0, 1) and the endpoint predicts the midpoint
-    # monotonically; the truth's plateau means it does not. The gap is the room
-    # the policy has to beat the fixed-form baseline in.
-    for pH in (PH_RANGE[0], PH_RANGE[1]):
-        end = float(_activity_true(T_MAX, pH))
-        k_d = -math.log(end) / T_MAX
-        print(
-            f"  pH {pH}: midpoint truth {float(_activity_true(T_MAX / 2, pH)):.4f} vs "
-            f"best-exponential {math.exp(-k_d * T_MAX / 2):.4f}"
-        )
-
-
 def reference_returns(episodes: EpisodeData, solver: SolverConfig) -> tuple[float, float]:
     """Score the exact zero-order-hold target and the do-nothing model.
 
     Returns ``(truth, static)``. ``truth`` is what the hidden deactivation law
-    itself scores against this noisy data: the interval-mean activity reproduces
-    the continuous truth exactly, so the only residue is observation noise and
-    whatever the frozen trunk gets wrong about ``k``.
+    itself scores against this noisy data: the interval-mean activity
+    reproduces the continuous truth exactly, so the only residue is
+    observation noise and whatever the frozen trunk gets wrong about ``k``.
 
     A reference, not a ceiling. A model scoring *above* it is fitting noise
     rather than signal, the over-parameterisation failure mode hybrid models
@@ -1055,29 +947,6 @@ def reference_returns(episodes: EpisodeData, solver: SolverConfig) -> tuple[floa
 
     truth = float(jnp.mean(scored(_activity_interval_mean)))
     static = float(jnp.mean(scored(lambda t0, t1, pH: jnp.asarray(1.0))))
-    return truth, static
-
-
-def _verify_rollout_ceiling(episodes: EpisodeData, solver: SolverConfig) -> tuple[float, float]:
-    """The checkpoint the whole script rests on (SPEC_RL.md step 5).
-
-    If the exact target does not clearly beat the do-nothing model, the reward
-    scaling or the zero-order hold is wrong and no amount of PPO tuning fixes
-    it. Both numbers are reported so the learning curves later have a scale.
-    """
-    truth, static = reference_returns(episodes, solver)
-    noise_floor = HORIZON / math.sqrt(3.0)
-    print(f"  the true deactivation law scores: {truth:7.4f}")
-    print(f"  no deactivation at all:           {static:7.4f}")
-    print(f"  pure-noise optimum (HORIZON/sqrt 3): {noise_floor:.4f}")
-    print(f"  range to learn in: {static:.2f} to {truth:.2f}, above which is noise-fitting")
-    assert truth > 0.6 * noise_floor, (
-        "the exact target should approach the noise-limited optimum; if it does not, "
-        "the reward scaling or the zero-order hold is wrong"
-    )
-    assert truth > 2.0 * static, (
-        "deactivation must matter, or there is nothing for the policy to learn"
-    )
     return truth, static
 
 
@@ -1224,78 +1093,6 @@ def _trajectory_plot(
     plt.close(fig)
 
 
-def _learning_curve_plot(
-    returns: list[float],
-    val_returns: list[float],
-    losses: list[float],
-    *,
-    truth_return: float,
-    static_return: float,
-    save_path: Path,
-) -> None:
-    """PPO return against update, with the true law's own score marked.
-
-    The reference is not ``HORIZON``. Observation noise caps a perfect model at
-    about ``0.577`` per step, so the true deactivation law scores roughly
-    ``0.577 * HORIZON`` against its own noisy data. Training return climbing
-    above that line is the policy fitting noise, which is why the validation
-    curve is plotted alongside it.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.6))
-    axes[0].plot(returns, color="tab:red", lw=1.4, label="training")
-    axes[0].plot(val_returns, color="tab:blue", lw=1.4, label="validation")
-    axes[0].axhline(
-        truth_return,
-        color="black",
-        ls="--",
-        lw=1.0,
-        label=f"true law scores {truth_return:.2f}",
-    )
-    axes[0].axhline(
-        static_return,
-        color="tab:grey",
-        ls=":",
-        lw=1.0,
-        label=f"no deactivation = {static_return:.2f}",
-    )
-    axes[0].set_xlabel("update")
-    axes[0].set_ylabel("mean deterministic return")
-    axes[0].legend(fontsize=8)
-    axes[1].plot(losses, color="tab:purple", lw=1.4)
-    axes[1].set_xlabel("update")
-    axes[1].set_ylabel("PPO loss")
-    fig.suptitle("PPO learning curve")
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-
-
-def _saturation_plot(
-    agent: Agent, episodes: EpisodeData, *, solver: SolverConfig, save_path: Path
-) -> None:
-    """Sampled latents against the squash knee, showing where the policy operates."""
-    rollout = rollout_batch(
-        agent, episodes, jr.PRNGKey(7), solver=solver, penalty_weight=0.0, n_samples=64
-    )
-    z = np.asarray(rollout.latent).reshape(-1)
-    knee = float(agent.policy.out_scaler.z_knee)
-
-    fig, ax = plt.subplots(figsize=(5.6, 3.6))
-    ax.hist(z, bins=60, color="tab:red", alpha=0.75)
-    for sign in (-1.0, 1.0):
-        ax.axvline(sign * knee, color="black", ls="--", lw=1.0)
-    ax.set_xlabel("sampled latent z")
-    ax.set_ylabel("count")
-    ax.set_title(
-        f"Policy latents against the sigmoid knee at ±{knee:.3f}\n"
-        f"{100.0 * float(np.mean(np.abs(z) > knee)):.1f}% of samples past the knee",
-        fontsize=10,
-    )
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--doe-seed", type=int, default=0, help="LHS sampler seed")
@@ -1328,10 +1125,55 @@ def main() -> None:
 
     # ---- Truth ------------------------------------------------------------- #
     print("[verify] deactivation truth")
-    _verify_truth()
+    # Check the deactivation truth is severe enough to be worth learning. The
+    # point of the aged runs is that the batch *stalls*: fouling shuts the
+    # reaction down long before the substrate is consumed, so a static rate
+    # constant is not slightly wrong, it is wrong about the shape of the curve.
+    a0 = float(_activity_true(0.0, PH_REF))
+    assert abs(a0 - 1.0) < 1e-12, f"activity at t=0 must be exactly 1, got {a0}"
+    print(f"  activity at t=0: {a0:.6f}")
+    print(
+        f"  tau(pH) spans {float(_tau_true(PH_RANGE[0])):.2f} to "
+        f"{float(_tau_true(PH_RANGE[1])):.2f}"
+    )
+    assert float(_activity_true(T_MAX, PH_RANGE[0])) < float(_activity_true(T_MAX, PH_RANGE[1])), (
+        "low pH must age the catalyst faster"
+    )
+    print(f"  {'pH':>5}{'a(T_MAX)':>10}{'Ca(T_MAX) aged':>16}{'Ca(T_MAX) static':>18}")
+    grid = jnp.linspace(0.0, T_MAX, 4001)
+    for pH in (PH_RANGE[0], PH_REF, PH_RANGE[1]):
+        k = float(_k_true(25.0, pH))
+        integral = float(jnp.trapezoid(_activity_true(grid, pH), grid))
+        aged = math.exp(-k * integral)
+        static = math.exp(-k * T_MAX)
+        print(f"  {pH:>5.1f}{float(_activity_true(T_MAX, pH)):>10.4f}{aged:>16.4f}{static:>18.4f}")
+        # An absolute gap, not a ratio: the static prediction goes to nearly
+        # zero at low pH, where any ratio is huge and says nothing.
+        assert aged - static > 0.25, (
+            f"at pH {pH} the aged batch must stall well short of the static prediction, "
+            f"got Ca={aged:.4f} against {static:.4f} (gap {aged - static:.4f})"
+        )
+        assert aged < 0.75, (
+            f"at pH {pH} the aged batch must still make real progress, got Ca={aged:.4f}; "
+            "a batch that barely reacts carries no information about k"
+        )
+    # An exponential fitted through (0, 1) and the endpoint predicts the
+    # midpoint monotonically; the truth's plateau means it does not. The gap
+    # is the room the policy has to beat the fixed-form baseline in.
+    for pH in (PH_RANGE[0], PH_RANGE[1]):
+        end = float(_activity_true(T_MAX, pH))
+        k_d = -math.log(end) / T_MAX
+        print(
+            f"  pH {pH}: midpoint truth {float(_activity_true(T_MAX / 2, pH)):.4f} vs "
+            f"best-exponential {math.exp(-k_d * T_MAX / 2):.4f}"
+        )
 
     # ---- Aged dataset ------------------------------------------------------ #
     print("\n[build] aged dataset")
+    # The 9 LHS aged runs plus the 2 off-grid aged validation runs. The noise
+    # keys are folded from a different root than ``train_hybrid.py`` uses, so
+    # the fresh and aged datasets are independent noise realisations at the
+    # same ``(T, pH)`` points rather than correlated ones.
     train_experiments, val_experiments = _build_aged_datasets(
         doe_seed=args.doe_seed, noise_key=k_noise
     )
@@ -1348,6 +1190,10 @@ def main() -> None:
 
     # ---- Frozen trunk ------------------------------------------------------ #
     print("\n[load] frozen trunk from the fresh-catalyst calibration")
+    # ``load_predictors`` needs a template whose per-leaf static configuration
+    # matches the saved tree, which ``build_predictors`` supplies. The key only
+    # seeds the template's array leaves; every one of them is overwritten by
+    # the file's values.
     trunk = load_trunk(args.trunk, key=k_template)
     log_k_ref, Ea = trunk[0]()
     print(f"  trunk parametric: log_k_ref {float(log_k_ref):+.4f}, Ea {float(Ea):.2f} kJ/mol")
@@ -1368,7 +1214,39 @@ def main() -> None:
 
     # ---- Step 5 checkpoint ------------------------------------------------- #
     print("\n[verify] rollout and reward, before any learning")
-    truth_return, static_return = _verify_rollout_ceiling(episodes, solver)
+    # Score the exact zero-order-hold target and the do-nothing model.
+    # ``truth`` is what the hidden deactivation law itself scores against
+    # this noisy data: the interval-mean activity reproduces the continuous
+    # truth exactly, so the only residue is observation noise and whatever
+    # the frozen trunk gets wrong about ``k``. A reference, not a ceiling:
+    # a model scoring *above* it is fitting noise rather than signal.
+    #
+    # The undiscounted return does *not* top out at ``HORIZON``. With
+    # ``r = exp(-err^2 / sigma^2)`` and residuals ``N(0, sigma^2)`` at the
+    # true model, ``E[r] = 1/sqrt(3) = 0.577``, so the noise-limited optimum
+    # is about ``0.577 * HORIZON`` and reporting against ``HORIZON`` would
+    # understate a converged policy by nearly a factor of two.
+    #
+    # The checkpoint the whole script rests on (SPEC_RL.md step 5): if the
+    # exact target does not clearly beat the do-nothing model, the reward
+    # scaling or the zero-order hold is wrong and no amount of PPO tuning
+    # fixes it. Both numbers are reported so the learning curves have a scale.
+    truth_return, static_return = reference_returns(episodes, solver)
+    noise_floor = HORIZON / math.sqrt(3.0)
+    print(f"  the true deactivation law scores: {truth_return:7.4f}")
+    print(f"  no deactivation at all:           {static_return:7.4f}")
+    print(f"  pure-noise optimum (HORIZON/sqrt 3): {noise_floor:.4f}")
+    print(
+        f"  range to learn in: {static_return:.2f} to {truth_return:.2f}, "
+        "above which is noise-fitting"
+    )
+    assert truth_return > 0.6 * noise_floor, (
+        "the exact target should approach the noise-limited optimum; if it does not, "
+        "the reward scaling or the zero-order hold is wrong"
+    )
+    assert truth_return > 2.0 * static_return, (
+        "deactivation must matter, or there is nothing for the policy to learn"
+    )
 
     # ---- Baseline 2: fitted exponential decay ------------------------------ #
     print("\n[baseline] trunk + fitted exponential decay scalar (optax)")
@@ -1420,6 +1298,7 @@ def main() -> None:
 
     # ---- PPO --------------------------------------------------------------- #
     print("\n[ppo] the same policy, trained without differentiating the solve")
+    # Policy, exploration spread, and value head.
     agent = build_agent(key=k_agent)
     print(
         f"  {args.rollouts} noise samples x {len(train_experiments)} experiments = "
@@ -1506,14 +1385,39 @@ def main() -> None:
 
     # ---- Plots ------------------------------------------------------------- #
     if not args.no_plot:
-        _learning_curve_plot(
-            returns,
-            val_returns,
-            losses,
-            truth_return=truth_return,
-            static_return=static_return,
-            save_path=args.plot_dir / "01_ppo_learning.png",
+        # PPO return against update, with the true law's own score marked.
+        # The reference is not ``HORIZON``: observation noise caps a perfect
+        # model at about ``0.577`` per step, so the true deactivation law
+        # scores roughly ``0.577 * HORIZON`` against its own noisy data.
+        # Training return climbing above that line is the policy fitting
+        # noise, which is why the validation curve is plotted alongside it.
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.6))
+        axes[0].plot(returns, color="tab:red", lw=1.4, label="training")
+        axes[0].plot(val_returns, color="tab:blue", lw=1.4, label="validation")
+        axes[0].axhline(
+            truth_return,
+            color="black",
+            ls="--",
+            lw=1.0,
+            label=f"true law scores {truth_return:.2f}",
         )
+        axes[0].axhline(
+            static_return,
+            color="tab:grey",
+            ls=":",
+            lw=1.0,
+            label=f"no deactivation = {static_return:.2f}",
+        )
+        axes[0].set_xlabel("update")
+        axes[0].set_ylabel("mean deterministic return")
+        axes[0].legend(fontsize=8)
+        axes[1].plot(losses, color="tab:purple", lw=1.4)
+        axes[1].set_xlabel("update")
+        axes[1].set_ylabel("PPO loss")
+        fig.suptitle("PPO learning curve")
+        fig.tight_layout()
+        fig.savefig(args.plot_dir / "01_ppo_learning.png", dpi=150)
+        plt.close(fig)
         _trajectory_plot(
             val_experiments,
             val_predictions,
@@ -1526,18 +1430,119 @@ def main() -> None:
             save_path=args.plot_dir / "03_train_trajectories.png",
             title="Aged training runs: Ca against every model",
         )
-        _activity_recovery_plot(
-            val_agent,
-            val_episodes,
-            val_experiments,
-            exponential,
-            gradient_policy,
-            solver=solver,
-            save_path=args.plot_dir / "04_activity_recovery.png",
+        # Recovered activity against the truth, one panel per experiment.
+        n = len(val_experiments)
+        fig, axes = plt.subplots(1, n, figsize=(4.2 * n, 3.6), squeeze=False)
+        dense = jnp.linspace(0.0, T_MAX, 200)
+
+        for j, (ax, exp) in enumerate(zip(axes[0], val_experiments, strict=True)):
+            pH = float(exp.covariates["pH"])
+            T_C = float(exp.covariates["temperature_C"])
+            ax.plot(dense, _activity_true(dense, pH), color="black", lw=2, label="truth a(t)")
+            ts_exp = np.asarray(exp.channels["Ca"].ts)
+            ax.step(
+                ts_exp[:-1],
+                [
+                    float(_activity_interval_mean(ts_exp[i], ts_exp[i + 1], pH))
+                    for i in range(HORIZON)
+                ],
+                where="post",
+                color="black",
+                ls="--",
+                lw=1.2,
+                label="exact hold target",
+            )
+
+            episode = jax.tree.map(lambda x, j=j: x[j], val_episodes)
+            rollout = rollout_batch(
+                val_agent,
+                jax.tree.map(lambda x: x[None], episode),
+                jr.PRNGKey(0),
+                solver=solver,
+                penalty_weight=0.0,
+                n_samples=1,
+                deterministic=True,
+            )
+            ts = np.asarray(episode.ts)
+            ax.step(
+                ts[:-1],
+                np.asarray(rollout.activity[0]),
+                where="post",
+                color="tab:red",
+                lw=1.8,
+                label="PPO policy",
+            )
+
+            # Default-argument binding, not closure capture: ruff's B023 is
+            # right that a bare `episode` here would resolve to the loop's
+            # last value.
+            grad_states = zoh_states(
+                lambda t, ca, _ep=episode: gradient_policy(
+                    {"Ca": ca, "temperature_C": _ep.temperature_C, "pH": _ep.pH}
+                )[0],
+                episode.ts,
+                episode.k_fresh,
+                episode.y0,
+                solver,
+            )
+            grad_activity = [
+                float(gradient_policy({"Ca": grad_states[i, 0], "temperature_C": T_C, "pH": pH})[0])
+                for i in range(HORIZON)
+            ]
+            ax.step(
+                ts[:-1],
+                grad_activity,
+                where="post",
+                color="tab:blue",
+                lw=1.4,
+                ls="--",
+                label="optax policy",
+            )
+
+            k_d = float(exponential.rate())
+            ax.plot(
+                dense,
+                np.exp(-k_d * np.asarray(dense)),
+                color="tab:green",
+                lw=1.4,
+                ls=":",
+                label="exp decay",
+            )
+
+            ax.set_title(f"T = {T_C:.1f} °C, pH = {pH:.2f}", fontsize=10)
+            ax.set_xlabel("time")
+            ax.set_ylim(-0.05, 1.15)
+            if j == 0:
+                ax.set_ylabel("catalyst activity")
+                ax.legend(fontsize=8)
+
+        fig.suptitle("Recovered catalyst activity against the hidden truth")
+        fig.tight_layout()
+        fig.savefig(args.plot_dir / "04_activity_recovery.png", dpi=150)
+        plt.close(fig)
+
+        # Sampled latents against the squash knee, showing where the policy
+        # operates.
+        rollout = rollout_batch(
+            val_agent, episodes, jr.PRNGKey(7), solver=solver, penalty_weight=0.0, n_samples=64
         )
-        _saturation_plot(
-            val_agent, episodes, solver=solver, save_path=args.plot_dir / "05_latent_saturation.png"
+        z = np.asarray(rollout.latent).reshape(-1)
+        knee = float(val_agent.policy.out_scaler.z_knee)
+
+        fig, ax = plt.subplots(figsize=(5.6, 3.6))
+        ax.hist(z, bins=60, color="tab:red", alpha=0.75)
+        for sign in (-1.0, 1.0):
+            ax.axvline(sign * knee, color="black", ls="--", lw=1.0)
+        ax.set_xlabel("sampled latent z")
+        ax.set_ylabel("count")
+        ax.set_title(
+            f"Policy latents against the sigmoid knee at ±{knee:.3f}\n"
+            f"{100.0 * float(np.mean(np.abs(z) > knee)):.1f}% of samples past the knee",
+            fontsize=10,
         )
+        fig.tight_layout()
+        fig.savefig(args.plot_dir / "05_latent_saturation.png", dpi=150)
+        plt.close(fig)
         val_policy_pred = predict_dataset(
             val_agent.policy,
             val_dataset,
@@ -1547,8 +1552,11 @@ def main() -> None:
         )
         diag = compute_metrics(val_policy_pred, val_dataset)
         print_metrics(diag)
+        # ``compute_metrics`` keeps only the summary stats; the scatter needs
+        # the raw value pairs, so re-walk the mask here.
+        parity_data = parity_diagnostics(val_policy_pred, val_dataset)
         parity_plot(
-            _parity_diagnostics(val_policy_pred, val_dataset),
+            parity_data,
             title="PPO policy parity (aged validation)",
             save_path=args.plot_dir / "06_parity_ppo.png",
         )

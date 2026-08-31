@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import jax.numpy as jnp
@@ -20,11 +21,36 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
 
-from ._diagnostics import ChannelDiagnostics
+from hybridmodels.metrics import compute_metrics
+
+
+def parity_diagnostics(predictions: Any, dataset: Any) -> dict[str, SimpleNamespace]:
+    """Masked obs/pred pairs per channel, for :func:`parity_plot`.
+
+    ``compute_metrics`` keeps only the summary stats; the scatter needs the
+    raw value pairs, so re-walk the mask here. This is the block every
+    example used to inline.
+    """
+    metrics = compute_metrics(predictions, dataset)
+    out: dict[str, SimpleNamespace] = {}
+    for d, name in enumerate(dataset.output_channel_names):
+        obs_chunks: list = []
+        pred_chunks: list = []
+        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
+            mask = bp.mask[..., d]
+            obs_chunks.append(bp.y_observed[..., d][mask])
+            pred_chunks.append(pred[..., d][mask])
+        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
+        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
+        m = metrics[name]
+        out[name] = SimpleNamespace(
+            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
+        )
+    return out
 
 
 def parity_plot(
-    diagnostics: dict[str, ChannelDiagnostics],
+    diagnostics: dict[str, SimpleNamespace],
     *,
     channels: list[str] | None = None,
     title: str | None = "Parity",
@@ -37,8 +63,9 @@ def parity_plot(
 
     Parameters
     ----------
-    diagnostics : dict[str, ChannelDiagnostics]
-        Output of :func:`compute_diagnostics`.
+    diagnostics : dict[str, SimpleNamespace]
+        Output of :func:`parity_diagnostics`, one entry per channel with
+        ``obs`` / ``pred`` / ``n`` / ``r2`` / ``rmse``.
     channels : list[str], optional
         Subset and order to plot. Defaults to every channel, in dataset
         order.

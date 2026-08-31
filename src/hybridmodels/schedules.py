@@ -126,6 +126,15 @@ def annealing_schedule(
     # point, so the curve lands exactly on end_value at step == total_epochs
     # (same contract as every other kind). optax's exponential_decay does
     # not flatten past its budget, so clamp the tail at end_value.
+    # Optax treats a zero decay rate as a no-op, so use the finite-endpoint
+    # schedule directly for the one endpoint that a geometric sequence cannot
+    # reach stably in finite precision.
+    if end_value == 0.0:
+        return optax.linear_schedule(
+            init_value=init_value,
+            end_value=end_value,
+            transition_steps=total_epochs,
+        )
     rate = (end_value / init_value) ** (1.0 / total_epochs)
     raw = optax.exponential_decay(
         init_value=init_value,

@@ -6,7 +6,9 @@ one whenever fresh randomness is needed. This framework takes one root
 key from the user and derives every internal key from it with
 ``jr.fold_in(root, salt)``, where ``salt`` is a stable hash of a short
 name. The names used internally are ``"tournament"``,
-``"tournament_attempt_{i}"``, ``"evosax_init"``, ``"evosax_box_init"``,
+``"tournament_attempt_{i}"``, ``"seed_ensemble_tournament"``,
+``"bootstrap_{s}"``, ``"bootstrap_seeds_{s}"``,
+``"bootstrap_sample_tournament"``, ``"evosax_init"``, ``"evosax_box_init"``,
 ``"evosax_ask_{gen}"``, and ``"evosax_tell_{gen}"``.
 
 Names rather than the more familiar ``jr.split`` chain. A chained split

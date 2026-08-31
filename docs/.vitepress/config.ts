@@ -32,10 +32,15 @@ export default defineConfig({
       '/guide/': [
         { text: 'Getting Started', link: '/guide/getting-started' },
         { text: 'Concepts', link: '/guide/concepts' },
+        { text: 'Model interface', link: '/guide/model-interface' },
+        { text: 'Data and buckets', link: '/guide/data' },
+        { text: 'Predictors and bounds', link: '/guide/predictors' },
         { text: 'Training', link: '/guide/training' },
         { text: 'Custom Predictors', link: '/guide/custom-predictors' },
         { text: 'Extending', link: '/guide/extending' },
         { text: 'Ensembles', link: '/guide/ensembles' },
+        { text: 'Saving and loading', link: '/guide/serialization' },
+        { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         { text: 'Recommendations', link: '/guide/recommendations' },
       ],
       // Examples are plain scripts single-sourced into the docs. The

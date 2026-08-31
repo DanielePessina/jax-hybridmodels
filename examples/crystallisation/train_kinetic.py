@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import jax
 
@@ -53,6 +52,7 @@ from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax  #
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402
     apply_default_style,
+    parity_diagnostics,
     parity_plot,
     trajectory_plot,
 )
@@ -144,30 +144,6 @@ def state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
     return jnp.stack([conc, d43], axis=-1)
 
 
-def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``.
-
-    ``compute_metrics`` keeps only the summary stats; the scatter needs the
-    raw value pairs, so re-walk the mask here.
-    """
-    metrics = compute_metrics(predictions, dataset)
-    out: dict[str, SimpleNamespace] = {}
-    for d, name in enumerate(dataset.output_channel_names):
-        obs_chunks: list = []
-        pred_chunks: list = []
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask = bp.mask[..., d]
-            obs_chunks.append(bp.y_observed[..., d][mask])
-            pred_chunks.append(pred[..., d][mask])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        m = metrics[name]
-        out[name] = SimpleNamespace(
-            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
-        )
-    return out
-
-
 def simulate_fn(
     predictors: tuple[BoundedPredictor, BoundedPredictor],
     ts: Float[Array, " T"],
@@ -243,7 +219,7 @@ def simulate_fn(
         saveat=diffrax.SaveAt(ts=times_sec),
         stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=atol),
         max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
+        adjoint=solver.adjoint,
     )
     return jnp.asarray(sol.ys)
 
@@ -328,6 +304,10 @@ def main() -> None:
         atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),
         max_steps=500_000,
         dt0=None,
+        # The backward pass is chosen here, on the config, and forwarded by
+        # the vector field below via ``solver.adjoint``. DirectAdjoint is
+        # the memory-cheap choice for a six-state moment model.
+        adjoint=diffrax.DirectAdjoint(),
     )
 
     # Both pairs share the input scaler, and the growth and nucleation
@@ -474,8 +454,11 @@ def main() -> None:
         if not args.no_plot:
             family_dir = args.plot_dir / label
             family_dir.mkdir(parents=True, exist_ok=True)
+            # ``compute_metrics`` keeps only the summary stats; the scatter
+            # needs the raw value pairs, so re-walk the mask here.
+            parity_data = parity_diagnostics(predictions, dataset)
             parity_plot(
-                _parity_diagnostics(predictions, dataset),
+                parity_data,
                 title=f"Crystallisation parity ({label})",
                 save_path=family_dir / "parity.png",
             )

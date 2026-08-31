@@ -46,6 +46,16 @@ from jaxtyping import Array, Float
 from hybridmodels.data import BucketPayload
 
 
+def _validate_channel_idx(channel_idx: tuple[int, ...], total_channels: int) -> None:
+    """Reject channel selections that JAX advanced indexing would clamp."""
+    invalid = [idx for idx in channel_idx if idx < 0 or idx >= total_channels]
+    if invalid:
+        raise ValueError(
+            f"channel_idx contains out-of-range entries {invalid}; "
+            f"pred_obs has {total_channels} channels"
+        )
+
+
 def _resolve_channels(
     pred_obs: Array,
     channel_idx: tuple[int, ...] | None,
@@ -55,6 +65,8 @@ def _resolve_channels(
         n_channels = int(pred_obs.shape[-1])
         indices = jnp.arange(n_channels)
     else:
+        total_channels = int(pred_obs.shape[-1])
+        _validate_channel_idx(channel_idx, total_channels)
         n_channels = len(channel_idx)
         indices = jnp.asarray(channel_idx)
     if channel_weights is None:
@@ -77,6 +89,26 @@ def _select(
     return p, y, m
 
 
+def _masked_safe(p: Array, y: Array, m: Array) -> tuple[Array, Array]:
+    """Benign replacements for masked cells, before any arithmetic.
+
+    Gating only the output is not enough: ``jnp.where`` still computes the
+    dead branch's local derivative, so a NaN in a masked cell returns as
+    ``0 * nan = nan``. Swap masked values for zeros up front, then gate.
+    """
+    return jnp.where(m, p, 0.0), jnp.where(m, y, 0.0)
+
+
+def _masked_squared_error(p: Array, y: Array, m: Array) -> Array:
+    """Per-cell squared error, zeroed at masked cells.
+
+    Sanitises the inputs via :func:`_masked_safe` before squaring, so a
+    NaN or inf at a masked cell cannot leak through the gate's dead branch.
+    """
+    p_safe, y_safe = _masked_safe(p, y, m)
+    return jnp.where(m, (p_safe - y_safe) ** 2, 0.0)
+
+
 def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
     """Pointwise Gaussian NLL ``0.5 * (log(2*pi*var) + (p-y)**2/var)`` with mask gating.
 
@@ -90,8 +122,7 @@ def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
     """
     var_safe = jnp.where(m, var, 1.0)
     var_stable = jnp.maximum(var_safe, 1e-12)
-    p_safe = jnp.where(m, p, 0.0)
-    y_safe = jnp.where(m, y, 0.0)
+    p_safe, y_safe = _masked_safe(p, y, m)
     log_term = jnp.where(m, 0.5 * jnp.log(2.0 * jnp.pi * var_stable), 0.0)
     sq_term = jnp.where(m, 0.5 * (p_safe - y_safe) ** 2 / var_stable, 0.0)
     return log_term + sq_term
@@ -126,12 +157,7 @@ def masked_mse(
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    # Sanitise the inputs before squaring, then gate the output. Gating only
-    # the output is not enough: jnp.where still computes the dead branch's
-    # local derivative, so a NaN in a masked cell returns as 0 * nan = nan.
-    p_safe = jnp.where(m, p, 0.0)
-    y_safe = jnp.where(m, y, 0.0)
-    se = jnp.where(m, (p_safe - y_safe) ** 2, 0.0)
+    se = _masked_squared_error(p, y, m)
     weighted = se * weights[None, None, :]
     denom = jnp.maximum(m.sum(), 1)
     return weighted.sum() / denom
@@ -179,22 +205,21 @@ def bal_mse(
 
     Per-experiment, per-channel denominators are clamped to ``1`` with
     ``maximum(count, 1)``, so an experiment with zero observations on a
-    channel does not divide by zero. Mask gating has already zeroed the
-    matching numerator, so that contribution is exactly ``0.0``.
+    channel does not divide by zero. Experiments with no observations in any
+    selected channel (for example, a trajectory-penalty probe) are excluded
+    from the outer mean rather than diluting measured experiments.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    # Sanitise the inputs before squaring, then gate the output. Gating only
-    # the output is not enough: jnp.where still computes the dead branch's
-    # local derivative, so a NaN in a masked cell returns as 0 * nan = nan.
-    p_safe = jnp.where(m, p, 0.0)
-    y_safe = jnp.where(m, y, 0.0)
-    se = jnp.where(m, (p_safe - y_safe) ** 2, 0.0)
+    se = _masked_squared_error(p, y, m)
     sum_se = se.sum(axis=1)
     count = jnp.maximum(m.sum(axis=1), 1)
     avg = sum_se / count
     weighted = avg * weights[None, :]
-    return weighted.sum(axis=1).mean()
+    per_experiment = weighted.sum(axis=1)
+    has_observations = m.any(axis=(1, 2))
+    n_experiments = jnp.maximum(has_observations.sum(), 1)
+    return jnp.where(has_observations, per_experiment, 0.0).sum() / n_experiments
 
 
 def bal_mle(
@@ -206,10 +231,11 @@ def bal_mle(
 ) -> Array:
     """Per-experiment-balanced Gaussian NLL.
 
-    Averages over time within each experiment, then over experiments. Same
-    reduction as ``bal_mse``, with ``_gaussian_nll_terms`` (which reads
-    ``bp.yvar``) in place of the pointwise squared error. Returns the bucket
-    mean of the per-experiment, channel-weighted, time-averaged NLLs.
+    Averages over time within each observed experiment, then over those
+    experiments. Same reduction as ``bal_mse``, with
+    ``_gaussian_nll_terms`` (which reads ``bp.yvar``) in place of the
+    pointwise squared error. Experiments with no observations in any selected
+    channel are excluded from the outer mean.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
@@ -219,7 +245,10 @@ def bal_mle(
     count = jnp.maximum(m.sum(axis=1), 1)
     avg = sum_nll / count
     weighted = avg * weights[None, :]
-    return weighted.sum(axis=1).mean()
+    per_experiment = weighted.sum(axis=1)
+    has_observations = m.any(axis=(1, 2))
+    n_experiments = jnp.maximum(has_observations.sum(), 1)
+    return jnp.where(has_observations, per_experiment, 0.0).sum() / n_experiments
 
 
 LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
@@ -296,9 +325,12 @@ def resolve_loss_fn(
             "in your loss's signature."
         )
 
+    if channel_idx is None:
+        raise ValueError("channel_idx is required when projecting a custom loss")
     indices = jnp.asarray(channel_idx)
 
     def projected_loss(pred_obs: Array, bp: BucketPayload) -> Array:
+        _validate_channel_idx(channel_idx, int(pred_obs.shape[-1]))
         p = pred_obs[..., indices]
         y = bp.y_observed[..., indices]
         var = bp.yvar[..., indices]

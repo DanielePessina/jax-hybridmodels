@@ -1,13 +1,12 @@
 # Ensembles of hybrid models
 
-Sometimes one fitted model is not enough. You want several, and you want
-their predictions averaged — to smooth over unlucky initialisations, or
-to quantify how much the answer moves when the training data moves.
+An ensemble contains several trained predictor PyTrees. Average their
+predictions to reduce sensitivity to initialization or to measure sensitivity
+to the training data.
 
-The library supports two ways to build an ensemble, both returning the
-same thing: a list of `(final_loss, trained_predictors)` pairs, ranked
-ascending by loss. Feed the predictors into
-`ensemble_predictions` to average their per-bucket forecasts.
+The library provides seed and bootstrap ensembles. Both return a list of
+`(final_loss, trained_predictors)` pairs, ranked by loss. Pass the predictor
+PyTrees to `ensemble_predictions` to average their per-bucket forecasts.
 
 ## Seed ensembles: same data, different starts
 
@@ -49,10 +48,9 @@ ranked = hm.train_bootstrap_ensemble(
 ```
 
 `n_seeds > 1` combines the two: each bootstrap sample gets its own
-seed-selected member, so every member sees different data *and* is a good
-seed. Irregular per-channel timestamps are handled automatically —
-resampling re-buckets, and duplicated experiments just add rows to a
-bucket.
+seed-selected members. Every member sees different data and starts from a
+selected initialization. Irregular per-channel timestamps are handled
+automatically because resampling re-buckets the experiments.
 
 ## Averaging predictions
 

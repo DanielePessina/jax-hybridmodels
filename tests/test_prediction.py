@@ -75,6 +75,35 @@ def _dataset(shapes=((6, 1.0, 0.0), (6, 0.0, 1.0), (9, 0.5, -0.5))) -> Dataset:
 
 
 class TestPredictBucket:
+    def test_vector_covariates_reach_each_vmapped_simulation(self):
+        ts = jnp.array([0.0, 1.0])
+        experiments = [
+            make_experiment(
+                covariates={"features": jnp.array([1.0, 2.0])},
+                channels={"position": ChannelObs(ts=ts, values=jnp.zeros_like(ts))},
+                y0_fn=lambda _cov, _channels: jnp.zeros((1,)),
+            ),
+            make_experiment(
+                covariates={"features": jnp.array([3.0, 4.0])},
+                channels={"position": ChannelObs(ts=ts, values=jnp.zeros_like(ts))},
+                y0_fn=lambda _cov, _channels: jnp.zeros((1,)),
+            ),
+        ]
+        bp = make_dataset(experiments, output_channel_names=("position",)).bucket_payloads[0]
+
+        def simulate_fn(_predictors, ts, covariates, _y0, _solver):
+            value = covariates["features"].sum()
+            return jnp.broadcast_to(value, (ts.shape[0], 1))
+
+        got = predict_bucket(
+            OmegaPredictor(OMEGA_TRUE),
+            bp,
+            simulate_fn=simulate_fn,
+            state_to_output=lambda state: state,
+            solver=_solver(),
+        )
+        assert jnp.array_equal(got[:, 0, 0], jnp.array([3.0, 7.0]))
+
     def test_matches_an_unvmapped_python_loop(self):
         # The oracle: call simulate_fn once per experiment and project, with
         # no vmap anywhere. Independent of the batching under test.

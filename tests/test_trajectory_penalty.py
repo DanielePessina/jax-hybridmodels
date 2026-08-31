@@ -43,7 +43,7 @@ from hybridmodels.penalties import (
 from hybridmodels.predictors.base import BoundedPredictor, BoundScaler, Predictor
 from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
-from hybridmodels.training.kernels import build_bucket_step
+from hybridmodels.training.kernels import build_bucket_step, build_score_bucket
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 N_PENALTY = 2  # saturation accumulator + input-violation accumulator
@@ -216,6 +216,27 @@ class TestPenaltyStateHelpers:
 
 
 class TestEmbeddedTrajectoryPenalty:
+    def test_forward_score_includes_configured_trajectory_penalty(self):
+        ds = build_embedded_dataset(make_predictor(c=3.0))
+        predictors = (make_predictor(c=3.0),)
+        bp = ds.bucket_payloads[0]
+        kwargs = dict(
+            simulate_fn=make_physics_simulate_fn(predictors[0]),
+            state_to_output=embedded_state_to_output,
+            solver=solver(),
+            loss_fn=hm.masked_mse,
+        )
+        data_only = build_score_bucket(**kwargs)
+        with_penalty = build_score_bucket(
+            **kwargs,
+            trajectory_penalty_fn=trajectory_penalty_fn,
+            trajectory_penalty_weight=1.0,
+        )
+
+        score_data = float(data_only(predictors, bp, jnp.asarray(1.0)))
+        score_combined = float(with_penalty(predictors, bp, jnp.asarray(1.0)))
+        assert score_combined > score_data
+
     def test_penalty_is_zero_for_unsaturated_and_large_for_saturated(self):
         ds_sat = build_embedded_dataset(make_predictor(c=5.0))  # deep saturation
         ds_mild = build_embedded_dataset(make_predictor(c=0.1))
@@ -512,3 +533,21 @@ class TestTrajectoryPenaltyEndToEnd:
         for final_loss, member in members:
             assert float(member[0].inner.c) < 4.0  # penalty pulled out of saturation
             assert jnp.isfinite(final_loss)
+
+
+def test_penalty_state_helpers_require_at_least_one_accumulator():
+    y0 = jnp.zeros((2,))
+    state = jnp.zeros((3, 2))
+    for helper in (attach_penalty_state, strip_penalty_state, penalty_integral):
+        with pytest.raises(ValueError, match="at least one"):
+            helper(y0 if helper is attach_penalty_state else state, n=0)
+
+
+def test_penalty_vector_field_passes_only_physical_state_to_base_rhs():
+    wrapped = penalty_vector_field(
+        lambda _t, y, _args: jnp.zeros_like(y),
+        lambda _t, _y, _args: jnp.ones((1,)),
+    )
+    out = wrapped(jnp.asarray(0.0), jnp.zeros((3,)), None)
+    assert out.shape == (3,)
+    assert jnp.array_equal(out, jnp.array([0.0, 0.0, 1.0]))

@@ -168,7 +168,7 @@ def _simulate_fn(predictors, ts, covariates, y0, solver):
 ```
 
 See [Where a predictor sits relative to the
-solver](/guide/concepts#where-a-predictor-sits-relative-to-the-solver)
+solver](/guide/concepts#embedded-and-parallel-predictors)
 for the case where it cannot.
 
 ## Results
@@ -198,6 +198,16 @@ least expressive thing that fits.
 
 Sixteen features are enough here because the target is one smooth
 monotone curve. The default is 64 to leave room for a harder rate law.
+
+The default run (64 features, bank frozen) in pictures:
+
+![Predicted against observed concentration](assets/custom-predictor/parity.png)
+
+![Fitted decay curves against the seven temperatures](assets/custom-predictor/trajectories.png)
+
+The parity scatter is noise-floor tight, and the trajectories show the
+fit's worst point: the two coldest runs (least decay in the window), where
+the rate law's relative error concentrates.
 
 ## What's next
 

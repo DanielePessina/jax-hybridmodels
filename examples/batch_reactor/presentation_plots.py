@@ -393,16 +393,6 @@ def simulate_fn_linear_ph(predictors, ts, covariates, y0, solver):
 
 
 # Training configs and fit drivers.
-def _make_solver():
-    return SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-5,
-        atol=1e-7,
-        max_steps=10_000,
-        dt0=0.05,
-    )
-
-
 def _cfg_baseline():
     return EvosaxTrainingConfig(
         algorithm="CMA_ES",
@@ -416,98 +406,6 @@ def _cfg_baseline():
     )
 
 
-def _cfg_p2():
-    return OptaxTrainingConfig(
-        steps=(200,),
-        lr=(3e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=False,
-    )
-
-
-def fit_per_bin(experiments, bin_of_exp, predictors_init, mask_p1, solver):
-    """One Arrhenius fit per pH bin. Returns ``{bin_idx: predictors}``."""
-    bin_predictors: dict[int, tuple] = {}
-    for bin_idx, ph in enumerate(PH_BINS):
-        bin_exps = [e for i, e in enumerate(experiments) if bin_of_exp[i] == bin_idx]
-        bin_ds = make_dataset(
-            bin_exps,
-            output_channel_names=OUTPUT_CHANNELS,
-        )
-        _hist, preds = train_with_evosax(
-            predictors_init,
-            bin_ds,
-            _cfg_baseline(),
-            simulate_fn=simulate_fn_baseline,
-            state_to_output=_state_to_output,
-            solver=solver,
-            trainable=mask_p1,
-            key=jr.PRNGKey(bin_idx),
-        )
-        bin_predictors[bin_idx] = preds
-        log_k_ref, Ea = preds[0]()
-        print(
-            f"  bin {bin_idx} (pH={ph}): log_k_ref={float(log_k_ref):+.3f}, "
-            f"Ea={float(Ea):.2f} kJ/mol"
-        )
-    return bin_predictors
-
-
-def fit_joint_arrhenius(dataset, predictors_init, mask_p1, solver):
-    """Single Arrhenius fit on all 12 experiments — phase 1 of the hybrid."""
-    _hist, preds = train_with_evosax(
-        predictors_init,
-        dataset,
-        _cfg_baseline(),
-        simulate_fn=simulate_fn_baseline,
-        state_to_output=_state_to_output,
-        solver=solver,
-        trainable=mask_p1,
-        key=jr.PRNGKey(0),
-    )
-    log_k_ref, Ea = preds[0]()
-    print(f"  joint Arrhenius: log_k_ref={float(log_k_ref):+.3f}, Ea={float(Ea):.2f} kJ/mol")
-    return preds
-
-
-def fit_linear_ph_arrhenius(dataset, predictors_init_linph, mask_linph, solver):
-    """Single linear-pH Arrhenius fit on all 12 experiments. Three params."""
-    _hist, preds = train_with_evosax(
-        predictors_init_linph,
-        dataset,
-        _cfg_baseline(),
-        simulate_fn=simulate_fn_linear_ph,
-        state_to_output=_state_to_output,
-        solver=solver,
-        trainable=mask_linph,
-        key=jr.PRNGKey(0),
-    )
-    a, b_ph, Ea = preds[0]()
-    print(
-        f"  linear-pH Arrhenius: log_k_ref(pH) = {float(a):+.3f} "
-        f"{float(b_ph):+.3f}·pH, Ea={float(Ea):.2f} kJ/mol"
-    )
-    return preds
-
-
-def fit_hybrid(predictors_p1, dataset, mask_p2, solver):
-    """Phase 2 — fit the residual MLP with the trunk pinned at its phase-1 endpoint."""
-    _hist, preds = train_with_optax(
-        predictors_p1,
-        dataset,
-        _cfg_p2(),
-        simulate_fn=simulate_fn,
-        state_to_output=_state_to_output,
-        solver=solver,
-        trainable=mask_p2,
-        key=jr.PRNGKey(1),
-    )
-    return preds
-
-
 # Plotting.
 DARK2 = plt.get_cmap("Dark2")
 # Dark2 indices used cold→warm. Dark2 is qualitative so this mapping is purely
@@ -516,18 +414,6 @@ DARK2 = plt.get_cmap("Dark2")
 T_COLOR_INDICES = (0, 1, 2, 3)
 
 DENSE_TS = jnp.linspace(0.0, T_MAX, 200)
-
-
-def _predict_dense(predictors, exp, sim_fn, solver):
-    """Integrate the ODE on a dense time grid for a smooth prediction line."""
-    covariates = {
-        "temperature_C": jnp.asarray(float(exp.covariates["temperature_C"])),
-        "pH": jnp.asarray(float(exp.covariates["pH"])),
-        "Ca0": jnp.asarray(float(exp.covariates["Ca0"])),
-    }
-    y0 = _y0_fn(covariates, exp.channels)
-    traj = sim_fn(predictors, DENSE_TS, covariates, y0, solver)
-    return np.asarray(traj[:, 0])
 
 
 def _three_panel_figure(
@@ -558,7 +444,15 @@ def _three_panel_figure(
             T_C = float(exp.covariates["temperature_C"])
             ts_obs = np.asarray(exp.channels["Ca"].ts)
             ca_obs = np.asarray(exp.channels["Ca"].values)
-            ca_dense = _predict_dense(preds, exp, sim_fn, solver)
+            # Integrate the ODE on a dense time grid for a smooth line.
+            covariates = {
+                "temperature_C": jnp.asarray(float(exp.covariates["temperature_C"])),
+                "pH": jnp.asarray(float(exp.covariates["pH"])),
+                "Ca0": jnp.asarray(float(exp.covariates["Ca0"])),
+            }
+            y0 = _y0_fn(covariates, exp.channels)
+            traj = sim_fn(preds, DENSE_TS, covariates, y0, solver)
+            ca_dense = np.asarray(traj[:, 0])
             ax.scatter(
                 ts_obs,
                 ca_obs,
@@ -604,7 +498,13 @@ def main():
     )
 
     predictors_init = _build_predictors_init()
-    solver = _make_solver()
+    solver = SolverConfig(
+        solver=diffrax.Tsit5(),
+        rtol=1e-5,
+        atol=1e-7,
+        max_steps=10_000,
+        dt0=0.05,
+    )
 
     # Trunk-only mask: freeze the residual MLP and any BoundScaler leaves so
     # only the two-element ArrheniusKinetics latent is trainable. Reused
@@ -614,10 +514,46 @@ def main():
     mask_p1 = freeze_modules_of_type(mask_p1, predictors_init, BoundScaler)
 
     print("Fitting per-bin Arrhenius...")
-    bin_predictors = fit_per_bin(experiments, bin_of_exp, predictors_init, mask_p1, solver)
+    # One Arrhenius fit per pH bin.
+    bin_predictors: dict[int, tuple] = {}
+    for bin_idx, ph in enumerate(PH_BINS):
+        bin_exps = [e for i, e in enumerate(experiments) if bin_of_exp[i] == bin_idx]
+        bin_ds = make_dataset(
+            bin_exps,
+            output_channel_names=OUTPUT_CHANNELS,
+        )
+        _hist, preds = train_with_evosax(
+            predictors_init,
+            bin_ds,
+            _cfg_baseline(),
+            simulate_fn=simulate_fn_baseline,
+            state_to_output=_state_to_output,
+            solver=solver,
+            trainable=mask_p1,
+            key=jr.PRNGKey(bin_idx),
+        )
+        bin_predictors[bin_idx] = preds
+        log_k_ref, Ea = preds[0]()
+        print(
+            f"  bin {bin_idx} (pH={ph}): log_k_ref={float(log_k_ref):+.3f}, "
+            f"Ea={float(Ea):.2f} kJ/mol"
+        )
 
     print("Fitting joint Arrhenius (hybrid phase 1)...")
-    predictors_p1 = fit_joint_arrhenius(dataset, predictors_init, mask_p1, solver)
+    # Single Arrhenius fit on all 12 experiments — phase 1 of the hybrid.
+    _hist, preds = train_with_evosax(
+        predictors_init,
+        dataset,
+        _cfg_baseline(),
+        simulate_fn=simulate_fn_baseline,
+        state_to_output=_state_to_output,
+        solver=solver,
+        trainable=mask_p1,
+        key=jr.PRNGKey(0),
+    )
+    log_k_ref, Ea = preds[0]()
+    print(f"  joint Arrhenius: log_k_ref={float(log_k_ref):+.3f}, Ea={float(Ea):.2f} kJ/mol")
+    predictors_p1 = preds
     joint_for_each_bin = {b: predictors_p1 for b in range(len(PH_BINS))}
 
     # Linear-in-pH analytic variant — same trunk-only mask logic as the joint
@@ -629,7 +565,23 @@ def main():
     mask_linph = trainable_mask(predictors_init_linph)
     mask_linph = freeze_modules_of_type(mask_linph, predictors_init_linph, BoundedPredictor)
     mask_linph = freeze_modules_of_type(mask_linph, predictors_init_linph, BoundScaler)
-    predictors_linph = fit_linear_ph_arrhenius(dataset, predictors_init_linph, mask_linph, solver)
+    # Single linear-pH Arrhenius fit on all 12 experiments. Three params.
+    _hist, preds = train_with_evosax(
+        predictors_init_linph,
+        dataset,
+        _cfg_baseline(),
+        simulate_fn=simulate_fn_linear_ph,
+        state_to_output=_state_to_output,
+        solver=solver,
+        trainable=mask_linph,
+        key=jr.PRNGKey(0),
+    )
+    a, b_ph, Ea = preds[0]()
+    print(
+        f"  linear-pH Arrhenius: log_k_ref(pH) = {float(a):+.3f} "
+        f"{float(b_ph):+.3f}·pH, Ea={float(Ea):.2f} kJ/mol"
+    )
+    predictors_linph = preds
     linph_for_each_bin = {b: predictors_linph for b in range(len(PH_BINS))}
 
     print("Fitting hybrid (phase 2)...")
@@ -638,7 +590,26 @@ def main():
     mask_p2 = trainable_mask(predictors_p1)
     mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, ArrheniusKinetics)
     mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, BoundScaler)
-    predictors_p2 = fit_hybrid(predictors_p1, dataset, mask_p2, solver)
+    # Phase 2 — fit the residual MLP with the trunk pinned at its phase-1
+    # endpoint.
+    _hist, predictors_p2 = train_with_optax(
+        predictors_p1,
+        dataset,
+        OptaxTrainingConfig(
+            steps=(200,),
+            lr=(3e-3,),
+            optimizer=("adamw",),
+            reset_optimiser_state=(False,),
+            length_schedule=(1.0,),
+            loss="mse",
+            verbose=False,
+        ),
+        simulate_fn=simulate_fn,
+        state_to_output=_state_to_output,
+        solver=solver,
+        trainable=mask_p2,
+        key=jr.PRNGKey(1),
+    )
     hybrid_for_each_bin = {b: predictors_p2 for b in range(len(PH_BINS))}
 
     # Equations rendered as suptitles. LaTeX maths via $...$. Coefficients are

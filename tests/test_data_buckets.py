@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -61,6 +62,19 @@ class TestChannelObs:
         assert ch_x.ts.shape == (2,)
         assert ch_y.ts.shape == (3,)
 
+    def test_duplicate_timestamps_raise(self):
+        with pytest.raises(ValueError, match="duplicate|repeat"):
+            ChannelObs(ts=jnp.array([0.0, 0.0]), values=jnp.array([1.0, 2.0]))
+
+    def test_nonpositive_variance_raises(self):
+        with pytest.raises(ValueError, match="variance"):
+            ChannelObs(ts=jnp.array([0.0]), values=jnp.array([1.0]), variance=0.0)
+
+    @pytest.mark.parametrize("value", [jnp.nan, jnp.inf, -jnp.inf])
+    def test_nonfinite_values_raise(self, value):
+        with pytest.raises(ValueError, match="finite|value"):
+            ChannelObs(ts=jnp.array([0.0]), values=jnp.array([value]))
+
 
 class TestMakeExperiment:
     def test_invokes_y0_fn_with_covariates_and_channels(self):
@@ -102,8 +116,60 @@ class TestMakeExperiment:
         )
         assert jnp.allclose(exp.y0, jnp.array([7.0, 11.0]))
 
+    def test_covariates_must_be_scalar_or_rank_one(self):
+        channels = {"c": ChannelObs(ts=jnp.array([0.0]), values=jnp.array([1.0]))}
+        with pytest.raises(ValueError, match="scalar or rank-1"):
+            make_experiment(
+                covariates={"a": jnp.zeros((2, 2))},
+                channels=channels,
+                y0_fn=_zero_y0,
+            )
+
+    def test_vector_covariates_are_preserved(self):
+        channels = {"c": ChannelObs(ts=jnp.array([0.0]), values=jnp.array([1.0]))}
+        exp = make_experiment(
+            covariates={"features": jnp.array([1.0, 2.0, 3.0])},
+            channels=channels,
+            y0_fn=_zero_y0,
+        )
+        assert exp.covariates["features"].shape == (3,)
+
+    def test_y0_must_be_rank_one(self):
+        channels = {"c": ChannelObs(ts=jnp.array([0.0]), values=jnp.array([1.0]))}
+        with pytest.raises(ValueError, match="y0"):
+            make_experiment(
+                covariates={"a": 1.0},
+                channels=channels,
+                y0_fn=lambda _cov, _channels: jnp.zeros((1, 1)),
+            )
+
 
 class TestMakeDatasetUnion:
+    def test_equal_timestamps_with_mixed_float_dtypes_share_one_union_row(self):
+        # The same decimal timestamp has different exact binary values in
+        # float32 and float64. Dataset construction must canonicalize before
+        # using timestamps as dictionary/set keys.
+        with jax.enable_x64():
+            exp = make_experiment(
+                covariates={},
+                channels={
+                    "x": ChannelObs(
+                        ts=jnp.asarray([0.1], dtype=jnp.float32),
+                        values=jnp.array([1.0]),
+                    ),
+                    "y": ChannelObs(
+                        ts=jnp.asarray([0.1], dtype=jnp.float64),
+                        values=jnp.array([2.0]),
+                    ),
+                },
+                y0_fn=_zero_y0,
+                exp_id="mixed-dtype",
+            )
+            bp = make_dataset([exp], output_channel_names=("x", "y")).bucket_payloads[0]
+
+        assert bp.ts.shape == (1, 1)
+        assert bp.mask.tolist() == [[[True, True]]]
+
     def test_union_timestamps_sorted(self):
         exp = make_experiment(
             covariates={"a": 1.0},
@@ -121,6 +187,49 @@ class TestMakeDatasetUnion:
         bp = ds.bucket_payloads[0]
         assert bp.ts.shape == (1, 4)
         assert jnp.allclose(bp.ts[0], jnp.array([0.0, 1.0, 2.0, 3.0]))
+
+    def test_vector_covariates_stack_across_experiments(self):
+        def channels(value):
+            return {"c": ChannelObs(ts=jnp.array([0.0]), values=jnp.array([value]))}
+
+        experiments = [
+            make_experiment(
+                covariates={"features": jnp.array([1.0, 2.0])},
+                channels=channels(1.0),
+                y0_fn=_zero_y0,
+                exp_id="e0",
+            ),
+            make_experiment(
+                covariates={"features": jnp.array([3.0, 4.0])},
+                channels=channels(2.0),
+                y0_fn=_zero_y0,
+                exp_id="e1",
+            ),
+        ]
+        bp = make_dataset(experiments, output_channel_names=("c",)).bucket_payloads[0]
+        assert bp.covariates["features"].shape == (2, 2)
+        assert jnp.array_equal(
+            bp.covariates["features"], jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        )
+
+    def test_vector_covariate_shape_mismatch_raises(self):
+        channels = {"c": ChannelObs(ts=jnp.array([0.0]), values=jnp.array([1.0]))}
+        experiments = [
+            make_experiment(
+                covariates={"features": jnp.array([1.0, 2.0])},
+                channels=channels,
+                y0_fn=_zero_y0,
+                exp_id="e0",
+            ),
+            make_experiment(
+                covariates={"features": jnp.array([3.0, 4.0, 5.0])},
+                channels=channels,
+                y0_fn=_zero_y0,
+                exp_id="e1",
+            ),
+        ]
+        with pytest.raises(ValueError, match="shape"):
+            make_dataset(experiments, output_channel_names=("c",))
 
     def test_y_observed_and_mask_at_correct_positions(self):
         exp = make_experiment(
@@ -526,3 +635,15 @@ class TestManualConstruction:
         )
         assert ds.bucket_payloads == ()
         assert ds._experiments == ()
+
+
+class TestDatasetBoundaryValidation:
+    def test_an_experiment_without_any_timestamps_raises(self):
+        exp = make_experiment(
+            covariates={"a": 1.0},
+            channels={"c": ChannelObs(ts=jnp.array([]), values=jnp.array([]))},
+            y0_fn=lambda _cov, _channels: jnp.zeros((1,)),
+            exp_id="empty",
+        )
+        with pytest.raises(ValueError, match="timestamp|empty"):
+            make_dataset([exp], output_channel_names=("c",))

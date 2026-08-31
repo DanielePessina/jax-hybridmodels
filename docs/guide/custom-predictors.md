@@ -1,16 +1,14 @@
 # Custom predictors
 
 A **predictor** is a trainable module that takes an array and returns an
-array. The library ships two: [`MLPPredictor`](/api/predictors#mlppredictor),
-a dense feedforward network, and [`KANPredictor`](/api/predictors#kanpredictor),
-a Kolmogorov-Arnold network. Neither is privileged. Writing a third
-family is a supported extension point, not a workaround, and this page
-is the procedure for doing it.
+array. The library includes [`MLPPredictor`](/api/predictors#mlppredictor),
+a dense feedforward network, [`KANPredictor`](/api/predictors#kanpredictor),
+a Kolmogorov-Arnold network, and `NeuralNPolynomial`. You can add another
+predictor family by subclassing `Predictor`.
 
-You would write your own when the shape of the unknown is known and a
-generic network is the wrong prior: a single physical constant, a basis
-expansion, a monotone function, a random-features regressor, a layer
-from a paper. The
+Write a custom predictor when a generic network does not match the function
+you want to fit: for example, a physical constant, a basis expansion, a
+monotone function, a random-features regressor, or a layer from a paper. The
 [custom-predictor example](/examples/custom-predictor) does the last of
 these end to end.
 
@@ -29,8 +27,8 @@ A predictor must satisfy four rules. Everything else is free.
    units. [`BoundedPredictor`](/api/predictors#boundedpredictor) supplies
    those by composition.
 
-Rule 4 is the one people break first. Concrete predictors are final: you
-compose them, you do not override their methods.
+Keep bounds, named inputs, and physical units in `BoundedPredictor`.
+Concrete predictors are composed; their methods are not overridden.
 
 ## A minimal predictor
 
@@ -185,7 +183,7 @@ unbounded latent space, calls your module, and maps the result back into
 physical units. Your module sees latent values of roughly unit scale in
 and writes latent values out. It never handles a bound, and it cannot
 produce one that is out of range. See
-[Bound scaling](/guide/concepts#bound-scaling) for what the scalers do
+[Predictors and bounds](/guide/predictors) for what the scalers do
 and how to choose a warp.
 
 This is also why unit-scale defaults are the right choice inside a

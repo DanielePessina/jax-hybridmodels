@@ -101,6 +101,20 @@ class TestBoundScaler:
         assert jnp.allclose(s2.from_latent(z2), x, atol=1e-5)
         assert jnp.allclose(s1.from_latent(z1), x, atol=1e-5)
 
+    @pytest.mark.parametrize("temperature", [0.0, -1.0, float("nan")])
+    def test_temperature_must_be_finite_and_positive(self, temperature):
+        with pytest.raises(ValueError, match="temperature"):
+            BoundScaler(bounds=((0.0, 1.0),), temperature=temperature)
+
+    def test_vector_temperature_must_match_bounds(self):
+        with pytest.raises(ValueError, match="temperature"):
+            BoundScaler(bounds=((0.0, 1.0),), temperature=jnp.array([1.0, 2.0]))
+
+    @pytest.mark.parametrize("eps", [0.0, -1e-3, 0.5, 1.0, float("nan")])
+    def test_logit_eps_must_be_inside_unit_interval(self, eps):
+        with pytest.raises(ValueError, match="logit_eps"):
+            BoundScaler(bounds=((0.0, 1.0),), logit_eps=eps)
+
 
 def _identity_bp(
     *,
@@ -206,6 +220,29 @@ class TestBoundedPredictorInputKeys:
 
 
 class TestBoundedPredictor:
+    def test_known_inner_dimensions_are_validated(self):
+        from hybridmodels.predictors import MLPPredictor
+
+        with pytest.raises(ValueError, match="input dimension"):
+            BoundedPredictor(
+                input_keys=("x",),
+                in_scaler=BoundScaler(bounds=((0.0, 1.0),)),
+                inner=MLPPredictor(
+                    in_size=2, out_size=1, width_size=2, depth=1, key=jr.PRNGKey(0)
+                ),
+                out_scaler=BoundScaler(bounds=((0.0, 1.0),)),
+            )
+
+        with pytest.raises(ValueError, match="output dimension"):
+            BoundedPredictor(
+                input_keys=("x",),
+                in_scaler=BoundScaler(bounds=((0.0, 1.0),)),
+                inner=MLPPredictor(
+                    in_size=1, out_size=1, width_size=2, depth=1, key=jr.PRNGKey(0)
+                ),
+                out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0))),
+            )
+
     def test_pipeline_round_trip_with_identity_inner(self):
         bp = BoundedPredictor(
             input_keys=("a", "b"),
@@ -232,6 +269,16 @@ class TestBoundedPredictor:
         assert out.shape == (2,)
         assert 0.0 <= float(out[0]) <= 100.0
         assert -50.0 <= float(out[1]) <= 50.0
+
+    def test_unknown_inner_output_dimension_is_checked_at_call(self):
+        bp = BoundedPredictor(
+            input_keys=("x",),
+            in_scaler=BoundScaler(bounds=((0.0, 1.0),)),
+            inner=_LinearPredictor(weights=jnp.ones((1, 1))),
+            out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0))),
+        )
+        with pytest.raises(eqx.EquinoxTracetimeError):
+            bp({"x": jnp.array(0.5)})
 
 
 class TestPredictorsTuple:
@@ -395,6 +442,16 @@ class TestBoundScalerGradientSafety:
         scaler = BoundScaler(bounds=((0.0, 10.0),), transform="sigmoid")
         z = scaler.to_latent(jnp.array([-1e4, 1e4]))
         assert jnp.all(jnp.isfinite(z))
+
+    def test_positive_warp_rejects_nonpositive_runtime_inputs(self):
+        scaler = BoundScaler(bounds=((1e-3, 1.0),), warp="log10")
+        with pytest.raises(ValueError, match="positive"):
+            scaler.to_latent(jnp.array([0.0]))
+
+    def test_positive_warp_runtime_guard_survives_jit(self):
+        scaler = BoundScaler(bounds=((1e-3, 1.0),), warp="log10")
+        with pytest.raises(eqx.EquinoxRuntimeError, match="positive"):
+            eqx.filter_jit(scaler.to_latent)(jnp.array([0.0]))
 
     def test_interior_round_trip_is_unaffected(self):
         # The softclip must be a no-op well inside the box, so existing

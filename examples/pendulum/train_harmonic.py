@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import diffrax
 import jax.numpy as jnp
@@ -48,6 +47,7 @@ from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402
     apply_default_style,
+    parity_diagnostics,
     parity_plot,
     trajectory_plot,
 )
@@ -92,38 +92,6 @@ class OmegaPredictor(Predictor):
         return OmegaPredictor(jr.normal(key))
 
 
-def _build_predictor(key: Array) -> BoundedPredictor:
-    """Wrap ``OmegaPredictor`` so its latent scalar lands in ``OMEGA_BOUNDS``.
-
-    ``BoundedPredictor`` needs at least one input slot, so a constant
-    ``"dummy"`` covariate satisfies the named-input contract. The
-    ``in_scaler`` is a no-op in practice, since the inner predictor ignores
-    what it receives.
-    """
-    in_scaler = BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid")
-    inner = OmegaPredictor(jr.normal(key))
-    out_scaler = BoundScaler(bounds=(OMEGA_BOUNDS,), transform="sigmoid")
-    return BoundedPredictor(
-        input_keys=("dummy",),
-        in_scaler=in_scaler,
-        inner=inner,
-        out_scaler=out_scaler,
-    )
-
-
-def _y0_fn_factory(initial_state: Float[Array, " 2"]):
-    """Per-experiment closure returning the closed-over ``[x0, v0]``.
-
-    ``y0_fn`` must accept ``(covariates, channels)``, both unused here: the
-    initial state is captured at synthesis time, not read off the data.
-    """
-
-    def _y0_fn(_cov: dict[str, Array], _channels: dict[str, ChannelObs]) -> Array:
-        return initial_state
-
-    return _y0_fn
-
-
 def _state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
     """Project full state ``[x, v]`` to the observed channel ``[x]``."""
     return state[..., :1]
@@ -153,70 +121,9 @@ def _simulate_fn(
     return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
 
 
-def _true_position(omega: float, t: Array, x0: float, v0: float) -> Array:
-    """Closed-form solution ``x(t) = x0 cos(ωt) + (v0/ω) sin(ωt)``."""
-    return x0 * jnp.cos(omega * t) + (v0 / omega) * jnp.sin(omega * t)
-
-
-def _build_experiments(noise_key: Array) -> list[Experiment]:
-    """Synthesise one ``Experiment`` per entry in ``INITIAL_STATES``.
-
-    Positions come from the closed form, sampled evenly on ``[0, T_MAX]``
-    and perturbed by ``NOISE_STD`` Gaussian noise.
-    """
-    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    experiments: list[Experiment] = []
-    rng = noise_key
-    for i, (x0, v0) in enumerate(INITIAL_STATES):
-        rng, k = jr.split(rng)
-        clean = _true_position(OMEGA_TRUE, ts, x0, v0)
-        noisy = clean + NOISE_STD * jr.normal(k, ts.shape)
-        channels = {
-            "position": ChannelObs(
-                ts=ts,
-                values=noisy,
-                variance=jnp.full(ts.shape, NOISE_STD**2),
-            )
-        }
-        y0 = jnp.asarray([x0, v0], dtype=jnp.float32)
-        experiments.append(
-            make_experiment(
-                covariates={"dummy": 0.0},
-                channels=channels,
-                y0_fn=_y0_fn_factory(y0),
-                exp_id=f"osc_{i}_x0={x0}_v0={v0}",
-            )
-        )
-    return experiments
-
-
 def _read_omega(predictor: BoundedPredictor) -> float:
     """Pull the bounded ``omega`` value out of the predictor for reporting."""
     return evaluate_predictor(predictor, {"dummy": 0.0})
-
-
-def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``.
-
-    ``compute_metrics`` keeps only summary stats; the scatter needs the raw
-    value pairs, so re-walk the buckets' masks here.
-    """
-    metrics = compute_metrics(predictions, dataset)
-    out: dict[str, SimpleNamespace] = {}
-    for d, name in enumerate(dataset.output_channel_names):
-        obs_chunks: list = []
-        pred_chunks: list = []
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask = bp.mask[..., d]
-            obs_chunks.append(bp.y_observed[..., d][mask])
-            pred_chunks.append(pred[..., d][mask])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        m = metrics[name]
-        out[name] = SimpleNamespace(
-            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
-        )
-    return out
 
 
 def main() -> None:
@@ -243,7 +150,32 @@ def main() -> None:
     k_data, k_init, k_train = jr.split(root_key, 3)
 
     print("[build] synthetic harmonic-oscillator dataset")
-    experiments = _build_experiments(k_data)
+    # Positions come from the closed form ``x(t) = x0 cos(ωt) + (v0/ω) sin(ωt)``,
+    # sampled evenly on ``[0, T_MAX]`` and perturbed by ``NOISE_STD`` Gaussian
+    # noise. Each experiment's ``y0_fn`` closes over its own ``[x0, v0]``,
+    # captured at synthesis time rather than read off the data.
+    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
+    experiments: list[Experiment] = []
+    rng = k_data
+    for i, (x0, v0) in enumerate(INITIAL_STATES):
+        rng, k = jr.split(rng)
+        clean = x0 * jnp.cos(OMEGA_TRUE * ts) + (v0 / OMEGA_TRUE) * jnp.sin(OMEGA_TRUE * ts)
+        noisy = clean + NOISE_STD * jr.normal(k, ts.shape)
+        y0 = jnp.asarray([x0, v0], dtype=jnp.float32)
+        experiments.append(
+            make_experiment(
+                covariates={"dummy": 0.0},
+                channels={
+                    "position": ChannelObs(
+                        ts=ts,
+                        values=noisy,
+                        variance=jnp.full(ts.shape, NOISE_STD**2),
+                    )
+                },
+                y0_fn=lambda _cov, _channels, y0=y0: y0,
+                exp_id=f"osc_{i}_x0={x0}_v0={v0}",
+            )
+        )
     dataset = make_dataset(
         experiments,
         output_channel_names=OUTPUT_CHANNELS,
@@ -263,7 +195,16 @@ def main() -> None:
         max_steps=10_000,
         dt0=0.05,
     )
-    predictor = _build_predictor(k_init)
+    # ``BoundedPredictor`` needs at least one input slot, so a constant
+    # ``"dummy"`` covariate satisfies the named-input contract. The
+    # ``in_scaler`` is a no-op in practice, since the inner predictor ignores
+    # what it receives.
+    predictor = BoundedPredictor(
+        input_keys=("dummy",),
+        in_scaler=BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid"),
+        inner=OmegaPredictor(jr.normal(k_init)),
+        out_scaler=BoundScaler(bounds=(OMEGA_BOUNDS,), transform="sigmoid"),
+    )
     print(f"  initial omega = {_read_omega(predictor):.4f} (target {OMEGA_TRUE})")
 
     print("\n[train] optax (single phase, mse loss)")
@@ -305,8 +246,11 @@ def main() -> None:
 
     if not args.no_plot:
         args.plot_dir.mkdir(parents=True, exist_ok=True)
+        # ``compute_metrics`` keeps only summary stats; the scatter needs the
+        # raw value pairs, so re-walk the buckets' masks here.
+        parity_data = parity_diagnostics(predictions, dataset)
         parity_plot(
-            _parity_diagnostics(predictions, dataset),
+            parity_data,
             title="Pendulum parity (trained model)",
             save_path=args.plot_dir / "parity.png",
         )

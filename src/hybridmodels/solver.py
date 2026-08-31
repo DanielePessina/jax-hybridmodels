@@ -12,6 +12,7 @@ name tables. Add a custom class with :func:`register_solver` or
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import diffrax
@@ -143,6 +144,52 @@ class SolverConfig(eqx.Module):
     pcoeff: float = eqx.field(static=True, default=0.0)
     icoeff: float = eqx.field(static=True, default=1.0)
     dcoeff: float = eqx.field(static=True, default=0.0)
+
+    def __init__(
+        self,
+        *,
+        solver: diffrax.AbstractSolver[Any],
+        rtol: float,
+        atol: float | tuple[float, ...],
+        max_steps: int,
+        dt0: float | None,
+        adjoint: diffrax.AbstractAdjoint | None = None,
+        pcoeff: float = 0.0,
+        icoeff: float = 1.0,
+        dcoeff: float = 0.0,
+    ) -> None:
+        """Construct and validate a solver configuration at the host boundary."""
+        if not math.isfinite(float(rtol)) or float(rtol) <= 0.0:
+            raise ValueError(f"SolverConfig.rtol must be finite and positive; got {rtol}")
+
+        atol_values = atol if isinstance(atol, tuple) else (atol,)
+        if not atol_values or any(
+            not math.isfinite(float(value)) or float(value) <= 0.0 for value in atol_values
+        ):
+            raise ValueError(
+                "SolverConfig.atol values must be finite and positive; "
+                f"got {atol}"
+            )
+
+        try:
+            valid_max_steps = int(max_steps) == max_steps and int(max_steps) > 0
+        except (TypeError, ValueError, OverflowError):
+            valid_max_steps = False
+        if not valid_max_steps:
+            raise ValueError(f"SolverConfig.max_steps must be a positive integer; got {max_steps}")
+
+        if dt0 is not None and (not math.isfinite(float(dt0)) or float(dt0) <= 0.0):
+            raise ValueError(f"SolverConfig.dt0 must be finite and positive or None; got {dt0}")
+
+        self.solver = solver
+        self.rtol = rtol
+        self.atol = atol
+        self.max_steps = max_steps
+        self.dt0 = dt0
+        self.adjoint = diffrax.DirectAdjoint() if adjoint is None else adjoint
+        self.pcoeff = pcoeff
+        self.icoeff = icoeff
+        self.dcoeff = dcoeff
 
     def stepsize_controller(self) -> diffrax.PIDController:
         """Build the adaptive step-size controller this config describes.

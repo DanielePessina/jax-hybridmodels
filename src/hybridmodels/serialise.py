@@ -54,7 +54,9 @@ from typing import Any
 
 import equinox as eqx
 import jax.tree_util as jtu
+import optax
 
+from hybridmodels.predictors.base import Predictor
 from hybridmodels.solver import SolverConfig
 from hybridmodels.training.evosax import EvosaxTrainingConfig
 from hybridmodels.training.optax import OptaxTrainingConfig
@@ -96,20 +98,54 @@ def _stringify_loss_field(value: Any) -> Any:
     if isinstance(value, str):
         return value
     if callable(value):
-        module = getattr(value, "__module__", "")
-        qualname = getattr(value, "__qualname__", getattr(value, "__name__", ""))
-        return f"{module}.{qualname}" if module else qualname
+        return _callable_path(value)
     return value
+
+
+def _callable_path(value: Any) -> str:
+    """Return the import-style identity of a callable for metadata."""
+    module = getattr(value, "__module__", "")
+    qualname = getattr(value, "__qualname__", getattr(value, "__name__", ""))
+    return f"{module}.{qualname}" if module else qualname
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert metadata values into JSON-safe values without losing identity hints."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if callable(value):
+        return {"__callable__": _callable_path(value)}
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    return {"__opaque__": _callable_path(type(value)), "repr": repr(value)}
+
+
+def _json_safe_optimizer(value: Any) -> Any:
+    """Preserve raw Optax transformations as one opaque metadata value."""
+    if isinstance(value, optax.GradientTransformation):
+        return {
+            "__opaque__": _callable_path(type(value)),
+            "repr": repr(value),
+        }
+    return _json_safe(value)
 
 
 def _serialise_training_config(config: Any) -> dict[str, Any]:
     """Return a JSON-encodable view of an Optax/Evosax training config.
 
     ``dataclasses.asdict`` deep-copies the config, turning tuples into
-    lists since JSON has no tuple. Only ``loss`` needs extra care, being
-    allowed to be a callable. See ``_stringify_loss_field``.
+    lists since JSON has no tuple. Callable and opaque runtime fields are
+    represented by descriptive markers; ``loss`` keeps its historical
+    import-style string representation. See ``_json_safe``.
     """
-    raw = dataclasses.asdict(config)
+    raw_unprocessed = dataclasses.asdict(config)
+    if hasattr(config, "optimizer"):
+        raw_unprocessed["optimizer"] = [
+            _json_safe_optimizer(spec) for spec in config.optimizer
+        ]
+    raw = _json_safe(raw_unprocessed)
     if "loss" in raw:
         # Read ``loss`` from the live config, not the asdict'd copy, so the
         # original identity is unambiguous.
@@ -169,9 +205,38 @@ def _describe_predictors(predictors: Any) -> dict[str, Any]:
                 "class": f"{cls.__module__}.{cls.__qualname__}",
             }
         )
+    static: dict[str, Any] = {}
+
+    def collect_static(node: Any, path: str) -> None:
+        if isinstance(node, eqx.Module):
+            # Capture static semantics on user-defined Predictor modules too.
+            # Dependency internals such as eqx.nn.MLP remain intentionally
+            # opaque because their enclosing shipped predictor owns the
+            # serialisable architecture metadata.
+            if not isinstance(node, Predictor) and not type(node).__module__.startswith(
+                "hybridmodels"
+            ):
+                return
+            for field in dataclasses.fields(type(node)):
+                value = getattr(node, field.name)
+                field_path = f"{path}.{field.name}" if path else field.name
+                if field.metadata.get("static", False):
+                    static[field_path] = _json_safe(value)
+                else:
+                    collect_static(value, field_path)
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                collect_static(value, f"{path}.{key}" if path else str(key))
+        elif isinstance(node, (tuple, list)):
+            for index, value in enumerate(node):
+                collect_static(value, f"{path}.{index}" if path else str(index))
+
+    collect_static(predictors, "")
     return {
         "tree_structure": repr(treedef),
         "leaves": leaves,
+        "static": static,
     }
 
 
@@ -257,15 +322,25 @@ def save_run(
 
 
 def _filter_dataclass_kwargs(cls: type, raw: dict[str, Any]) -> dict[str, Any]:
-    """Keep only ``raw`` keys that are declared fields of ``cls``.
-
-    Lets ``load_run`` rebuild a frozen config even when the saved metadata
-    carries fields the current dataclass no longer declares, as after a
-    rename. Unknown fields are dropped without warning; a caller wanting
-    strict loading must check for them itself.
-    """
+    """Keep only declared fields, refusing metadata the current config cannot represent."""
     valid = {f.name for f in dataclasses.fields(cls)}
+    unknown = sorted(set(raw) - valid)
+    if unknown:
+        raise ValueError(
+            f"Saved {cls.__name__} contains unknown configuration fields: {unknown}"
+        )
     return {k: v for k, v in raw.items() if k in valid}
+
+
+def _contains_serialised_callable(value: Any) -> bool:
+    """Whether metadata contains a callable or opaque runtime object marker."""
+    if isinstance(value, dict):
+        if "__callable__" in value or "__opaque__" in value:
+            return True
+        return any(_contains_serialised_callable(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_serialised_callable(item) for item in value)
+    return False
 
 
 def _coerce_tuple_fields(cls: type, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -292,13 +367,19 @@ def _build_training_config(cls: type | None, raw: dict[str, Any] | None) -> Any:
     """Reconstruct a training config from its dict, or pass through if no class given.
 
     ``None`` when no config was saved. A populated ``raw`` with no ``cls``
-    passes through unchanged. Otherwise unknown keys are dropped, for
-    forward compatibility, and JSON lists are re-tupled.
+    passes through unchanged. Otherwise unknown keys are rejected and JSON
+    lists are re-tupled, so loading cannot silently change the configuration.
     """
     if raw is None:
         return None
     if cls is None:
         return raw
+    if _contains_serialised_callable(raw):
+        raise ValueError(
+            "Saved training config contains callable or opaque fields that cannot be "
+            "reconstructed automatically; load it without a config class and rebind "
+            "those fields explicitly."
+        )
     kwargs = _filter_dataclass_kwargs(cls, raw)
     kwargs = _coerce_tuple_fields(cls, kwargs)
     return cls(**kwargs)
@@ -338,6 +419,28 @@ def load_run(
     directory = Path(directory)
     with (directory / _METADATA_FILENAME).open() as f:
         metadata: dict[str, Any] = json.load(f)
+
+    saved_version = metadata.get("version")
+    current_version = _resolve_version()
+    if (
+        saved_version is not None
+        and saved_version != "unknown"
+        and current_version != "unknown"
+        and saved_version != current_version
+    ):
+        raise ValueError(
+            f"Saved run targets hybridmodels version {saved_version!r}, "
+            f"but the installed package is {current_version!r}."
+        )
+
+    saved_description = metadata.get("predictors", {})
+    actual_description = _describe_predictors(predictors_template)
+    for field in ("tree_structure", "leaves", "static"):
+        if field in saved_description and saved_description[field] != actual_description[field]:
+            raise ValueError(
+                "predictors_template does not match saved predictor metadata for "
+                f"{field}; rebuild the template with the original static configuration."
+            )
 
     solver = SolverConfig.from_dict(metadata["solver"])
     optax_config = _build_training_config(optax_cls, metadata.get("optax_config"))

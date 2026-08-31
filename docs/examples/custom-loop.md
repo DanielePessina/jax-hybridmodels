@@ -34,3 +34,15 @@ The example is a single file with no hidden parts — what you see is what
 runs:
 
 <<< ../../examples/custom_loop/train_custom_loop.py
+
+## Results
+
+Default settings, seed 0, 150 hand-rolled steps. The masked-Huber loss and
+the per-bucket weight are the injected customisations; the L2 on `scale`
+is the custom regulariser, charged once per step outside the bucket loop.
+
+![Predicted against observed position for the custom-loop model](assets/custom-loop/parity.png)
+
+The recovered `omega = 0.999` against a true `1.0` is the same accuracy
+the [pendulum example](/examples/pendulum) reaches through the stock
+trainer — the loop is different, the physics pipeline is not.

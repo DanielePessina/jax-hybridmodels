@@ -44,3 +44,18 @@ The example is a single file with no hidden parts — what you see is what
 runs:
 
 <<< ../../examples/supersaturation_poly/train_supersaturation_poly.py
+
+## Results
+
+Default settings, seed 0, 400 steps. The `mu0` time-series fit to the
+noise floor (`R^2 = 0.999`), and the rate law comes out close to the truth
+`J(S) = 0.02 + 0.15 (S-1)^4`.
+
+![Predicted against observed nucleation moment](assets/supersaturation-poly/parity.png)
+
+![Learned nucleation rate against the truth](assets/supersaturation-poly/recovered_rate.png)
+
+The recovered curve is a *polynomial in the latented input* wrapped in a
+`BoundedPredictor`'s output scaler, so the shape is the network's and the
+range is structural. The fit is best at high supersaturation, where
+nucleation actually drives the observable dynamics.

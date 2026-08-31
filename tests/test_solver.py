@@ -229,6 +229,22 @@ class TestSolverConfigRoundTrip:
 
 
 class TestSolverConfigErrors:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"rtol": 0.0},
+            {"rtol": -1.0},
+            {"atol": 0.0},
+            {"atol": (1e-6, 0.0)},
+            {"max_steps": 0},
+            {"dt0": 0.0},
+            {"dt0": -0.1},
+        ],
+    )
+    def test_invalid_solver_settings_raise_at_construction(self, kwargs):
+        with pytest.raises(ValueError):
+            _cfg(**kwargs)
+
     def test_from_dict_unknown_solver_raises(self):
         d = {
             "solver": "DoesNotExist",

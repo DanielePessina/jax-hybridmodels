@@ -185,7 +185,7 @@ known answer.
 
 - [`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`make_dataset`](/api/data#make_dataset)
 - A custom [`Predictor`](/api/predictors#predictor) subclass wrapped in a [`BoundedPredictor`](/api/predictors#boundedpredictor)
-- A user-written `simulate_fn` matching the [mandatory signature](/guide/concepts#simulate-fn)
+- A user-written `simulate_fn` matching the [mandatory signature](/guide/model-interface)
 - [`SolverConfig`](/api/solver#solverconfig) with `diffrax.Tsit5`
 - [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig) and [`train_with_optax`](/api/training#train_with_optax)
 - The [tournament re-init hook](/guide/training#the-shared-tournament),

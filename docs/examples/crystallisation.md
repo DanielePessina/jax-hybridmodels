@@ -380,6 +380,20 @@ Reading the predictors at conditions no experiment visited is the point
 of a bounded hybrid model. The script also writes parity and trajectory
 plots under `examples/crystallisation/figures/`.
 
+Default settings, seed 0, 600 steps for the MLP family:
+
+![Predicted against observed concentration and d43](assets/crystallisation/mlp/parity.png)
+
+![Fitted trajectories against the four experiments](assets/crystallisation/mlp/trajectories.png)
+
+The concentration parity sits close to the identity line across the full
+concentration range, and the terminal `d43` points land within their
+variance of the fitted curves. The KAN family (`--kan-basis spline`
+defaults) reaches a similar concentration fit but recovers the `d43`
+terminal size worse, which is the same least-expressive-model lesson the
+[hybrid ODE](/examples/hybrid-ode#results) and [custom
+predictor](/examples/custom-predictor#results) examples show.
+
 ## What's next
 
 - [Crystallisation (mechanistic)](/examples/crystallisation-mechanistic).
