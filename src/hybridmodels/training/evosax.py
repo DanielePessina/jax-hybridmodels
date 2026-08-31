@@ -56,6 +56,7 @@ so the contract stays the same whichever strategy is plugged in.
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -73,10 +74,16 @@ from scipy.stats import qmc
 
 from hybridmodels.data import BucketPayload, Dataset
 from hybridmodels.losses import resolve_loss_fn
-from hybridmodels.penalties import bound_penalty, collocation_grids
+from hybridmodels.penalties import (
+    bound_penalty,
+    data_penalty_points,
+    select_penalty_points,
+    validate_penalty_points,
+)
 from hybridmodels.rng import fold
 from hybridmodels.solver import SolverConfig
 from hybridmodels.trainable import trainable_mask
+from hybridmodels.training.kernels import simulate_bucket
 from hybridmodels.ui.base import EvosaxUI, SilentUI
 from hybridmodels.ui.evosax import RichEvosaxUI
 
@@ -129,13 +136,20 @@ class EvosaxTrainingConfig:
     penalty_weight
         Weight on the bound-saturation penalty, folded into each
         individual's fitness. ``0.0`` disables it. Scalar, not a tuple.
-    penalty_grid_points
-        Points per input dimension in the collocation grid the penalty is
-        evaluated on.
+        Relative to the per-bucket-averaged data term, charged once per
+        evaluation.
+    penalty_points
+        User-supplied penalty-only points for the bound penalty: one
+        ``[G, n_inputs]`` array of physical input vectors per
+        ``BoundedPredictor`` leaf, in traversal order, matching each leaf's
+        ``input_keys`` column order. ``None`` (the default) uses only the
+        measured points gathered from the dataset; leaves whose inputs do
+        not all resolve to dataset covariates must be covered by an entry
+        here, or the run raises.
     penalty_fn
         The regulariser added to each individual's fitness, defaulting to
         :func:`hybridmodels.penalties.bound_penalty` when ``None``. A
-        custom callable ``(predictors, penalty_grids) -> scalar`` replaces
+        custom callable ``(predictors, points) -> scalar`` replaces
         the bound penalty.
     trajectory_penalty_fn
         Trajectory-aware penalty for **embedded** hybrid models, called as
@@ -173,7 +187,7 @@ class EvosaxTrainingConfig:
     num_generations: int = 100
     init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
     penalty_weight: float = 0.0
-    penalty_grid_points: int = 5
+    penalty_points: tuple[Array, ...] | None = None
     penalty_fn: Callable[..., Array] | None = None
     trajectory_penalty_fn: Callable[..., Array] | None = None
     trajectory_penalty_weight: float = 0.0
@@ -201,11 +215,15 @@ class EvosaxTrainingConfig:
                 "EvosaxTrainingConfig.penalty_weight must be non-negative; "
                 f"got {self.penalty_weight}"
             )
+        if not math.isfinite(self.penalty_weight):
+            raise ValueError("EvosaxTrainingConfig.penalty_weight must be finite")
         if self.trajectory_penalty_weight < 0.0:
             raise ValueError(
                 "EvosaxTrainingConfig.trajectory_penalty_weight must be "
                 f"non-negative; got {self.trajectory_penalty_weight}"
             )
+        if not math.isfinite(self.trajectory_penalty_weight):
+            raise ValueError("EvosaxTrainingConfig.trajectory_penalty_weight must be finite")
         if self.trajectory_penalty_weight != 0.0 and self.trajectory_penalty_fn is None:
             raise ValueError(
                 "EvosaxTrainingConfig.trajectory_penalty_weight is non-zero but "
@@ -216,6 +234,19 @@ class EvosaxTrainingConfig:
             raise ValueError("EvosaxTrainingConfig.population_size must be > 0")
         if self.num_generations <= 0:
             raise ValueError("EvosaxTrainingConfig.num_generations must be > 0")
+        for idx, points in enumerate(self.penalty_points or ()):
+            if points.ndim != 2:
+                raise ValueError(
+                    "EvosaxTrainingConfig.penalty_points entries must be rank-2 "
+                    f"[G, n_inputs] arrays of physical input vectors; entry {idx} "
+                    f"has shape {points.shape}"
+                )
+        if not math.isfinite(self.init_box_extent) or self.init_box_extent < 0.0:
+            raise ValueError("EvosaxTrainingConfig.init_box_extent must be finite and non-negative")
+        if not math.isfinite(self.sigma_init) or self.sigma_init <= 0.0:
+            raise ValueError("EvosaxTrainingConfig.sigma_init must be finite and positive")
+        if self.log_every < 1:
+            raise ValueError("EvosaxTrainingConfig.log_every must be at least 1")
 
 
 def _build_single_eval(
@@ -228,7 +259,7 @@ def _build_single_eval(
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
     penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
-    penalty_grids: tuple[Array, ...],
+    penalty_points: tuple[Array, ...] = (),
     penalty_weight: float,
     trajectory_penalty_fn: Callable[[Array, BucketPayload], Array] | None = None,
     trajectory_penalty_weight: float = 0.0,
@@ -241,13 +272,18 @@ def _build_single_eval(
     and the resolved loss. The bucket loop unrolls inside the trace, so
     the multi-bucket forward pass becomes one fused kernel.
 
-    Loss aggregation across buckets is a **simple sum**, so a bucket with
-    more experiments weighs more. That matches how the same dataset scores
-    end to end, which keeps the ranking honest.
+    Loss aggregation across buckets is a simple average, matching the Optax
+    training step. Each bucket therefore contributes one equally weighted
+    term, regardless of how many distinct timestamp lengths the dataset has.
+
+    The bound penalty evaluates at ``penalty_points``, the per-leaf point
+    arrays selected host-side by the caller (the output of
+    :func:`hybridmodels.penalties.select_penalty_points`). Evosax has no
+    length-mask curriculum, so every observed cell counts.
 
     ``trajectory_penalty_fn`` reads the full state ``[N, T, S]`` (penalty
     accumulators included) and is folded into the fitness alongside the
-    collocation penalty. ``None`` keeps the eval identical to a plain
+    bound penalty. ``None`` keeps the eval identical to a plain
     data+bound fit.
     """
 
@@ -255,13 +291,10 @@ def _build_single_eval(
         params = unflatten(flat)
         predictor = eqx.combine(params, static_predictor)
 
-        def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
-            return simulate_fn(predictor, ts, covariates, y0, solver)
-
         total = jnp.asarray(0.0)
         for bp in bucket_payloads:
-            full_state = jax.vmap(per_experiment, in_axes=(0, 0, 0))(
-                bp.ts, bp.covariates, bp.y0
+            full_state = simulate_bucket(
+                predictor, bp, simulate_fn=simulate_fn, solver=solver
             )
             pred_obs = jax.vmap(state_to_output)(full_state)
             total = total + loss_fn(pred_obs, bp)
@@ -269,6 +302,7 @@ def _build_single_eval(
                 total = total + trajectory_penalty_weight * trajectory_penalty_fn(
                     full_state, bp
                 )
+        total = total / float(max(len(bucket_payloads), 1))
         if penalty_weight > 0.0:
             # The search roams the latent space with nothing holding it in
             # range, and the squash keeps the physical output legal however
@@ -280,7 +314,7 @@ def _build_single_eval(
             # Folded into the fitness because evosax ranks by one scalar
             # with no aux channel. The weight is a closed-over Python float,
             # never traced, so it stays out of the vmap.
-            total = total + penalty_weight * penalty_fn(predictor, penalty_grids)
+            total = total + penalty_weight * penalty_fn(predictor, penalty_points)
         return total
 
     return single_eval
@@ -434,6 +468,17 @@ def train_with_evosax(
         population_size=int(config.population_size),
     )
 
+    sources = data_penalty_points(predictors, dataset)
+    extras = config.penalty_points or ()
+    validate_penalty_points(
+        predictors,
+        sources,
+        extras,
+        # Coverage is the default bound penalty's contract; a custom
+        # ``penalty_fn`` owns its points and needs no coverage check.
+        enabled=config.penalty_weight > 0.0 and config.penalty_fn is None,
+    )
+
     single_eval = _build_single_eval(
         static_predictor=static_predictors,
         unflatten=unflatten,
@@ -443,7 +488,7 @@ def train_with_evosax(
         solver=solver,
         loss_fn=loss_fn,
         penalty_fn=bound_penalty if config.penalty_fn is None else config.penalty_fn,
-        penalty_grids=collocation_grids(predictors, config.penalty_grid_points),
+        penalty_points=select_penalty_points(sources, extras, 1.0),
         penalty_weight=float(config.penalty_weight),
         trajectory_penalty_fn=config.trajectory_penalty_fn,
         trajectory_penalty_weight=config.trajectory_penalty_weight,
@@ -459,6 +504,8 @@ def train_with_evosax(
     warm_pop = jnp.broadcast_to(flat0[None, :], (config.population_size, flat0.shape[0]))
     warm_fitness = population_eval(warm_pop)
     jax.block_until_ready(warm_fitness)  # type: ignore[no-untyped-call]
+    if not bool(jnp.all(jnp.isfinite(warm_fitness))):
+        raise FloatingPointError("non-finite fitness in the initial population")
     ui_.on_compile_done(bucket_idx=0)
 
     strategy, strat_params = _build_strategy(config=config, flat=flat0)
@@ -486,9 +533,8 @@ def train_with_evosax(
             population, state = strategy.ask(ask_key, state, strat_params)
 
         fitness = population_eval(population)
-        # CMA-ES tolerates NaN in the fitness vector: a NaN just makes that
-        # individual the worst in the generation. Per-individual error
-        # recovery is deliberately absent; wrap your own simulator for it.
+        if not bool(jnp.all(jnp.isfinite(fitness))):
+            raise FloatingPointError(f"non-finite fitness in generation {gen}")
         tell_key = fold(key, f"evosax_tell_{gen}")
         state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)
 

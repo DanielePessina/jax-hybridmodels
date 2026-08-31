@@ -1,6 +1,6 @@
 # jax-hybridmodels architecture specification
 
-**Status:** v1 build order (§8) complete and green; the package is in pre-1.0 refinement. Locked through interactive grilling on 2026-05-03; amended 2026-08-26 to reinstate bound penalties (§2.2, R-P1..R-P7, [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md)).
+**Status:** v1 build order (§8) complete and green; the package is in pre-1.0 refinement. Locked through interactive grilling on 2026-05-03; amended 2026-08-26 to reinstate bound penalties (§2.2, R-P1..R-P7, [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md)); amended 2026-08-31 to reverse the collocation default for measured points plus user penalty-only points (same ADR, rewritten), and to document the evosax history divergence (R-P6).
 
 This spec is the architectural source of truth. It pairs with [`CONTEXT.md`](./CONTEXT.md) (the domain glossary) and the ADRs in [`docs/adr/`](./docs/adr/). Read CONTEXT.md first if any term here looks unfamiliar.
 
@@ -35,11 +35,11 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-D2**: `Experiment` accepts per-channel sparse observations (`ChannelObs` with its own `ts/values/variance`). The framework computes the per-experiment union timestamp axis and the resulting mask automatically at `make_dataset` time. Users never write mask code.
 - **R-D3**: Bucketing groups by `len(union_ts)`. Within a bucket, individual experiments may have different `ts` values and different masks (mask is a per-experiment array).
 - **R-D4**: `BucketPayload` is not promoted to a class. It is a `NamedTuple` of stacked `[N, T, ...]` arrays.
-- **R-D5**: Covariates are passed as `dict[str, float]` (scalar per experiment, constant in time, named, with no canonical-order packed array). Stored as 0-d JAX arrays after `make_experiment`. Array-valued covariates remain out of scope for v1.
+- **R-D5**: Covariates are passed as `dict[str, float | Array]` (scalar or rank-1 vector per experiment, constant in time, named, with no canonical-order packed array). Stored as 0-d or 1-d JAX arrays after `make_experiment`. Each covariate key must have the same shape across a dataset.
 - **R-D6**: `y0` is the full model state, constructed at data-import time via a user-supplied `y0_fn` hook and stored on `Experiment`.
 - **R-D7**: `state_to_output` maps a full state trajectory to observed channels and is applied externally to `simulate_fn`'s output, before loss. It is a property of the *model*, passed to prediction and training as a keyword argument — not stored on the `Dataset` ([ADR-0008](./docs/adr/0008-state-to-output-belongs-to-model.md)).
 - **R-D8**: `split_dataset(dataset, *, train, val, test, key)` is provided.
-- **R-D9**: Exogenous time-varying quantities enter through **profile factories** (`hybridmodels.profiles`: `constant_profile`, `step_profile`, `ramp_profile`, `piecewise_linear_profile`). A profile is a pure-JAX callable `t -> Array` evaluated inside the user's vector field at the solver's continuous `t`; its *parameters* (set points, jump/ramp times) travel as ordinary R-D5 scalar covariates, so the data layer, bucketing, and the mandatory `simulate_fn` signature are untouched. The two flat edges are exact: `ramp_profile(t0, t1, v0, v1)` returns `v0` before `t0` and `v1` after `t1`; `piecewise_linear_profile` extends the first/last values outward. Factories validate host-side parameters (`t1 > t0`, strictly increasing knots) and skip validation for traced values so they stay `jit`/`vmap`-safe.
+- **R-D9**: Exogenous time-varying quantities enter through **profile factories** (`hybridmodels.profiles`: `constant_profile`, `step_profile`, `ramp_profile`, `piecewise_linear_profile`). A profile is a pure-JAX callable `t -> Array` evaluated inside the user's vector field at the solver's continuous `t`; its *parameters* travel as ordinary R-D5 covariates, so the data layer, bucketing, and the mandatory `simulate_fn` signature are untouched. The two flat edges are exact: `ramp_profile(t0, t1, v0, v1)` returns `v0` before `t0` and `v1` after `t1`; `piecewise_linear_profile` extends the first/last values outward. Factories validate host-side parameters (`t1 > t0`, strictly increasing knots) and skip validation for traced values so they stay `jit`/`vmap`-safe.
 
 #### Training (Optax)
 
@@ -68,10 +68,10 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-P1**: Bounds stay enforced by reparameterisation; the penalty is an *additional* term, never the feasibility mechanism. A physical bound violation remains unrepresentable.
 - **R-P2**: `BoundScaler.to_latent` guards `logit` with a linear continuation (`soft_logit`), not `jnp.clip`. Rationale: a hard clip has exactly zero derivative outside the box, and sitting mid-graph that zero propagates to every upstream parameter, silently dropping state-derived sensitivities from the ODE adjoint. Inside `[logit_eps, 1-logit_eps]` the map is exactly the previous one.
 - **R-P3**: Penalties hinge on the latent, never the physical output. `from_latent`'s derivative underflows to exactly `0.0` past `|z/T| ~ 15`, so a physical-space penalty vanishes exactly where saturation is worst.
-- **R-P4**: See [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md). The default penalty is top-level collocation (`collocation_grids` + `bound_penalty`) over each predictor's declared input box. It requires no change to `simulate_fn`, `BoundedPredictor.__call__`, `predict_bucket`, or the `loss(pred_obs, bp)` contract, and is invariant to pytree nesting.
-- **R-P5**: Penalty weight is opt-in, default zero, and passed to the jitted kernel as a traced 0-d array (like `length_mask_fraction`) so changing it never retraces.
-- **R-P6**: `losses_history`, `restore_best`, early stopping, and the tournament score track the data term alone — plus any configured trajectory penalty (R-P8), which is charged inside `bucket_step`'s forward pass and therefore rides in the per-step loss; the **bound** penalty is the one reported separately via `TrainingUI.on_step_end(penalty=...)`.
-- **R-P7**: `penalty_weight` is deliberately not an R-T2 phase-keyed field. Length 1 broadcasts across phases; any other length must equal `len(steps)`. R-T2's enumerated fields all lack a safe default, which is why they are mandatory; `penalty_weight` has an unambiguous off state.
+- **R-P4**: See [ADR-0007](./docs/adr/0007-collocation-bound-penalty.md). The default penalty is evaluated at *points*: the measured points (the input vectors the loss actually sees at observed cells, gathered by `data_penalty_points` and following the length-mask prefix per phase) plus any user-supplied penalty-only points (`penalty_points`, positional per `BoundedPredictor` leaf in traversal order, physical units, no measurements needed). `box_grid(in_scaler, n_per_dim)` is the collocation-as-extension recipe: a deterministic tensor-product sweep of the input box, uniform in *warped* coordinates so log warps cover decades evenly. It requires no change to `simulate_fn`, `BoundedPredictor.__call__`, `predict_bucket`, or the `loss(pred_obs, bp)` contract, and is invariant to pytree nesting. When the penalty is enabled, every leaf must have at least one point source (measured, extras, or both), else the run raises pointing at the trajectory penalty for embedded predictors.
+- **R-P5**: Penalty weight is opt-in, default zero. In the Optax path it is passed to the jitted penalty kernel as a traced 0-d array (like `length_mask_fraction`) so changing it never retraces; the Evosax path folds a closed-over Python float into the fitness (never traced, so it stays out of the population vmap).
+- **R-P6**: `losses_history`, `restore_best`, early stopping, and the tournament score track the data term alone — plus any configured trajectory penalty (R-P8), which is charged inside `bucket_step`'s forward pass and therefore rides in the per-step loss; the **bound** penalty is the one reported separately via `TrainingUI.on_step_end(penalty=...)`. Evosax is the documented exception: it ranks by one scalar with no aux channel, so its `losses_history` (best-so-far) folds the bound penalty in when configured — same type, same position, different meaning from the Optax series, and the docstring says so.
+- **R-P7**: `penalty_weight` is deliberately not an R-T2 phase-keyed field. Length 1 broadcasts across phases; any other length must equal `len(steps)`. R-T2's enumerated fields all lack a safe default, which is why they are mandatory; `penalty_weight` has an unambiguous off state. Convention: the weight is relative to the per-bucket-averaged data term — the penalty is a mean over its points, charged once per step onto the averaged data gradient — so the same weight means the same thing whatever the dataset or point-count size.
 - **R-P8**: Trajectory-aware penalty, opt-in via `trajectory_penalty_fn(full_state, bp)` + scalar `trajectory_penalty_weight` on both configs, charged in the training step's single forward pass. For embedded predictors the penalty rides in extra ODE state components (whose time-integral is charged; helpers `attach_penalty_state` / `penalty_vector_field` / `strip_penalty_state` / `penalty_integral`); for parallel predictors `trajectory_saturation_penalty` charges output saturation over time. Probe conditions — scenarios to steer toward with no measurements — are all-False-mask experiments (channels carry `values=jnp.array([])`; the `ts` still defines the grid). See [ADR-0009](./docs/adr/0009-trajectory-aware-penalties.md).
 
 #### Trainability filter
@@ -115,7 +115,7 @@ This section is the contract. Implementation is judged against these line by lin
 - Gaussian process regressors; entire Bayesian / variational-inference (`bayes/`) submodule.
 - System embeddings (`EmbeddedMLP*`, `SystemConditionedRatePredictor`).
 - Padded batched-experiments data interface.
-- Time-varying *covariates* at the data layer (`Experiment.covariates` stays constant in time — scalar parameters only, per R-D5). Time-varying *values* are first-class via the profile factories (R-D9) evaluated inside the user's vector field. See CONTEXT.md "Time profiles" and "Predictor inputs".
+- Time-varying *covariates* at the data layer (`Experiment.covariates` stays constant in time, whether scalar or vector). Time-varying *values* are first-class via the profile factories (R-D9) evaluated inside the user's vector field. See CONTEXT.md "Time profiles" and "Predictor inputs".
 - A `Model` wrapper class.
 - Temperature annealing in the bound scaler (`cosine_temperature_annealing`, `use_temp_annealing`, `initial_temperature`, `temp_cosine_fraction`, `temp_indices`). `BoundScaler.temperature` is a (typically frozen) parameter. This is distinct from R-T10's `annealing_schedule`, which anneals training hyperparameters only.
 - `_build_filter_spec` per-class registry; per-step bucket shuffling.
@@ -130,7 +130,7 @@ This section is the contract. Implementation is judged against these line by lin
 
 - Builder registry for serialisable predictor reconstruction without templates.
 - Sub-batching across population / within-bucket for memory-bound workloads.
-- Array-valued covariates (a profile pre-evaluated on the experiment grid, interpolated by the solver).
+- Time-varying covariate arrays pre-evaluated on the experiment grid and interpolated by the solver.
 - Builder/loader registries for `state_to_output` / `simulate_fn` to enable Dataset round-trip.
 
 ---
@@ -160,7 +160,7 @@ jax-hybridmodels/                      (repo)
 │       ├── __init__.py                 (lazy public API re-exports)
 │       ├── data.py                     (Experiment, ChannelObs, Dataset, BucketPayload, make_dataset, split_dataset)
 │       ├── transforms.py                (BOUND_TRANSFORMS, WARPS, register_bound_transform, register_warp)
-│       ├── penalties.py                (soft_logit, softclip, clip_ste, box_violation, collocation_grids, bound_penalty)
+│       ├── penalties.py                (soft_logit, softclip, clip_ste, box_violation, box_grid, data_penalty_points, bound_penalty)
 │       ├── solver.py                   (SolverConfig, SOLVER_REGISTRY, register_solver)
 │       ├── losses.py                   (masked_mse, masked_mle, bal_mse, bal_mle)
 │       ├── metrics.py                  (compute_metrics, print_metrics, ChannelMetrics)
@@ -170,7 +170,7 @@ jax-hybridmodels/                      (repo)
 │       ├── profiles.py                 (constant/step/ramp/piecewise_linear time profiles, R-D9)
 │       ├── schedules.py                (annealing_schedule, R-T10)
 │       ├── serialise.py                (save/load, last-shipped)
-│       ├── penalties.py                (bound_penalty, collocation_grids, trajectory-penalty helpers, R-P8)
+│       ├── penalties.py                (bound_penalty, box_grid, data_penalty_points, penalty_points, trajectory-penalty helpers, R-P8)
 │       ├── predictors/
 │       │   ├── __init__.py
 │       │   ├── base.py                 (Predictor, BoundScaler, BoundedPredictor, reinitialize_with_key, reinitialize_pytree_with_key)
@@ -281,7 +281,7 @@ from jaxtyping import Float
 def simulate_fn(
     predictors,                                         # PyTree[eqx.Module], convention: tuple of BoundedPredictor leaves
     ts: Float[Array, "T"],                              # observation times, this experiment
-    covariates: dict[str, Array],                       # named, constant-in-time scalars (per-experiment data)
+    covariates: dict[str, Array],                       # named, constant-in-time scalars or vectors
     y0: Float[Array, "S"],                              # full initial state
     solver,                                             # SolverConfig instance
 ) -> Float[Array, "T S"]:                                # full state at each ts
@@ -414,7 +414,7 @@ class ChannelObs(eqx.Module):
     variance: Float[Array, "Tc"]                   # always rank-1 post-init
 
 class Experiment(eqx.Module):
-    covariates: dict[str, float]                   # rank-0 / scalar; v1 supports floats only
+    covariates: dict[str, float | Array]            # rank-0 or rank-1; constant in time
     y0: Float[Array, "S"]
     channels: dict[str, ChannelObs]
     exp_id: str = eqx.field(static=True)
@@ -424,7 +424,7 @@ class BucketPayload(NamedTuple):
     y_observed: Float[Array, "N T D"]
     yvar: Float[Array, "N T D"]
     mask: Bool[Array, "N T D"]
-    covariates: dict[str, Float[Array, "N"]]
+    covariates: dict[str, Array]
     y0: Float[Array, "N S"]
     n_obs: Int[Array, ""]                          # total observed (mask sum), for weighted reductions
 
@@ -440,7 +440,7 @@ class Dataset(eqx.Module):
 ```python
 def make_experiment(
     *,
-    covariates: dict[str, float],
+    covariates: dict[str, float | Array],
     channels: dict[str, ChannelObs],
     y0_fn: Callable[[dict, dict[str, ChannelObs]], Array],
     exp_id: str = "",
@@ -529,7 +529,16 @@ SOLVER_REGISTRY: dict[str, type[diffrax.AbstractSolver]] = {
     # ... extended via register_solver
 }
 
+ADJOINT_REGISTRY: dict[str, type[diffrax.AbstractAdjoint]] = {
+    "RecursiveCheckpoint": diffrax.RecursiveCheckpointAdjoint,
+    "Direct": diffrax.DirectAdjoint,
+    "Backsolve": diffrax.BacksolveAdjoint,
+    "ForwardMode": diffrax.ForwardMode,
+    # ... extended via register_adjoint
+}
+
 def register_solver(name: str, cls: type[diffrax.AbstractSolver]) -> None: ...
+def register_adjoint(name: str, cls: type[diffrax.AbstractAdjoint]) -> None: ...
 
 class SolverConfig(eqx.Module):
     solver: diffrax.AbstractSolver = eqx.field(static=True)
@@ -537,11 +546,24 @@ class SolverConfig(eqx.Module):
     atol: float | tuple[float, ...] = eqx.field(static=True)
     max_steps: int = eqx.field(static=True)
     dt0: float | None = eqx.field(static=True)
+    adjoint: diffrax.AbstractAdjoint = eqx.field(static=True, default_factory=diffrax.DirectAdjoint)
+    pcoeff: float = eqx.field(static=True, default=0.0)   # PID controller gains
+    icoeff: float = eqx.field(static=True, default=1.0)
+    dcoeff: float = eqx.field(static=True, default=0.0)
 
+    def stepsize_controller(self) -> diffrax.PIDController: ...
+    def diffeqsolve(self, term, ts, y0, args=None) -> diffrax.Solution: ...
     def to_dict(self) -> dict: ...                  # {"solver": "Tsit5", "rtol": ..., ...}
     @classmethod
     def from_dict(cls, d: dict) -> "SolverConfig": ...
 ```
+
+`adjoint` selects the backward pass; `None` passed to the constructor
+coerces to `DirectAdjoint`, the memory-cheap default (diffrax's own default
+is `RecursiveCheckpointAdjoint` — pick it explicitly if you want it).
+`diffeqsolve` forwards it, and hand-written vector fields that build their
+own `diffrax.diffeqsolve` call should pass `solver.adjoint` the same way
+`examples/crystallisation/train_kinetic.py` does.
 
 ### 5.4 `losses.py`
 
@@ -584,8 +606,10 @@ class OptaxTrainingConfig:
     reset_optimiser_state: tuple[bool, ...]
     length_schedule: tuple[float, ...] = (1.0,)
     penalty_weight: tuple[float, ...] = (0.0,)        # length-1 broadcasts across phases
-    penalty_grid_points: int = 5
+    penalty_points: tuple[Array, ...] | None = None   # per-leaf penalty-only points
     penalty_fn: Callable | None = None                # replaces the bound penalty
+    trajectory_penalty_fn: Callable | None = None     # R-P8: (full_state, bp) -> scalar
+    trajectory_penalty_weight: float = 0.0
     loss: Callable | str = "mse"
     channel_idx: tuple[int, ...] | None = None
     channel_weights: tuple[float, ...] | None = None
@@ -611,7 +635,10 @@ class EvosaxTrainingConfig:
     init_box_extent: float = 2.0
     sigma_init: float = 0.1
     penalty_weight: float = 0.0
-    penalty_grid_points: int = 5
+    penalty_points: tuple[Array, ...] | None = None
+    penalty_fn: Callable | None = None                # replaces the bound penalty
+    trajectory_penalty_fn: Callable | None = None     # R-P8: (full_state, bp) -> scalar
+    trajectory_penalty_weight: float = 0.0
     penalty_fn: Callable | None = None
     loss: Callable | str = "mse"
     channel_idx: tuple[int, ...] | None = None
@@ -632,7 +659,9 @@ def train_with_evosax(predictors, dataset, config, *, simulate_fn, state_to_outp
 @eqx.filter_jit
 def predict_bucket(predictors, bp, *, simulate_fn, state_to_output, solver) -> Float[Array, "N T D"]: ...
 
-def predict_dataset(predictors, dataset, *, simulate_fn, solver) -> tuple[Float[Array, "N T D"], ...]:
+def predict_dataset(
+    predictors, dataset, *, simulate_fn, state_to_output, solver
+) -> tuple[Float[Array, "N T D"], ...]:
     """One stacked array per bucket; user concatenates if they want a flat list."""
 ```
 

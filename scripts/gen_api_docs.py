@@ -74,18 +74,23 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "penalties",
         "Penalties: Gradient-Safe Bound Handling",
         (
+            "PenaltyPointSource",
             "attach_penalty_state",
             "bound_penalty",
+            "box_grid",
             "box_violation",
             "clip_ste",
-            "collocation_grids",
+            "data_penalty_points",
+            "length_mask_keep",
             "penalty_integral",
             "penalty_vector_field",
+            "select_penalty_points",
             "soft_inverse",
             "soft_logit",
             "softclip",
             "strip_penalty_state",
             "trajectory_saturation_penalty",
+            "validate_penalty_points",
         ),
     ),
     (
@@ -575,28 +580,22 @@ def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> 
 
 PAGE_INTROS: dict[str, str] = {
     "data": (
-        "The data layer turns irregular, sparse experiment records into a "
-        "JAX-traceable [`Dataset`](#dataset). Every observation channel can "
-        "have its own timestamps; missing values are represented by a boolean "
-        "mask, never by NaN sentinels. Experiments with the same number of "
-        "union timestamps are stacked into one [`BucketPayload`](#bucketpayload), "
-        "so each bucket compiles once and reuses its trace.\n\n"
-        "**Typical flow:** build `ChannelObs` per channel → wrap in `Experiment` "
-        "via [`make_experiment`](#make_experiment) → batch via "
-        "[`make_dataset`](#make_dataset) → optionally partition with "
+        "Build [`Experiment`](#experiment) records from sparse observations, "
+        "then pass them to [`make_dataset`](#make_dataset). The data layer "
+        "creates masks and groups experiments by union-axis length. Scalar "
+        "and rank-1 vector covariates are stacked along the bucket's leading "
+        "axis.\n\n"
+        "**Typical flow:** build `ChannelObs` → call "
+        "[`make_experiment`](#make_experiment) → call "
+        "[`make_dataset`](#make_dataset) → optionally call "
         "[`split_dataset`](#split_dataset)."
     ),
     "predictors": (
-        "Predictors are the trainable components of a hybrid model — Equinox "
-        "modules with a fixed `Array → Array` signature. The framework wraps "
-        "them in a [`BoundedPredictor`](#boundedpredictor), which sigmoid-scales "
-        "physical-unit inputs into a latent box, runs the inner predictor, and "
-        "scales the output back to physical units. Inner predictors never see "
-        "or enforce bounds.\n\n"
-        "**Predictors pytree convention:** any pytree of `eqx.Module` leaves is "
-        "accepted (single module, tuple, dict, NamedTuple). The single-predictor "
-        "case is conventionally written as `(predictor,)` so the surrounding "
-        "code never branches on container type."
+        "A predictor is an Equinox module with an `Array → Array` call "
+        "signature. [`BoundedPredictor`](#boundedpredictor) composes an input "
+        "scaler, an inner predictor, and an output scaler. Any PyTree of "
+        "predictor modules is accepted; the conventional single-predictor "
+        "container is `(predictor,)`."
     ),
     "solver": (
         "[`SolverConfig`](#solverconfig) bundles a `diffrax` solver instance "
@@ -609,16 +608,11 @@ PAGE_INTROS: dict[str, str] = {
         "implementations so saved configs round-trip cleanly."
     ),
     "training": (
-        "Two training entry points share the same `(predictors, dataset, "
-        "config, *, simulate_fn, solver, trainable, key, ui)` signature:\n\n"
-        "- [`train_with_optax`](#train_with_optax) — gradient-based, multi-phase "
-        "  schedule, optional shared tournament for warm-up restarts.\n"
-        "- [`train_with_evosax`](#train_with_evosax) — population-based search "
-        "  via evosax strategies; useful when the loss landscape is "
-        "  non-differentiable or has many local minima.\n\n"
-        "Both return `(loss_history, trained_predictors)`. Both require a "
-        "`key` keyword-only argument so reproducibility never relies on an "
-        "implicit default."
+        "Choose [`train_with_optax`](#train_with_optax) for gradient-based "
+        "fitting or [`train_with_evosax`](#train_with_evosax) for population "
+        "search over small parameter sets. Both take the same model pieces, "
+        "return `(loss_history, trained_predictors)`, and require an explicit "
+        "keyword-only `key`."
     ),
     "losses": (
         "Loss functions consume a model's predicted output `[N, T, D]` and "

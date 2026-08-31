@@ -27,4 +27,4 @@ Equivalent to ``jr.fold_in(root_key, crc32(name.encode("utf-8")))``.
 and two different names return different keys unless their CRC32 values
 collide, which none of the framework's fixed set of names do.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/rng.py#L32)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/rng.py#L34)</small>

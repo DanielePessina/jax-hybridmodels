@@ -1,14 +1,11 @@
 # Extending hybridmodels
 
-The library is deliberately small. The trainer you get out of the box is
-assembled from public pieces, and every component you might want to swap —
-a predictor, a loss, an optimiser, a regulariser, even the training loop
-itself — is a plain callable or PyTree. There is no base class you must
-subclass to fit in, and no registry you must extend just to try an idea.
+The library is assembled from small public pieces. A predictor, loss,
+optimizer, regulariser, or training loop is a callable or PyTree that you can
+replace. Subclass `Predictor` only when you are defining a new predictor
+family.
 
-This page lists the extension points, each with the shape it expects and
-where it lives. The rule of thumb: if it is a function, write a function;
-if it is a PyTree, hand back a PyTree.
+This page lists each extension point and its expected interface.
 
 ## Custom predictors
 
@@ -88,8 +85,9 @@ set `reset_optimiser_state`.
 ## Custom regularisers
 
 A training config's `penalty_fn` replaces the default bound-saturation
-penalty. It is called as `penalty_fn(predictors, penalty_grids) -> scalar`,
-once per step, outside the bucket loop. Use it for weight decay, a
+penalty. It is called as `penalty_fn(predictors, points) -> scalar`,
+once per step, outside the bucket loop, with the per-leaf point arrays the
+default penalty would evaluate at. Use it for weight decay, a
 monotonicity term, or anything else the bound penalty does not express.
 Both `OptaxTrainingConfig` and `EvosaxTrainingConfig` take it.
 
@@ -260,11 +258,10 @@ def fit(model: HybridModel, config, key):
     )
 ```
 
-This is a user-side grouping, not a framework class: each field stays an
-ordinary object the library functions consume directly, so nothing is
-hidden behind a wrapper. Serialisation still works on the predictors
-leaf; ensembles still take the predictors; prediction still takes the
-same callables. The container is sugar for *your* scripts.
+This grouping remains in user code. Each field is still passed directly to the
+library functions, so the public interfaces do not change. Serialization
+continues to operate on the predictor PyTree, and prediction and ensembles
+continue to use the same callables.
 
 ## Custom solvers, adjoints, transforms, warps
 
@@ -288,10 +285,8 @@ or `EvosaxUI` (evosax). Implement the protocol to pipe metrics into your
 own logger — a TensorBoard writer, a file, a queue. An explicit `ui=`
 always wins over the config's `verbose` flag.
 
-## What this adds up to
+## Summary
 
-None of these extension points require touching library code. The stock
-trainers are convenience, not a cage: every piece they are made of is
-public, and each is a plain function or PyTree you can replace with your
-own. That is the whole extensibility story — switch things out in the
-obvious way.
+The stock trainers are built from the same public pieces available to user
+code. Replace one piece at a time, or assemble a complete custom loop from
+the training kernels.

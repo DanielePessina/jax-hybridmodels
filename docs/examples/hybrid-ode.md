@@ -146,13 +146,13 @@ Bounds hold by construction, so a violation cannot be represented and there is n
 config = OptaxTrainingConfig(
     ...,
     penalty_weight=(1e-3,),   # length 1 broadcasts across phases
-    penalty_grid_points=7,
+    penalty_points=(rate_sweep, residual_sweep),  # per leaf, in order
 )
 ```
 
 The penalty is charged on the **latent**, not the physical output. A penalty written against the physical value would inherit the same $\sigma'(z/T)$ factor on its backward pass and die exactly where saturation is worst.
 
-It is also evaluated on a **collocation grid** over each predictor's declared input box, not along the trajectories. The script prints the end-of-run value per leaf:
+It is evaluated at the **measured points** — the input vectors the loss actually sees — plus any user-supplied penalty-only points. Here the residual network reads the ODE state, which the dataset cannot resolve to measured points, so both leaves are covered with a `box_grid` sweep (the collocation-as-extension recipe). The script prints the end-of-run value per leaf:
 
 ```
   end-of-run saturation penalty, by leaf:
@@ -182,3 +182,12 @@ The fourth row is the same effect running the other way. A KAN residual is more 
 Both data layouts reach the same trajectory accuracy, which is the point of the bucketing: half a mask is not a handicap. Their rate laws differ at the cold end because the irregular set draws end times up to 9 where the rectangular set stops at 8, and a cold experiment barely decays inside either window.
 
 The residual RMS is measured on a grid over the data range against a true residual RMS of 0.249. It is only identifiable where trajectories went, and the grid includes corners none of them visited, so the number overstates the error the trajectory fit sees.
+
+The default run (irregular data, MLP inner) in pictures:
+
+![Predicted against observed, both channels](assets/hybrid-ode/parity_irregular_mlp.png)
+
+![Fitted trajectories on irregular masks](assets/hybrid-ode/trajectories_irregular_mlp.png)
+
+Both channels are scored only on masked-in cells; the `R^2 = 0.985 / 0.983`
+row of the table is exactly what these two figures average.

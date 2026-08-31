@@ -1,16 +1,21 @@
 # Training
 
-Two entry points, same signature.
+Choose a training loop based on the number and type of parameters:
+
+| Loop | Use it for |
+| --- | --- |
+| `train_with_optax` | Differentiable predictors and medium or large parameter sets. |
+| `train_with_evosax` | Small parameter sets or objectives with difficult gradients. |
 
 ```python
 history, trained = train_with_optax(predictors, dataset, config, *, simulate_fn, state_to_output, solver, trainable=None, key, ui=None)
 history, trained = train_with_evosax(predictors, dataset, config, *, simulate_fn, state_to_output, solver, trainable=None, key, ui=None)
 ```
 
-`train_with_optax` follows gradients. `train_with_evosax` runs a
-population search and never computes a gradient. Both return
-`(loss_history, trained_predictors)`. Both require `key=`, which is
-keyword-only and has no default, so every run states its seed.
+`train_with_optax` differentiates through the ODE solve.
+`train_with_evosax` searches a population of parameter vectors and does not
+compute gradients. Both return `(loss_history, trained_predictors)` and both
+require an explicit keyword-only `key=`.
 
 The two histories mean different things. Optax returns the raw loss at
 each step, which can go up. Evosax returns best-so-far per generation,
@@ -22,7 +27,7 @@ which cannot. Do not plot them on one axis.
 loop. One **step** is one full pass over every bucket, accumulating
 gradients across all of them, then one optimiser update. A **bucket** is
 a group of experiments whose merged time axes have the same length; see
-[Concepts](/guide/concepts#buckets-the-union-timestamp-axis-and-the-mask).
+[Data and buckets](/guide/data).
 A step is not one bucket.
 
 ### Phases
@@ -78,13 +83,13 @@ and the returned model would be the least-trained one in the run.
 `penalty_weight` charges the objective for predictors pinned against
 their bounds, evaluated on a fixed grid over each predictor's declared
 input box. See
-[Concepts](/guide/concepts#the-saturation-penalty).
+[Predictors and bounds](/guide/predictors).
 
 ```python
 config = OptaxTrainingConfig(
     ...,
     penalty_weight=(1e-3,),   # length 1 broadcasts across every phase
-    penalty_grid_points=7,    # points per input dimension
+    penalty_points=(sweep,),  # optional per-leaf penalty-only points
 )
 ```
 

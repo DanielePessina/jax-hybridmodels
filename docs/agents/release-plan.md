@@ -35,7 +35,7 @@ Exit criterion: a user can write a custom training loop against public `hybridmo
 3. **`penalty_fn` hook** — a config field / callable param defaulting to the current `bound_penalty` closure. Lets users add weight decay, monotonicity, or custom regularisers. Fixes the `_bounded_leaves` shape-coupling for free.
 4. **Evosax algorithm registry** — `register_algorithm` + `_SUPPORTED_ALGORITHMS` widened. Ship CMA-ES (default) + at least one more (e.g. `Sep_CMA_ES` or `SimpleES`). Serialisation story already exists to copy from `register_solver`.
 5. **Custom-loss + channel weighting** — fix the `TypeError` when a user callable loss meets `channel_idx`/`channel_weights` (losses.py:259-264): either document loudly that callables ignore channel config, or apply channel selection in the trainer before the user loss. Tests for both.
-6. **Export `bound_penalty`/`collocation_grids`** at top level (or document `hybridmodels.penalties` as the public path).
+6. **Export `bound_penalty`/`box_grid`/`data_penalty_points`** at top level (or document `hybridmodels.penalties` as the public path).
 7. **Correctness/hygiene batch** — unique fold name for `_box_population` (evosax.py:390 collides with 373); refresh `rng.py` docstring name list (`init`/`phase_{i}` don't exist, `tournament_attempt_{i}`/`evosax_tell_{gen}` undocumented); fix `trainable.py:7-9` mechanism description; share the vmap-per-experiment core across `prediction.py`/`optax.py`/`evosax.py`; derive `__init__.py` `__all__`/`TYPE_CHECKING` from `_EXPORTS` with a drift test; delete dead `ui/_rich.py` or wire the UIs to its widgets; wire `EvosaxTrainingConfig.log_every` or delete it.
 
 ### WS3 — Fold example patterns into the library

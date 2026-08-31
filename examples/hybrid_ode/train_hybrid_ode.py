@@ -54,7 +54,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import diffrax
 import jax.numpy as jnp
@@ -73,7 +72,7 @@ from hybridmodels import (
     print_metrics,
     register_warp,
 )
-from hybridmodels.penalties import bound_penalty, collocation_grids
+from hybridmodels.penalties import bound_penalty, box_grid
 from hybridmodels.predictors.base import Predictor
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
@@ -93,6 +92,7 @@ from _data import (  # noqa: E402
 )
 from _shared import (  # noqa: E402
     apply_default_style,
+    parity_diagnostics,
     parity_plot,
     trajectory_plot,
 )
@@ -112,28 +112,21 @@ STATE_BOUNDS: tuple[tuple[float, float], ...] = ((-2.0, 2.0), (-2.0, 2.0))
 RESIDUAL_BOUNDS: tuple[tuple[float, float], ...] = ((-3.0, 3.0), (-3.0, 3.0))
 
 
-def _register_symlog() -> None:
-    """Register a signed-logarithmic axis warp under the name ``symlog``.
-
-    ``forward(x) = sign(x) log(1 + |x| / eps)``, inverted exactly. Monotone
-    on the whole line, smooth through zero, and ``forward(0) = 0``, so the
-    box midpoint stays at zero and a fresh residual network starts near no
-    correction rather than at an arbitrary interior point.
-
-    ``register_warp`` overwrites without warning, so prefix custom names if
-    a collision with a future package warp would matter to you.
-    """
-    register_warp(
-        "symlog",
-        Warp(
-            forward=lambda x: jnp.sign(x) * jnp.log1p(jnp.abs(x) / SYMLOG_EPS),
-            inverse=lambda w: jnp.sign(w) * SYMLOG_EPS * jnp.expm1(jnp.abs(w)),
-            requires_positive=False,
-        ),
-    )
-
-
-_register_symlog()
+# A signed-logarithmic axis warp under the name ``symlog``:
+# ``forward(x) = sign(x) log(1 + |x| / eps)``, inverted exactly. Monotone on
+# the whole line, smooth through zero, and ``forward(0) = 0``, so the box
+# midpoint stays at zero and a fresh residual network starts near no
+# correction rather than at an arbitrary interior point. ``register_warp``
+# overwrites without warning, so prefix custom names if a collision with a
+# future package warp would matter to you.
+register_warp(
+    "symlog",
+    Warp(
+        forward=lambda x: jnp.sign(x) * jnp.log1p(jnp.abs(x) / SYMLOG_EPS),
+        inverse=lambda w: jnp.sign(w) * SYMLOG_EPS * jnp.expm1(jnp.abs(w)),
+        requires_positive=False,
+    ),
+)
 
 
 def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) -> Predictor:
@@ -158,33 +151,6 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
             in_size=in_size, out_size=out_size, hidden_widths=(width,), grid_size=5, key=key
         )
     raise ValueError(f"--inner must be 'mlp' or 'kan'; got {kind!r}")
-
-
-def build_rate_net(key: Array, kind: str) -> BoundedPredictor:
-    """``temperature -> k``, evaluated once per experiment above the solver.
-
-    ``warp="log10"`` is what makes this read well. A linear box over
-    ``(1e-3, 1)`` has midpoint ``0.5``, putting every rate in the data in
-    the bottom 3% of the box, reachable only through large negative
-    latents. Under ``log10`` the midpoint is ``0.032`` and the true range
-    covers the middle of the box.
-    """
-    return BoundedPredictor(
-        input_keys=("temperature",),
-        in_scaler=BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
-        inner=_inner(kind, in_size=1, out_size=1, width=16, key=key),
-        out_scaler=BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
-    )
-
-
-def build_residual_net(key: Array, kind: str) -> BoundedPredictor:
-    """``[y1, y2] -> correction``, evaluated once per solver step inside the field."""
-    return BoundedPredictor(
-        input_keys=("y1", "y2"),
-        in_scaler=BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
-        inner=_inner(kind, in_size=2, out_size=2, width=32, key=key),
-        out_scaler=BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
-    )
 
 
 def simulate_fn(
@@ -215,60 +181,6 @@ def simulate_fn(
 
     term = diffrax.ODETerm(vector_field)
     return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
-
-
-def report_rate_net(rate_net: BoundedPredictor) -> None:
-    """Print recovered against true ``k`` at every temperature level in the data.
-
-    The check that matters for the outside-the-solver network: it sees only
-    trajectories, so agreeing with the Arrhenius law here means the
-    covariate dependence was recovered, not memorised per experiment.
-    """
-    print("  temperature   true k     fitted k    ratio")
-    for temperature in TEMPERATURES:
-        truth = float(true_k(temperature))
-        fitted = evaluate_predictor(rate_net, {"temperature": temperature})
-        print(f"    {temperature:6.1f}    {truth:.5f}    {fitted:.5f}    {fitted / truth:5.2f}")
-
-
-def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``.
-
-    ``compute_metrics`` keeps only the summary stats; the scatter needs the
-    raw value pairs, so re-walk the mask here.
-    """
-    metrics = compute_metrics(predictions, dataset)
-    out: dict[str, SimpleNamespace] = {}
-    for d, name in enumerate(dataset.output_channel_names):
-        obs_chunks: list = []
-        pred_chunks: list = []
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask = bp.mask[..., d]
-            obs_chunks.append(bp.y_observed[..., d][mask])
-            pred_chunks.append(pred[..., d][mask])
-        obs = jnp.concatenate(obs_chunks) if obs_chunks else jnp.empty(0)
-        pred = jnp.concatenate(pred_chunks) if pred_chunks else jnp.empty(0)
-        m = metrics[name]
-        out[name] = SimpleNamespace(
-            name=name, n=m.n, obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
-        )
-    return out
-
-
-def report_residual_net(residual_net: BoundedPredictor) -> None:
-    """Compare the learned correction with ``C y^3`` on a grid inside the data range.
-
-    Relative RMS over the grid rather than pointwise, since the residual is
-    only identifiable where trajectories actually went.
-    """
-    axis = jnp.linspace(-0.8, 1.0, 9)
-    grid = jnp.stack(jnp.meshgrid(axis, axis, indexing="ij"), axis=-1).reshape(-1, 2)
-    truth = (COUPLING @ (grid**3).T).T
-    fitted = jnp.stack([residual_net(point) for point in grid])
-    rms_error = float(jnp.sqrt(jnp.mean((fitted - truth) ** 2)))
-    rms_truth = float(jnp.sqrt(jnp.mean(truth**2)))
-    print(f"  residual RMS error {rms_error:.4f} against a true RMS of {rms_truth:.4f}")
-    print(f"  relative {rms_error / rms_truth:.2%}")
 
 
 def main() -> None:
@@ -321,9 +233,33 @@ def main() -> None:
         adjoint=diffrax.RecursiveCheckpointAdjoint(),
     )
 
-    predictors: tuple[BoundedPredictor, ...] = (build_rate_net(k_rate, args.inner),)
+    # ``temperature -> k``, evaluated once per experiment above the solver.
+    # ``warp="log10"`` is what makes this read well: a linear box over
+    # ``(1e-3, 1)`` has midpoint ``0.5``, putting every rate in the data in
+    # the bottom 3% of the box, reachable only through large negative
+    # latents. Under ``log10`` the midpoint is ``0.032`` and the true range
+    # covers the middle of the box.
+    rate_net = BoundedPredictor(
+        input_keys=("temperature",),
+        in_scaler=BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
+        inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
+        out_scaler=BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
+    )
+    predictors: tuple[BoundedPredictor, ...] = (rate_net,)
     if not args.mechanistic_only:
-        predictors = (*predictors, build_residual_net(k_res, args.inner))
+        # ``[y1, y2] -> correction``, evaluated once per solver step inside
+        # the vector field.
+        predictors = (
+            *predictors,
+            BoundedPredictor(
+                input_keys=("y1", "y2"),
+                in_scaler=BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
+                inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
+                out_scaler=BoundScaler(
+                    bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"
+                ),
+            ),
+        )
     print(f"\n[model] {len(predictors)} predictor(s), inner architecture {args.inner!r}")
 
     config = OptaxTrainingConfig(
@@ -335,7 +271,11 @@ def main() -> None:
         # Length-1 tuple, so the weight broadcasts across both phases. A
         # two-element tuple would set it per phase.
         penalty_weight=(args.penalty_weight,),
-        penalty_grid_points=7,
+        # The residual network reads the ODE state ("y1", "y2"), so the
+        # dataset can resolve no measured points for it; cover both leaves
+        # with a box sweep in warped space instead -- the
+        # collocation-as-extension recipe (``box_grid``).
+        penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors),
         loss="mse",
         verbose=False,
     )
@@ -356,15 +296,31 @@ def main() -> None:
     # declared input box, which is what you want to ship. Non-zero says a
     # network is leaning on its bound, which is probably in the wrong place.
     print("  end-of-run saturation penalty, by leaf:")
-    names = ("rate_net", "residual_net")
-    for name, leaf in zip(names, trained, strict=False):
-        print(f"    {name:13s} {float(bound_penalty((leaf,), collocation_grids((leaf,)))):.4e}")
+    names = ("rate_net", "residual_net")[: len(trained)]
+    for name, leaf in zip(names, trained, strict=True):
+        print(f"    {name:13s} {float(bound_penalty((leaf,), (box_grid(leaf.in_scaler),))):.4e}")
 
     print("\n[rate network] recovered temperature dependence")
-    report_rate_net(trained[0])
+    # The check that matters for the outside-the-solver network: it sees only
+    # trajectories, so agreeing with the Arrhenius law here means the
+    # covariate dependence was recovered, not memorised per experiment.
+    print("  temperature   true k     fitted k    ratio")
+    for temperature in TEMPERATURES:
+        truth = float(true_k(temperature))
+        fitted = evaluate_predictor(trained[0], {"temperature": temperature})
+        print(f"    {temperature:6.1f}    {truth:.5f}    {fitted:.5f}    {fitted / truth:5.2f}")
     if len(trained) > 1:
         print("\n[residual network] recovered cubic coupling")
-        report_residual_net(trained[1])
+        # Relative RMS over the grid rather than pointwise, since the residual
+        # is only identifiable where trajectories actually went.
+        axis = jnp.linspace(-0.8, 1.0, 9)
+        grid = jnp.stack(jnp.meshgrid(axis, axis, indexing="ij"), axis=-1).reshape(-1, 2)
+        truth = (COUPLING @ (grid**3).T).T
+        fitted = jnp.stack([trained[1](point) for point in grid])
+        rms_error = float(jnp.sqrt(jnp.mean((fitted - truth) ** 2)))
+        rms_truth = float(jnp.sqrt(jnp.mean(truth**2)))
+        print(f"  residual RMS error {rms_error:.4f} against a true RMS of {rms_truth:.4f}")
+        print(f"  relative {rms_error / rms_truth:.2%}")
 
     predictions = predict_dataset(
         trained, dataset, simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver
@@ -377,8 +333,11 @@ def main() -> None:
         variant = "mechanistic" if args.mechanistic_only else args.inner
         suffix = f"{args.data}_{variant}"
         args.plot_dir.mkdir(parents=True, exist_ok=True)
+        # ``compute_metrics`` keeps only the summary stats; the scatter needs
+        # the raw value pairs, so re-walk the mask here.
+        parity_data = parity_diagnostics(predictions, dataset)
         parity_plot(
-            _parity_diagnostics(predictions, dataset),
+            parity_data,
             title=f"Hybrid ODE parity ({suffix})",
             save_path=args.plot_dir / f"parity_{suffix}.png",
         )

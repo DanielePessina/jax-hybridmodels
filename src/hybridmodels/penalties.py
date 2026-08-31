@@ -21,6 +21,16 @@ the box is exactly zero, and that zero propagates back through the ODE
 adjoint to every upstream parameter. :func:`soft_logit` continues linearly
 instead, and :func:`box_violation` supplies push-back beyond its reach.
 
+The bound penalty (:func:`bound_penalty`) is charged at *points*, not on a
+box sweep. The default points are the measured ones: the input vectors the
+loss actually sees at observed cells, gathered from the dataset by
+:func:`data_penalty_points` and following the same length-mask prefix as
+the loss (:func:`length_mask_keep`). User-supplied penalty-only points
+(no measurements needed) extend coverage where it matters — a deployment
+region, a future operating point — and :func:`box_grid` is the
+collocation-as-extension recipe: a deterministic sweep of the input box,
+uniform in *warped* coordinates so a log warp covers decades evenly.
+
 Everything here is pure and safe under ``jit``, ``vmap`` and ``grad``.
 Hinges are ``jnp.maximum(., 0.0) ** 2``: C^1, so an adaptive ODE step-size
 controller does not chatter at the crossing, and pole-free, so they need
@@ -30,12 +40,14 @@ none of the double-``where`` guarding ``losses.py`` applies around ``log``.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxtyping import Array
+
+from hybridmodels.data import Dataset
 
 if TYPE_CHECKING:
     from hybridmodels.predictors import BoundedPredictor
@@ -46,7 +58,12 @@ __all__ = (
     "softclip",
     "clip_ste",
     "box_violation",
-    "collocation_grids",
+    "PenaltyPointSource",
+    "box_grid",
+    "data_penalty_points",
+    "length_mask_keep",
+    "select_penalty_points",
+    "validate_penalty_points",
     "bound_penalty",
     "attach_penalty_state",
     "penalty_vector_field",
@@ -63,7 +80,7 @@ def _bounded_leaves(predictors: Any) -> list[BoundedPredictor]:
     supported (``inner`` is typed ``Predictor``), and a traversal that
     stopped at the outer match would leave the inner box unpenalised.
 
-    Order is outer-then-inner, depth first. :func:`collocation_grids`
+    Order is outer-then-inner, depth first. :func:`data_penalty_points`
     relies on it to return a positional tuple.
 
     ``BoundedPredictor`` is imported lazily because ``predictors.base``
@@ -192,69 +209,299 @@ def box_violation(x: Array, lows: Array, highs: Array) -> Array:
     return jnp.sum(below**2 + above**2)
 
 
-def collocation_grids(predictors: Any, n_per_dim: int = 5) -> tuple[Array, ...]:
-    """Build one *collocation grid* per ``BoundedPredictor`` leaf of ``predictors``.
+class PenaltyPointSource(NamedTuple):
+    """One ``BoundedPredictor`` leaf's gathered measured points.
 
-    A collocation grid is a fixed set of input points at which a predictor
-    is evaluated for inspection, chosen up front rather than taken from any
-    trajectory. Each grid is a tensor product of ``n_per_dim`` evenly spaced
-    points along every dimension of that predictor's ``in_scaler.bounds``,
-    shape ``[n_per_dim ** n_inputs, n_inputs]``.
+    Produced by :func:`data_penalty_points` for leaves whose ``input_keys``
+    all resolve to dataset covariates. One entry per *observed cell*: the
+    input vector the loss actually sees at that cell, in ``input_keys``
+    column order, in physical units.
 
-    Call this once on the host before the training loop: the grids depend
-    only on static ``bounds``, so rebuilding them per step compiles work
-    that computes a constant. The returned tuple is positional and matches
-    the leaf order :func:`bound_penalty` walks.
+    Attributes
+    ----------
+    points : Float[Array, "G n_inputs"]
+        The measured input vectors.
+    cell_ts : Int[Array, " G"]
+        Timestamp index of each cell inside its own experiment.
+    cell_T : Int[Array, " G"]
+        Length of that experiment's time grid. ``cell_ts`` and ``cell_T``
+        let :func:`length_mask_keep` apply the loss's prefix mask to the
+        penalty, so the two never disagree about which points are live.
+    """
 
-    The grid is deterministic rather than sampled because ``restore_best``
-    compares raw loss values across steps, and a resampled penalty could
-    pick a "best" that drew an easy sample.
+    points: Array
+    cell_ts: Array
+    cell_T: Array
+
+
+def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
+    """Build a deterministic sweep of an input box, uniform in *warped* coordinates.
+
+    The collocation-as-extension recipe: a tensor product of ``n_per_dim``
+    evenly spaced points along every dimension of ``in_scaler``'s box, in
+    the box's *warped* coordinates, mapped back to physical units. A linear
+    warp therefore reproduces a plain physical ``linspace`` sweep
+    bit-for-bit, while ``log`` / ``log10`` warps cover each decade evenly
+    instead of starving the low end of the box.
+
+    ``n_per_dim`` must be at least 2 so both edges of every input box are
+    represented. Deterministic: it depends only on the scaler's static
+    ``bounds`` and ``warp``, so ``restore_best`` compares raw loss values
+    across steps with no resampling noise.
 
     Point count grows exponentially in input dimension. Predictors here take
     two or three inputs, so ``n_per_dim=5`` is 25 to 125 forward passes and
     negligible beside an ODE solve. Lower it if that stops holding.
 
+    Parameters
+    ----------
+    in_scaler : BoundScaler
+        The input scaler of the predictor the sweep is for (``leaf.in_scaler``).
+
     Returns
     -------
-    tuple[Array, ...]
-        One ``[G, n_inputs]`` grid per ``BoundedPredictor`` leaf, in
-        traversal order. Empty if the pytree holds no such leaf.
+    Array
+        ``[n_per_dim ** n_inputs, n_inputs]`` physical points, positional
+        in the scaler's input dimension order.
     """
-    grids: list[Array] = []
-    for leaf in _bounded_leaves(predictors):
-        axes = [jnp.linspace(low, high, n_per_dim) for low, high in leaf.in_scaler.bounds]
-        mesh = jnp.meshgrid(*axes, indexing="ij")
-        grids.append(jnp.stack([m.reshape(-1) for m in mesh], axis=-1))
-    return tuple(grids)
+    if n_per_dim < 2:
+        raise ValueError(
+            "box_grid n_per_dim must be at least 2 "
+            f"(one point per box edge); got {n_per_dim}"
+        )
+
+    from hybridmodels.transforms import WARPS
+
+    warp = WARPS[in_scaler.warp]
+    lows = jnp.asarray([b[0] for b in in_scaler.warped_bounds])
+    highs = jnp.asarray([b[1] for b in in_scaler.warped_bounds])
+    axes = [
+        warp.inverse(jnp.linspace(low, high, n_per_dim))
+        for low, high in zip(lows, highs, strict=True)
+    ]
+    mesh = jnp.meshgrid(*axes, indexing="ij")
+    return jnp.stack([m.reshape(-1) for m in mesh], axis=-1)
 
 
-def bound_penalty(predictors: Any, grids: tuple[Array, ...]) -> Array:
+def data_penalty_points(
+    predictors: Any, dataset: Dataset
+) -> tuple[PenaltyPointSource | None, ...]:
+    """Gather one :class:`PenaltyPointSource` per ``BoundedPredictor`` leaf.
+
+    A leaf is *resolvable* when every ``input_keys`` name is a dataset
+    covariate (in every bucket). Its measured points are then the input
+    vectors at the observed cells — the cells the loss actually charges —
+    with a ``None`` entry for an unresolvable leaf. A resolvable leaf whose
+    dataset holds no observed cells (all probes) yields a source with zero
+    points, which contributes nothing until extras are added.
+
+    Call this once on the host before the training loop: the points depend
+    only on the dataset and the leaf's static ``input_keys``.
+
+    Covariates must be scalar per experiment (constant in time, the v1
+    contract); a per-experiment covariate with extra dimensions has no
+    unambiguous column to feed an input key and raises.
+    """
+    leaves = _bounded_leaves(predictors)
+    if not leaves:
+        return ()
+    cov_keys = set().union(*(set(bp.covariates) for bp in dataset.bucket_payloads))
+
+    sources: list[PenaltyPointSource | None] = []
+    for leaf in leaves:
+        keys = leaf.input_keys
+        if not all(key in cov_keys for key in keys):
+            sources.append(None)
+            continue
+        point_chunks: list[Array] = []
+        ts_chunks: list[Array] = []
+        t_chunks: list[Array] = []
+        for bp in dataset.bucket_payloads:
+            vectors = jnp.stack([bp.covariates[key] for key in keys], axis=-1)
+            if vectors.ndim != 2:
+                raise ValueError(
+                    "penalty: covariates feeding a BoundedPredictor's penalty points "
+                    "must be scalar per experiment (constant in time); got shape "
+                    f"{vectors.shape} for input_keys {keys!r}"
+                )
+            observed = jnp.argwhere(bp.mask.any(axis=-1))
+            if observed.shape[0] == 0:
+                continue
+            point_chunks.append(vectors[observed[:, 0]])
+            ts_chunks.append(observed[:, 1])
+            t_chunks.append(jnp.full(observed.shape[0], bp.ts.shape[1], dtype=observed.dtype))
+        if not point_chunks:
+            sources.append(
+                PenaltyPointSource(
+                    points=jnp.zeros((0, len(keys))),
+                    cell_ts=jnp.zeros(0, jnp.int32),
+                    cell_T=jnp.zeros(0, jnp.int32),
+                )
+            )
+            continue
+        sources.append(
+            PenaltyPointSource(
+                points=jnp.concatenate(point_chunks),
+                cell_ts=jnp.concatenate(ts_chunks),
+                cell_T=jnp.concatenate(t_chunks),
+            )
+        )
+    return tuple(sources)
+
+
+def length_mask_keep(source: PenaltyPointSource, length_mask_fraction: float) -> Array:
+    """Boolean keep-vector over a source's cells, matching the loss's prefix mask.
+
+    Applies the same prefix semantics :func:`~hybridmodels.training.kernels.apply_length_mask`
+    gives the loss: a cell is kept when its timestamp index is below
+    ``ceil(T * fraction)``, clamped at 1 so a phase never scores nothing.
+    The penalty therefore follows the curriculum exactly, disagreeing with
+    the loss about which points are live only by mistake.
+
+    ``length_mask_fraction`` must be a Python float, not a traced array:
+    the keep-vector is used to *index* the gathered points, and JAX rejects
+    boolean indexing with tracers. The penalty kernel retraces only when
+    the fraction changes (a phase boundary), never per step.
+    """
+    cutoff = jnp.maximum(
+        jnp.ceil(jnp.float32(source.cell_T) * length_mask_fraction).astype(jnp.int32),
+        jnp.int32(1),
+    )
+    return source.cell_ts < cutoff
+
+
+def validate_penalty_points(
+    predictors: Any,
+    sources: tuple[PenaltyPointSource | None, ...],
+    extras: tuple[Array, ...],
+    *,
+    enabled: bool,
+) -> None:
+    """Raise when an enabled penalty has a leaf no point set reaches.
+
+    ``sources`` is the per-leaf output of :func:`data_penalty_points`
+    (``None`` for unresolvable leaves); ``extras`` the user-supplied
+    penalty-only points, positional per leaf. ``enabled`` is whether any
+    phase charges the penalty.
+
+    With the penalty on, every ``BoundedPredictor`` leaf must be covered by
+    measured points, extras, or both; an uncovered leaf would otherwise be
+    a silent no-penalty, the failure mode this penalty exists to prevent.
+    For embedded predictors (state-derived inputs) the trajectory penalty
+    (ADR-0009) is the instrument, and the error says so.
+
+    Point-shape mismatches are checked unconditionally, so a user cannot
+    carry a silently-wrong extras array into a run that later enables it.
+    """
+    leaves = _bounded_leaves(predictors)
+    if not leaves:
+        return
+    if len(extras) not in (0, len(leaves)):
+        raise ValueError(
+            f"penalty_points has {len(extras)} entries but predictors holds "
+            f"{len(leaves)} BoundedPredictor leaves; provide one point array "
+            "per leaf (in traversal order)."
+        )
+    for idx, leaf in enumerate(leaves):
+        extra = extras[idx] if idx < len(extras) else None
+        if extra is not None:
+            if extra.ndim != 2:
+                raise ValueError(
+                    f"penalty_points[{idx}] must be a rank-2 [G, n_inputs] array "
+                    f"of physical input vectors; got shape {extra.shape}"
+                )
+            n_inputs = len(leaf.in_scaler.bounds)
+            if extra.shape[-1] != n_inputs:
+                raise ValueError(
+                    f"penalty_points[{idx}] has {extra.shape[-1]} input columns but "
+                    f"leaf {idx} (input_keys={leaf.input_keys!r}) takes {n_inputs}; "
+                    "columns follow input_keys order."
+                )
+        if not enabled:
+            continue
+        covered_by_data = sources[idx] is not None and sources[idx].points.shape[0] > 0
+        covered_by_extra = extra is not None and extra.shape[0] > 0
+        if not (covered_by_data or covered_by_extra):
+            raise ValueError(
+                f"penalty: leaf {idx} (input_keys={leaf.input_keys!r}) has no penalty "
+                "points: its inputs do not all resolve to dataset covariates and no "
+                "entry was given in penalty_points for it. Add penalty_points for "
+                "this leaf, or use trajectory_penalty_fn (see ADR-0009) for "
+                "embedded predictors."
+            )
+
+
+def select_penalty_points(
+    sources: tuple[PenaltyPointSource | None, ...],
+    extras: tuple[Array, ...],
+    length_mask_fraction: float,
+) -> tuple[Array, ...]:
+    """Per-leaf point arrays for one phase: length-mask-kept cells ∪ extras.
+
+    ``sources`` is the per-leaf output of :func:`data_penalty_points`
+    (``None`` for unresolvable leaves); ``extras`` the user-supplied
+    penalty-only points, positional per leaf. Returns one ``[G, n_inputs]``
+    array per leaf in traversal order: the measured cells kept by
+    :func:`length_mask_keep` concatenated with that leaf's extras.
+
+    This is host-side selection: the keep-vector must be concrete to index
+    the gathered points, so call it with the phase's Python float outside
+    any jit (the stock trainers do, once per phase). The returned arrays
+    are what a ``penalty_step`` receives.
+    """
+    built: list[Array] = []
+    for idx, src in enumerate(sources):
+        extra = extras[idx] if idx < len(extras) else None
+        if src is not None and src.points.shape[0] > 0:
+            kept = src.points[length_mask_keep(src, length_mask_fraction)]
+            if extra is not None and extra.shape[0] > 0:
+                built.append(jnp.concatenate([kept, extra]))
+            else:
+                built.append(kept)
+        elif extra is not None and extra.shape[0] > 0:
+            built.append(extra)
+        else:
+            built.append(jnp.zeros((0, 0)))
+    return tuple(built)
+
+
+def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
     """Mean output-squash saturation over every ``BoundedPredictor`` in a pytree.
 
-    For each leaf, evaluates ``inner(in_scaler.to_latent(x))`` across that
-    leaf's collocation grid and charges
+    For each leaf, evaluates ``inner(in_scaler.to_latent(x))`` across the
+    leaf's point set and charges
     :meth:`~hybridmodels.predictors.BoundScaler.saturation` on the
     resulting latents. Leaves are summed.
 
-    The default way to penalise bound behaviour here, and deliberately
-    trajectory-blind: saturation is a property of the predictor as a
-    function on its declared box, whatever any particular solve does. So it
-    needs no cooperation from ``simulate_fn``, ``predict_bucket`` or the
-    loss protocol, behaves the same inside a vector field or above one, and
-    handles arbitrary nesting by walking leaves.
+    ``points`` is positional, one ``[G, n_inputs]`` array per leaf in
+    traversal order: measured points from :func:`data_penalty_points`,
+    user-supplied penalty-only points, or a :func:`box_grid` sweep. An
+    empty per-leaf array contributes exactly zero, so a leaf the penalty
+    cannot reach does not NaN a run.
 
-    That cuts both ways. It reports saturation anywhere in the declared box,
-    including regions no training trajectory visited, which catches
-    extrapolation failure early. It cannot answer "did this solve push an
-    input out of range", which needs the penalty computed where the state
-    actually went.
+    The default way to penalise bound behaviour here, and deliberately
+    evaluated at fixed input points rather than along a solve: saturation
+    is a property of the predictor as a function, whatever any particular
+    solve does. So it needs no cooperation from ``simulate_fn``,
+    ``predict_bucket`` or the loss protocol, behaves the same inside a
+    vector field or above one, and handles arbitrary nesting by walking
+    leaves.
+
+    That cuts both ways. It reports saturation wherever the point set
+    reaches, including regions no training trajectory visited when the
+    points say so (a ``box_grid`` sweep, user extras); for "did *this*
+    solve push an input out of range" the trajectory-aware penalty
+    (ADR-0009) is the right instrument.
 
     Parameters
     ----------
     predictors : PyTree[eqx.Module]
         Any pytree shape. Only ``BoundedPredictor`` leaves contribute.
-    grids : tuple[Array, ...]
-        Output of :func:`collocation_grids` for this same pytree.
+    points : tuple[Array, ...]
+        One ``[G, n_inputs]`` array per leaf, in traversal order: the
+        output of :func:`data_penalty_points` (with any user extras
+        concatenated), user penalty-only points, or a :func:`box_grid`
+        sweep. An empty per-leaf array contributes zero.
 
     Returns
     -------
@@ -262,15 +509,17 @@ def bound_penalty(predictors: Any, grids: tuple[Array, ...]) -> Array:
         Non-negative scalar. Exactly zero when no leaf saturates.
     """
     leaves = _bounded_leaves(predictors)
-    if len(leaves) != len(grids):
+    if len(leaves) != len(points):
         raise ValueError(
-            f"grids has {len(grids)} entries but predictors holds "
-            f"{len(leaves)} BoundedPredictor leaves; rebuild the grids "
-            "with collocation_grids(predictors) after changing the pytree."
+            f"points has {len(points)} entries but predictors holds "
+            f"{len(leaves)} BoundedPredictor leaves; rebuild the points "
+            "after changing the pytree."
         )
     total = jnp.asarray(0.0)
-    for leaf, grid in zip(leaves, grids, strict=True):
-        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.to_latent(x)))(grid)
+    for leaf, leaf_points in zip(leaves, points, strict=True):
+        if leaf_points.shape[0] == 0:
+            continue
+        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.to_latent(x)))(leaf_points)
         total = total + leaf.out_scaler.saturation(latents)
     return total
 
@@ -278,8 +527,8 @@ def bound_penalty(predictors: Any, grids: tuple[Array, ...]) -> Array:
 # --------------------------------------------------------------------------- #
 # Trajectory-aware penalties (embedded hybrid models).
 #
-# ``bound_penalty`` above is trajectory-blind: it sweeps a synthetic grid of
-# each predictor's *declared input box*. For an *embedded* hybrid model —
+# ``bound_penalty`` above is trajectory-blind: it evaluates saturation at
+# fixed input points, never along a solve. For an *embedded* hybrid model —
 # the predictor runs inside the user's vector field and its output feeds the
 # dynamics (a kinetic parameter, a shape factor) — what matters is whether
 # the model saturates along the trajectories it actually simulates. The
@@ -304,6 +553,11 @@ def bound_penalty(predictors: Any, grids: tuple[Array, ...]) -> Array:
 # --------------------------------------------------------------------------- #
 
 
+def _validate_penalty_count(n: int) -> None:
+    if n < 1:
+        raise ValueError(f"penalty accumulator count must be at least one; got {n}")
+
+
 def attach_penalty_state(y0: Array, n: int = 1) -> Array:
     """Append ``n`` zero-valued penalty accumulators to ``y0``.
 
@@ -312,6 +566,7 @@ def attach_penalty_state(y0: Array, n: int = 1) -> Array:
     integrated penalty rates supplied by :func:`penalty_vector_field`.
     ``y0_fn`` should return ``attach_penalty_state(physics_y0, n)``.
     """
+    _validate_penalty_count(n)
     zeros = jnp.zeros((n,), dtype=y0.dtype)
     return jnp.concatenate([jnp.asarray(y0), zeros])
 
@@ -335,9 +590,17 @@ def penalty_vector_field(
     """
 
     def wrapped(t: Array, y: Array, args: Any) -> Array:
-        phys = base_rhs(t, y, args)
-        rates = penalty_rhs(t, y, args)
-        return jnp.concatenate([jnp.asarray(phys), jnp.asarray(rates)])
+        rates = jnp.asarray(penalty_rhs(t, y, args))
+        if rates.ndim != 1:
+            raise ValueError(f"penalty_rhs must return a rank-1 vector; got shape {rates.shape}")
+        n = rates.shape[0]
+        if n < 1 or n >= y.shape[0]:
+            raise ValueError(
+                "penalty_rhs must return at least one rate and leave at least one "
+                f"physical state component; got {n} rates for state shape {y.shape}."
+            )
+        phys = base_rhs(t, y[:-n], args)
+        return jnp.concatenate([jnp.asarray(phys), rates])
 
     return wrapped
 
@@ -349,6 +612,7 @@ def strip_penalty_state(state: Array, n: int = 1) -> Array:
     see only the physics, not the integrated penalty components. ``state``
     is ``[..., S + n]``; the result is ``[..., S]``.
     """
+    _validate_penalty_count(n)
     return state[..., :-n]
 
 
@@ -361,6 +625,7 @@ def penalty_integral(state: Array, n: int = 1) -> Array:
     these; divide by the time span to get the time-mean instead of the
     integral.
     """
+    _validate_penalty_count(n)
     return state[..., -1, -n:]
 
 

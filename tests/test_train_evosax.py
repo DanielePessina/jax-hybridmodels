@@ -54,6 +54,7 @@ from hybridmodels.trainable import trainable_mask
 from hybridmodels.training.evosax import (
     EvosaxTrainingConfig,
     _box_population,
+    _build_single_eval,
     _build_strategy,
     train_with_evosax,
 )
@@ -235,6 +236,33 @@ def test_flatten_unflatten_round_trip() -> None:
         assert jnp.allclose(a, b)
 
 
+def test_multi_bucket_eval_uses_the_same_average_as_optax():
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    mask = trainable_mask(pred)
+    params, static = eqx.partition(pred, mask)
+    flat, unflatten = jfu.ravel_pytree(params)
+    bp = quadratic_dataset().bucket_payloads[0]
+    bp_small = bp._replace(n_obs=jnp.asarray(1, dtype=bp.n_obs.dtype))
+    bp_large = bp._replace(n_obs=jnp.asarray(3, dtype=bp.n_obs.dtype))
+
+    def bucket_loss(_pred_obs, bucket):
+        return bucket.n_obs.astype(jnp.float32)
+
+    evaluate = _build_single_eval(
+        static_predictor=static,
+        unflatten=unflatten,
+        bucket_payloads=(bp_small, bp_large),
+        simulate_fn=quadratic_simulate_fn,
+        state_to_output=quadratic_state_to_output,
+        solver=solver_config(),
+        loss_fn=bucket_loss,
+        penalty_fn=lambda _predictors, _points: jnp.asarray(0.0),
+        penalty_points=(),
+        penalty_weight=0.0,
+    )
+    assert float(evaluate(flat)) == pytest.approx(2.0)
+
+
 def test_missing_key_raises() -> None:
     pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
     ds = quadratic_dataset()
@@ -252,6 +280,25 @@ def test_missing_key_raises() -> None:
             simulate_fn=quadratic_simulate_fn,
             state_to_output=quadratic_state_to_output,
             solver=solver_config(),
+        )
+
+
+def test_nonfinite_population_fitness_raises() -> None:
+    pred = QuadraticPredictor(theta=jnp.zeros(N_DIM))
+    ds = quadratic_dataset()
+
+    def invalid_simulate(_predictor, ts, _covariates, _y0, _solver):
+        return jnp.full((ts.shape[0], 1), jnp.nan)
+
+    with pytest.raises(FloatingPointError, match="non-finite"):
+        train_with_evosax(
+            pred,
+            ds,
+            EvosaxTrainingConfig(population_size=4, num_generations=1, verbose=False),
+            simulate_fn=invalid_simulate,
+            state_to_output=quadratic_state_to_output,
+            solver=solver_config(),
+            key=jr.PRNGKey(0),
         )
 
 
@@ -335,6 +382,19 @@ class TestEvosaxPenalty:
             algorithm="CMA_ES", population_size=4, num_generations=1, verbose=False
         )
         assert cfg.penalty_weight == 0.0
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("penalty_points", (jnp.zeros(3),)),
+            ("init_box_extent", -1.0),
+            ("sigma_init", 0.0),
+            ("log_every", 0),
+        ],
+    )
+    def test_invalid_numeric_configuration_raises(self, field, value) -> None:
+        with pytest.raises(ValueError):
+            EvosaxTrainingConfig(**{field: value})
 
     def test_zero_weight_reproduces_the_unpenalised_run(self) -> None:
         # A predictors pytree with no BoundedPredictor leaf must be

@@ -1,8 +1,8 @@
 # Data: Experiments, Channels, Datasets
 
-The data layer turns irregular, sparse experiment records into a JAX-traceable [`Dataset`](#dataset). Every observation channel can have its own timestamps; missing values are represented by a boolean mask, never by NaN sentinels. Experiments with the same number of union timestamps are stacked into one [`BucketPayload`](#bucketpayload), so each bucket compiles once and reuses its trace.
+Build [`Experiment`](#experiment) records from sparse observations, then pass them to [`make_dataset`](#make_dataset). The data layer creates masks and groups experiments by union-axis length. Scalar and rank-1 vector covariates are stacked along the bucket's leading axis.
 
-**Typical flow:** build `ChannelObs` per channel → wrap in `Experiment` via [`make_experiment`](#make_experiment) → batch via [`make_dataset`](#make_dataset) → optionally partition with [`split_dataset`](#split_dataset).
+**Typical flow:** build `ChannelObs` → call [`make_experiment`](#make_experiment) → call [`make_dataset`](#make_dataset) → optionally call [`split_dataset`](#split_dataset).
 
 ## Quick links
 
@@ -35,9 +35,12 @@ mean crystal size. Each carries its own ``Tc`` observation times, so
 channels can be sampled at completely different rates.
 ``make_dataset`` later merges them onto a shared time axis.
 
-All three arrays share the leading dimension ``Tc``. ``ts`` may be
-unsorted, since ``_per_experiment_arrays`` sorts when it builds the
-union axis, but must not repeat a time within one channel.
+For observed channels, all three arrays share the leading dimension
+``Tc``. A probe channel may instead provide nonempty ``ts`` with empty
+``values``; its timestamps define the integration grid while contributing
+no observations. ``ts`` may be unsorted, since
+``_per_experiment_arrays`` sorts when it builds the union axis, but must
+not repeat a time within one channel.
 
 **Attributes**
 
@@ -76,12 +79,12 @@ after a permutation.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `covariates` | `dict[str, Array]` | Named scalar conditions of the run that do not change with time, such as ``temperature_C`` or ``loading``. Every experiment passed to one ``make_dataset`` call must define the same keys. |
+| `covariates` | `dict[str, Array]` | Named scalar or rank-1 vector conditions of the run that do not change with time, such as ``temperature_C`` or a feed composition. Every experiment passed to one ``make_dataset`` call must define the same keys and shapes. |
 | `y0` | `Float[Array, "S"]` | Full model state at ``t=0``, of length ``S``. Built by the user's ``y0_fn`` hook when the experiment is constructed. The state may contain components that are never observed, so ``S`` need not equal the channel count. The framework never inspects ``S``. |
 | `channels` | `dict[str, ChannelObs]` | Sparse observations, one entry per measured quantity. Must contain every name listed in ``make_dataset(..., output_channel_names=...)``. |
 | `exp_id` | `str` | Identifier carried through for diagnostics. A static field, so it is not a JAX array leaf and never reaches a compiled kernel as data. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L108)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L137)</small>
 
 ---
 
@@ -93,7 +96,7 @@ after a permutation.
 
 ```python
 make_experiment(
-    covariates: 'dict[str, float]',
+    covariates: 'dict[str, float | Array]',
     channels: 'dict[str, ChannelObs]',
     y0_fn: 'Callable[[dict[str, Array], dict[str, ChannelObs]], Array]',
     exp_id: 'str' = '',
@@ -113,12 +116,12 @@ moment initialised to zero being the common case.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `covariates` |  | Scalar run conditions, constant in time. Values are converted to 0-d ``jnp`` arrays. |
+| `covariates` |  | Scalar or rank-1 vector run conditions, constant in time. Values are converted to JAX arrays; a given key must have one consistent shape across a dataset. |
 | `channels` |  | Sparse observations keyed by channel name. |
 | `y0_fn` |  | Hook ``(covariates, channels) -> [S]`` building the full initial state, where ``S`` is the state dimension the user's ``simulate_fn`` integrates. |
 | `exp_id` |  | Optional human-readable id copied to ``Experiment.exp_id``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L223)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L254)</small>
 
 ---
 
@@ -134,7 +137,7 @@ BucketPayload(
     y_observed: ForwardRef("Float[Array, 'N T D']"),
     yvar: ForwardRef("Float[Array, 'N T D']"),
     mask: ForwardRef("Bool[Array, 'N T D']"),
-    covariates: ForwardRef("dict[str, Float[Array, ' N']]"),
+    covariates: ForwardRef('dict[str, Array]'),
     y0: ForwardRef("Float[Array, 'N S']"),
     n_obs: ForwardRef("Int[Array, '']"),
 )
@@ -167,9 +170,10 @@ mask : Bool[Array, "N T D"]
     real ``ChannelObs`` entry, ``False`` where the union axis carries a
     time at which that channel was not measured. Every loss reads this
     to know which cells count.
-covariates : dict[str, Float[Array, "N"]]
+covariates : dict[str, Array]
     Per-key covariate stacked across the bucket. Same keys as on
-    ``Experiment.covariates``, with an ``N`` axis added.
+    ``Experiment.covariates``, with an ``N`` axis added; scalar values
+    have shape ``[N]`` and vectors have shape ``[N, K]``.
 y0 : Float[Array, "N S"]
     Per-experiment full initial state, stacked.
 n_obs : Int[Array, ""]
@@ -180,7 +184,7 @@ n_obs : Int[Array, ""]
     its own denominator. Kept because examples and smoke scripts assert
     dataset shape with it (R-D4).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L140)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L170)</small>
 
 ---
 
@@ -216,7 +220,7 @@ ADR-0008).
 | `covariate_names` | `tuple[str, ...]` | Covariate keys, sorted. Matches each ``Experiment.covariates`` key set. Sorting makes dict iteration deterministic. |
 | `_experiments` | `tuple[Experiment, ...]` | Source experiments, kept so ``split_dataset`` can re-bucket each split. Empty when a ``Dataset`` is built by hand from raw payloads, and ``split_dataset`` then raises. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L191)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L222)</small>
 
 ---
 
@@ -263,7 +267,7 @@ the model, is passed to prediction and training separately (ADR-0008).
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with ``_experiments`` kept so ``split_dataset`` can re-bucket subsets. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L435)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L496)</small>
 
 ---
 
@@ -307,7 +311,7 @@ ensemble whose members saw different resamples.
 | --- | --- | --- |
 | `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L560)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L642)</small>
 
 ---
 
@@ -351,7 +355,7 @@ payloads and no ``_experiments``, so it cannot be split again.
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L611)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L693)</small>
 
 ---
 
@@ -372,4 +376,4 @@ debugging and example output. Each line reports the bucket's ``N``
 (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
 fraction of ``[N, T, D]`` cells the mask marks as real observations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L417)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L478)</small>

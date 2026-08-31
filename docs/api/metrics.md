@@ -19,7 +19,7 @@ Per-channel evaluation of trained predictions, mirroring the loss mask disciplin
 ```python
 ChannelMetrics(
     name: 'str',
-    n: 'int',
+    n: "Int[Array, '']",
     mse: "Float[Array, '']",
     rmse: "Float[Array, '']",
     mae: "Float[Array, '']",
@@ -34,11 +34,11 @@ Metrics for a single output channel.
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | `str` | Channel name from ``dataset.output_channel_names``. |
-| `n` | `int` | Number of observed (mask=True) cells behind the stats. |
+| `n` | `Int[Array, ""]` | Scalar number of observed (mask=True) cells behind the stats. It is a JAX scalar so the complete metrics result can pass through ``jit``. |
 | `mse, rmse, mae` | `Float[Array, ""]` | Error of ``predicted - observed`` over the masked cells. |
 | `r2` | `Float[Array, ""]` | ``1 - SS_res/SS_tot``; ``nan`` when the observations are constant and ``SS_tot`` is zero. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L31)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L33)</small>
 
 ---
 
@@ -70,7 +70,7 @@ Collapse bucketed predictions into per-channel summary stats.
 | --- | --- | --- |
 | `dict[str, ChannelMetrics]` |  | Keyed by channel, in ``dataset.output_channel_names`` order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L56)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L64)</small>
 
 ---
 
@@ -100,4 +100,4 @@ Scientific notation throughout, so one template stays readable across
 the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
 spanning nine decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L116)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L146)</small>

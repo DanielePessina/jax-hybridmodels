@@ -4,7 +4,7 @@ Training configs gain an opt-in `trajectory_penalty_fn(full_state, bp) -> scalar
 
 ## Why this is non-obvious
 
-ADR-0007 deliberately made the collocation penalty **trajectory-blind**: it sweeps a synthetic grid of each predictor's *declared input box* and charges output saturation there. That was the right default at the time — it needs no cooperation from `simulate_fn`, `state_to_output`, or the loss protocol, and it is an extrapolation safety net (it fires in regions no trajectory visits). But it cannot answer "did the model saturate *where it actually ran*", and for an embedded hybrid model — crystallisation's `G(S)` and `J(S)` feeding the moment equations, a shape factor learned from data — that is the question that matters. The predictor's output feeds the dynamics; whether it hugs a boundary on the trajectories the model actually simulates is a property of those trajectories, not of a box sweep.
+ADR-0007 deliberately made the bound penalty **trajectory-blind**: it evaluates saturation at fixed input points — the measured points gathered from the dataset, plus any user-supplied penalty-only points — never along a solve. That is the right default for a *function* property: it needs no cooperation from `simulate_fn`, `state_to_output`, or the loss protocol. But it cannot answer "did the model saturate *where it actually ran*", and for an embedded hybrid model — crystallisation's `G(S)` and `J(S)` feeding the moment equations, a shape factor learned from data — that is the question that matters. The predictor's output feeds the dynamics; whether it hugs a boundary on the trajectories the model actually simulates is a property of those trajectories, not of any fixed point set.
 
 The obvious way to collect a per-call penalty is to sum it up in Python at each call. That is wrong: a vector field is evaluated by the solver at RK stage points a data-dependent number of times, including rejected steps, so any hand-rolled accumulation is meaningless. The only sound accumulator in a solve is an extra ODE state component — the *time-integral* of the rate. This mirrors ADR-0007's own note ("carrying a penalty as an extra integrated ODE state ... is the only correct way to do that"), which previously failed only because `state_to_output` projected it away; here the recipe strips the accumulators in `state_to_output` and the new hook reads them *before* the projection.
 
@@ -19,7 +19,7 @@ It is an opt-in additive feature: with `trajectory_penalty_fn=None` (the default
 - Manual accumulation in `simulate_fn`. Rejected: meaningless under adaptive error control (rejected steps, variable call counts).
 - A second forward pass that "checks" the bounds. Rejected: the predictor calls live inside user code; a second pass cannot see them any better than the first, and it doubles the solve cost.
 - Loss-stage penalty on `pred_obs` (no state change). Adopted for the parallel case (`trajectory_saturation_penalty`); insufficient for embedded predictors.
-- Probe conditions as a synthetic-grid extension. Rejected: the grid is exactly the collocation weakness. Probing the *actual* condition (covariates, initial state, time grid) with no observations is strictly more targeted and costs nothing extra.
+- Probe conditions as an extension of penalty-only points. Rejected: static extra input points (ADR-0007's `penalty_points`) police a function, not a condition. Probing the *actual* condition (covariates, initial state, time grid) with no observations is strictly more targeted and costs nothing extra.
 
 ## Consequences
 

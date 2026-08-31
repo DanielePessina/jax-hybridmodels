@@ -28,7 +28,13 @@ pulling in diffrax, optax, evosax and rich on a run that needs none.
 from importlib import import_module, metadata
 from typing import TYPE_CHECKING, Any
 
-__version__ = metadata.version("hybridmodels")
+try:
+    __version__ = metadata.version("hybridmodels")
+except metadata.PackageNotFoundError:
+    # Same policy as serialise._resolve_version: a checkout that has not
+    # been ``uv sync``'d has no installed package metadata, and that must
+    # not break an import that otherwise works from source.
+    __version__ = "unknown"
 
 if TYPE_CHECKING:
     from hybridmodels.data import (
@@ -52,18 +58,23 @@ if TYPE_CHECKING:
     )
     from hybridmodels.metrics import ChannelMetrics, compute_metrics, print_metrics
     from hybridmodels.penalties import (
+        PenaltyPointSource,
         attach_penalty_state,
         bound_penalty,
+        box_grid,
         box_violation,
         clip_ste,
-        collocation_grids,
+        data_penalty_points,
+        length_mask_keep,
         penalty_integral,
         penalty_vector_field,
+        select_penalty_points,
         soft_inverse,
         soft_logit,
         softclip,
         strip_penalty_state,
         trajectory_saturation_penalty,
+        validate_penalty_points,
     )
     from hybridmodels.prediction import (
         ensemble_predictions,
@@ -162,6 +173,7 @@ __all__: list[str] = [
     "MLPPredictor",
     "NeuralNPolynomial",
     "OptaxTrainingConfig",
+    "PenaltyPointSource",
     "Predictor",
     "RichEvosaxUI",
     "RichTrainingUI",
@@ -173,6 +185,7 @@ __all__: list[str] = [
     "bal_mse",
     "attach_penalty_state",
     "bound_penalty",
+    "box_grid",
     "box_violation",
     "build_apply_update",
     "build_bucket_step",
@@ -180,7 +193,9 @@ __all__: list[str] = [
     "build_score_bucket",
     "ChannelMetrics",
     "clip_ste",
-    "collocation_grids",
+    "data_penalty_points",
+    "length_mask_keep",
+    "select_penalty_points",
     "constant_profile",
     "penalty_integral",
     "penalty_vector_field",
@@ -230,6 +245,7 @@ __all__: list[str] = [
     "train_with_evosax",
     "train_with_optax",
     "trainable_mask",
+    "validate_penalty_points",
     "apply_length_mask",
     "Warp",
     "WARPS",
@@ -255,6 +271,7 @@ _EXPORTS: dict[str, str] = {
     "MLPPredictor": "hybridmodels.predictors",
     "NeuralNPolynomial": "hybridmodels.predictors",
     "OptaxTrainingConfig": "hybridmodels.training",
+    "PenaltyPointSource": "hybridmodels.penalties",
     "Predictor": "hybridmodels.predictors",
     "RichEvosaxUI": "hybridmodels.ui",
     "RichTrainingUI": "hybridmodels.ui",
@@ -266,6 +283,7 @@ _EXPORTS: dict[str, str] = {
     "bal_mse": "hybridmodels.losses",
     "attach_penalty_state": "hybridmodels.penalties",
     "bound_penalty": "hybridmodels.penalties",
+    "box_grid": "hybridmodels.penalties",
     "box_violation": "hybridmodels.penalties",
     "build_apply_update": "hybridmodels.training.kernels",
     "build_bucket_step": "hybridmodels.training.kernels",
@@ -273,7 +291,9 @@ _EXPORTS: dict[str, str] = {
     "build_score_bucket": "hybridmodels.training.kernels",
     "ChannelMetrics": "hybridmodels.metrics",
     "clip_ste": "hybridmodels.penalties",
-    "collocation_grids": "hybridmodels.penalties",
+    "data_penalty_points": "hybridmodels.penalties",
+    "length_mask_keep": "hybridmodels.penalties",
+    "select_penalty_points": "hybridmodels.penalties",
     "constant_profile": "hybridmodels.profiles",
     "penalty_integral": "hybridmodels.penalties",
     "penalty_vector_field": "hybridmodels.penalties",
@@ -324,6 +344,7 @@ _EXPORTS: dict[str, str] = {
     "train_with_evosax": "hybridmodels.training",
     "train_with_optax": "hybridmodels.training",
     "trainable_mask": "hybridmodels.trainable",
+    "validate_penalty_points": "hybridmodels.penalties",
     "apply_length_mask": "hybridmodels.training.kernels",
     "Warp": "hybridmodels.transforms",
     "WARPS": "hybridmodels.transforms",

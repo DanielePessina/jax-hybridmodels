@@ -91,7 +91,7 @@ from hybridmodels import (
     predict_dataset,
     register_warp,
 )
-from hybridmodels.penalties import bound_penalty, collocation_grids
+from hybridmodels.penalties import bound_penalty, box_grid
 from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 
@@ -564,9 +564,11 @@ def main() -> None:
     # two and a fresh minimum for `restore_best` at the phase boundary.
     #
     # The saturation penalty is charged on the latent, not the physical
-    # output, and evaluated on a collocation grid over each predictor's
-    # declared input box rather than along the trajectories, so it reports
-    # saturation anywhere in the box the model claims to be valid on.
+    # output, and evaluated at the measured points (plus any user-supplied
+    # penalty-only points) rather than along the trajectories. The residual
+    # network reads the ODE state, so the dataset resolves no measured
+    # points for it; both leaves are covered with a warp-uniform box sweep
+    # (`box_grid`) -- the collocation-as-extension recipe.
     # `penalty_weight` is a length-1 tuple and broadcasts across both
     # phases.
     #
@@ -582,7 +584,7 @@ def main() -> None:
         reset_optimiser_state=(False, False),
         length_schedule=(0.4, 1.0),
         penalty_weight=(penalty_weight,),
-        penalty_grid_points=7,
+        penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors),
         loss="mse",
         verbose=False,
     )
@@ -616,7 +618,7 @@ def main() -> None:
     # series, so runs with different penalty weights stay comparable.
     print("saturation penalty at the end of the run, by leaf:")
     for _name, _leaf in zip(("rate_net", "residual_net"), trained, strict=True):
-        print(f"  {_name:13s} {float(bound_penalty((_leaf,), collocation_grids((_leaf,)))):.4e}")
+        print(f"  {_name:13s} {float(bound_penalty((_leaf,), (box_grid(_leaf.in_scaler),))):.4e}")
 
     # With the default settings the residual network reads exactly zero and
     # the rate network reads a small non-zero value. That split is the
@@ -718,11 +720,19 @@ def main() -> None:
     # residual from the tuple and nothing else changes. "Rectangular data"
     # runs the full hybrid model on the one-bucket dataset from section 2.
     # Dropping the residual is a one-line change: the tuple gets shorter.
-    # simulate_fn already handles a length-one tuple.
+    # simulate_fn already handles a length-one tuple. The penalty points
+    # are positional per leaf, so the mechanistic config rebuilds them for
+    # the single-leaf tuple.
+    from dataclasses import replace
+
+    mech_config = replace(
+        config,
+        penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in (predictors[0],)),
+    )
     _mech_history, mech_trained = train_with_optax(
         (predictors[0],),
         irr_dataset,
-        config,
+        mech_config,
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         solver=solver,
@@ -740,19 +750,6 @@ def main() -> None:
         key=k_train,
     )
     print(f"hybrid, rectangular:         final data loss {_rect_history[-1]:.5f}")
-
-    def r2_per_channel(predictions, dataset):
-        """R^2 per channel over masked-in cells only."""
-        out = []
-        for d in range(dataset.bucket_payloads[0].y_observed.shape[-1]):
-            obs, pred = [], []
-            for arr, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-                sel = np.asarray(bp.mask[:, :, d])
-                obs.append(np.asarray(bp.y_observed[:, :, d])[sel])
-                pred.append(np.asarray(arr[:, :, d])[sel])
-            obs, pred = np.concatenate(obs), np.concatenate(pred)
-            out.append(1.0 - np.sum((obs - pred) ** 2) / np.sum((obs - obs.mean()) ** 2))
-        return out
 
     mech_predictions = predict_dataset(
         mech_trained,
@@ -775,7 +772,16 @@ def main() -> None:
         ("hybrid, rectangular (1 bucket)", rect_predictions, rect_dataset),
         ("mechanistic only, irregular", mech_predictions, irr_dataset),
     ):
-        _r2 = r2_per_channel(_preds, _ds)
+        # R^2 per channel over masked-in cells only.
+        _r2 = []
+        for _d in range(_ds.bucket_payloads[0].y_observed.shape[-1]):
+            _obs, _pred = [], []
+            for _arr, _bp in zip(_preds, _ds.bucket_payloads, strict=True):
+                _sel = np.asarray(_bp.mask[:, :, _d])
+                _obs.append(np.asarray(_bp.y_observed[:, :, _d])[_sel])
+                _pred.append(np.asarray(_arr[:, :, _d])[_sel])
+            _obs, _pred = np.concatenate(_obs), np.concatenate(_pred)
+            _r2.append(1.0 - np.sum((_obs - _pred) ** 2) / np.sum((_obs - _obs.mean()) ** 2))
         print(f"{_label:38s} {_r2[0]:8.3f} {_r2[1]:8.3f}")
 
     print("recovered k, hybrid against mechanistic-only")

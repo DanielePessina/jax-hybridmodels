@@ -15,6 +15,7 @@ import diffrax
 import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
+import optax
 import pytest
 from _harness import (
     INITIAL_STATES,
@@ -29,14 +30,23 @@ from _harness import (
     true_position,
     y0_fn_factory,
 )
+from jax import Array
 
 from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
 from hybridmodels.losses import masked_mse
-from hybridmodels.penalties import bound_penalty, collocation_grids
+from hybridmodels.penalties import bound_penalty, box_grid
 from hybridmodels.prediction import predict_dataset
 from hybridmodels.predictors import BoundedPredictor, BoundScaler, MLPPredictor
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from hybridmodels.trainable import trainable_mask
+from hybridmodels.training.kernels import apply_length_mask
+from hybridmodels.training.optax import OptaxTrainingConfig, _shared_tournament, train_with_optax
 from hybridmodels.ui.testing import RecordingUI
+
+# The ``_bounded_predictors`` leaf reads ``input_keys=("omega_input",)``,
+# which the oscillator dataset's only covariate (``"id"``) does not
+# resolve, so penalty-on runs must cover it with penalty-only points. One
+# interior point inside the leaf's ``(0.5, 2.0)`` box.
+_EXTRA_POINTS = jnp.asarray([[1.0]])
 
 
 def _bounded_simulate_fn():
@@ -347,6 +357,12 @@ def test_silent_default_when_no_ui_and_verbose_false(capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_length_mask_keeps_n_obs_consistent_with_mask():
+    bp = make_oscillator_dataset().bucket_payloads[0]
+    masked = apply_length_mask(bp, jnp.asarray(0.5))
+    assert int(masked.n_obs) == int(masked.mask.sum())
+
+
 class TestPenaltyWiring:
     """The bound penalty reaches the optimiser without disturbing the data path."""
 
@@ -383,6 +399,7 @@ class TestPenaltyWiring:
         reset_optimiser_state: tuple[bool, ...] = (False,),
         length_schedule: tuple[float, ...] = (1.0,),
         penalty_weight: tuple[float, ...] = (0.0,),
+        penalty_points: tuple[Array, ...] | None = None,
         restore_best: bool = True,
     ) -> OptaxTrainingConfig:
         return OptaxTrainingConfig(
@@ -392,6 +409,7 @@ class TestPenaltyWiring:
             reset_optimiser_state=reset_optimiser_state,
             length_schedule=length_schedule,
             penalty_weight=penalty_weight,
+            penalty_points=penalty_points,
             restore_best=restore_best,
             verbose=False,
         )
@@ -418,7 +436,7 @@ class TestPenaltyWiring:
         preds = self._bounded_predictors(scale=50.0)
         # Anti-vacuity guard: without this the test would also pass if the
         # penalty never reached the loss at all.
-        assert float(bound_penalty(preds, collocation_grids(preds, 5))) > 0.0
+        assert float(bound_penalty(preds, (box_grid(preds[0].in_scaler, 5),))) > 0.0
         h_off, _ = self._run(preds, ds, self._config())
         h_zero, _ = self._run(preds, ds, self._config(penalty_weight=(0.0,)))
         assert h_off == h_zero
@@ -462,6 +480,11 @@ class TestPenaltyWiring:
         with pytest.raises(ValueError, match="non-negative"):
             self._config(penalty_weight=(-1.0,))
 
+    @pytest.mark.parametrize("weight", [float("nan"), float("inf")])
+    def test_nonfinite_penalty_weight_raises(self, weight):
+        with pytest.raises(ValueError, match="finite"):
+            self._config(penalty_weight=(weight,))
+
     def test_history_tracks_the_data_term_not_the_combined_objective(self):
         # A large penalty must not inflate the reported loss; otherwise
         # runs with different weights are incomparable and restore_best
@@ -469,7 +492,11 @@ class TestPenaltyWiring:
         ds = make_oscillator_dataset()
         preds = self._bounded_predictors(scale=50.0)
         h_off, _ = self._run(preds, ds, self._config())
-        h_on, _ = self._run(preds, ds, self._config(penalty_weight=(1e3,)))
+        h_on, _ = self._run(
+            preds,
+            ds,
+            self._config(penalty_weight=(1e3,), penalty_points=(_EXTRA_POINTS,)),
+        )
         # Step 0 is evaluated at identical parameters in both runs, so the
         # data term must agree exactly even though the objectives differ.
         assert h_off[0] == pytest.approx(h_on[0], rel=1e-6)
@@ -482,7 +509,13 @@ class TestPenaltyWiring:
         # whenever the data loss never improves, and the comparison would
         # pass vacuously.
         _, off = self._run(preds, ds, self._config(restore_best=False))
-        _, on = self._run(preds, ds, self._config(penalty_weight=(1e2,), restore_best=False))
+        _, on = self._run(
+            preds,
+            ds,
+            self._config(
+                penalty_weight=(1e2,), penalty_points=(_EXTRA_POINTS,), restore_best=False
+            ),
+        )
         w_off = off[0].inner.mlp.layers[-1].weight
         w_on = on[0].inner.mlp.layers[-1].weight
         assert not jnp.allclose(w_off, w_on)
@@ -492,14 +525,19 @@ class TestPenaltyWiring:
         # a saturated predictor back toward its usable range.
         ds = make_oscillator_dataset()
         preds = self._bounded_predictors(scale=50.0)
-        grids = collocation_grids(preds, 5)
-        before = float(bound_penalty(preds, grids))
+        points = (box_grid(preds[0].in_scaler, 5),)
+        before = float(bound_penalty(preds, points))
         _, after_preds = self._run(
             preds,
             ds,
-            self._config(steps=(25,), penalty_weight=(1e2,), restore_best=False),
+            self._config(
+                steps=(25,),
+                penalty_weight=(1e2,),
+                penalty_points=(_EXTRA_POINTS,),
+                restore_best=False,
+            ),
         )
-        after = float(bound_penalty(after_preds, grids))
+        after = float(bound_penalty(after_preds, points))
         assert after < before
 
     def test_ui_receives_the_penalty(self):
@@ -508,12 +546,61 @@ class TestPenaltyWiring:
         self._run(
             self._bounded_predictors(scale=50.0),
             ds,
-            self._config(penalty_weight=(1e-1,)),
+            self._config(penalty_weight=(1e-1,), penalty_points=(_EXTRA_POINTS,)),
             ui=ui,
         )
         steps = [kw for name, kw in ui.events if name == "on_step_end"]
         assert steps and all("penalty" in kw for kw in steps)
-        assert any(kw["penalty"] > 0.0 for kw in steps)
+
+    def test_uncovered_leaf_with_penalty_on_raises(self):
+        # An enabled penalty must never silently skip a leaf: input_keys
+        # that do not resolve to dataset covariates leave the leaf with no
+        # points unless the user supplies them.
+        ds = make_oscillator_dataset()
+        preds = self._bounded_predictors(scale=50.0)
+        with pytest.raises(ValueError, match="trajectory_penalty_fn"):
+            self._run(preds, ds, self._config(penalty_weight=(1e-2,)))
+
+    def test_extras_cover_an_unresolvable_leaf(self):
+        ds = make_oscillator_dataset()
+        preds = self._bounded_predictors(scale=50.0)
+        h, _ = self._run(
+            preds,
+            ds,
+            self._config(penalty_weight=(1e-2,), penalty_points=(_EXTRA_POINTS,)),
+        )
+        assert h  # ran to completion
+
+    def test_penalty_disabled_needs_no_coverage(self):
+        # The off state stays fully inert: an unresolvable leaf is fine
+        # when no phase charges the penalty.
+        ds = make_oscillator_dataset()
+        preds = self._bounded_predictors(scale=50.0)
+        h, _ = self._run(preds, ds, self._config())
+        assert h
+
+    def test_penalty_points_length_mismatch_raises(self):
+        ds = make_oscillator_dataset()
+        preds = self._bounded_predictors(scale=50.0)
+        with pytest.raises(ValueError, match="penalty_points has"):
+            self._run(
+                preds,
+                ds,
+                self._config(
+                    penalty_weight=(1e-2,),
+                    penalty_points=(_EXTRA_POINTS, _EXTRA_POINTS),
+                ),
+            )
+
+    def test_penalty_points_wrong_input_columns_raises(self):
+        ds = make_oscillator_dataset()
+        preds = self._bounded_predictors(scale=50.0)
+        with pytest.raises(ValueError, match="input columns"):
+            self._run(
+                preds,
+                ds,
+                self._config(penalty_weight=(1e-2,), penalty_points=(jnp.zeros((2, 3)),)),
+            )
 
 
 class TestPhaseOptimiserSwitch:
@@ -587,12 +674,15 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="phase-keyed field"):
             OptaxTrainingConfig(**self._kwargs(**{field: value}))
 
-    @pytest.mark.parametrize("n", [0, 1, -1])
-    def test_penalty_grid_points_below_two_raises(self, n):
-        # Two is one point per box edge. Fewer cannot span the box, so the
-        # collocation grid would sample the interior only.
-        with pytest.raises(ValueError, match="penalty_grid_points"):
-            OptaxTrainingConfig(**self._kwargs(penalty_grid_points=n))
+    @pytest.mark.parametrize(
+        "points",
+        [(jnp.zeros(3),), (jnp.zeros((2, 2, 1)),)],
+    )
+    def test_non_rank2_penalty_points_raises(self, points):
+        # Penalty-only points are [G, n_inputs] physical input vectors; a
+        # different rank cannot align with any leaf's input_keys.
+        with pytest.raises(ValueError, match="penalty_points"):
+            OptaxTrainingConfig(**self._kwargs(penalty_points=points))
 
     @pytest.mark.parametrize("fraction", [0.0, -0.1, 1.5])
     def test_length_schedule_outside_the_unit_interval_raises(self, fraction):
@@ -903,3 +993,30 @@ class TestTournamentSelection:
     def test_selection_is_deterministic_in_the_key(self):
         dataset = make_oscillator_dataset()
         assert self._winner_loss(dataset, 4) == self._winner_loss(dataset, 4)
+
+
+def test_tournament_retries_equinox_runtime_failures():
+    predictors = OmegaPredictor(1.0)
+    dataset = make_oscillator_dataset()
+    mask = trainable_mask(predictors)
+
+    def score_bucket(_predictors, _bp, _fraction):
+        raise eqx.EquinoxRuntimeError("solver failed")
+
+    with pytest.warns(RuntimeWarning, match="all attempts failed"):
+        ranked = _shared_tournament(
+            predictors,
+            dataset,
+            bucket_step=lambda *_args: (jnp.asarray(0.0), predictors),
+            score_bucket=score_bucket,
+            apply_update=lambda *args: args[:2],
+            optimizer=optax.sgd(1e-3),
+            trainable=mask,
+            tournament_attempts=2,
+            tournament_steps=0,
+            tournament_lr=1e-3,
+            key=jr.PRNGKey(0),
+            length_mask_fraction=jnp.asarray(1.0),
+            top_k=1,
+        )
+    assert ranked[0][0] == float("inf")

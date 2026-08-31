@@ -29,7 +29,7 @@ Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 the container shape, writing a flat binary stream of ``np.save``-encoded
 leaves. The caller picks the file extension; ``save_run`` uses ``.eqx``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L66)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L68)</small>
 
 ---
 
@@ -51,7 +51,7 @@ and per-leaf static configuration, such as the same ``in_size`` and
 the template's array leaves; its static fields supply the structure
 ``equinox`` needs. The template is not mutated.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L77)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L79)</small>
 
 ---
 
@@ -97,7 +97,7 @@ Persist a complete training run to ``directory``.
 The directory is created, parents included. Existing files are
 overwritten: this saves rather than appends.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L198)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L263)</small>
 
 ---
 
@@ -137,4 +137,4 @@ into a function is the caller's job, usually
 | --- | --- | --- |
 | `dict` |  | Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver`` (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` \| dict \| None), ``evosax_config`` (``EvosaxTrainingConfig`` \| dict \| None), ``loss_history`` (``list[float] \| None``), ``loss_history_kind`` (``str \| None``), ``extras`` (``dict``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L307)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L388)</small>

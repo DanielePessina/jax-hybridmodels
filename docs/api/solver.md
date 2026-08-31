@@ -27,7 +27,7 @@ SolverConfig(
     atol: 'float | tuple[float, ...]',
     max_steps: 'int',
     dt0: 'float | None',
-    adjoint: 'diffrax.AbstractAdjoint' = <factory>,
+    adjoint: 'diffrax.AbstractAdjoint | None' = None,
     pcoeff: 'float' = 0.0,
     icoeff: 'float' = 1.0,
     dcoeff: 'float' = 0.0,
@@ -52,7 +52,7 @@ tolerance change must change the compiled solve.
 | `adjoint` | `diffrax.AbstractAdjoint` | How gradients are taken back through the solve. See ``ADJOINT_REGISTRY`` for what each choice costs. |
 | `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See :meth:`stepsize_controller`. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L105)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L106)</small>
 
 #### `SolverConfig.diffeqsolve()`
 
@@ -98,7 +98,7 @@ scalar/array tolerances — this is the whole invocation.
 | --- | --- | --- |
 | `diffrax.Solution` |  | The diffrax solution; call ``.ys`` for the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L169)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L216)</small>
 
 #### `SolverConfig.stepsize_controller()`
 
@@ -118,7 +118,7 @@ I-control, so this reproduces the ``PIDController(rtol, atol)`` the
 examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L147)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L194)</small>
 
 #### `SolverConfig.to_dict()`
 
@@ -132,7 +132,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L228)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L275)</small>
 
 ---
 
@@ -181,7 +181,7 @@ After registration, ``SolverConfig(solver=cls(), ...).to_dict()`` emits
 Re-registering an existing name overwrites without warning. Calling code
 owns the naming.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L66)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L67)</small>
 
 ---
 
@@ -228,4 +228,4 @@ Register a diffrax adjoint class under ``name`` for round-trip serialisation.
 Same contract as :func:`register_solver`. Re-registering an existing
 name overwrites without warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L57)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L58)</small>

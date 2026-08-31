@@ -37,7 +37,7 @@ The cutoff is clamped at 1. A fraction small enough to floor to zero
 would otherwise give an all-false mask, and every loss here divides by a
 count clamped at 1, so the step would silently score nothing.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L54)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L56)</small>
 
 ---
 
@@ -65,7 +65,7 @@ Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
 the training and prediction jit caches separate (R-J1): this body is
 traced into whichever kernel calls it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L99)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L102)</small>
 
 ---
 
@@ -91,7 +91,7 @@ Return a jitted ``bucket_step(predictors, bp, fraction) -> (loss, grads)``.
 
 One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
 update lives in a separate jitted ``apply_update``, and the **bound**
-(collocation) penalty is charged once per step by
+penalty is charged once per step by
 :func:`build_penalty_step`, outside the bucket loop — this kernel
 charges the data loss (plus any configured trajectory penalty, below).
 
@@ -105,7 +105,7 @@ penalty's once-per-step charge. When it is ``None`` (the default) this
 kernel is byte-for-byte what it was before — no extra simulate, no
 behaviour change.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L119)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L122)</small>
 
 ---
 
@@ -121,6 +121,8 @@ build_score_bucket(
     state_to_output: 'Callable[[Array], Array]',
     solver: 'SolverConfig',
     loss_fn: 'Callable[[Array, BucketPayload], Array]',
+    trajectory_penalty_fn: 'Callable[[Array, BucketPayload], Array] | None' = None,
+    trajectory_penalty_weight: 'float' = 0.0,
 ) -> Callable[[Any, BucketPayload, Array], Array]
 ```
 
@@ -129,9 +131,11 @@ Return a forward-only ``score_bucket(predictors, bp, fraction) -> loss``.
 Scoring through ``bucket_step`` would run a full ``value_and_grad`` and
 discard the gradients, roughly tripling the cost of a scoring sweep.
 This costs one extra compile per bucket shape and pays for itself above
-two attempts.
+two attempts. The returned score includes the data loss and, when
+configured, the trajectory penalty; the bound penalty remains
+outside this per-bucket scorer.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L181)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L184)</small>
 
 ---
 
@@ -144,29 +148,35 @@ two attempts.
 ```python
 build_penalty_step(
     penalty_fn: 'Callable[[Any, tuple[Array, ...]], Array]',
-    penalty_grids: 'tuple[Array, ...]',
     trainable: 'Any',
-) -> Callable[[Any, Array], tuple[Array, Any]]
+) -> Callable[[Any, Array, tuple[Array, ...]], tuple[Array, Any]]
 ```
 
-Return ``penalty_step(predictors, weight) -> (penalty, weighted_grads)``.
+Return ``penalty_step(predictors, weight, points=()) -> (penalty, weighted_grads)``.
 
 Evaluated once per training step, outside the bucket loop: the penalty
-reads only the predictors pytree, so computing it inside ``bucket_step``
-would repeat one identical evaluation per bucket.
+reads only the predictors tree and its point arrays, so computing it
+inside ``bucket_step`` would repeat one identical evaluation per
+bucket.
+
+``points`` are the per-leaf point arrays the penalty is evaluated at —
+the output of :func:`hybridmodels.penalties.select_penalty_points` —
+passed as traced arrays, so a shape change (a phase boundary) retraces
+this small kernel and nothing else. The default ``()`` suits a custom
+``penalty_fn`` that ignores points.
 
 ``penalty_fn`` is the regulariser, required here and defaulted to
 :func:`hybridmodels.penalties.bound_penalty` by the stock trainers.
 Passing a different callable (weight decay on inner weights, a
 monotonicity term, ...) is how a custom regulariser composes with the
-loop. It must take ``(predictors, penalty_grids)`` and return a
-scalar; a custom term that does not need grids just ignores them.
+loop. It must take ``(predictors, points)`` and return a scalar; a
+custom term that does not need points just ignores them.
 
 Returns the gradient of ``weight * penalty``, to add straight onto the
 averaged data gradient. ``penalty`` comes back unweighted, since that
 is what gets reported.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L211)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L220)</small>
 
 ---
 
@@ -189,4 +199,4 @@ The single optimiser update per training step. Build once per
 optimiser; reuse its returned state across steps, rebuilding only at a
 reset/phase boundary.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L253)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L269)</small>

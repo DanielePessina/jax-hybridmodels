@@ -12,16 +12,18 @@ accumulating per-bucket gradients, then a single optimiser update. The
 kernels here are the compiled pieces that step makes:
 
 - :func:`build_bucket_step` — one jitted ``bucket_step(predictors, bp,
-  fraction) -> (loss, grads)`` per bucket shape. The **bound**
-  (collocation) penalty is *not* here; a configured **trajectory** penalty
-  is, added to the loss inside the same forward pass (one charge per
-  bucket, since each bucket's trajectories differ).
+  fraction) -> (loss, grads)`` per bucket shape. The **bound** penalty is
+  *not* here; a configured **trajectory** penalty is, added to the loss
+  inside the same forward pass (one charge per bucket, since each bucket's
+  trajectories differ).
 - :func:`build_score_bucket` — a forward-only scorer (no backward pass),
   for sweeps like the tournament where gradients would be wasted.
 - :func:`build_penalty_step` — one jitted ``penalty_step(predictors,
-  weight) -> (penalty, weighted_grads)`` per step, evaluated outside the
-  bucket loop because it reads only the predictors tree. This is the
-  bound penalty's slot: once per step, not once per bucket.
+  weight, points=()) -> (penalty, weighted_grads)`` per step, evaluated
+  outside the bucket loop because it reads only the predictors tree and
+  its point arrays. This is the bound penalty's slot: once per step, not
+  once per bucket, at the per-leaf point arrays selected host-side by
+  :func:`hybridmodels.penalties.select_penalty_points`.
 - :func:`build_apply_update` — one jitted ``apply_update(predictors,
   grads, opt_state)``; the single optimiser update per step.
 
@@ -72,7 +74,8 @@ def apply_length_mask(bp: BucketPayload, length_mask_fraction: Array) -> BucketP
         jnp.int32(1),
     )
     sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
-    return bp._replace(mask=bp.mask & sched_mask)
+    mask = bp.mask & sched_mask
+    return bp._replace(mask=mask, n_obs=mask.sum().astype(bp.n_obs.dtype))
 
 
 def simulate_bucket(
@@ -130,7 +133,7 @@ def build_bucket_step(
 
     One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
     update lives in a separate jitted ``apply_update``, and the **bound**
-    (collocation) penalty is charged once per step by
+    penalty is charged once per step by
     :func:`build_penalty_step`, outside the bucket loop — this kernel
     charges the data loss (plus any configured trajectory penalty, below).
 
@@ -184,26 +187,32 @@ def build_score_bucket(
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
+    trajectory_penalty_fn: Callable[[Array, BucketPayload], Array] | None = None,
+    trajectory_penalty_weight: float = 0.0,
 ) -> Callable[[Any, BucketPayload, Array], Array]:
     """Return a forward-only ``score_bucket(predictors, bp, fraction) -> loss``.
 
     Scoring through ``bucket_step`` would run a full ``value_and_grad`` and
     discard the gradients, roughly tripling the cost of a scoring sweep.
     This costs one extra compile per bucket shape and pays for itself above
-    two attempts.
+    two attempts. The returned score includes the data loss and, when
+    configured, the trajectory penalty; the bound penalty remains
+    outside this per-bucket scorer.
     """
 
     @eqx.filter_jit
     def score_bucket(predictors: Any, bp: BucketPayload, length_mask_fraction: Array) -> Array:
         bp_masked = apply_length_mask(bp, length_mask_fraction)
-        pred_obs = predict_bucket_obs(
-            predictors,
-            bp_masked,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
+        full_state = simulate_bucket(
+            predictors, bp_masked, simulate_fn=simulate_fn, solver=solver
         )
-        return loss_fn(pred_obs, bp_masked)
+        pred_obs = jax.vmap(state_to_output)(full_state)
+        loss = loss_fn(pred_obs, bp_masked)
+        if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
+            loss = loss + trajectory_penalty_weight * trajectory_penalty_fn(
+                full_state, bp_masked
+            )
+        return loss
 
     return score_bucket
 
@@ -211,37 +220,44 @@ def build_score_bucket(
 def build_penalty_step(
     *,
     penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
-    penalty_grids: tuple[Array, ...],
     trainable: Any,
-) -> Callable[[Any, Array], tuple[Array, Any]]:
-    """Return ``penalty_step(predictors, weight) -> (penalty, weighted_grads)``.
+) -> Callable[[Any, Array, tuple[Array, ...]], tuple[Array, Any]]:
+    """Return ``penalty_step(predictors, weight, points=()) -> (penalty, weighted_grads)``.
 
     Evaluated once per training step, outside the bucket loop: the penalty
-    reads only the predictors pytree, so computing it inside ``bucket_step``
-    would repeat one identical evaluation per bucket.
+    reads only the predictors tree and its point arrays, so computing it
+    inside ``bucket_step`` would repeat one identical evaluation per
+    bucket.
+
+    ``points`` are the per-leaf point arrays the penalty is evaluated at —
+    the output of :func:`hybridmodels.penalties.select_penalty_points` —
+    passed as traced arrays, so a shape change (a phase boundary) retraces
+    this small kernel and nothing else. The default ``()`` suits a custom
+    ``penalty_fn`` that ignores points.
 
     ``penalty_fn`` is the regulariser, required here and defaulted to
     :func:`hybridmodels.penalties.bound_penalty` by the stock trainers.
     Passing a different callable (weight decay on inner weights, a
     monotonicity term, ...) is how a custom regulariser composes with the
-    loop. It must take ``(predictors, penalty_grids)`` and return a
-    scalar; a custom term that does not need grids just ignores them.
+    loop. It must take ``(predictors, points)`` and return a scalar; a
+    custom term that does not need points just ignores them.
 
     Returns the gradient of ``weight * penalty``, to add straight onto the
     averaged data gradient. ``penalty`` comes back unweighted, since that
     is what gets reported.
     """
 
-    def weighted(diff_predictors: Any, static_predictors: Any, weight: Array) -> Array:
-        predictors = eqx.combine(diff_predictors, static_predictors)
-        return weight * penalty_fn(predictors, penalty_grids)
-
-    grad_fn = eqx.filter_value_and_grad(weighted)
-
     @eqx.filter_jit
-    def penalty_step(predictors: Any, weight: Array) -> tuple[Array, Any]:
+    def penalty_step(
+        predictors: Any, weight: Array, points: tuple[Array, ...] = ()
+    ) -> tuple[Array, Any]:
         diff_part, static_part = eqx.partition(predictors, trainable)
-        weighted_value, grads = grad_fn(diff_part, static_part, weight)
+
+        def weighted(diff: Any, static: Any, w: Array) -> Array:
+            preds = eqx.combine(diff, static)
+            return w * penalty_fn(preds, points)
+
+        weighted_value, grads = eqx.filter_value_and_grad(weighted)(diff_part, static_part, weight)
         # Report the raw penalty; the weight is a scheduling choice and
         # folding it into the number would make phases incomparable.
         unweighted = jnp.where(weight > 0.0, weighted_value / jnp.maximum(weight, 1e-30), 0.0)
