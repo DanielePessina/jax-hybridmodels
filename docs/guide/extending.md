@@ -91,6 +91,9 @@ default penalty would evaluate at. Use it for weight decay, a
 monotonicity term, or anything else the bound penalty does not express.
 Both `OptaxTrainingConfig` and `EvosaxTrainingConfig` take it.
 
+For the design of the default penalty — measured points, penalty-only
+points, coverage — see [Penalties and bounds](/guide/penalties).
+
 ## Trajectory-aware penalties (embedded hybrid models)
 
 `penalty_fn` operates on the predictors alone — it cannot see where the

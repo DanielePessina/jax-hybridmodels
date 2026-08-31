@@ -35,6 +35,7 @@ export default defineConfig({
         { text: 'Model interface', link: '/guide/model-interface' },
         { text: 'Data and buckets', link: '/guide/data' },
         { text: 'Predictors and bounds', link: '/guide/predictors' },
+        { text: 'Penalties and bounds', link: '/guide/penalties' },
         { text: 'Training', link: '/guide/training' },
         { text: 'Custom Predictors', link: '/guide/custom-predictors' },
         { text: 'Extending', link: '/guide/extending' },

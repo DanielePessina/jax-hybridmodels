@@ -81,9 +81,9 @@ and the returned model would be the least-trained one in the run.
 ### The saturation penalty
 
 `penalty_weight` charges the objective for predictors pinned against
-their bounds, evaluated on a fixed grid over each predictor's declared
-input box. See
-[Predictors and bounds](/guide/predictors).
+their bounds, evaluated at the measured points plus any penalty-only
+points. See
+[Penalties and bounds](/guide/penalties).
 
 ```python
 config = OptaxTrainingConfig(

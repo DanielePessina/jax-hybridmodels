@@ -63,8 +63,8 @@ This penalty is not a feasibility mechanism. Reparameterisation enforces the
 physical bounds; the penalty keeps the predictor away from a saturated region
 where optimization becomes slow.
 
-For saturation along an actual ODE trajectory, use the trajectory-penalty
-helpers described in [Extending](/guide/extending#trajectory-aware-penalties).
+For the full picture — measured points, penalty-only points, the trajectory
+penalty, and choosing between them — see [Penalties and bounds](/guide/penalties).
 
 ## Initialization and freezing
 
