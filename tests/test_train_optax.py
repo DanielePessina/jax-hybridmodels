@@ -9,10 +9,12 @@ be checked against the ground-truth ``omega = 1.0``.
 
 from __future__ import annotations
 
+import math
 import statistics
 
 import diffrax
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import optax
@@ -185,6 +187,51 @@ def test_length_schedule_does_not_recompile():
         key=jr.PRNGKey(0),
     )
     assert trace_count[0] == 1
+
+
+def test_weak_zero_d_scalar_trains_via_settle_path():
+    """A user model with a weak-typed scalar leaf still trains cleanly.
+
+    ``jnp.asarray(1.0)`` produces a weak-typed 0-d array, and JAX keys its
+    compile cache on weak type, so the first optimiser update would force
+    a one-time retrace of every training kernel. The warm-up settle absorbs
+    that (``training/optax.py:_warmup_compile``). This guards the settle
+    path with the case that triggers it: the trainer must complete with
+    finite losses. The framework's own scalars are strong-typed, so only a
+    user-supplied tree like this one reaches the settle.
+    """
+
+    class WeakScalarPredictor(eqx.Module):
+        omega: Array
+        scale: Array
+
+        def __call__(self) -> Array:
+            return self.omega
+
+    pred = WeakScalarPredictor(
+        omega=jnp.asarray(2.0, dtype=jnp.float32),
+        scale=jnp.asarray(1.0),  # weak-typed 0-d leaf, deliberately
+    )
+    assert jax.typeof(pred.scale).weak_type
+    ds = make_oscillator_dataset()
+    config = OptaxTrainingConfig(
+        steps=(6,),
+        lr=(1e-2,),
+        optimizer=("adamw",),
+        reset_optimiser_state=(False,),
+        verbose=False,
+    )
+    history, _trained = train_with_optax(
+        pred,
+        ds,
+        config,
+        simulate_fn=make_oscillator_simulate_fn(),
+        state_to_output=oscillator_state_to_output,
+        solver=solver_config(),
+        key=jr.PRNGKey(0),
+    )
+    assert len(history) == 6
+    assert all(math.isfinite(v) for v in history)
 
 
 def test_missing_key_raises():

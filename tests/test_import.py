@@ -1,102 +1,55 @@
-def test_package_imports() -> None:
-    import hybridmodels
+"""The public surface resolves: the entry points examples and docs call work.
 
-    expected = {
-        "ADJOINT_REGISTRY",
-        "BOUND_TRANSFORMS",
-        "BoundedPredictor",
+Deliberately small. This is not a re-assertion of ``hybridmodels.__all__``
+(a list that lives in the source and would have to be hand-kept in sync
+here, which made the previous full-list version an implementation-pinning
+test). Instead it pins the handful of stable, user-facing entry points —
+the ones every example script calls — and checks they exist and are
+callable, so a wholesale breakage of the public surface (a broken import,
+a renamed trainer) fails loudly here rather than only inside the big
+integration tests.
+"""
+
+from __future__ import annotations
+
+import hybridmodels
+
+
+def test_core_entry_points_resolve_and_are_callable() -> None:
+    core = [
+        # training + prediction
+        "train_with_optax",
+        "train_seed_ensemble",
+        "train_bootstrap_ensemble",
+        "train_with_evosax",
+        "predict_bucket",
+        "predict_dataset",
+        "predict_dense",
+        "ensemble_predictions",
+        # predictors + bounds
         "BoundScaler",
-        "BoundTransform",
-        "BucketPayload",
-        "ChannelObs",
-        "Dataset",
-        "EvosaxTrainingConfig",
-        "EvosaxUI",
-        "Experiment",
-        "KANPredictor",
-        "LOSS_REGISTRY",
+        "BoundedPredictor",
         "MLPPredictor",
-    "NeuralNPolynomial",
-        "OptaxTrainingConfig",
-        "Predictor",
-        "RichEvosaxUI",
-        "RichTrainingUI",
-        "SOLVER_REGISTRY",
-        "SilentUI",
+        "KANPredictor",
+        # data
+        "make_experiment",
+        "make_dataset",
+        "split_dataset",
+        "make_bootstrap_dataset",
+        "ChannelObs",
+        "Experiment",
+        # solver + kernels (composed by custom loops)
         "SolverConfig",
-        "TrainingUI",
-        "bal_mle",
-        "bal_mse",
-        "attach_penalty_state",
-    "bound_penalty",
-        "box_grid",
-        "box_violation",
-        "build_apply_update",
         "build_bucket_step",
         "build_penalty_step",
         "build_score_bucket",
-        "ChannelMetrics",
-        "clip_ste",
-        "data_penalty_points",
-        "length_mask_keep",
-        "select_penalty_points",
-        "PenaltyPointSource",
-    "penalty_integral",
-    "penalty_vector_field",
+        "build_apply_update",
+        # metrics + helpers
         "compute_metrics",
-        "count_trainable_params",
-        "default_trainable",
-        "describe_buckets",
-    "ensemble_predictions",
         "evaluate_predictor",
-        "fold",
-        "freeze_modules_of_type",
-        "freeze_paths",
-        "freeze_where",
-        "frozen_default_mask",
-        "load_predictors",
-        "load_run",
-        "make_bootstrap_dataset",
-    "make_dataset",
-        "make_experiment",
-        "masked_mle",
-        "masked_mse",
-        "predict_bucket",
-        "predict_bucket_obs",
-        "predict_dataset",
-    "predict_dense",
-        "print_metrics",
-        "register_adjoint",
-        "register_algorithm",
-        "register_bound_transform",
-        "register_solver",
-        "register_warp",
-        "reinitialize_pytree_with_key",
-        "reinitialize_with_key",
-        "resolve_loss_fn",
-        "save_predictors",
-        "save_run",
-        "soft_inverse",
-    "strip_penalty_state",
-        "soft_logit",
-        "softclip",
-    "trajectory_saturation_penalty",
-        "split_dataset",
-        "train_bootstrap_ensemble",
-    "train_seed_ensemble",
-    "train_with_evosax",
-        "train_with_optax",
         "trainable_mask",
-        "validate_penalty_points",
-        "apply_length_mask",
-        "Warp",
-        "WARPS",
-        "constant_profile",
-        "piecewise_linear_profile",
-        "ramp_profile",
-        "step_profile",
-        "annealing_schedule",
-    }
-    assert set(hybridmodels.__all__) == expected
-    for name in expected:
-        getattr(hybridmodels, name)
+        "save_predictors",
+        "load_predictors",
+    ]
+    missing = [name for name in core if not callable(getattr(hybridmodels, name, None))]
+    assert not missing, f"public entry points missing or not callable: {missing}"

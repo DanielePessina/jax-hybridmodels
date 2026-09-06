@@ -225,6 +225,14 @@ class BoundScaler(eqx.Module):
         bounds = tuple((float(low), float(high)) for low, high in bounds)
         check_bounds(bounds, warp)
         temperature_arr = jnp.asarray(temperature)
+        # Kick the weak type. ``jnp.asarray(1.0)`` is weak-typed, and JAX's
+        # compiled cache keys 0-d leaves by value *and* weak type, so the
+        # first optimiser update would flip it strong and force a one-time
+        # full retrace of every training kernel. A scalar this framework
+        # constructs is strong from birth, so default models never pay that
+        # (see ``_has_weak_scalar_trainable`` in ``training/optax.py``).
+        if jax.typeof(temperature_arr).weak_type:
+            temperature_arr = jnp.asarray(temperature_arr, dtype=temperature_arr.dtype)
         if temperature_arr.ndim not in (0, 1) or (
             temperature_arr.ndim == 1 and temperature_arr.shape[0] != len(bounds)
         ):

@@ -450,32 +450,82 @@ def _optimiser_state_supports_lr(opt_state: Any) -> bool:
     return hasattr(opt_state, "hyperparams")
 
 
+def _build_step_update(
+    *,
+    optimizer: optax.GradientTransformation,
+    trainable: Any,
+) -> Callable[..., tuple[Any, Any]]:
+    """Fused per-step tail: average, merge the bound penalty, and optimise.
+
+    One jitted ``step_update(predictors, acc_grads, penalty_grads,
+    n_buckets, opt_state) -> (predictors, opt_state)`` replacing what used
+    to be two Python tree walks (normalise by bucket count, add the
+    penalty grads) plus a separate ``apply_update`` launch every step.
+    Each eager per-leaf tree operation dispatches one compiled kernel per
+    parameter leaf — on CPU that measured ~2 ms per tree walk for a small
+    MLP, several times the ODE solve itself — so folding them into the
+    optimiser kernel removes most of the Python-side step cost without
+    changing the math: the averaging and the penalty merge run in the
+    same order, so the optimiser sees bit-identical gradients.
+
+    ``n_buckets`` stays a traced argument rather than a closure because a
+    bootstrap ensemble re-buckets every resample: closing over the source
+    dataset's count would silently average with the wrong denominator.
+    """
+
+    @eqx.filter_jit
+    def step_update(
+        predictors: Any,
+        acc_grads: Any,
+        penalty_grads: Any,
+        n_buckets: Array,
+        opt_state: Any,
+    ) -> tuple[Any, Any]:
+        avg_grads = jax.tree.map(
+            lambda a, p: a / n_buckets + p, acc_grads, penalty_grads
+        )
+        params = eqx.filter(predictors, trainable)
+        updates, new_opt_state = optimizer.update(avg_grads, opt_state, params)
+        return eqx.apply_updates(predictors, updates), new_opt_state
+
+    return step_update
+
+
 def _training_step(
     predictors: Any,
     dataset: Dataset,
     bucket_step: Callable[..., tuple[Array, Any]],
     length_mask_fraction: Array,
     trainable: Any,
-) -> tuple[Array, Any]:
-    """One training step: every bucket, gradients accumulated, then averaged.
+) -> tuple[Array, Any, int]:
+    """One training step: every bucket, gradients accumulated, raw sums back.
 
-    Returns the per-bucket-averaged loss: the data term plus any
-    configured trajectory penalty (charged inside ``bucket_step``'s
-    forward pass). The bound penalty is bucket-independent and is added
-    once per step by the caller, via ``build_penalty_step``.
+    Returns ``(total_loss, acc_grads, n_buckets)`` — the **raw** sum of
+    per-bucket losses and gradients, not yet divided. The caller merges
+    the bound-penalty gradients and normalises inside the fused
+    ``step_update`` kernel (:func:`_build_step_update`), so the per-step
+    Python side never walks the parameter tree. The first bucket's
+    gradients seed the accumulator directly instead of adding to a
+    ``zeros_like`` tree — one fewer pointless per-leaf pass per step.
+
+    ``total_loss`` is the data term plus any configured trajectory penalty
+    (charged inside ``bucket_step``'s forward pass). The bound penalty is
+    bucket-independent and added once per step by the caller.
     """
-    zero_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, trainable))
-    acc_grads = zero_grads
+    acc_grads: Any = None
     total_loss = jnp.asarray(0.0)
     n_buckets = 0
     for bp in dataset.bucket_payloads:
         loss, grads = bucket_step(predictors, bp, length_mask_fraction)
-        acc_grads = jax.tree.map(jnp.add, acc_grads, grads)
+        if acc_grads is None:
+            acc_grads = grads
+        else:
+            acc_grads = jax.tree.map(jnp.add, acc_grads, grads)
         total_loss = total_loss + loss
         n_buckets += 1
-    denom = float(max(n_buckets, 1))
-    avg_grads = jax.tree.map(lambda g: g / denom, acc_grads)
-    return total_loss / denom, avg_grads
+    if acc_grads is None:  # defensive; callers validate a non-empty dataset
+        acc_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, trainable))
+    return total_loss, acc_grads, n_buckets
 
 
 def _shared_tournament(
@@ -535,9 +585,15 @@ def _shared_tournament(
                 )
 
             for _ in range(tournament_steps):
-                _loss, avg_grads = _training_step(
+                _loss, acc_grads, n_buckets = _training_step(
                     candidate, dataset, bucket_step, length_mask_fraction, trainable
                 )
+                denom = float(max(n_buckets, 1))
+
+                def _normalised(g: Array, _d: float = denom) -> Array:
+                    return g / _d
+
+                avg_grads = jax.tree.map(_normalised, acc_grads)
                 candidate, opt_state = apply_update(candidate, avg_grads, opt_state)
 
             # Forward-only scorer, not bucket_step, whose discarded backward
@@ -594,6 +650,24 @@ def _horizon_changed(config: OptaxTrainingConfig, phase_idx: int) -> bool:
     return config.length_schedule[phase_idx] != config.length_schedule[phase_idx - 1]
 
 
+def _has_weak_scalar_trainable(predictors: Any, trainable: Any) -> bool:
+    """Does the trainable partition hold a weak-typed 0-d array leaf?
+
+    JAX's compiled cache keys 0-d array leaves by value *and* weak type,
+    so the first optimiser update flips a weak scalar leaf
+    (``jnp.asarray(1.0)``, the default-constructed
+    ``BoundScaler.temperature``) to strong-typed and invalidates every
+    kernel that reads the predictor once. Strong-typed or frozen scalars
+    never flip and never retrace (``tests/_harness.py``'s ``OmegaPredictor``
+    documents the same rule). This is the predicate that decides whether
+    :func:`_warmup_compile`'s settle cycle is worth paying.
+    """
+    for leaf in jax.tree.leaves(eqx.filter(predictors, trainable)):
+        if isinstance(leaf, jax.Array) and leaf.ndim == 0 and jax.typeof(leaf).weak_type:
+            return True
+    return False
+
+
 def _warmup_compile(
     predictors: Any,
     bucket_payloads: tuple[BucketPayload, ...],
@@ -601,52 +675,126 @@ def _warmup_compile(
     bucket_step: Callable[..., tuple[Array, Any]],
     ui: TrainingUI,
     length_mask_fraction: Array,
+    penalty_step: Callable[..., tuple[Array, Any]] | None = None,
+    optimizer: optax.GradientTransformation | None = None,
+    step_update: Callable[..., tuple[Any, Any]] | None = None,
+    trainable: Any = None,
+    penalty_points: tuple[Array, ...] = (),
+    score_bucket: Callable[..., Array] | None = None,
+    settle: bool = False,
 ) -> None:
-    """Force one trace per bucket shape before the run proper starts.
+    """Force one trace per kernel before the run proper starts.
 
     Compilation dominates the first steps and can take tens of seconds per
     shape. Paying it here, bracketed by the compile events, is what stops a
     progress bar sitting at zero and making the run look hung. The warm-up
     loss is discarded; only the populated jit cache matters.
+
+    With the trainer's ``optimizer``/``step_update``/``penalty_step``
+    supplied, the non-bucket kernels are compiled here too, so the run
+    starts with every kernel warm.
+
+    ``settle=true`` additionally runs one update-and-re-evaluate round on
+    the updated predictors. This is the weak-scalar safety net: JAX's
+    compiled cache keys 0-d array leaves by value *and* weak type, so the
+    first optimiser update flips a weak-typed scalar leaf in the user's own
+    tree (``jnp.asarray(1.0)``) to strong-typed and would retrace every
+    kernel once — seconds of ODE recompile mid-run. The framework's own
+    scalars are strong-typed at construction
+    (:class:`~hybridmodels.predictors.BoundScaler`), so the stock trainer
+    requests the settle only when :func:`_has_weak_scalar_trainable` finds
+    a weak trainable scalar in the supplied tree; strong-typed or frozen
+    trees keep the one-trace-per-shape contract exactly. Discovered and
+    verified empirically — see ``scripts/bench_hotpath.py``.
     """
     total_buckets = len(bucket_payloads)
+    last_grads: Any = None
     for idx, bp in enumerate(bucket_payloads):
         bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
         ui.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
-        warm_loss, _grads = bucket_step(predictors, bp, length_mask_fraction)
+        warm_loss, warm_grads = bucket_step(predictors, bp, length_mask_fraction)
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
+        last_grads = warm_grads
         ui.on_compile_progress(bucket_idx=idx, total_buckets=total_buckets)
         ui.on_compile_done(bucket_idx=idx)
+
+    if (
+        step_update is None
+        or optimizer is None
+        or trainable is None
+        or penalty_step is None
+    ):
+        return
+
+    opt_state = optimizer.init(eqx.filter(predictors, trainable))
+    zero_weight = jnp.asarray(0.0)
+    n_buckets_arg = jnp.asarray(len(bucket_payloads), dtype=jnp.int32)
+    # Compile the loop's non-bucket kernels here (one call each) so the run
+    # starts with every kernel warm. ``last_grads`` is a real gradient from
+    # the warm-up pass; the values are irrelevant, only the shapes.
+    warm_penalty, _ = penalty_step(predictors, zero_weight, penalty_points)
+    jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
+    updated, opt_state = step_update(
+        predictors, last_grads, last_grads, n_buckets_arg, opt_state
+    )
+    jax.block_until_ready(updated)  # type: ignore[no-untyped-call]
+    # The tournament's forward-only scorer gets its first trace here too.
+    if score_bucket is not None:
+        for bp in bucket_payloads:
+            warm_score = score_bucket(predictors, bp, length_mask_fraction)
+            jax.block_until_ready(warm_score)  # type: ignore[no-untyped-call]
+
+    if not settle:
+        return
+
+    # One update round, then re-trace every kernel on the updated (strong)
+    # tree, absorbing the weak→strong retrace into the compile bracket.
+    for bp in bucket_payloads:
+        warm_loss, _ = bucket_step(updated, bp, length_mask_fraction)
+        jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
+    warm_penalty, _ = penalty_step(updated, zero_weight, penalty_points)
+    jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
+    updated, opt_state = step_update(
+        updated, last_grads, last_grads, n_buckets_arg, opt_state
+    )
+    jax.block_until_ready(updated)  # type: ignore[no-untyped-call]
+    # The tournament's forward-only scorer reads the same post-update
+    # predictors; settle it too so a scoring sweep never re-traces.
+    if score_bucket is not None:
+        for bp in bucket_payloads:
+            warm_score = score_bucket(updated, bp, length_mask_fraction)
+            jax.block_until_ready(warm_score)  # type: ignore[no-untyped-call]
+    ui.on_compile_progress(
+        bucket_idx=total_buckets, total_buckets=total_buckets
+    )
 
 
 def _begin_phase(
     phase_idx: int,
     predictors: Any,
     optimizer: optax.GradientTransformation,
-    apply_update: Callable[..., tuple[Any, Any]],
     opt_state: Any,
     *,
     config: OptaxTrainingConfig,
     trainable: Any,
-) -> tuple[optax.GradientTransformation, Callable[..., tuple[Any, Any]], Any]:
-    """Apply the phase-boundary optimiser policy and return the trio to run with.
+) -> tuple[optax.GradientTransformation, Any]:
+    """Apply the phase-boundary optimiser policy and return the pair to run with.
 
     A phase either rebuilds the optimiser and discards its state, or keeps the
     live state and pushes the new learning rate into it. Phase 0 passes
     through untouched: its optimiser was built by the caller, and the
     tournament may already have trained against it.
 
-    All three of ``(optimizer, apply_update, opt_state)`` come back together
-    because a reset invalidates all three at once: ``apply_update`` closes
-    over the optimiser, and the state belongs to the optimiser that built it.
+    Both ``(optimizer, opt_state)`` come back together because a reset
+    invalidates them jointly; :func:`_run_phases` rebuilds the fused
+    ``step_update`` whenever the returned optimiser is a new instance.
     """
     if phase_idx == 0:
-        return optimizer, apply_update, opt_state
+        return optimizer, opt_state
 
     if config.reset_optimiser_state[phase_idx]:
         optimizer = _build_optimizer(config.optimizer[phase_idx], config.lr[phase_idx])
-        apply_update = build_apply_update(optimizer, trainable)
-        return optimizer, apply_update, optimizer.init(eqx.filter(predictors, trainable))
+        return optimizer, optimizer.init(eqx.filter(predictors, trainable))
 
     # No reset, so only the learning rate moves. ``__post_init__`` has already
     # refused a phase that changes the optimiser without a reset, so the live
@@ -663,7 +811,7 @@ def _begin_phase(
                 "an optimiser name / factory so the learning rate stays injectable."
             )
         opt_state.hyperparams["learning_rate"] = jnp.asarray(config.lr[phase_idx])
-    return optimizer, apply_update, opt_state
+    return optimizer, opt_state
 
 
 class _BestTracker:
@@ -804,6 +952,7 @@ def train_with_optax(
         score_bucket,
         optimizer,
         apply_update,
+        step_update,
         sources,
         extras,
     ) = _build_training_kernels(
@@ -841,13 +990,13 @@ def train_with_optax(
         dataset,
         config,
         optimizer=optimizer,
-        apply_update=apply_update,
         bucket_step=bucket_step,
         penalty_step=penalty_step,
         sources=sources,
         extras=extras,
         trainable=trainable,
         ui=ui_,
+        step_update=step_update,
     )
     return _history, final_predictors
 
@@ -858,13 +1007,13 @@ def _run_phases(
     config: OptaxTrainingConfig,
     *,
     optimizer: optax.GradientTransformation,
-    apply_update: Callable[..., tuple[Any, Any]],
     bucket_step: Callable[..., tuple[Array, Any]],
     penalty_step: Callable[..., tuple[Array, Any]],
     sources: tuple[PenaltyPointSource | None, ...],
     extras: tuple[Array, ...],
     trainable: Any,
     ui: TrainingUI,
+    step_update: Callable[..., tuple[Any, Any]] | None = None,
 ) -> tuple[list[float], Any, float]:
     """Run the phase schedule from a starting ``predictors``.
 
@@ -885,22 +1034,35 @@ def _run_phases(
     (measured one update before the returned parameters, as the loop
     reports it). The ensembles rank members on this labelled loss, so a
     best-step-restored member is not reported at a loss it never had.
+
+    ``step_update`` is the fused per-step tail built by
+    :func:`_build_step_update` — average + penalty merge + optimiser
+    update in one kernel. The stock callers pass the instance the
+    warm-up settled; when ``None`` (or when a phase reset rebuilds the
+    optimiser) it is rebuilt here from the live optimiser.
     """
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
+    if step_update is None:
+        step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
+    step_update_optimizer = optimizer
+    n_buckets_arg = jnp.asarray(len(dataset.bucket_payloads), dtype=jnp.int32)
 
     losses_history: list[float] = []
     best = _BestTracker(predictors)
 
     for phase_idx, n_steps in enumerate(config.steps):
-        optimizer, apply_update, opt_state = _begin_phase(
+        optimizer, opt_state = _begin_phase(
             phase_idx,
             predictors,
             optimizer,
-            apply_update,
             opt_state,
             config=config,
             trainable=trainable,
         )
+        if optimizer is not step_update_optimizer:
+            # A reset built a fresh optimiser; its fused kernel must too.
+            step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
+            step_update_optimizer = optimizer
 
         length_mask_fraction = jnp.asarray(config.length_schedule[phase_idx])
         # Traced, not closed over: a Python float that changed per phase
@@ -924,26 +1086,28 @@ def _run_phases(
         )
 
         for step in range(int(n_steps)):
-            avg_data, avg_grads = _training_step(
+            total_loss, acc_grads, n_buckets = _training_step(
                 predictors, dataset, bucket_step, length_mask_fraction, trainable
             )
             avg_penalty, penalty_grads = penalty_step(
                 predictors, penalty_weight, phase_points
             )
-            # Added after the bucket average, not inside it: the penalty is
-            # charged once per step, not once per bucket.
-            avg_grads = jax.tree.map(jnp.add, avg_grads, penalty_grads)
             # Dispatch the update before blocking on the loss values. Both
             # float() calls are host syncs; reading them first left the
             # accelerator idle through the Python bookkeeping every step.
+            # The fused kernel averages the accumulator, merges the penalty
+            # grads (charged once per step, not once per bucket) and runs
+            # the optimiser update in a single launch.
             previous_predictors = predictors
-            predictors, opt_state = apply_update(predictors, avg_grads, opt_state)
+            predictors, opt_state = step_update(
+                predictors, acc_grads, penalty_grads, n_buckets_arg, opt_state
+            )
 
             # History and early stopping follow the per-bucket-averaged
             # loss (the data term plus any configured trajectory penalty):
             # tracking the bound-penalty weight too would let "best" move
             # when only the penalty weight changed.
-            loss_value = float(avg_data)
+            loss_value = float(total_loss / float(max(n_buckets, 1)))
             penalty_value = float(avg_penalty)
             losses_history.append(loss_value)
             # ``previous_predictors``, not ``predictors``: avg_data was
@@ -993,6 +1157,7 @@ def _build_training_kernels(
     Callable[..., Array],
     optax.GradientTransformation,
     Callable[..., tuple[Any, Any]],
+    Callable[..., tuple[Any, Any]],
     tuple[PenaltyPointSource | None, ...],
     tuple[Array, ...],
 ]:
@@ -1001,8 +1166,9 @@ def _build_training_kernels(
     Shared by :func:`train_with_optax` and the ensemble entry points so a
     seed/bootstrap ensemble reuses the exact same kernel construction.
     Returns ``(bucket_step, penalty_step, score_bucket, optimizer,
-    apply_update, sources, extras)`` with the jit caches already populated
-    by a warm-up pass; ``sources`` / ``extras`` are the penalty point sets
+    apply_update, step_update, sources, extras)`` with the jit caches
+    already populated by a warm-up pass; ``sources`` / ``extras`` are the
+    penalty point sets
     the phases select from.
 
     The caller owns the ``on_run_start`` side of the UI bracket: the
@@ -1046,16 +1212,42 @@ def _build_training_kernels(
         trajectory_penalty_weight=config.trajectory_penalty_weight,
     )
     full_mask = jnp.asarray(1.0)
+    # Settle only when the run can hit the weak→strong scalar flip: a
+    # default ``trainable_mask`` treats ``BoundScaler.temperature``
+    # (``jnp.asarray(1.0)``, weak-typed) as trainable, and JAX's cache keys
+    # 0-d leaves by value+weak_type, so the first update would retrace
+    # every kernel once (seconds-to-minutes of ODE compile) mid-run.
+    # Strong-typed or frozen scalars never flip — skip the settle entirely
+    # and keep the "one trace per bucket shape" contract untouched.
+    settle = _has_weak_scalar_trainable(predictors, trainable)
+    optimizer = _build_optimizer(config.optimizer[0], config.lr[0])
+    apply_update = build_apply_update(optimizer, trainable)
+    step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
+    settle_points = select_penalty_points(sources, extras, 1.0)
     _warmup_compile(
         predictors,
         bucket_payloads,
         bucket_step=bucket_step,
         ui=ui,
         length_mask_fraction=full_mask,
+        penalty_step=penalty_step,
+        optimizer=optimizer,
+        step_update=step_update,
+        trainable=trainable,
+        penalty_points=settle_points,
+        score_bucket=score_bucket if _tournament_enabled(config) else None,
+        settle=settle,
     )
-    optimizer = _build_optimizer(config.optimizer[0], config.lr[0])
-    apply_update = build_apply_update(optimizer, trainable)
-    return bucket_step, penalty_step, score_bucket, optimizer, apply_update, sources, extras
+    return (
+        bucket_step,
+        penalty_step,
+        score_bucket,
+        optimizer,
+        apply_update,
+        step_update,
+        sources,
+        extras,
+    )
 
 
 def train_seed_ensemble(
@@ -1121,6 +1313,7 @@ def train_seed_ensemble(
         score_bucket,
         optimizer,
         apply_update,
+        step_update,
         sources,
         extras,
     ) = _build_training_kernels(
@@ -1165,13 +1358,13 @@ def train_seed_ensemble(
             dataset,
             config,
             optimizer=optimizer,
-            apply_update=apply_update,
             bucket_step=bucket_step,
             penalty_step=penalty_step,
             sources=sources,
             extras=extras,
             trainable=trainable,
             ui=ui_,
+            step_update=step_update,
         )
         trained.append((final_loss, final))
 
@@ -1249,6 +1442,7 @@ def train_bootstrap_ensemble(
         score_bucket,
         optimizer,
         apply_update,
+        step_update,
         sources,
         extras,
     ) = _build_training_kernels(
@@ -1295,7 +1489,6 @@ def train_bootstrap_ensemble(
                 boot,
                 config,
                 optimizer=optimizer,
-                apply_update=apply_update,
                 bucket_step=bucket_step,
                 penalty_step=penalty_step,
                 # The resample changes the covariate values, so the measured
@@ -1304,6 +1497,7 @@ def train_bootstrap_ensemble(
                 extras=extras,
                 trainable=trainable,
                 ui=ui_,
+                step_update=step_update,
             )
             all_trained.append((final_loss, final))
 
