@@ -10,7 +10,7 @@ Each entry contains:
   Python code fence
 - The parsed numpy-style docstring rendered as markdown — Parameters,
   Returns, Attributes, and Raises become two-column tables; Notes /
-  Examples are passed through with their original formatting
+  Examples are passed through with VitePress-safe cross-references
 - A source-code link pointing at the GitHub blob
 
 Run via ``npm run docs:gen`` (which is ``uv run python scripts/gen_api_docs.py``)
@@ -239,8 +239,17 @@ GITHUB_BLOB = "https://github.com/DanielePessina/jax-hybridmodels/blob/main"
 
 # Section names treated as "parameter-like" (rendered as a table).
 # Anything else is rendered as a plain `**Heading**` block followed by the
-# verbatim body — Notes, Examples, See Also, Construction, Pipeline, etc.
+# body with source cross-references normalised for VitePress — Notes, Examples,
+# See Also, Construction, Pipeline, etc.
 _PARAM_SECTIONS = {"Parameters", "Returns", "Yields", "Attributes", "Raises", "Other Parameters"}
+
+# Source docstrings use a few Sphinx roles because they are useful when
+# reading the source in an IDE. VitePress does not render those roles, so the
+# generator converts them to ordinary Markdown links (when the target is a
+# public API symbol) or inline code.
+_RST_ROLE_RE = re.compile(
+    r":(?P<role>func|class|meth|attr|mod|ref):`(?P<target>~?[^`]+)`"
+)
 
 # Match a section header: a line whose next line is a row of dashes of the
 # same length. Captures the header name. Multiline / non-greedy.
@@ -315,6 +324,10 @@ def parse_param_section(body: str) -> list[tuple[str, str, str]]:
         header = line.strip()
         if " : " in header:
             name, type_str = header.split(" : ", 1)
+        elif header.endswith(":"):
+            # Accept the colon-only spelling used by the UI classes' docstrings
+            # as well as strict NumPy ``name : type`` entries.
+            name, type_str = header[:-1], ""
         else:
             name, type_str = header, ""
         # Collect indented description lines.
@@ -341,6 +354,7 @@ def _escape_table_cell(text: str) -> str:
     to preserve code fences inside cells — they don't render reliably; we
     inline backtick spans instead.
     """
+    text = _normalise_doc_markup(text)
     return text.replace("|", "\\|").replace("\n\n", "<br><br>").replace("\n", " ")
 
 
@@ -361,6 +375,39 @@ def render_param_table(rows: list[tuple[str, str, str]], header: str = "Paramete
 def _slugify(name: str) -> str:
     """Anchor slug used for ``[link](#slug)`` cross-references inside a page."""
     return re.sub(r"[^a-zA-Z0-9_-]", "", name).lower()
+
+
+def _api_page_for_symbol(name: str) -> str | None:
+    for slug, _title, symbols in PAGES:
+        if name in symbols:
+            return slug
+    return None
+
+
+def _normalise_doc_markup(text: str) -> str:
+    """Convert the small subset of Sphinx roles used in source docstrings."""
+
+    def replace(match: re.Match[str]) -> str:
+        target = match.group("target").lstrip("~")
+        parts = target.split(".")
+        name = parts[-1]
+        page = _api_page_for_symbol(name)
+        if page is not None:
+            return f"[`{name}`](/api/{page}#{_slugify(name)})"
+
+        # Methods and attributes are emitted below their public class entry.
+        # Give them an explicit anchor so source-level references remain
+        # useful in the generated VitePress page.
+        if len(parts) >= 2 and match.group("role") in {"meth", "attr"}:
+            owner = parts[-2]
+            owner_page = _api_page_for_symbol(owner)
+            if owner_page is not None:
+                display = f"{owner}.{name}"
+                return f"[`{display}`](/api/{owner_page}#{_slugify(display)})"
+
+        return f"`{target}`"
+
+    return _RST_ROLE_RE.sub(replace, text)
 
 
 def render_signature(name: str, obj: Any) -> str | None:
@@ -477,9 +524,9 @@ def render_entry(name: str, module_name: str) -> str:
 
     # Summary + body prose.
     if parsed.summary:
-        parts.append(parsed.summary)
+        parts.append(_normalise_doc_markup(parsed.summary))
     if parsed.body:
-        parts.append(parsed.body)
+        parts.append(_normalise_doc_markup(parsed.body))
 
     # Sections.
     for title, body in parsed.sections:
@@ -493,9 +540,13 @@ def render_entry(name: str, module_name: str) -> str:
                 else "Item"
             )
             table = render_param_table(rows, header=header)
-            parts.append(f"**{title}**\n\n{table}" if table else f"**{title}**\n\n{body}")
+            parts.append(
+                f"**{title}**\n\n{table}"
+                if table
+                else f"**{title}**\n\n{_normalise_doc_markup(body)}"
+            )
         else:
-            parts.append(f"**{title}**\n\n{body}")
+            parts.append(f"**{title}**\n\n{_normalise_doc_markup(body)}")
 
     # Source link.
     link = get_source_link(obj)
@@ -541,6 +592,7 @@ def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> 
     """Render one ``#### ClassName.method()`` sub-entry inside a class entry."""
     parsed = parse_docstring(inspect.getdoc(method_obj))
     parts: list[str] = []
+    parts.append(f'<a id="{_slugify(f"{class_name}.{method_name}")}"></a>')
     parts.append(f"#### `{class_name}.{method_name}()`")
 
     sig = render_signature(method_name, method_obj)
@@ -548,9 +600,9 @@ def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> 
         parts.append(f"```python\n{sig}\n```")
 
     if parsed.summary:
-        parts.append(parsed.summary)
+        parts.append(_normalise_doc_markup(parsed.summary))
     if parsed.body:
-        parts.append(parsed.body)
+        parts.append(_normalise_doc_markup(parsed.body))
 
     for title, body in parsed.sections:
         if title in _PARAM_SECTIONS:
@@ -563,9 +615,13 @@ def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> 
                 else "Item"
             )
             table = render_param_table(rows, header=header)
-            parts.append(f"**{title}**\n\n{table}" if table else f"**{title}**\n\n{body}")
+            parts.append(
+                f"**{title}**\n\n{table}"
+                if table
+                else f"**{title}**\n\n{_normalise_doc_markup(body)}"
+            )
         else:
-            parts.append(f"**{title}**\n\n{body}")
+            parts.append(f"**{title}**\n\n{_normalise_doc_markup(body)}")
 
     link = get_source_link(method_obj)
     if link is not None:

@@ -34,9 +34,10 @@ The polynomial basis is `sum(inner_input)` — the *latented* input — so
 `NeuralNPolynomial` cannot separate "coefficients from condition A" from
 "basis in condition B" in a single predictor. The physics-clean
 crystallisation form (`sum_i c_i(T) * (S-1)^p_i`) therefore enters either
-as one polynomial in `S-1` with `S`-conditioned coefficients (shown
-here), or by composing two predictors. The latent-vs-physical basis is
-the open design question (SPEC §2.3).
+as one polynomial in `S-1` with `S`-conditioned coefficients (shown here),
+or by composing two predictors. If the basis and coefficient conditions are
+different physical variables, write that composition explicitly at the
+vector-field boundary.
 
 ## The script, in full
 

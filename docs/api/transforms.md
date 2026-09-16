@@ -80,7 +80,7 @@ register_bound_transform(name: 'str', transform: 'BoundTransform') -> 'None'
 
 Register a squash under ``name`` for use by ``BoundScaler``.
 
-Mirrors :func:`~hybridmodels.solver.register_solver`. A scaler stores
+Mirrors [`register_solver`](/api/solver#register_solver). A scaler stores
 only the name, so a custom transform must be registered before a saved
 scaler that references it can be rebuilt. Re-registering an existing
 name overwrites without warning.
@@ -112,7 +112,7 @@ coordinates, then the transform's inverse takes it to the latent.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `forward` | `Callable` | Physical to warped coordinate. Must accept a Python float as well as an array, because :func:`warp_bounds` calls it on the static box edges when a scaler is constructed. |
+| `forward` | `Callable` | Physical to warped coordinate. Must accept a Python float as well as an array, because `warp_bounds` calls it on the static box edges when a scaler is constructed. |
 | `inverse` | `Callable` | Warped coordinate back to physical. Must invert ``forward`` exactly on the declared box. |
 | `requires_positive` | `bool` | Whether the warp is undefined at or below zero. Checked against the declared bounds at construction, where it raises a useful error rather than a silent nan inside a compiled solve. |
 
@@ -159,7 +159,7 @@ register_warp(name: 'str', warp: 'Warp') -> 'None'
 
 Register an axis warp under ``name`` for use by ``BoundScaler``.
 
-Same contract as :func:`register_bound_transform`. A warp must be
+Same contract as [`register_bound_transform`](/api/transforms#register_bound_transform). A warp must be
 monotone on the declared box and ``inverse`` must undo ``forward``
 there, or the scaler's round trip stops being the identity.
 

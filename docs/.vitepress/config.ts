@@ -2,10 +2,8 @@ import { defineConfig } from 'vitepress'
 
 // VitePress configuration for the hybridmodels documentation site.
 //
-// Layout follows the gsax docs: a flat sidebar per section (Guide,
-// Examples, API), local search, and math rendering enabled so the
-// crystallisation example's ODE expressions and the moments equations
-// render cleanly.
+// Keep a flat sidebar per section (Guide, Examples, API), with local search
+// and math rendering enabled for the ODE expressions in the examples.
 export default defineConfig({
   title: 'hybridmodels',
   description: 'Hybrid models in JAX — trainable predictors composed with user-written ODE dynamics.',
@@ -24,7 +22,7 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
-      { text: 'Examples', link: '/examples/custom-loop' },
+      { text: 'Examples', link: '/examples/' },
       { text: 'API', link: '/api/' },
     ],
 
@@ -33,6 +31,7 @@ export default defineConfig({
         { text: 'Getting Started', link: '/guide/getting-started' },
         { text: 'Concepts', link: '/guide/concepts' },
         { text: 'Model interface', link: '/guide/model-interface' },
+        { text: 'Profiles and schedules', link: '/guide/profiles-and-schedules' },
         { text: 'Data and buckets', link: '/guide/data' },
         { text: 'Predictors and bounds', link: '/guide/predictors' },
         { text: 'Penalties and bounds', link: '/guide/penalties' },
@@ -48,14 +47,17 @@ export default defineConfig({
       // earlier marimo notebook pages were converted to scripts and the
       // notebook-specific pages removed.
       '/examples/': [
-        { text: 'Custom training loop', link: '/examples/custom-loop' },
+        { text: 'Overview', link: '/examples/' },
+        { text: 'Harmonic oscillator', link: '/examples/pendulum' },
         { text: 'Crystallisation', link: '/examples/crystallisation' },
         { text: 'Hybrid ODE', link: '/examples/hybrid-ode' },
         { text: 'Batch reactor', link: '/examples/batch-reactor' },
         { text: 'Batch reactor RL', link: '/examples/batch-reactor-rl' },
         { text: 'SBML hybrid kinetics', link: '/examples/sbml-hybrid' },
-        { text: 'Custom predictor', link: '/examples/custom-predictor' },
         { text: 'Neural polynomial kinetics', link: '/examples/supersaturation-poly' },
+        { text: 'Custom predictor', link: '/examples/custom-predictor' },
+        { text: 'Custom training loop', link: '/examples/custom-loop' },
+        { text: 'Mechanistic crystallisation', link: '/examples/crystallisation-mechanistic' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },

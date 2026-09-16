@@ -172,10 +172,10 @@ recovered = evaluate_predictor(trained, {"dummy": 0.0})
 print(f"recovered omega: {recovered:.4f}  (target: 1.0000, final loss: {history[-1]:.6f})")
 ```
 
-Expected output (default seed):
+Typical output (the exact values can vary with dependency versions):
 
 ```
-recovered omega: 0.9981  (target: 1.0000, final loss: 0.000377)
+recovered omega: 0.9995  (target: 1.0000, final loss: 0.000327)
 ```
 
 ## What this example exercises
@@ -195,4 +195,3 @@ To check a refactor of your own physics, run this and confirm the
 recovered $\omega$ lands within about 1% of `OMEGA_TRUE`. If it does not,
 the integrator and loss path has a wiring bug, usually in
 `state_to_output` or `y0_fn`.
-

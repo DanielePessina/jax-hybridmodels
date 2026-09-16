@@ -74,7 +74,7 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
 
 - `BoundedPredictor.__call__` accepts the dict (extracts `input_keys` in declared order; missing keys raise, extras ignored) or a rank-1 Array.
 - Time-varying exogenous values: evaluate a profile factory in the vector field, e.g. `hm.ramp_profile(t0=cov["t0"], t1=cov["t1"], v0=cov["T_lo"], v1=cov["T_hi"])(t)` — parameters travel as ordinary covariates.
-- `state_to_output(state)` maps `[T, S]` (or `[N, T, S]` when vmapped) → `[T, D]`. It is passed to training/prediction, never stored on the Dataset. Guarded divisions belong here.
+- `state_to_output(state)` maps one trajectory `[T, S]` → `[T, D]`. The framework vmaps it over the bucket, so the callback itself does not receive `[N, T, S]`. It is passed to training/prediction, never stored on the Dataset. Guarded divisions belong here.
 
 ## Predictors and bounds
 
@@ -94,7 +94,7 @@ Trainability mask (same structure as `predictors`, default = all float arrays):
 ```python
 mask = hm.trainable_mask(predictors)
 mask = hm.freeze_modules_of_type(mask, predictors, hm.BoundScaler)  # freeze temperature: ALWAYS
-mask = hm.freeze_paths(mask, predictors, ...)                       # paths = dotted names
+mask = hm.freeze_paths(mask, ("0.inner.mlp.layers.0.weight",))      # dotted leaf paths
 mask = hm.freeze_where(mask, predictors, lambda m: isinstance(m, hm.MLPPredictor))
 ```
 
@@ -126,8 +126,8 @@ Semantics that matter:
 - **A step = one epoch**: full pass over all buckets, gradients accumulated, one `optimizer.update`. The Python bucket loop drives JIT-cached per-bucket-shape kernels — the loop is idiomatic, not a smell.
 - **Phases**: each phase gets its own `(steps, lr, optimizer, reset_optimiser_state, length_schedule)`. `optimizer` entries: name string, factory taking `learning_rate` (chains/clipping compose), or a ready-made `optax.GradientTransformation`. Changing `lr` with a raw instance requires `reset_optimiser_state=True` there.
 - `restore_best`/`patience` reset at phase boundaries (a `length_schedule` change redefines what the loss measures).
-- **Bound penalty** (saturation, charged in latent space): added to the optimiser's objective, but `losses_history`/`restore_best`/early stopping/tournament track the data term alone.
-- **Tournament**: fresh re-init candidates trained briefly then scored forward-only, reusing the compiled step kernels (no extra compile). Triggers on diffrax runtime errors / non-finite scores; all-fail falls back with a `RuntimeWarning`.
+- **Bound penalty** (saturation, charged in latent space): added to the optimiser's objective, but `losses_history`/`restore_best`/early stopping/tournament exclude it. They include any configured trajectory penalty.
+- **Tournament**: fresh re-init candidates trained briefly then scored forward-only on the data term plus any trajectory penalty, excluding the fixed-point bound penalty. It reuses the compiled step kernels (no extra compile). It retries Diffrax runtime errors / non-finite scores; all-fail falls back with a `RuntimeWarning`.
 - **Trajectory penalty** (opt-in `trajectory_penalty_fn(full_state, bp)` + weight): rides in the per-step loss. Embedded predictors accumulate it as ODE state (`attach_penalty_state`, `penalty_vector_field`, `strip_penalty_state`, `penalty_integral`); parallel predictors use `trajectory_saturation_penalty`.
 
 ## Training with evosax
@@ -149,7 +149,7 @@ history, trained = hm.train_with_evosax(
 )
 ```
 
-Bounds are **not** enforced during search — CMA-ES wanders latent space; the sigmoid reparameterisation keeps physical outputs in range. A diffrax/non-finite individual crashes the generation.
+Bounds are **not** enforced during search — CMA-ES wanders latent space; the `BoundedPredictor` output squash keeps physical outputs in range. A diffrax/non-finite individual crashes the generation.
 
 ## Prediction and metrics
 
@@ -184,8 +184,8 @@ Built-ins: `masked_mse`, `masked_mle`, `bal_mse`, `bal_mle` (selected by name st
 
 ## Penalties and profiles quick reference
 
-- `hm.box_grid(predictor, n_per_dim)` — deterministic warp-uniform sweep of a predictor's input box; feed as `penalty_points`.
+- `hm.box_grid(predictor.in_scaler, n_per_dim)` — deterministic warp-uniform sweep of a predictor's input box; feed as `penalty_points`.
 - `hm.data_penalty_points` — the measured points the loss sees; gathered automatically.
-- `hm.box_violation`, `hm.saturation`, `hm.penalty_integral`, `hm.clip_ste` — building blocks for custom penalty fns.
+- `hm.box_violation`, `predictor.out_scaler.saturation(z)`, `hm.penalty_integral`, `hm.clip_ste` — building blocks for custom penalty fns.
 - Profiles: `constant_profile`, `step_profile`, `ramp_profile` (exact flat edges), `piecewise_linear_profile` (extends edges outward) — all return `t -> Array`, jit/vmap-safe, host-side validated.
-- `hm.annealing_schedule(total_epochs, init_value, end_value)` — epoch-scaled multiplier for custom loops.
+- `hm.annealing_schedule("cosine", total_epochs=..., init_value=..., end_value=...)` — epoch-scaled multiplier for custom loops.

@@ -7,19 +7,20 @@ enforce them; choose different values when your problem requires it.
 
 Every quantity a `BoundedPredictor` produces lives in a box you declare,
 `(low, high)`, in physical units. A freshly initialised network emits
-latent zero, which maps to the midpoint of that box. So the midpoint,
-not the edges, is what the integrator sees on step 0.
+values centred roughly around latent zero, which maps to the midpoint of that
+box. A random readout can still move the initial output away from the
+midpoint. Use `with_zero_final_head()` when the exact midpoint is important,
+for example because the initial ODE is stiff.
 
 ### Centre the box where you would guess the answer
 
 The common failure is a box so wide that its midpoint is physically
 absurd. The integrator then hits `max_steps` before training does
-anything. The crystallisation example records one:
+anything. For example:
 
-> An earlier draft used `(0, 15)` for the log nucleation rate. That put
-> the midpoint at `J ≈ 3e7`, about 17,000 times too large, which made
-> the moment ODE intractably stiff at random initialisation even though
-> the same ODE solves cleanly with sensible kinetic parameters.
+> A log nucleation-rate box of `(0, 15)` puts the midpoint at
+> `J ≈ 3e7`, about 17,000 times too large, and can make the moment ODE
+> intractably stiff at initialisation.
 
 Pick the order of magnitude you would guess by hand, then add a few
 decades of slack on each side.
@@ -317,4 +318,3 @@ inside the vector field. If you do that, say so loudly in a comment.
 
 `train_with_optax(predictors, dataset, config, key)` raises `TypeError`.
 The barrier is deliberate. It makes the seed visible at every call site.
-

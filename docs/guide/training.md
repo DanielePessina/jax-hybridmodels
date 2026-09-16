@@ -97,8 +97,11 @@ length 1, because it has an unambiguous off state. Any other length must
 match `steps` exactly.
 
 `loss_history`, `restore_best`, early stopping, and the tournament score
-all track the data term alone. The optimiser descends
-`data + weight * penalty`, but reporting the combined value would let
+track the data term plus any configured trajectory penalty. The fixed-point
+regulariser (`penalty_fn`, including the default bound penalty) is excluded
+from those measurements. The optimiser descends
+`data + trajectory_weight * trajectory_penalty + weight * penalty`, but
+reporting the combined value would let
 "best" move when only the penalty weight changed, and would make runs
 with different weights incomparable.
 
@@ -108,10 +111,11 @@ Random initialisation can be unlucky. A bad draw can put the integrator
 in a stiff regime it cannot escape within `max_steps`, and training
 never gets started. The **tournament** re-initialises the predictors
 several times from different keys, trains each candidate for a few
-steps, scores it with a forward-only pass on the data term alone, and
-keeps the **best-scoring** candidate. If an attempt raises a diffrax
-error or produces a non-finite score it is dropped and the next key is
-tried, up to `tournament_attempts` times. Ties keep the earlier attempt,
+steps, scores it with a forward-only pass on the data term plus any configured
+trajectory penalty, and keeps the **best-scoring** candidate. The fixed-point
+bound penalty is excluded. If an attempt raises a diffrax error or produces a
+non-finite score it is dropped and the next key is tried, up to
+`tournament_attempts` times. Ties keep the earlier attempt,
 so the result is a deterministic function of the seed.
 
 ```python
@@ -229,8 +233,8 @@ hist2, predictors = train_with_optax(predictors, dataset, opt_config,
 ```
 
 Both accept the same `trainable=` mask, so freezing carries across
-unchanged. The [batch reactor notebook](/examples/batch-reactor) is a
-worked two-phase fit in exactly this shape.
+unchanged. The [batch reactor script](/examples/batch-reactor) is a worked
+two-phase fit in exactly this shape.
 
 ## Freezing leaves
 
@@ -291,4 +295,3 @@ to hang.
 - Pass `key=` at every `train_with_*` call site.
 - Use [`fold`](/api/rng#fold) instead of `jr.split` for named subkeys in
   your own code, so inserting a consumer does not shift the others.
-

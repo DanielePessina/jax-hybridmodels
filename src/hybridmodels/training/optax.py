@@ -14,7 +14,8 @@ rate followed by a slow refinement.
 
 Before the phases the loop can run a **tournament**: re-initialise the
 predictors several times from different keys, train each candidate
-briefly, keep the one with the lowest data loss. This escapes an unlucky
+briefly, keep the one with the lowest tracked loss (data plus any trajectory
+penalty). This escapes an unlucky
 initial draw, which matters because a hybrid ODE model can be
 unrecoverable from a bad start. It reuses the main loop's compiled
 kernels, so it adds no compilation cost.
@@ -180,23 +181,27 @@ class OptaxTrainingConfig:
         The tournament runs only when ``tournament_steps > 0`` and
         ``tournament_attempts > 1``. Each attempt re-initialises the
         predictors, trains for ``tournament_steps`` steps, and is scored on
-        the data term alone by a forward-only pass; the lowest wins. An
-        attempt that raises a diffrax error or a non-finite loss is dropped
-        and the next key tried. If all fail, the original predictors are
-        used and a ``RuntimeWarning`` is raised.
+        the data term plus any configured trajectory penalty by a
+        forward-only pass; the bound penalty remains excluded. The lowest
+        score wins. An attempt that raises a diffrax error or a non-finite
+        loss is dropped and the next key tried. If all fail, the original
+        predictors are used and a ``RuntimeWarning`` is raised.
     tournament_lr : float
         Learning rate for the tournament's short bursts, independent of
         ``lr``.
     patience : int
-        Consecutive steps without a new best data loss before the current
-        phase stops early. Counted within a phase and reset at every phase
-        boundary, so a plateau at the end of one phase cannot kill the next
-        before its new learning rate acts. ``0`` disables early stopping.
+        Consecutive steps without a new best tracked loss before the current
+        phase stops early. The tracked loss is the data term plus any
+        trajectory penalty, excluding the fixed-point bound penalty. Counted
+        within a phase and reset at every phase boundary, so a plateau at the
+        end of one phase cannot kill the next before its new learning rate
+        acts. ``0`` disables early stopping.
     restore_best : bool
-        Return the predictors from the lowest-data-loss step instead of the
-        last one. The running minimum resets whenever ``length_schedule``
-        changes, since losses over different horizons are not comparable
-        and the shortest horizon would otherwise always own the minimum.
+        Return the predictors from the lowest tracked-loss step instead of
+        the last one. The running minimum resets whenever ``length_schedule``
+        changes, since tracked losses over different horizons are not
+        comparable and the shortest horizon would otherwise always own the
+        minimum.
     verbose : bool
         Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An
         explicit ``ui=...`` argument always wins.

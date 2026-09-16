@@ -30,7 +30,7 @@
 
 ## Stiffness and initialisation traps
 
-- **A box whose midpoint is physically absurd makes the ODE intractably stiff at init.** Fresh predictors emit latent zero = box midpoint, and the integrator sees that on step 0. Recorded failure: log nucleation rate boxed `(0, 15)` → midpoint `J ≈ 3e7` (~17,000x too large) → `max_steps exceeded` everywhere. Centre the box at your hand-guessed order of magnitude + a few decades of slack.
+- **A box whose midpoint is physically absurd makes the ODE intractably stiff at init.** Fresh random predictors are centred roughly around latent zero, which maps to the box midpoint, but their readout can still move away from it. Recorded failure: log nucleation rate boxed `(0, 15)` → midpoint `J ≈ 3e7` (~17,000x too large) → `max_steps exceeded` everywhere. Centre the box at your hand-guessed order of magnitude + a few decades of slack.
 - **`RuntimeWarning: max_steps exceeded` on some seeds but not others** → unlucky final-layer draw pushing the initial output off midpoint. Fix with `inner.with_zero_final_head()` (initial output = exact midpoint; hidden layers keep random init). Or switch `Tsit5` → `Kvaerno3` for genuinely stiff problems.
 - Leave `dt0=None`; let the step controller pick the first step.
 - **Adjoint by memory, not habit**: default `DirectAdjoint` stores the whole forward tape (cheapest gradients, most memory). With a network inside the vector field, `diffrax.RecursiveCheckpointAdjoint()` is usually the right swap.
@@ -65,7 +65,7 @@
 ## evosax traps
 
 - **No per-individual error handling**: a single diffrax failure or non-finite fitness crashes the generation. Mitigate with conservative `sigma_init` and `init_box_extent`, not code.
-- Bounds are not enforced during search; only the sigmoid reparameterisation keeps outputs in range.
+- Bounds are not enforced during search; the `BoundedPredictor` output squash keeps outputs in range.
 - Not optimised for NN-sized search (~4–10 dims is the target). Use Optax for big predictors.
 - Init modes: `"warm"` (start at current params — the default), `"uniform_box"`/`"lhs_box"` (latent ± `init_box_extent`).
 

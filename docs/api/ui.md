@@ -44,6 +44,8 @@ tournament's fallback warning.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L31)</small>
 
+<a id="traininguion_compile_done"></a>
+
 #### `TrainingUI.on_compile_done()`
 
 ```python
@@ -53,6 +55,8 @@ on_compile_done(self, *, bucket_idx: int) -> None
 The bucket at ``bucket_idx`` finished compiling.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L66)</small>
+
+<a id="traininguion_compile_progress"></a>
 
 #### `TrainingUI.on_compile_progress()`
 
@@ -64,6 +68,8 @@ Periodic heartbeat during long compiles (best-effort, may not fire).
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L62)</small>
 
+<a id="traininguion_compile_start"></a>
+
 #### `TrainingUI.on_compile_start()`
 
 ```python
@@ -73,6 +79,8 @@ on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> Non
 A bucket of shape ``bucket_shape`` is about to be JIT-compiled for the first time.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L58)</small>
+
+<a id="traininguion_message"></a>
 
 #### `TrainingUI.on_message()`
 
@@ -84,6 +92,8 @@ Free-form log line. ``level`` is one of ``"info"``, ``"warning"``, ``"error"``.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L99)</small>
 
+<a id="traininguion_phase_end"></a>
+
 #### `TrainingUI.on_phase_end()`
 
 ```python
@@ -93,6 +103,8 @@ on_phase_end(self, *, phase_idx: int) -> None
 Fires after the last step of a phase, before any optimiser reset.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L76)</small>
+
+<a id="traininguion_phase_start"></a>
 
 #### `TrainingUI.on_phase_start()`
 
@@ -110,6 +122,8 @@ Fires at the start of each phase; ``phase_steps`` is the per-phase step budget.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L70)</small>
 
+<a id="traininguion_run_end"></a>
+
 #### `TrainingUI.on_run_end()`
 
 ```python
@@ -120,6 +134,8 @@ Fires once after every phase has completed (or training was aborted gracefully).
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L95)</small>
 
+<a id="traininguion_run_start"></a>
+
 #### `TrainingUI.on_run_start()`
 
 ```python
@@ -129,6 +145,8 @@ on_run_start(self, *, total_steps: int, num_phases: int) -> None
 Fires once before the first phase. ``total_steps`` is the sum across phases.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L54)</small>
+
+<a id="traininguion_step_end"></a>
 
 #### `TrainingUI.on_step_end()`
 
@@ -181,6 +199,8 @@ Event order during a typical run::
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L104)</small>
 
+<a id="evosaxuion_compile_done"></a>
+
 #### `EvosaxUI.on_compile_done()`
 
 ```python
@@ -190,6 +210,8 @@ on_compile_done(self, *, bucket_idx: int) -> None
 The bucket finished compiling.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L132)</small>
+
+<a id="evosaxuion_compile_progress"></a>
 
 #### `EvosaxUI.on_compile_progress()`
 
@@ -201,6 +223,8 @@ Periodic compile-time heartbeat (best-effort).
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L128)</small>
 
+<a id="evosaxuion_compile_start"></a>
+
 #### `EvosaxUI.on_compile_start()`
 
 ```python
@@ -210,6 +234,8 @@ on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> Non
 A bucket of shape ``bucket_shape`` is about to be JIT-compiled.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L124)</small>
+
+<a id="evosaxuion_generation_end"></a>
 
 #### `EvosaxUI.on_generation_end()`
 
@@ -226,6 +252,8 @@ Fires once per generation with population statistics.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L136)</small>
 
+<a id="evosaxuion_message"></a>
+
 #### `EvosaxUI.on_message()`
 
 ```python
@@ -236,6 +264,8 @@ Free-form log line; same level set as ``TrainingUI.on_message``.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L144)</small>
 
+<a id="evosaxuion_run_end"></a>
+
 #### `EvosaxUI.on_run_end()`
 
 ```python
@@ -245,6 +275,8 @@ on_run_end(self, *, best_fitness: float) -> None
 Fires once after the last generation.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L140)</small>
+
+<a id="evosaxuion_run_start"></a>
 
 #### `EvosaxUI.on_run_start()`
 
@@ -297,12 +329,12 @@ Live Rich dashboard satisfying ``hybridmodels.ui.base.TrainingUI``.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `console:` |  | Optional :class:`rich.console.Console`. ``None`` constructs a default ``Console()``. Tests typically pass a recording console (``Console(record=True, force_terminal=False, ...)``) so the rendered final state can be asserted on. |
-| `recent_messages:` |  | Maximum number of lines the message-log panel holds. |
+| `console` |  | Optional `rich.console.Console`. ``None`` constructs a default ``Console()``. Tests typically pass a recording console (``Console(record=True, force_terminal=False, ...)``) so the rendered final state can be asserted on. |
+| `recent_messages` |  | Maximum number of lines the message-log panel holds. |
 
 **Notes**
 
-The instance carries one :class:`rich.live.Live` between
+The instance carries one `rich.live.Live` between
 ``on_run_start`` and ``on_run_end``. Any state mutation outside that
 window updates the model only; the next ``on_run_start`` rebuilds Live
 afresh, so a single ``RichTrainingUI`` instance can be reused for
@@ -333,14 +365,14 @@ Live Rich dashboard satisfying ``hybridmodels.ui.base.EvosaxUI``.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `console:` |  | Optional :class:`rich.console.Console`. ``None`` constructs a default ``Console()``. Tests typically pass a recording console (``Console(record=True, force_terminal=False, ...)``) so the rendered final state can be asserted on. |
-| `log_every:` |  | Throttle for the recent-generation table. ``log_every=k`` records generations where ``gen_idx % k == 0``. ``None`` (the default) defers the choice to :meth:`on_run_start`, which sets it to ``max(1, num_generations // 5)`` so the table accumulates to exactly five rows over the run instead of sliding past a constantly-changing last-five window. An explicit integer always overrides the auto-scale. |
-| `recent_generations:` |  | Maximum number of rows the recent-generation table holds. |
-| `recent_messages:` |  | Maximum number of lines the message-log panel holds. |
+| `console` |  | Optional `rich.console.Console`. ``None`` constructs a default ``Console()``. Tests typically pass a recording console (``Console(record=True, force_terminal=False, ...)``) so the rendered final state can be asserted on. |
+| `log_every` |  | Throttle for the recent-generation table. ``log_every=k`` records generations where ``gen_idx % k == 0``. ``None`` (the default) defers the choice to `on_run_start`, which sets it to ``max(1, num_generations // 5)`` so the table accumulates to exactly five rows over the run instead of sliding past a constantly-changing last-five window. An explicit integer always overrides the auto-scale. |
+| `recent_generations` |  | Maximum number of rows the recent-generation table holds. |
+| `recent_messages` |  | Maximum number of lines the message-log panel holds. |
 
 **Notes**
 
-The instance carries one :class:`rich.live.Live` between
+The instance carries one `rich.live.Live` between
 ``on_run_start`` and ``on_run_end``. State is reset in
 ``on_run_start`` so a single instance can be reused across sequential
 runs (used in tests).

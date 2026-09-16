@@ -58,3 +58,10 @@ The latest verification script there is `thesis_training/sharedgrowth.py` (and t
 - Porting Bayesian/GP/embeddings code (out of scope).
 - Adding plotting beyond what an example script needs.
 - Optimising for >20 buckets or >100-dim evosax searches.
+
+## Package skill
+
+For code, debugging, or documentation work that uses `hybridmodels`, also read
+[`skills/jax-hybrid-models/SKILL.md`](./skills/jax-hybrid-models/SKILL.md).
+Its supporting references contain the package API patterns and known JAX,
+Diffrax, training, and serialisation traps.

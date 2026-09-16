@@ -38,7 +38,7 @@ PenaltyPointSource(
 
 One ``BoundedPredictor`` leaf's gathered measured points.
 
-Produced by :func:`data_penalty_points` for leaves whose ``input_keys``
+Produced by [`data_penalty_points`](/api/penalties#data_penalty_points) for leaves whose ``input_keys``
 all resolve to dataset covariates. One entry per *observed cell*: the
 input vector the loss actually sees at that cell, in ``input_keys``
 column order, in physical units.
@@ -49,7 +49,7 @@ column order, in physical units.
 | --- | --- | --- |
 | `points` | `Float[Array, "G n_inputs"]` | The measured input vectors. |
 | `cell_ts` | `Int[Array, " G"]` | Timestamp index of each cell inside its own experiment. |
-| `cell_T` | `Int[Array, " G"]` | Length of that experiment's time grid. ``cell_ts`` and ``cell_T`` let :func:`length_mask_keep` apply the loss's prefix mask to the penalty, so the two never disagree about which points are live. |
+| `cell_T` | `Int[Array, " G"]` | Length of that experiment's time grid. ``cell_ts`` and ``cell_T`` let [`length_mask_keep`](/api/penalties#length_mask_keep) apply the loss's prefix mask to the penalty, so the two never disagree about which points are live. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L212)</small>
 
@@ -69,7 +69,7 @@ Append ``n`` zero-valued penalty accumulators to ``y0``.
 
 The first step of the trajectory-penalty recipe: the ODE state widens
 from ``[S]`` to ``[S + n]``, where the trailing components are
-integrated penalty rates supplied by :func:`penalty_vector_field`.
+integrated penalty rates supplied by [`penalty_vector_field`](/api/penalties#penalty_vector_field).
 ``y0_fn`` should return ``attach_penalty_state(physics_y0, n)``.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L561)</small>
@@ -90,12 +90,12 @@ Mean output-squash saturation over every ``BoundedPredictor`` in a pytree.
 
 For each leaf, evaluates ``inner(in_scaler.to_latent(x))`` across the
 leaf's point set and charges
-:meth:`~hybridmodels.predictors.BoundScaler.saturation` on the
+[`BoundScaler.saturation`](/api/predictors#boundscalersaturation) on the
 resulting latents. Leaves are summed.
 
 ``points`` is positional, one ``[G, n_inputs]`` array per leaf in
-traversal order: measured points from :func:`data_penalty_points`,
-user-supplied penalty-only points, or a :func:`box_grid` sweep. An
+traversal order: measured points from [`data_penalty_points`](/api/penalties#data_penalty_points),
+user-supplied penalty-only points, or a [`box_grid`](/api/penalties#box_grid) sweep. An
 empty per-leaf array contributes exactly zero, so a leaf the penalty
 cannot reach does not NaN a run.
 
@@ -118,7 +118,7 @@ is the right instrument.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `predictors` | `PyTree[eqx.Module]` | Any pytree shape. Only ``BoundedPredictor`` leaves contribute. |
-| `points` | `tuple[Array, ...]` | One ``[G, n_inputs]`` array per leaf, in traversal order: the output of :func:`data_penalty_points` (with any user extras concatenated), user penalty-only points, or a :func:`box_grid` sweep. An empty per-leaf array contributes zero. |
+| `points` | `tuple[Array, ...]` | One ``[G, n_inputs]`` array per leaf, in traversal order: the output of [`data_penalty_points`](/api/penalties#data_penalty_points) (with any user extras concatenated), user penalty-only points, or a [`box_grid`](/api/penalties#box_grid) sweep. An empty per-leaf array contributes zero. |
 
 **Returns**
 
@@ -232,7 +232,7 @@ the clip were not there.
 
 The identity gradient is a deliberate fiction: it propagates whatever
 the data loss asks for, including "go further out of bounds", forever.
-Pair it with :func:`box_violation` on the pre-clip value for the
+Pair it with [`box_violation`](/api/penalties#box_violation) on the pre-clip value for the
 restoring force.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L165)</small>
@@ -252,7 +252,7 @@ data_penalty_points(
 ) -> tuple[PenaltyPointSource | None, ...]
 ```
 
-Gather one :class:`PenaltyPointSource` per ``BoundedPredictor`` leaf.
+Gather one [`PenaltyPointSource`](/api/penalties#penaltypointsource) per ``BoundedPredictor`` leaf.
 
 A leaf is *resolvable* when every ``input_keys`` name is a dataset
 covariate (in every bucket). Its measured points are then the input
@@ -284,7 +284,7 @@ length_mask_keep(source: 'PenaltyPointSource', length_mask_fraction: 'float') ->
 
 Boolean keep-vector over a source's cells, matching the loss's prefix mask.
 
-Applies the same prefix semantics :func:`~hybridmodels.training.kernels.apply_length_mask`
+Applies the same prefix semantics [`apply_length_mask`](/api/kernels#apply_length_mask)
 gives the loss: a cell is kept when its timestamp index is below
 ``ceil(T * fraction)``, clamped at 1 so a phase never scores nothing.
 The penalty therefore follows the curriculum exactly, disagreeing with
@@ -312,7 +312,7 @@ penalty_integral(state: 'Array', n: 'int' = 1) -> 'Array'
 The accumulated (time-integrated) penalty values at the trajectory's end.
 
 ``state`` is the full state trajectory ``[..., T, S + n]`` as produced by
-a :func:`penalty_vector_field` solve. Returns the trailing ``n``
+a [`penalty_vector_field`](/api/penalties#penalty_vector_field) solve. Returns the trailing ``n``
 components at the final time, ``[..., n]``. The training hook charges
 these; divide by the time span to get the time-mean instead of the
 integral.
@@ -367,11 +367,11 @@ select_penalty_points(
 
 Per-leaf point arrays for one phase: length-mask-kept cells ∪ extras.
 
-``sources`` is the per-leaf output of :func:`data_penalty_points`
+``sources`` is the per-leaf output of [`data_penalty_points`](/api/penalties#data_penalty_points)
 (``None`` for unresolvable leaves); ``extras`` the user-supplied
 penalty-only points, positional per leaf. Returns one ``[G, n_inputs]``
 array per leaf in traversal order: the measured cells kept by
-:func:`length_mask_keep` concatenated with that leaf's extras.
+[`length_mask_keep`](/api/penalties#length_mask_keep) concatenated with that leaf's extras.
 
 This is host-side selection: the keep-vector must be concrete to index
 the gathered points, so call it with the phase's Python float outside
@@ -399,7 +399,7 @@ soft_inverse(
 
 ``inverse(s)``, extended linearly outside ``[eps, 1 - eps]``.
 
-Generalises :func:`soft_logit` to the inverse of any squashing
+Generalises [`soft_logit`](/api/penalties#soft_logit) to the inverse of any squashing
 function. Every such inverse has a pole at each end of the unit
 interval, where a hard clip would zero the derivative and silently drop
 state-derived sensitivities from the ODE adjoint (R-P2).
@@ -432,7 +432,7 @@ unbounded latent. Outside the band the result grows linearly instead of
 blowing up at the pole, and the derivative is a finite constant instead
 of the exact zero ``logit(jnp.clip(s, eps, 1 - eps))`` would give.
 
-:func:`softclip` cannot do this job: its interior error is
+[`softclip`](/api/penalties#softclip) cannot do this job: its interior error is
 ``O(1 / beta)`` and ``s`` spans only ``[0, 1]``, so any ``beta`` gentle
 enough to keep gradient far outside the box also distorts the middle.
 
@@ -469,7 +469,7 @@ the box; the default 20 holds interior error below about 0.05 box widths
 and keeps usable gradient roughly one width out.
 
 Repairs the near field only. Several widths out the derivative
-underflows as a hard clip's does, so pair it with :func:`box_violation`
+underflows as a hard clip's does, so pair it with [`box_violation`](/api/penalties#box_violation)
 for unbounded push-back.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/penalties.py#L147)</small>
@@ -511,7 +511,7 @@ Sum over time of output saturation for a predictor whose output *is* the state.
 For a **parallel** hybrid model — the predictor is outside the solver and
 its output is a predicted channel — the full state already holds the
 physical outputs. Invert them back to latents with the predictor's
-``out_scaler`` and charge :meth:`BoundScaler.saturation` at every time
+``out_scaler`` and charge [`BoundScaler.saturation`](/api/predictors#boundscalersaturation) at every time
 step, summed over time. This is the trajectory-aware counterpart of
 ``bound_penalty`` for the hoisted case: it fires only where the model
 actually predicted, not across a synthetic grid.
@@ -541,7 +541,7 @@ validate_penalty_points(
 
 Raise when an enabled penalty has a leaf no point set reaches.
 
-``sources`` is the per-leaf output of :func:`data_penalty_points`
+``sources`` is the per-leaf output of [`data_penalty_points`](/api/penalties#data_penalty_points)
 (``None`` for unresolvable leaves); ``extras`` the user-supplied
 penalty-only points, positional per leaf. ``enabled`` is whether any
 phase charges the penalty.

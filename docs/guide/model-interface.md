@@ -62,9 +62,10 @@ def state_to_output(state):
     return state[..., :2]
 ```
 
-It receives either one trajectory `[T, S]` or, when vmapped by the framework,
-the corresponding leading batch dimension. Keep this function separate from
-the dataset so the same data can be used with different observation maps.
+The framework vmaps this function over a bucket, so your callback receives one
+trajectory at a time with shape `[T, S]`. Return `[T, D]`; the leading bucket
+dimension is added by the framework. Keep this function separate from the
+dataset so the same data can be used with different observation maps.
 
 ## Predictor containers
 
@@ -93,3 +94,25 @@ For a dataset, every experiment must use the same shape for a given key. The
 vector is passed to `simulate_fn` unchanged. Use its components in the vector
 field or pass the vector to an array-based custom predictor.
 
+## Time-varying inputs
+
+Covariates stay constant during an experiment. For a quantity that changes
+continuously or in a step, create a pure-JAX profile and evaluate it inside
+the vector field. The profile parameters still travel as ordinary covariates.
+
+```python
+temperature = hm.ramp_profile(
+    t0=covariates["heat_start"],
+    t1=covariates["heat_end"],
+    v0=covariates["temperature_initial"],
+    v1=covariates["temperature_final"],
+)
+
+def vector_field(t, y, args):
+    inputs = {"temperature": temperature(t)}
+    rate = predictors[0](inputs)
+    return physics_rhs(t, y, rate)
+```
+
+See [Profiles and schedules](/guide/profiles-and-schedules) for the built-in
+profile factories and the custom-loop schedule helper.

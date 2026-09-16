@@ -118,7 +118,7 @@ load_run(
 
 Reconstruct a run from ``directory``.
 
-Inverse of :func:`save_run`. ``predictors_template`` is required, since
+Inverse of [`save_run`](/api/serialise#save_run). ``predictors_template`` is required, since
 the framework owns no builder registry, and must share the saved
 pytree's container shape and per-leaf static configuration.
 

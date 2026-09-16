@@ -11,7 +11,7 @@ hero:
       link: /guide/getting-started
     - theme: alt
       text: Browse examples
-      link: /examples/pendulum
+      link: /examples/
     - theme: alt
       text: API reference
       link: /api/
@@ -31,6 +31,20 @@ features:
     details: Replace the predictor, loss, regulariser, solver, UI, or training loop with a callable or PyTree of your own.
 ---
 
+## Start here
+
+From a repository checkout, run the known-answer sanity check first:
+
+```bash
+uv sync --extra examples
+uv run python examples/pendulum/train_harmonic.py --no-plot
+```
+
+It recovers the frequency of a synthetic harmonic oscillator from noisy
+position measurements. The [Getting started](/guide/getting-started) page
+then builds the same pipeline step by step, and the [Examples](/examples/)
+page shows where to go for a real hybrid ODE.
+
 ## In a nutshell
 
 `hybridmodels` keeps the ODE simulation function in user code. The library
@@ -44,7 +58,7 @@ adds the surrounding data, predictor, and training machinery.
 | `SolverConfig` | Stores the Diffrax solver and its settings. |
 | `Dataset` | Stores bucketed observations and masks. |
 
-The shortest useful example is:
+The core training call is:
 
 ```python
 import hybridmodels as hm
@@ -61,8 +75,20 @@ history, trained = hm.train_with_optax(
 )
 ```
 
-Read [Getting started](/guide/getting-started) for a complete example.
-Read [Concepts](/guide/concepts) for the data and model interfaces.
+The variables in this short call are defined in the complete
+[Getting started](/guide/getting-started) example. Read [Concepts](/guide/concepts)
+for the data and model interfaces.
+
+## Find your path
+
+| If you want to... | Start here | Main API |
+| --- | --- | --- |
+| Build irregular experiments and datasets | [Data and buckets](/guide/data) | [`make_experiment`](/api/data#make_experiment), [`make_dataset`](/api/data#make_dataset) |
+| Write the ODE and observation map | [Model interface](/guide/model-interface) | `simulate_fn`, `state_to_output` |
+| Choose a bounded predictor | [Predictors and bounds](/guide/predictors) | [`BoundedPredictor`](/api/predictors#boundedpredictor), [`BoundScaler`](/api/predictors#boundscaler) |
+| Train with gradients or population search | [Training](/guide/training) | [`train_with_optax`](/api/training#train_with_optax), [`train_with_evosax`](/api/training#train_with_evosax) |
+| Add time-varying inputs or schedules | [Profiles and schedules](/guide/profiles-and-schedules) | [`ramp_profile`](/api/profiles#ramp_profile), [`annealing_schedule`](/api/schedules#annealing_schedule) |
+| Save, evaluate, or ensemble models | [Saving and loading](/guide/serialization), [Ensembles](/guide/ensembles) | [`save_run`](/api/serialise#save_run), [`predict_dataset`](/api/prediction#predict_dataset) |
 
 ## Install
 
@@ -76,6 +102,5 @@ uv add git+https://github.com/DanielePessina/jax-hybridmodels
 For a checkout of the repository:
 
 ```bash
-uv sync
+uv sync --extra examples
 ```
-

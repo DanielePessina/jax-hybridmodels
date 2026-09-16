@@ -50,8 +50,8 @@ wherever you run.
 
 `state_to_output` maps the full state `[T, S]` to the observed channels
 `[T, D]`. It is a plain callable, and it belongs to the model, not the
-data: pass it to `predict_*` and `train_with_*`. (It used to live on the
-`Dataset`.) Swap it to change what a run measures.
+data: pass it to `predict_*` and `train_with_*`. Swap it to change what a run
+measures.
 
 ## Custom losses
 
@@ -160,16 +160,28 @@ The kernels a trainer is built from are public, in
 `hybridmodels.training.kernels`: `build_bucket_step` (the jitted
 per-bucket `(loss, grads)` kernel), `build_score_bucket` (forward-only),
 `build_penalty_step` (the per-step regulariser), and `build_apply_update`
-(the single optimiser update). Write your own loop by composing them:
+(the single optimiser update). The following is the bucket/step skeleton;
+optimizer construction and UI bookkeeping are omitted:
 
 ```python
+import jax
+
 step = build_bucket_step(
     simulate_fn=simulate_fn, state_to_output=state_to_output,
     solver=solver, loss_fn=my_loss, trainable=mask,
 )
+acc_grads = None
 for bp in dataset.bucket_payloads:      # accumulate over every bucket
     loss, grads = step(predictors, bp, fraction)
-# one update per step
+    acc_grads = grads if acc_grads is None else jax.tree.map(
+        lambda total, current: total + current, acc_grads, grads
+    )
+
+# Average the bucket gradients, then call the update kernel once.
+acc_grads = jax.tree.map(
+    lambda gradient: gradient / len(dataset.bucket_payloads), acc_grads
+)
+predictors, opt_state = apply_update(predictors, acc_grads, opt_state)
 ```
 
 See the [custom training loop example](/examples/custom-loop) for the
@@ -196,13 +208,12 @@ for step in range(n_steps):
 The stock trainers do not take schedules: they express strategy changes
 as phases, and a smooth schedule is what a custom loop is for.
 
-## System-embedding pattern (user-space)
+## Conditioning on related systems
 
-The source package had framework classes for conditioning a model on the
-system it is running on (`EmbeddedMLP*`,
-`SystemConditionedRatePredictor`). This library deliberately does not:
-the pattern is a few lines of composition, and it is more flexible than
-any class could be.
+When one model serves several related systems, keep the system condition as
+an ordinary covariate and add a small trainable embedding as another
+predictor leaf. This is a user-space composition pattern, not a special
+framework class.
 
 The idea is that one hybrid model serves several related systems — a
 catalyst family, a batch of reactors, a set of plant conditions. Give

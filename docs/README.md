@@ -10,19 +10,30 @@ docs/
 ├── guide/                        # Hand-written narrative pages
 │   ├── getting-started.md
 │   ├── concepts.md
+│   ├── model-interface.md
+│   ├── profiles-and-schedules.md
+│   ├── data.md
+│   ├── predictors.md
+│   ├── penalties.md
 │   ├── training.md
 │   ├── custom-predictors.md
+│   ├── extending.md
+│   ├── ensembles.md
+│   ├── serialization.md
+│   ├── troubleshooting.md
 │   └── recommendations.md
 ├── examples/                     # Walkthroughs of the example scripts
+│   ├── index.md                   # Example chooser
 │   ├── custom-loop.md            # Write your own training loop (kernels)
 │   ├── crystallisation.md        # Canonical end-to-end
+│   ├── crystallisation-mechanistic.md
 │   ├── hybrid-ode.md
 │   ├── batch-reactor.md
 │   ├── batch-reactor-rl.md
 │   ├── sbml-hybrid.md            # External mechanistic model + neural rate
 │   ├── custom-predictor.md
 │   ├── supersaturation-poly.md   # NeuralNPolynomial rate law
-│   └── pendulum.md
+│   ├── pendulum.md
 │   └── assets/                   # Committed figures the example pages embed
 ├── api/                          # AUTO-GENERATED, do not edit by hand
 │   ├── index.md
@@ -59,6 +70,13 @@ npm --prefix docs run docs:build
 npm --prefix docs run docs:check
 ```
 
+## CI deployment
+
+The Pages workflow runs only when a commit message contains `[build docs]` or
+`[regen docs]`. Use `[build docs]` after regenerating `docs/api/` locally; use
+`[regen docs]` when the workflow should regenerate those pages and commit the
+result back. A manual `workflow_dispatch` follows the build-and-check path.
+
 ## How API generation works
 
 `scripts/gen_api_docs.py` introspects `hybridmodels.__all__`, groups symbols
@@ -70,7 +88,7 @@ each docstring as numpy-style, and emits markdown with:
   deterministic)
 - Parameters / Returns / Attributes / Raises rendered as two-column tables
 - Other sections (Notes, Examples, Construction, Pipeline, ...) passed
-  through verbatim
+  through with VitePress-safe cross-reference markup
 - A source-code link pointing at the GitHub blob
 
 To document a new public symbol:

@@ -6,7 +6,7 @@ Use `hybridmodels` when part of your differential equation is known and part
 is represented by a trainable function. You write the ODE simulation. The
 library handles the predictor PyTree, bucketed observations, and training.
 
-You supply four things:
+You make four decisions:
 
 1. Your measurements, grouped into **experiments** (one experiment is
    one run of the real thing, with its own conditions and its own
@@ -14,7 +14,7 @@ You supply four things:
 2. One Python function that integrates your ODE for a single experiment.
 3. A statement of which quantities the network predicts, and the
    physical range each one lives in.
-4. A training budget.
+4. A training budget and solver configuration.
 
 Training runs the integrator forward, compares the result to your
 measurements, and sends gradients back through the integrator into the
@@ -238,8 +238,8 @@ print(f"final loss: {history[-1]:.6f}")
 print(f"recovered omega: {recovered:.4f} (target: 1.0000)")
 ```
 
-With the seed above this prints a final loss near `0.00025` and
-`recovered omega: 1.0013`.
+The recovered value should be close to `1.0`. Exact loss values depend on the
+JAX, Diffrax, and Optax versions in the environment.
 
 Two details in that script recur everywhere.
 
@@ -262,4 +262,3 @@ Some models have no network at all. Their trainable part is a handful of
 kinetic constants feeding a classical rate law. The same interfaces apply,
 and population search is often a good fit for this small parameter set. See
 the [mechanistic crystallisation example](/examples/crystallisation-mechanistic).
-

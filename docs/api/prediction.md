@@ -158,7 +158,7 @@ ensemble_predictions(
 Average per-bucket predictions across an ensemble of models.
 
 ``members`` is a sequence of predictor pytrees — each the ``predictors``
-argument you would pass to :func:`predict_dataset` alone. Each member is
+argument you would pass to [`predict_dataset`](/api/prediction#predict_dataset) alone. Each member is
 run forward and the per-bucket predictions are averaged, so the result
 is the same shape as a single ``predict_dataset`` return.
 

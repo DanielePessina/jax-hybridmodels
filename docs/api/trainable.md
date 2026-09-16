@@ -71,7 +71,7 @@ freeze_paths(mask: 'Any', paths: 'tuple[str, ...]') -> 'Any'
 Return a new mask with leaves at `paths` set to ``False``.
 
 Path syntax is dot-joined segments addressing the mask PyTree from its root.
-Each segment is the bare key produced by :func:`jax.tree_util.tree_flatten_with_path`:
+Each segment is the bare key produced by `jax.tree_util.tree_flatten_with_path`:
 attribute names for ``eqx.Module`` fields, integer indices for tuples and
 lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
 addresses ``mask.inner.mlp.layers[0].weight``.

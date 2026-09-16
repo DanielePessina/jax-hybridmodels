@@ -288,7 +288,7 @@ Bootstrap resample the dataset's experiments, re-bucketing the result.
 
 Draws ``n_experiments`` experiments **with replacement** from the
 source (default: as many as the source holds), then re-buckets via
-:func:`make_dataset`. Irregular per-channel timestamps are handled
+[`make_dataset`](/api/data#make_dataset). Irregular per-channel timestamps are handled
 automatically: re-bucketing regroups by union-axis length, and a
 duplicated experiment simply contributes more ``N`` rows to its bucket.
 

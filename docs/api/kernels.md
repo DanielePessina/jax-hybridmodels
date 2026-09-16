@@ -59,7 +59,7 @@ predict_bucket_obs(
 
 Simulate every experiment in the bucket and project to ``[N, T, D]``.
 
-The uncompiled shared core behind both :func:`predict_bucket
+The uncompiled shared core behind both `predict_bucket
 <hybridmodels.prediction.predict_bucket>` and the training kernels.
 Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
 the training and prediction jit caches separate (R-J1): this body is
@@ -92,7 +92,7 @@ Return a jitted ``bucket_step(predictors, bp, fraction) -> (loss, grads)``.
 One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
 update lives in a separate jitted ``apply_update``, and the **bound**
 penalty is charged once per step by
-:func:`build_penalty_step`, outside the bucket loop — this kernel
+[`build_penalty_step`](/api/kernels#build_penalty_step), outside the bucket loop — this kernel
 charges the data loss (plus any configured trajectory penalty, below).
 
 ``trajectory_penalty_fn`` is the trajectory-aware counterpart, and the
@@ -160,13 +160,13 @@ inside ``bucket_step`` would repeat one identical evaluation per
 bucket.
 
 ``points`` are the per-leaf point arrays the penalty is evaluated at —
-the output of :func:`hybridmodels.penalties.select_penalty_points` —
+the output of [`select_penalty_points`](/api/penalties#select_penalty_points) —
 passed as traced arrays, so a shape change (a phase boundary) retraces
 this small kernel and nothing else. The default ``()`` suits a custom
 ``penalty_fn`` that ignores points.
 
 ``penalty_fn`` is the regulariser, required here and defaulted to
-:func:`hybridmodels.penalties.bound_penalty` by the stock trainers.
+[`bound_penalty`](/api/penalties#bound_penalty) by the stock trainers.
 Passing a different callable (weight decay on inner weights, a
 monotonicity term, ...) is how a custom regulariser composes with the
 loop. It must take ``(predictors, points)`` and return a scalar; a

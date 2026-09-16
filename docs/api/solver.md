@@ -50,9 +50,11 @@ tolerance change must change the compiled solve.
 | `max_steps` | `int` | Upper limit on solver steps. The solve errors rather than running forever if it needs more. |
 | `dt0` | `float | None` | Initial step size. ``None`` lets diffrax pick one. |
 | `adjoint` | `diffrax.AbstractAdjoint` | How gradients are taken back through the solve. See ``ADJOINT_REGISTRY`` for what each choice costs. |
-| `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See :meth:`stepsize_controller`. |
+| `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See `stepsize_controller`. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L106)</small>
+
+<a id="solverconfigdiffeqsolve"></a>
 
 #### `SolverConfig.diffeqsolve()`
 
@@ -100,6 +102,8 @@ scalar/array tolerances — this is the whole invocation.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L216)</small>
 
+<a id="solverconfigstepsize_controller"></a>
+
 #### `SolverConfig.stepsize_controller()`
 
 ```python
@@ -119,6 +123,8 @@ examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L194)</small>
+
+<a id="solverconfigto_dict"></a>
 
 #### `SolverConfig.to_dict()`
 
@@ -225,7 +231,7 @@ register_adjoint(name: 'str', cls: 'type[diffrax.AbstractAdjoint]') -> 'None'
 
 Register a diffrax adjoint class under ``name`` for round-trip serialisation.
 
-Same contract as :func:`register_solver`. Re-registering an existing
+Same contract as [`register_solver`](/api/solver#register_solver). Re-registering an existing
 name overwrites without warning.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/solver.py#L58)</small>

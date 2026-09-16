@@ -1,109 +1,126 @@
 ---
 name: jax-hybrid-models
-description: Uses the jax-hybridmodels package (JAX/Equinox hybrid ODE + neural models): building experiments and datasets, writing simulate_fn and state_to_output, configuring BoundedPredictor bounds/warps, training with Optax or evosax, prediction, and serialisation. Use when working in this repo or writing code that imports hybridmodels, or when asked to build, train, evaluate, debug, or tune hybrid ODE-neural models with bounded trainable predictors on irregular time-series data.
+description: "Uses the jax-hybridmodels package (JAX/Equinox hybrid ODE + neural models): building experiments and datasets, writing simulate_fn and state_to_output, configuring BoundedPredictor bounds/warps, training with Optax or evosax, prediction, and serialisation. Use when working in this repo or writing code that imports hybridmodels, or when asked to build, train, evaluate, debug, or tune hybrid ODE-neural models with bounded trainable predictors on irregular time-series data."
 ---
 
 # jax-hybridmodels
 
-JAX/Equinox library: user-written ODE dynamics with trainable predictors inside, trained on irregular time-series experiments. Crystallisation kinetics is the canonical example, not the scope.
+Use this skill for work that builds, trains, evaluates, debugs, or documents
+`hybridmodels`: a JAX/Equinox library for user-written ODE dynamics with
+trainable predictors and bucketed-irregular observations. Crystallisation is
+the canonical example, not the scope.
 
-## What a "model" is (there is no `Model` class)
+## Source of truth
 
-Five pieces passed separately to training/prediction:
+For repository work, read these before making a design or implementation
+change:
 
-| Piece | What it is |
-|---|---|
-| `predictors` | pytree of `eqx.Module` leaves; convention: `tuple` of `BoundedPredictor`, one per rate |
-| `simulate_fn` | **your** pure function integrating ONE experiment → `[T, S]` |
-| `state_to_output` | `[T, S]` → `[T, D]` (measured channels); belongs to the model, not the data |
-| `solver` | `SolverConfig` (static diffrax settings) |
-| `dataset` | experiments bucketed by `make_dataset`; pure data, no `state_to_output` |
+1. `AGENTS.md` for local workflow and invariants.
+2. `SPEC.md` for the architectural contract and build order.
+3. `CONTEXT.md` for domain terms and shape conventions.
+4. The relevant tests and source module for the behaviour being changed.
 
-The framework owns vmap/jit/grad over `simulate_fn`; the user owns physics.
+Resolve conflicts in that order: tests/source and explicit SPEC decisions beat
+prose docs or this skill. Do not invent a wrapper, registry, inheritance
+hierarchy, or new data pathway to make a task more convenient.
 
-## The `simulate_fn` contract (mandatory signature)
+Use the repository's `uv` commands. Never call `pip`, bare `python`, or bare
+`pytest`:
 
-```python
-def simulate_fn(predictors, ts, covariates, y0, solver) -> Float[Array, "T S"]:
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ty check src
 ```
 
-- `predictors`: pytree of modules — call inside the vector field: `rate = predictors[0]({"temperature_C": ...})`
-- `ts` `[T]`, `covariates` dict (constant in time), `y0` `[S]` (full state, may exceed measured channels)
-- `solver`: `SolverConfig` — call `solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys`; use `solver.adjoint` and `solver.stepsize_controller()` inside
-- Must be pure and JAX-transformable: no Python `if` on traced values, no side effects
-- The framework vmaps it across the bucket, jits it, differentiates through it
+## Route the request
 
-## Quick start
+| Task | Read first | Main surface |
+| --- | --- | --- |
+| Build experiments or handle sparse observations | `docs/guide/data.md`, `src/hybridmodels/data.py` | `make_experiment`, `make_dataset`, `split_dataset` |
+| Write or debug the physics boundary | `docs/guide/model-interface.md`, `CONTEXT.md` | `simulate_fn`, `state_to_output`, `SolverConfig` |
+| Add time-varying inputs or smooth schedules | `docs/guide/profiles-and-schedules.md` | profile factories, `annealing_schedule` |
+| Choose or extend a predictor | `docs/guide/predictors.md`, `docs/guide/custom-predictors.md` | `Predictor`, `BoundedPredictor`, `BoundScaler` |
+| Configure or debug training | `docs/guide/training.md`, `skills/jax-hybrid-models/caveats.md` | Optax/Evosax configs and trainers |
+| Evaluate or persist a result | `docs/guide/serialization.md`, `src/hybridmodels/prediction.py` | prediction, metrics, ensembles, save/load |
+| Change public API documentation | `README.md`, `docs/README.md`, source docstrings | `scripts/gen_api_docs.py` then `docs/api/` |
+
+## Model contract
+
+There is no `Model` wrapper. A model is the pieces passed separately:
+
+| Piece | Contract |
+| --- | --- |
+| `predictors` | Any PyTree of `eqx.Module` leaves; conventionally `(BoundedPredictor, ...)`. |
+| `simulate_fn` | User-written pure function `(predictors, ts, covariates, y0, solver) -> [T, S]`. |
+| `state_to_output` | User-written pure function `[T, S] -> [T, D]`; the framework vmaps it, so it receives one trajectory. |
+| `solver` | `SolverConfig` containing static Diffrax settings. |
+| `dataset` | `Dataset` made of bucket payloads; it never stores `state_to_output`. |
+
+The framework owns `vmap`, JIT, and gradient plumbing around one experiment.
+The user owns the vector field and all physics.
+
+## Non-negotiable invariants
+
+- Bucketed-irregular is the only data interface. `make_dataset` builds union
+  timestamps and masks; users do not write mask code or padded data pathways.
+- A training step visits every bucket, accumulates gradients, and applies one
+  optimizer update. A bucket is not a step.
+- Optax phase fields are equal-length tuples. `key=` is keyword-only and
+  required on both trainers; internal randomness uses named folds.
+- Trainability is a boolean PyTree mask. Use `trainable_mask` and the
+  `freeze_*` functions; there is no mutable per-predictor trainability API.
+- Every predictor must round-trip through
+  `eqx.tree_serialise_leaves`. Keep dynamic leaves as arrays and static fields
+  as JSON-compatible primitives or tuples; rebuild user callables yourself.
+- Use composition for bounds: `input_keys -> in_scaler -> inner -> out_scaler`.
+  Reparameterisation enforces physical bounds; penalties only discourage
+  saturation.
+- The shared tournament is the only tournament mode. It retries Diffrax or
+  non-finite failures, excludes the fixed-point bound penalty from ranking,
+  and includes any configured trajectory penalty.
+
+## Canonical physics boundary
 
 ```python
-import diffrax, jax.numpy as jnp, jax.random as jr
-import hybridmodels as hm
-
-key = jr.PRNGKey(0)
-k_init, k_train = jr.split(key, 2)
-
-# 1. Predictor: named inputs -> bounded physical output.
-inner = hm.MLPPredictor(in_size=1, out_size=1, width_size=64, depth=1,
-                        activation_name="relu", key=k_init)
-predictor = hm.BoundedPredictor(
-    input_keys=("temperature_C",),
-    in_scaler=hm.BoundScaler(bounds=((10.0, 40.0),), transform="sigmoid"),
-    inner=inner,
-    out_scaler=hm.BoundScaler(bounds=((1e-3, 1e3),), warp="log10", transform="algebraic"),
-)
-predictors = (predictor,)  # tuple even when there is only one
-
-# 2. simulate_fn with the mandatory signature.
 def simulate_fn(predictors, ts, covariates, y0, solver):
-    rate = predictors[0](covariates)
     def vector_field(t, y, args):
-        return -rate * y[0] + y[1]
-    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
+        inputs = {"temperature": covariates["temperature"], "state": y[0]}
+        rate = predictors[0](inputs)
+        return physics_rhs(t, y, rate)
 
-# 3. state_to_output: drop unmeasured state components.
-def state_to_output(state):
-    return state[..., :1]
-
-# 4. Data: one Experiment per physical run.
-exps = [
-    hm.make_experiment(
-        covariates={"temperature_C": 25.0},
-        channels={"conc": hm.ChannelObs(ts=ts, values=y, variance=v)},
-        y0_fn=lambda c, ch: jnp.array([ch["conc"].values[0], 0.0]),
-        exp_id=f"run_{i}",
-    )
-    for i, (ts, y, v) in enumerate(raw_measurements)
-]
-dataset = hm.make_dataset(exps, output_channel_names=("conc",))
-
-# 5. Train (key= is keyword-only, no default).
-solver = hm.SolverConfig(solver=diffrax.Tsit5(), rtol=1e-4, atol=1e-6, max_steps=50_000)
-config = hm.OptaxTrainingConfig(steps=(1000,), lr=(1e-3,), optimizer=("adamw",),
-                                reset_optimiser_state=(False,), loss="mse")
-history, trained = hm.train_with_optax(predictors, dataset, config,
-                                       simulate_fn=simulate_fn,
-                                       state_to_output=state_to_output,
-                                       solver=solver, key=k_train)
+    return solver.diffeqsolve(
+        diffrax.ODETerm(vector_field), ts, y0
+    ).ys
 ```
 
-Full runnable version: `examples/pendulum/train_harmonic.py`; canonical end-to-end: `examples/crystallisation/train_kinetic.py`.
+Callbacks run inside JAX transformations: return fixed shapes, avoid Python
+control flow on traced values, and guard divisions/logarithms before the
+invalid arithmetic. See `usage.md` for a complete pipeline.
 
-## Rules that agents get wrong (details in caveats.md)
+## Training and extension guidance
 
-1. **Freeze `BoundScaler.temperature`** — `mask = freeze_modules_of_type(trainable_mask(predictors), predictors, BoundScaler)`. Every example does this; training it slows convergence.
-2. **Bounds**: finite, `low < high`, physical units. Centre the box at your best guess + slack; a huge box whose midpoint is physically absurd makes the ODE intractably stiff at init. Decade-spanning bounds → `warp="log10"` (log warps reject non-positive bounds).
-3. **`transform="algebraic"`** for learned terms expected near their bounds (typical in a vector field): sigmoid's gradient dies at latent 16.8. Wide boxes + unlucky init → `MLPPredictor(...).with_zero_final_head()` to pin the initial output at the box midpoint.
-4. **`key=` is keyword-only and required** on both trainers. Never `jr.PRNGKey(0)` defaults.
-5. **Step = one full pass over all buckets** (one epoch). Bucket ≠ step. Phase fields (`steps`, `lr`, ...) are equal-length tuples, no scalar broadcast.
-6. **Every experiment must define every output channel.** Sensor offline? Drop the experiment, never pad zeros.
-7. **Guarded division guards the divisor**, not the result: `safe = jnp.where(d > eps, d, 1.0); r = jnp.where(d > eps, num / safe, 0.0)`. Same for `log` — clip the argument.
-8. **Stiff / mass-balance problems: enable x64 first** (`jax.config.update("jax_enable_x64", True)` before importing jax/diffrax). Float32 drifts visibly, e.g. `mu0` going negative.
-9. **Serialisation**: `load_run`/`load_predictors` need a template with the same container shape, module types, and static fields. Trainable configs with callables come back as metadata markers — rebind explicitly.
-10. **Turn on the tournament** (`tournament_attempts=8, tournament_steps=20`) when you see `RuntimeWarning: max_steps exceeded` or stable-but-pathological loss. No extra compile cost.
+- Freeze `BoundScaler` leaves by convention when the scaler temperature is
+  part of the predictor tree: `freeze_modules_of_type(mask, predictors,
+  BoundScaler)`.
+- Use Optax for differentiable medium/large parameter sets. Use Evosax for
+  small, kinetic-parameter-shaped searches; it has no per-individual failure
+  handling in v1.
+- For a custom loop, compose the public kernels in
+  `hybridmodels.training.kernels` over `dataset.bucket_payloads` in Python.
+- For code changes, follow TDD and update `SPEC.md` or `CONTEXT.md` only when
+  a decision or domain term genuinely changes.
+- For documentation changes, edit guide Markdown or source docstrings, never
+  generated `docs/api/*.md` directly. Run `npm --prefix docs run docs:gen`,
+  `uv run python scripts/gen_api_docs.py --check`, and
+  `npm --prefix docs run docs:build`.
 
-## Navigation
+## References
 
-- [usage.md](usage.md) — full API walkthrough with code: data, predictors, training configs, prediction, serialisation, losses
-- [caveats.md](caveats.md) — traps and tuning advice with the reasoning
-- Repo: `examples/` for working code, `docs/guide/*.md` for prose, `CONTEXT.md` for terminology, `SPEC.md` for the contract
-- Toolchain in this repo: `uv run pytest`, `uv run ruff check .`, `uv run ty check src`. Never `pip`/`pytest` directly.
+- [usage.md](usage.md) — exact API patterns, signatures, and return shapes.
+- [caveats.md](caveats.md) — JAX, numerical, solver, training, serialization,
+  and RNG traps.
+- Repository examples in `examples/` — executable behaviour references.
+- Human documentation in `docs/guide/` and generated API reference in
+  `docs/api/` — reader-oriented explanations and signatures.

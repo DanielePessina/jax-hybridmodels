@@ -61,7 +61,7 @@ Collapse bucketed predictions into per-channel summary stats.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `predictions` | `tuple of arrays, one per bucket` | From :func:`hybridmodels.prediction.predict_dataset`; each entry is ``[N_b, T_b, D]`` matching its ``BucketPayload``. |
+| `predictions` | `tuple of arrays, one per bucket` | From [`predict_dataset`](/api/prediction#predict_dataset); each entry is ``[N_b, T_b, D]`` matching its ``BucketPayload``. |
 | `dataset` | `Dataset` | The dataset that produced ``predictions``. Read for masks, observations, and channel names. |
 
 **Returns**
