@@ -29,7 +29,7 @@ from importlib import import_module, metadata
 from typing import TYPE_CHECKING, Any
 
 try:
-    __version__ = metadata.version("hybridmodels")
+    __version__ = metadata.version("jaxhybridmodels")
 except metadata.PackageNotFoundError:
     # Same policy as serialise._resolve_version: a checkout that has not
     # been ``uv sync``'d has no installed package metadata, and that must

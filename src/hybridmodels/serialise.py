@@ -154,14 +154,14 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
 
 
 def _resolve_version() -> str:
-    """Return the installed ``hybridmodels`` package version, or ``"unknown"``.
+    """Return the installed ``jaxhybridmodels`` version, or ``"unknown"``.
 
     ``importlib.metadata.version`` raises ``PackageNotFoundError`` when the
     package is not installed, as in a checkout that has not been ``uv
     sync``'d. Swallowed, so a save never fails over bookkeeping alone.
     """
     try:
-        return ilm.version("hybridmodels")
+        return ilm.version("jaxhybridmodels")
     except ilm.PackageNotFoundError:
         return "unknown"
 

@@ -1,0 +1,47 @@
+name: docs-check
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "src/**"
+      - "scripts/gen_api_docs.py"
+      - "pyproject.toml"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --python 3.12
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Install documentation dependencies
+        run: npm ci --prefix docs
+
+      - name: Check generated API reference
+        run: npm --prefix docs run docs:check:api
+
+      - name: Build documentation site
+        run: npm --prefix docs run docs:build

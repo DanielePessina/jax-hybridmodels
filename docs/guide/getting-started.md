@@ -43,12 +43,14 @@ whatever container you like".
 ## Installation
 
 The package needs Python 3.11 or newer and is managed with
-[`uv`](https://docs.astral.sh/uv/). It is not on PyPI yet, so install
-from GitHub:
+[`uv`](https://docs.astral.sh/uv/). Install the beta from PyPI:
 
 ```bash
-uv add git+https://github.com/DanielePessina/jax-hybridmodels
+uv add jaxhybridmodels==0.2.0b1
 ```
+
+The distribution is named `jaxhybridmodels`; import it in Python as
+`hybridmodels`.
 
 If you cloned the repository to work on it:
 

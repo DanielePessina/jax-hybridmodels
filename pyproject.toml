@@ -1,10 +1,24 @@
 [project]
-name = "hybridmodels"
-version = "0.1.0"
+name = "jaxhybridmodels"
+version = "0.2.0b1"
 description = "Hybrid ODE and neural models in JAX"
 readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [
     { name = "Daniele Pessina", email = "daniele.pessina18@imperial.ac.uk" }
+]
+keywords = ["jax", "diffrax", "equinox", "hybrid models", "neural ODE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+    "Topic :: Scientific/Engineering :: Mathematics",
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -31,6 +45,12 @@ examples = [
     "sympy>=1.14",
 ]
 
+[project.urls]
+Homepage = "https://github.com/DanielePessina/jax-hybridmodels"
+Documentation = "https://danielepessina.github.io/jax-hybridmodels/"
+Repository = "https://github.com/DanielePessina/jax-hybridmodels"
+Issues = "https://github.com/DanielePessina/jax-hybridmodels/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -43,6 +63,7 @@ include = [
     "/src",
     "/pyproject.toml",
     "/README.md",
+    "/CHANGELOG.md",
     "/LICENSE",
     "/CONTEXT.md",
     "/SPEC.md",

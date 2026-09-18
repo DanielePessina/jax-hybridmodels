@@ -1,6 +1,7 @@
-# hybridmodels docs
+# jaxhybridmodels docs
 
-VitePress documentation site for the `hybridmodels` package.
+VitePress documentation site for the `jaxhybridmodels` distribution and its
+`hybridmodels` Python import.
 
 ## Layout
 

@@ -1,4 +1,4 @@
-# jax-hybridmodels
+# jaxhybridmodels
 
 A JAX/Equinox library for combining user-written ODE dynamics with trainable
 predictors. It supports bounded physical quantities, regular and irregular
@@ -41,11 +41,14 @@ for the other workflows.
 
 ## Installation
 
-### From PyPI (once published)
+### From PyPI
 
 ```bash
-uv add hybridmodels
+uv add jaxhybridmodels==0.2.0b1
 ```
+
+The distribution is named `jaxhybridmodels`; the Python import remains
+`hybridmodels`.
 
 ### Development
 
@@ -75,4 +78,4 @@ and Pages deployment details.
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+BSD-3-Clause. See [LICENSE](./LICENSE).

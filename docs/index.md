@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: hybridmodels
+  name: jaxhybridmodels
   text: Train functions inside ODE models
   tagline: A JAX library for combining user-written differential equations with trainable predictors, bounded physical quantities, and irregular time-series data.
   actions:
@@ -47,7 +47,8 @@ page shows where to go for a real hybrid ODE.
 
 ## In a nutshell
 
-`hybridmodels` keeps the ODE simulation function in user code. The library
+`jaxhybridmodels` keeps the ODE simulation function in user code. The Python
+package is imported as `hybridmodels`. The library
 adds the surrounding data, predictor, and training machinery.
 
 | Part | Responsibility |
@@ -96,7 +97,7 @@ The package requires Python 3.11 or newer and uses
 [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-uv add git+https://github.com/DanielePessina/jax-hybridmodels
+uv add jaxhybridmodels==0.2.0b1
 ```
 
 For a checkout of the repository:

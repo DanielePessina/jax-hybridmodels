@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Typecheck
+        run: uv run ty check src
+
+      - name: Test
+        run: uv run pytest -q
+
+  package:
+    name: Build and validate distributions
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install
+        run: uv sync --frozen --python 3.12
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Validate distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Install the wheel in a clean environment
+        run: |
+          wheel_env="${RUNNER_TEMP}/jaxhybridmodels-wheel"
+          uv venv --python 3.12 "$wheel_env"
+          uv pip install --python "$wheel_env/bin/python" dist/*.whl
+          uv run --python "$wheel_env/bin/python" --no-project python -c \
+            'import hybridmodels; assert hybridmodels.__version__ == "0.2.0b1"'

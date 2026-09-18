@@ -5,7 +5,7 @@ import { defineConfig } from 'vitepress'
 // Keep a flat sidebar per section (Guide, Examples, API), with local search
 // and math rendering enabled for the ODE expressions in the examples.
 export default defineConfig({
-  title: 'hybridmodels',
+  title: 'jaxhybridmodels',
   description: 'Hybrid models in JAX — trainable predictors composed with user-written ODE dynamics.',
   base: '/jax-hybridmodels/',
 
@@ -89,7 +89,7 @@ export default defineConfig({
     },
 
     footer: {
-      message: 'Released under the MIT License.',
+      message: 'Released under the BSD-3-Clause License.',
     },
   },
 })
