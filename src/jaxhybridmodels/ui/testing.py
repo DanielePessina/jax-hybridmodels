@@ -2,7 +2,7 @@
 
 Used by ``tests/test_ui_callbacks.py`` and any training test that needs
 to assert on which events fired and in what order. It lives under
-``hybridmodels.ui.testing`` so it stays out of what ``hybridmodels.ui``
+``jaxhybridmodels.ui.testing`` so it stays out of what ``jaxhybridmodels.ui``
 re-exports.
 """
 

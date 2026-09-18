@@ -70,7 +70,7 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 
-from hybridmodels import SolverConfig, make_dataset, predict_dataset
+from jaxhybridmodels import SolverConfig, make_dataset, predict_dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -250,7 +250,7 @@ def main() -> None:
     # identical BoundedPredictor trained by ordinary backpropagation through
     # the solve. Both use the same zero-order-hold simulator, so the
     # discretisation is not a handicap applied only to the policy.
-    from hybridmodels.training import OptaxTrainingConfig, train_with_optax
+    from jaxhybridmodels.training import OptaxTrainingConfig, train_with_optax
 
     def fit(predictors, kind, key):
         """Train one activity model with optax, freezing the scalers."""

@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     MLPPredictor,

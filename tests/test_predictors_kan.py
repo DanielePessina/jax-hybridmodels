@@ -10,12 +10,12 @@ import jax.random as jr
 import jax.tree_util as jtu
 import pytest
 
-from hybridmodels.predictors import (
+from jaxhybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     KANPredictor,
 )
-from hybridmodels.predictors.kan import _scaffold_parts
+from jaxhybridmodels.predictors.kan import _scaffold_parts
 
 
 def _kan(
@@ -216,9 +216,9 @@ class TestWithZeroFinalHead:
 
 
 def test_top_level_export():
-    import hybridmodels
+    import jaxhybridmodels
 
-    assert hybridmodels.KANPredictor is KANPredictor
+    assert jaxhybridmodels.KANPredictor is KANPredictor
 
 
 class TestScaffoldCacheTracing:

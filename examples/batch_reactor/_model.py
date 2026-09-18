@@ -26,7 +26,7 @@ import jax.random as jr
 from jax import Array
 from jaxtyping import Float
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -118,7 +118,7 @@ def simulate_fn(
     covariates carry the parameters of a flat-ramp-flat heating profile
     (``ramp_t0``, ``ramp_t1``, ``T_lo``, ``T_hi``), and the profile is
     evaluated inside the vector field at the solver's continuous ``t``.
-    That is the ``hybridmodels.profiles`` pattern: profile parameters
+    That is the ``jaxhybridmodels.profiles`` pattern: profile parameters
     ride as ordinary scalar covariates, the pure-JAX profile callable
     produces the time-varying value, and the predictor's input dict is
     mixed at every step (``T(t)`` overrides the ``temperature_C`` key).

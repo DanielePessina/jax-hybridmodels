@@ -2,7 +2,7 @@
 
 A published, curated SBML model — Fujita et al., *Sci. Signal.* 2010, the
 EGF/ERK cascade (9 species, 11 reactions) — loaded from an actual `.xml`
-file and plugged into a `hybridmodels` fit, with one of its rate parameters
+file and plugged into a `jaxhybridmodels` fit, with one of its rate parameters
 supplied by a neural `BoundedPredictor`.
 
 The file is parsed with a small hand-rolled converter (`sbml_loader.py`):

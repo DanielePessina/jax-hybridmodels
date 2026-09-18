@@ -15,7 +15,7 @@
 
 ### `BoundTransform`
 
-<small>`from hybridmodels.transforms import BoundTransform` &nbsp;·&nbsp; also re-exported as `hybridmodels.BoundTransform`</small>
+<small>`from jaxhybridmodels.transforms import BoundTransform` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.BoundTransform`</small>
 
 ```python
 BoundTransform(
@@ -37,7 +37,7 @@ A squash from the whole real line into ``(0, 1)``, with its inverse and metadata
 | `inverse_slope` | `Callable` | ``d(inverse)/ds``. Builds the linear continuation that keeps ``to_latent`` differentiable for inputs that fall outside the box. |
 | `knee` | `float` | The latent at which ``forward`` reaches 0.95, where the physical value enters the outer 5% of its box. Default for ``BoundScaler.z_knee``. It must come from the transform: reusing sigmoid's 2.944 for softsign would start charging at 12.5% from the bound instead of 5%. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L67)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L67)</small>
 
 ---
 
@@ -45,7 +45,7 @@ A squash from the whole real line into ``(0, 1)``, with its inverse and metadata
 
 ### `BOUND_TRANSFORMS`
 
-<small>`from hybridmodels.transforms import BOUND_TRANSFORMS` &nbsp;·&nbsp; also re-exported as `hybridmodels.BOUND_TRANSFORMS`</small>
+<small>`from jaxhybridmodels.transforms import BOUND_TRANSFORMS` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.BOUND_TRANSFORMS`</small>
 
 ```python
 BOUND_TRANSFORMS = {
@@ -72,7 +72,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_bound_transform()`
 
-<small>`from hybridmodels.transforms import register_bound_transform` &nbsp;·&nbsp; also re-exported as `hybridmodels.register_bound_transform`</small>
+<small>`from jaxhybridmodels.transforms import register_bound_transform` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_bound_transform`</small>
 
 ```python
 register_bound_transform(name: 'str', transform: 'BoundTransform') -> 'None'
@@ -85,7 +85,7 @@ only the name, so a custom transform must be registered before a saved
 scaler that references it can be rebuilt. Re-registering an existing
 name overwrites without warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L200)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L200)</small>
 
 ---
 
@@ -93,7 +93,7 @@ name overwrites without warning.
 
 ### `Warp`
 
-<small>`from hybridmodels.transforms import Warp` &nbsp;·&nbsp; also re-exported as `hybridmodels.Warp`</small>
+<small>`from jaxhybridmodels.transforms import Warp` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.Warp`</small>
 
 ```python
 Warp(
@@ -116,7 +116,7 @@ coordinates, then the transform's inverse takes it to the latent.
 | `inverse` | `Callable` | Warped coordinate back to physical. Must invert ``forward`` exactly on the declared box. |
 | `requires_positive` | `bool` | Whether the warp is undefined at or below zero. Checked against the declared bounds at construction, where it raises a useful error rather than a silent nan inside a compiled solve. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L94)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L94)</small>
 
 ---
 
@@ -124,7 +124,7 @@ coordinates, then the transform's inverse takes it to the latent.
 
 ### `WARPS`
 
-<small>`from hybridmodels.transforms import WARPS` &nbsp;·&nbsp; also re-exported as `hybridmodels.WARPS`</small>
+<small>`from jaxhybridmodels.transforms import WARPS` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.WARPS`</small>
 
 ```python
 WARPS = {
@@ -151,7 +151,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_warp()`
 
-<small>`from hybridmodels.transforms import register_warp` &nbsp;·&nbsp; also re-exported as `hybridmodels.register_warp`</small>
+<small>`from jaxhybridmodels.transforms import register_warp` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_warp`</small>
 
 ```python
 register_warp(name: 'str', warp: 'Warp') -> 'None'
@@ -163,4 +163,4 @@ Same contract as [`register_bound_transform`](/api/transforms#register_bound_tra
 monotone on the declared box and ``inverse`` must undo ``forward``
 there, or the scaler's round trip stops being the identity.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/transforms.py#L211)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L211)</small>

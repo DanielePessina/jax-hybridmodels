@@ -4,8 +4,7 @@
 
 First public beta of the current v1 architecture.
 
-- Publish the `jaxhybridmodels` distribution; Python imports remain
-  `hybridmodels`.
+- Publish the `jaxhybridmodels` distribution and Python import.
 - Support bucketed-irregular experiments, user-written ODE dynamics, bounded
   predictors, Optax training, and Evosax training.
 - Include trajectory-aware penalties, profiles, schedules, ensembles,

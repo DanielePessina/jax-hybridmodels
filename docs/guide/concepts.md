@@ -1,6 +1,6 @@
 # Concepts
 
-`hybridmodels` combines a user-written ODE with trainable predictors. This
+`jaxhybridmodels` combines a user-written ODE with trainable predictors. This
 page gives the short version of the interfaces. Use the linked pages for
 details and examples.
 

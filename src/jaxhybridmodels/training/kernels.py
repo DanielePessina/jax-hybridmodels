@@ -1,7 +1,7 @@
 """Public gradient-kernel builders for writing your own training loop.
 
-The stock trainers (:func:`hybridmodels.training.optax.train_with_optax`,
-:func:`hybridmodels.training.evosax.train_with_evosax`) are assembled from
+The stock trainers (:func:`jaxhybridmodels.training.optax.train_with_optax`,
+:func:`jaxhybridmodels.training.evosax.train_with_evosax`) are assembled from
 these pieces. They are public so that a user who wants a custom loop —
 different accumulation, a custom regulariser, per-bucket weighting, a
 custom schedule — can compose the same kernels the framework uses, instead
@@ -23,7 +23,7 @@ kernels here are the compiled pieces that step makes:
   outside the bucket loop because it reads only the predictors tree and
   its point arrays. This is the bound penalty's slot: once per step, not
   once per bucket, at the per-leaf point arrays selected host-side by
-  :func:`hybridmodels.penalties.select_penalty_points`.
+  :func:`jaxhybridmodels.penalties.select_penalty_points`.
 - :func:`build_apply_update` — one jitted ``apply_update(predictors,
   grads, opt_state)``; the single optimiser update per step.
 
@@ -49,8 +49,8 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array
 
-from hybridmodels.data import BucketPayload
-from hybridmodels.solver import SolverConfig
+from jaxhybridmodels.data import BucketPayload
+from jaxhybridmodels.solver import SolverConfig
 
 
 def apply_length_mask(bp: BucketPayload, length_mask_fraction: Array) -> BucketPayload:
@@ -89,7 +89,7 @@ def simulate_bucket(
 
     ``[N, T, S]`` — the state *before* ``state_to_output``. Needed by
     trajectory-aware penalties, which read extra ODE components (see
-    :mod:`hybridmodels.penalties`). Uncompiled, like :func:`predict_bucket_obs`;
+    :mod:`jaxhybridmodels.penalties`). Uncompiled, like :func:`predict_bucket_obs`;
     each caller traces it into its own kernel.
     """
 
@@ -110,7 +110,7 @@ def predict_bucket_obs(
     """Simulate every experiment in the bucket and project to ``[N, T, D]``.
 
     The uncompiled shared core behind both :func:`predict_bucket
-    <hybridmodels.prediction.predict_bucket>` and the training kernels.
+    <jaxhybridmodels.prediction.predict_bucket>` and the training kernels.
     Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
     the training and prediction jit caches separate (R-J1): this body is
     traced into whichever kernel calls it.
@@ -230,13 +230,13 @@ def build_penalty_step(
     bucket.
 
     ``points`` are the per-leaf point arrays the penalty is evaluated at —
-    the output of :func:`hybridmodels.penalties.select_penalty_points` —
+    the output of :func:`jaxhybridmodels.penalties.select_penalty_points` —
     passed as traced arrays, so a shape change (a phase boundary) retraces
     this small kernel and nothing else. The default ``()`` suits a custom
     ``penalty_fn`` that ignores points.
 
     ``penalty_fn`` is the regulariser, required here and defaulted to
-    :func:`hybridmodels.penalties.bound_penalty` by the stock trainers.
+    :func:`jaxhybridmodels.penalties.bound_penalty` by the stock trainers.
     Passing a different callable (weight decay on inner weights, a
     monotonicity term, ...) is how a custom regulariser composes with the
     loop. It must take ``(predictors, points)`` and return a scalar; a

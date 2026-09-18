@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import pytest
 
-from hybridmodels import SolverConfig
+from jaxhybridmodels import SolverConfig
 
 _EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "batch_reactor"
 

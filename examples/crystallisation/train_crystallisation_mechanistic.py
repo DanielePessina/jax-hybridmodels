@@ -41,7 +41,7 @@ import jax.random as jr  # noqa: E402
 from jax import Array  # noqa: E402
 from jaxtyping import Float  # noqa: E402
 
-from hybridmodels import (  # noqa: E402
+from jaxhybridmodels import (  # noqa: E402
     BoundScaler,
     ChannelObs,
     Experiment,
@@ -52,7 +52,7 @@ from hybridmodels import (  # noqa: E402
     predict_dataset,
     print_metrics,
 )
-from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax  # noqa: E402
+from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402

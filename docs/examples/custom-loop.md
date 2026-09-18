@@ -1,7 +1,7 @@
 # Custom training loop
 
 The stock trainers — `train_with_optax`, `train_with_evosax` — are
-assembled from public pieces in `hybridmodels.training.kernels`. If you
+assembled from public pieces in `jaxhybridmodels.training.kernels`. If you
 want a loop the stock trainers do not express — a bespoke schedule,
 per-bucket weighting, a custom regulariser, a different accumulation
 rule — you compose those same kernels yourself instead of forking a

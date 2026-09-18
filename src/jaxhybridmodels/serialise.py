@@ -56,10 +56,10 @@ import equinox as eqx
 import jax.tree_util as jtu
 import optax
 
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.solver import SolverConfig
-from hybridmodels.training.evosax import EvosaxTrainingConfig
-from hybridmodels.training.optax import OptaxTrainingConfig
+from jaxhybridmodels.predictors.base import Predictor
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.training.evosax import EvosaxTrainingConfig
+from jaxhybridmodels.training.optax import OptaxTrainingConfig
 
 _PREDICTORS_FILENAME = "predictors.eqx"
 _METADATA_FILENAME = "metadata.json"
@@ -214,7 +214,7 @@ def _describe_predictors(predictors: Any) -> dict[str, Any]:
             # opaque because their enclosing shipped predictor owns the
             # serialisable architecture metadata.
             if not isinstance(node, Predictor) and not type(node).__module__.startswith(
-                "hybridmodels"
+                "jaxhybridmodels"
             ):
                 return
             for field in dataclasses.fields(type(node)):
@@ -429,7 +429,7 @@ def load_run(
         and saved_version != current_version
     ):
         raise ValueError(
-            f"Saved run targets hybridmodels version {saved_version!r}, "
+            f"Saved run targets jaxhybridmodels version {saved_version!r}, "
             f"but the installed package is {current_version!r}."
         )
 

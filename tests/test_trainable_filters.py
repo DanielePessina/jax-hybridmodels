@@ -8,12 +8,12 @@ import jax.random as jr
 import jax.tree_util as jtu
 import pytest
 
-from hybridmodels.predictors import (
+from jaxhybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     MLPPredictor,
 )
-from hybridmodels.trainable import (
+from jaxhybridmodels.trainable import (
     default_trainable,
     freeze_modules_of_type,
     freeze_paths,
@@ -53,7 +53,7 @@ def _leaves_equal(a, b) -> bool:
 
 def _path_to_dotted_first_leaf(mask) -> str:
     """First realised dotted path in a mask, for building a near-miss typo."""
-    from hybridmodels.trainable import _path_to_dotted
+    from jaxhybridmodels.trainable import _path_to_dotted
 
     return _path_to_dotted(jtu.tree_flatten_with_path(mask)[0][0][0])
 
@@ -181,7 +181,7 @@ class TestFreezeWhere:
         # test pins the leafless-module branch in freeze_where via a synthetic
         # Predictor subclass with no inexact-array leaves. Freezing a node
         # that contributes no leaves to the mask must leave the mask untouched.
-        from hybridmodels.predictors import Predictor
+        from jaxhybridmodels.predictors import Predictor
 
         class _LeaflessPredictor(Predictor):
             pass

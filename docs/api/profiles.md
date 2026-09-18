@@ -13,7 +13,7 @@
 
 ### `constant_profile()`
 
-<small>`from hybridmodels.profiles import constant_profile` &nbsp;·&nbsp; also re-exported as `hybridmodels.constant_profile`</small>
+<small>`from jaxhybridmodels.profiles import constant_profile` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.constant_profile`</small>
 
 ```python
 constant_profile(value: 'float') -> 'Callable[[Array], Array]'
@@ -25,7 +25,7 @@ The degenerate case, included so a code path can treat every
 quantity uniformly (a quantity is either a covariate or
 ``constant_profile(v)`` evaluated at ``t``).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/profiles.py#L30)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L30)</small>
 
 ---
 
@@ -33,7 +33,7 @@ quantity uniformly (a quantity is either a covariate or
 
 ### `step_profile()`
 
-<small>`from hybridmodels.profiles import step_profile` &nbsp;·&nbsp; also re-exported as `hybridmodels.step_profile`</small>
+<small>`from jaxhybridmodels.profiles import step_profile` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.step_profile`</small>
 
 ```python
 step_profile(
@@ -49,7 +49,7 @@ For a reactor, the moment a feed valve opens or a heater switches.
 Discontinuous at ``jump_at``; an adaptive solver sees a kink, so
 place the jump at a known event time or accept a short transient.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/profiles.py#L44)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L44)</small>
 
 ---
 
@@ -57,7 +57,7 @@ place the jump at a known event time or accept a short transient.
 
 ### `ramp_profile()`
 
-<small>`from hybridmodels.profiles import ramp_profile` &nbsp;·&nbsp; also re-exported as `hybridmodels.ramp_profile`</small>
+<small>`from jaxhybridmodels.profiles import ramp_profile` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.ramp_profile`</small>
 
 ```python
 ramp_profile(
@@ -79,7 +79,7 @@ check runs when the times are host-side values; inside ``jit``/``vmap``
 (per-experiment parameters from traced covariates) it is skipped, so
 the factory stays trace-safe.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/profiles.py#L58)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L58)</small>
 
 ---
 
@@ -87,7 +87,7 @@ the factory stays trace-safe.
 
 ### `piecewise_linear_profile()`
 
-<small>`from hybridmodels.profiles import piecewise_linear_profile` &nbsp;·&nbsp; also re-exported as `hybridmodels.piecewise_linear_profile`</small>
+<small>`from jaxhybridmodels.profiles import piecewise_linear_profile` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.piecewise_linear_profile`</small>
 
 ```python
 piecewise_linear_profile(
@@ -102,4 +102,4 @@ knots. Constant on both edges (the first and last values extend
 outward). Knots must be strictly increasing in ``t`` and contain at
 least two entries.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/profiles.py#L94)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L94)</small>

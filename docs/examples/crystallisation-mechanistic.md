@@ -88,7 +88,7 @@ never inspects it.
 
 ```python
 import equinox as eqx
-from hybridmodels import BoundScaler
+from jaxhybridmodels import BoundScaler
 
 LOGA_BOUNDS = (20.0, 65.0)
 GAMMA_BOUNDS = (0.15, 1.0)
@@ -180,7 +180,7 @@ result.
 ## Step 4: train with evosax (CMA-ES)
 
 ```python
-from hybridmodels import EvosaxTrainingConfig, train_with_evosax
+from jaxhybridmodels import EvosaxTrainingConfig, train_with_evosax
 
 predictor = KineticParameters(key=k_init)
 

@@ -34,15 +34,15 @@ from _harness import (
 )
 from jax import Array
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
-from hybridmodels.losses import masked_mse
-from hybridmodels.penalties import bound_penalty, box_grid
-from hybridmodels.prediction import predict_dataset
-from hybridmodels.predictors import BoundedPredictor, BoundScaler, MLPPredictor
-from hybridmodels.trainable import trainable_mask
-from hybridmodels.training.kernels import apply_length_mask
-from hybridmodels.training.optax import OptaxTrainingConfig, _shared_tournament, train_with_optax
-from hybridmodels.ui.testing import RecordingUI
+from jaxhybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
+from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.penalties import bound_penalty, box_grid
+from jaxhybridmodels.prediction import predict_dataset
+from jaxhybridmodels.predictors import BoundedPredictor, BoundScaler, MLPPredictor
+from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.training.kernels import apply_length_mask
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, _shared_tournament, train_with_optax
+from jaxhybridmodels.ui.testing import RecordingUI
 
 # The ``_bounded_predictors`` leaf reads ``input_keys=("omega_input",)``,
 # which the oscillator dataset's only covariate (``"id"``) does not

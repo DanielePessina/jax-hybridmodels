@@ -14,7 +14,7 @@ Per-channel evaluation of trained predictions, mirroring the loss mask disciplin
 
 ### `ChannelMetrics`
 
-<small>`from hybridmodels.metrics import ChannelMetrics` &nbsp;·&nbsp; also re-exported as `hybridmodels.ChannelMetrics`</small>
+<small>`from jaxhybridmodels.metrics import ChannelMetrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.ChannelMetrics`</small>
 
 ```python
 ChannelMetrics(
@@ -38,7 +38,7 @@ Metrics for a single output channel.
 | `mse, rmse, mae` | `Float[Array, ""]` | Error of ``predicted - observed`` over the masked cells. |
 | `r2` | `Float[Array, ""]` | ``1 - SS_res/SS_tot``; ``nan`` when the observations are constant and ``SS_tot`` is zero. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L33)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L33)</small>
 
 ---
 
@@ -46,7 +46,7 @@ Metrics for a single output channel.
 
 ### `compute_metrics()`
 
-<small>`from hybridmodels.metrics import compute_metrics` &nbsp;·&nbsp; also re-exported as `hybridmodels.compute_metrics`</small>
+<small>`from jaxhybridmodels.metrics import compute_metrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.compute_metrics`</small>
 
 ```python
 compute_metrics(
@@ -70,7 +70,7 @@ Collapse bucketed predictions into per-channel summary stats.
 | --- | --- | --- |
 | `dict[str, ChannelMetrics]` |  | Keyed by channel, in ``dataset.output_channel_names`` order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L64)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L64)</small>
 
 ---
 
@@ -78,7 +78,7 @@ Collapse bucketed predictions into per-channel summary stats.
 
 ### `print_metrics()`
 
-<small>`from hybridmodels.metrics import print_metrics` &nbsp;·&nbsp; also re-exported as `hybridmodels.print_metrics`</small>
+<small>`from jaxhybridmodels.metrics import print_metrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.print_metrics`</small>
 
 ```python
 print_metrics(
@@ -100,4 +100,4 @@ Scientific notation throughout, so one template stays readable across
 the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
 spanning nine decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/metrics.py#L146)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L146)</small>

@@ -43,7 +43,7 @@ from collections.abc import Callable
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from hybridmodels.data import BucketPayload
+from jaxhybridmodels.data import BucketPayload
 
 
 def _validate_channel_idx(channel_idx: tuple[int, ...], total_channels: int) -> None:

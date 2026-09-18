@@ -17,7 +17,7 @@ Serialisation uses Equinox's `tree_serialise_leaves` / `tree_deserialise_leaves`
 
 ### `save_predictors()`
 
-<small>`from hybridmodels.serialise import save_predictors` &nbsp;·&nbsp; also re-exported as `hybridmodels.save_predictors`</small>
+<small>`from jaxhybridmodels.serialise import save_predictors` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.save_predictors`</small>
 
 ```python
 save_predictors(path: 'str | Path', predictors: 'Any') -> 'None'
@@ -29,7 +29,7 @@ Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 the container shape, writing a flat binary stream of ``np.save``-encoded
 leaves. The caller picks the file extension; ``save_run`` uses ``.eqx``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L68)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L68)</small>
 
 ---
 
@@ -37,7 +37,7 @@ leaves. The caller picks the file extension; ``save_run`` uses ``.eqx``.
 
 ### `load_predictors()`
 
-<small>`from hybridmodels.serialise import load_predictors` &nbsp;·&nbsp; also re-exported as `hybridmodels.load_predictors`</small>
+<small>`from jaxhybridmodels.serialise import load_predictors` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.load_predictors`</small>
 
 ```python
 load_predictors(path: 'str | Path', predictors_template: 'Any') -> 'Any'
@@ -51,7 +51,7 @@ and per-leaf static configuration, such as the same ``in_size`` and
 the template's array leaves; its static fields supply the structure
 ``equinox`` needs. The template is not mutated.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L79)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L79)</small>
 
 ---
 
@@ -59,7 +59,7 @@ the template's array leaves; its static fields supply the structure
 
 ### `save_run()`
 
-<small>`from hybridmodels.serialise import save_run` &nbsp;·&nbsp; also re-exported as `hybridmodels.save_run`</small>
+<small>`from jaxhybridmodels.serialise import save_run` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.save_run`</small>
 
 ```python
 save_run(
@@ -97,7 +97,7 @@ Persist a complete training run to ``directory``.
 The directory is created, parents included. Existing files are
 overwritten: this saves rather than appends.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L263)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L263)</small>
 
 ---
 
@@ -105,7 +105,7 @@ overwritten: this saves rather than appends.
 
 ### `load_run()`
 
-<small>`from hybridmodels.serialise import load_run` &nbsp;·&nbsp; also re-exported as `hybridmodels.load_run`</small>
+<small>`from jaxhybridmodels.serialise import load_run` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.load_run`</small>
 
 ```python
 load_run(
@@ -137,4 +137,4 @@ into a function is the caller's job, usually
 | --- | --- | --- |
 | `dict` |  | Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver`` (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` \| dict \| None), ``evosax_config`` (``EvosaxTrainingConfig`` \| dict \| None), ``loss_history`` (``list[float] \| None``), ``loss_history_kind`` (``str \| None``), ``extras`` (``dict``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/serialise.py#L388)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L388)</small>

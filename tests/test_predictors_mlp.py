@@ -8,7 +8,7 @@ import jax.random as jr
 import jax.tree_util as jtu
 import pytest
 
-from hybridmodels.predictors import MLPPredictor
+from jaxhybridmodels.predictors import MLPPredictor
 
 
 def _mlp(
@@ -204,6 +204,6 @@ class TestWithZeroFinalHead:
 
 
 def test_top_level_export():
-    import hybridmodels
+    import jaxhybridmodels
 
-    assert hybridmodels.MLPPredictor is MLPPredictor
+    assert jaxhybridmodels.MLPPredictor is MLPPredictor

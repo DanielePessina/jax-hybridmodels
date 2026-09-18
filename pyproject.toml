@@ -55,7 +55,7 @@ Issues = "https://github.com/DanielePessina/jax-hybridmodels/issues"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# The wheel ships only the package (packages = src/hybridmodels). The sdist
+# The wheel ships only the package (packages = src/jaxhybridmodels). The sdist
 # ships source + docs/examples markdown and scripts, but deliberately not
 # the dependency tree, build artifacts, figures, or large data files.
 [tool.hatch.build.targets.sdist]
@@ -91,7 +91,7 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hybridmodels"]
+packages = ["src/jaxhybridmodels"]
 
 [dependency-groups]
 dev = [

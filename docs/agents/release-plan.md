@@ -1,4 +1,4 @@
-# Release plan — `hybridmodels` v1 → publication
+# Release plan — `jaxhybridmodels` v1 → publication
 
 Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), and [`build-plan.md`](./build-plan.md). This document is the **release-readiness and reframing plan**: it covers JAX-correctness hardening, the extensibility seams (public training kernels, injectable optimizer, penalty hook, evosax algorithms), folding example patterns into the library, the docs rewrite, the marimo→scripts migration, new examples, and SPEC reconciliation. Each workstream ends with a verifiable exit criterion. Nothing here reopens recorded SPEC decisions except where noted and gated behind an explicit SPEC amendment.
 
@@ -7,7 +7,7 @@ Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), and [
 | # | Decision |
 |---|---|
 | Q1 | SBML integration: use `jaxkineticmodel` (AbeelLab, PyPI `jaxkineticmodel`, JAX/Diffrax-native) as the JAX-native partner. RoadRunner only as a non-differentiable reference if needed. Example may use published dataset (Van Heerden glucose pulse) or synthetic. **Not** a flagship example. |
-| Q2 | Extensibility = public `hybridmodels.training.kernels` + config hooks (optimizer injectable, penalty hook). Not a full engine abstraction. |
+| Q2 | Extensibility = public `jaxhybridmodels.training.kernels` + config hooks (optimizer injectable, penalty hook). Not a full engine abstraction. |
 | Q3 | Fold only the 4 strong pure-library patterns: `metrics`, `diffrax_solve`, `describe_buckets`+`count_trainable_params`, `evaluate`+`default_trainable`. Defer plotting/synthetic-data/symlog/bespoke plots. |
 | Q4 | Optimizer: `(name | factory(learning_rate)->GradientTransformation | raw GradientTransformation)`. Names and factories are wrapped in `inject_hyperparams`; a raw instance is returned as-is and an lr change on one requires a reset. |
 | Q5 | `state_to_output` moves **off the Dataset** onto the model/prediction call. Dataset becomes pure data. A recorded SPEC decision (R-D7). |
@@ -28,34 +28,34 @@ Exit criterion: `tests/test_adjoint_consistency.py` green; a review-checklist do
 
 ### WS2 — Core extensibility (public kernels + config hooks)
 
-Exit criterion: a user can write a custom training loop against public `hybridmodels.training.kernels` without touching privates; `optimizer=` accepts names, callables, and raw transformations; a custom `penalty_fn` composes.
+Exit criterion: a user can write a custom training loop against public `jaxhybridmodels.training.kernels` without touching privates; `optimizer=` accepts names, callables, and raw transformations; a custom `penalty_fn` composes.
 
-1. **`hybridmodels/training/kernels.py`** — promote `_build_bucket_step`, `_apply_length_mask`, `_build_score_bucket`, `_build_apply_update`, `_build_penalty_step` (and the `_predict_bucket_obs` body) into a public module with docstrings. Keep `_training_step`/`_shared_tournament`/`_begin_phase` where they are. Update `tests/test_prediction.py:244` to import from the public path. `_resolve_loss_fn` becomes public (`losses.resolve_loss_fn`) — it is already part of the extension contract.
+1. **`jaxhybridmodels/training/kernels.py`** — promote `_build_bucket_step`, `_apply_length_mask`, `_build_score_bucket`, `_build_apply_update`, `_build_penalty_step` (and the `_predict_bucket_obs` body) into a public module with docstrings. Keep `_training_step`/`_shared_tournament`/`_begin_phase` where they are. Update `tests/test_prediction.py:244` to import from the public path. `_resolve_loss_fn` becomes public (`losses.resolve_loss_fn`) — it is already part of the extension contract.
 2. **Injectable optimizer** — `_build_optimizer` accepts `str | Callable[[float], optax.GradientTransformation] | optax.GradientTransformation`. Names and factories are wrapped in `optax.inject_hyperparams` so per-phase LR stays injectable; a raw instance is returned as-is, and the `_begin_phase` guard raises if a raw instance is given a per-phase `lr` change without `reset_optimiser_state=True`.
 3. **`penalty_fn` hook** — a config field / callable param defaulting to the current `bound_penalty` closure. Lets users add weight decay, monotonicity, or custom regularisers. Fixes the `_bounded_leaves` shape-coupling for free.
 4. **Evosax algorithm registry** — `register_algorithm` + `_SUPPORTED_ALGORITHMS` widened. Ship CMA-ES (default) + at least one more (e.g. `Sep_CMA_ES` or `SimpleES`). Serialisation story already exists to copy from `register_solver`.
 5. **Custom-loss + channel weighting** — fix the `TypeError` when a user callable loss meets `channel_idx`/`channel_weights` (losses.py:259-264): either document loudly that callables ignore channel config, or apply channel selection in the trainer before the user loss. Tests for both.
-6. **Export `bound_penalty`/`box_grid`/`data_penalty_points`** at top level (or document `hybridmodels.penalties` as the public path).
+6. **Export `bound_penalty`/`box_grid`/`data_penalty_points`** at top level (or document `jaxhybridmodels.penalties` as the public path).
 7. **Correctness/hygiene batch** — unique fold name for `_box_population` (evosax.py:390 collides with 373); refresh `rng.py` docstring name list (`init`/`phase_{i}` don't exist, `tournament_attempt_{i}`/`evosax_tell_{gen}` undocumented); fix `trainable.py:7-9` mechanism description; share the vmap-per-experiment core across `prediction.py`/`optax.py`/`evosax.py`; derive `__init__.py` `__all__`/`TYPE_CHECKING` from `_EXPORTS` with a drift test; delete dead `ui/_rich.py` or wire the UIs to its widgets; wire `EvosaxTrainingConfig.log_every` or delete it.
 
 ### WS3 — Fold example patterns into the library
 
 Exit criterion: each folded helper is in `src/`, has tests, and is used by the migrated examples (proving it's not dead).
 
-1. **`hybridmodels.metrics`** — masked per-channel MSE/RMSE/MAE/R². Today 4 implementations: `_shared/_diagnostics.py:49-106`, `crystallisation/notebook.py:1002-1036`, `batch_reactor/notebook.py:1228-1252`, `hybrid_ode/notebook.py:1203-1214`. API: `compute_metrics(predictions, bp_or_dataset) -> per-channel metrics dataclass`. Plots stay out of the library.
+1. **`jaxhybridmodels.metrics`** — masked per-channel MSE/RMSE/MAE/R². Today 4 implementations: `_shared/_diagnostics.py:49-106`, `crystallisation/notebook.py:1002-1036`, `batch_reactor/notebook.py:1228-1252`, `hybrid_ode/notebook.py:1203-1214`. API: `compute_metrics(predictions, bp_or_dataset) -> per-channel metrics dataclass`. Plots stay out of the library.
 2. **`diffrax_solve`** — a public helper that wraps `ODETerm`/`SaveAt(ts=...)`/`stepsize_controller()`/`max_steps`/`adjoint`/`jnp.asarray(sol.ys)`. Name is chosen for greppability: `diffrax_solve`. Lives beside `prediction.py` or on `SolverConfig` as a method. Keeps `simulate_fn` user-written — only the invocation is folded. Used by all migrated examples; kills ~18 boilerplate copies.
 3. **`describe_buckets(dataset) -> str`** in `data.py` — ~8 sites, two already named `describe_buckets`.
 4. **`count_trainable_params(predictors, mask)`** next to `trainable.py` — 2 identical sites.
 5. **`evaluate(predictor, covariates) -> float`** — predictor→float readout, ~6 sites.
 6. **`default_trainable(predictors, freeze=(...))`** — the `trainable_mask` + `freeze_modules_of_type(..., BoundScaler)` one-liner (~12 sites).
-7. Deferred (not folded): plotting, synthetic-data generators, symlog warp, batch-reactor bespoke plots. Move `_shared` to an importable `hybridmodels.examples` extra (or documented sys.path pattern) so notebooks/scripts can share without the hack.
+7. Deferred (not folded): plotting, synthetic-data generators, symlog warp, batch-reactor bespoke plots. Move `_shared` to an importable `jaxhybridmodels.examples` extra (or documented sys.path pattern) so notebooks/scripts can share without the hack.
 
 ### WS4 — Docs rewrite (reframe + technical-writing pass)
 
 Exit criterion: VitePress site builds clean; landing reframed; every stale/wrong doc fixed; API pages regenerated.
 
 1. **Reframe the landing** around the actual selling points: (a) regular & irregular data via bucketing, (b) embedding neural networks inside an ODE solver, (c) correct jit/vmap/autodiff, (d) extensibility/modularity where relevant. Tone per the equinox/diffrax/pysr research: "in a nutshell" landing, anti-magic rhetoric, "switch things out in the obvious way", stated expectations, "you own the physics".
-2. **Structure** — adopt the Kidger template: Landing → Getting started → Usage (data & bucketing, writing a simulate_fn, predictors & state_to_output, custom losses, custom training loops, extending hybridmodels) → Examples → API (Basic/Advanced split) → FAQ/Tricks/Citation. Add an **"Extending hybridmodels"** page (the extension-points bullet page; "It's completely possible to hack your own training setup").
+2. **Structure** — adopt the Kidger template: Landing → Getting started → Usage (data & bucketing, writing a simulate_fn, predictors & state_to_output, custom losses, custom training loops, extending jaxhybridmodels) → Examples → API (Basic/Advanced split) → FAQ/Tricks/Citation. Add an **"Extending jaxhybridmodels"** page (the extension-points bullet page; "It's completely possible to hack your own training setup").
 3. **Fix the stale/wrong content**:
    - `docs/guide/training.md:101-111` — tournament keeps the **best** candidate, not the first survivor (code + tests pin best-scoring-wins).
    - RNG fold names — document the real set (`tournament_attempt_{i}`, `evosax_tell_{gen}`), drop `init`/`phase_{i}`.
@@ -79,7 +79,7 @@ Exit criterion: no `marimo` anywhere (deps, HTML embeds, skills, ruff/ty exempti
 
 Exit criterion: each new example runs end-to-end and is documented.
 
-1. **Custom training loop example** (code-first, flagship for WS2) — a user writes their own loop against `hybridmodels.training.kernels`: custom accumulation, custom schedule, per-bucket weighting, custom regulariser via the penalty hook. Demonstrates "you should be able to hack".
+1. **Custom training loop example** (code-first, flagship for WS2) — a user writes their own loop against `jaxhybridmodels.training.kernels`: custom accumulation, custom schedule, per-bucket weighting, custom regulariser via the penalty hook. Demonstrates "you should be able to hack".
 2. **SBML→JAX example** (`jaxkineticmodel`) — load an SBML-derived kinetic model in JAX/Diffrax, embed a hybrid correction (neural term on the mechanistic rates), train. Optionally compare trajectories against a RoadRunner reference (non-differentiable). Data: published (Van Heerden glucose-pulse) or synthetic. Sits with the other examples, not flagship.
 3. Existing four examples (RL, hybrid_ode, crystallization, batch reactor) remain canonical after WS5 conversion.
 
@@ -90,7 +90,7 @@ Exit criterion: spec and code reconciled, test gaps closed, README updated, pack
 1. **SPEC reconciliation** — reconcile `NeuralNPolynomial` built-but-deferred; update §3 layout; config sketches; R-T2/R-T4 defaults; record the WS2/WS3/WS5 decisions that are hard to reverse in SPEC (state_to_output off the Dataset is R-D7; optimizer-injection + kernels-public are softer, document in CONTEXT).
 2. **Test-gap closure** — `trainable=` end-to-end through a trainer; custom-loss callable through a trainer; dict/tuple-shaped predictor pytrees through `train_with_*`/`predict_*`; standalone custom-`Predictor` serialisation round-trip in pytest (not just the example).
 3. **README** — update the docs/commands sections to reflect the marimo removal and new structure.
-4. **Version + publish** — `hybridmodels` is available on PyPI; set version, build, publish.
+4. **Version + publish** — `jaxhybridmodels` is available on PyPI; set version, build, publish.
 5. Optional: add a validation-dataset / eval-callback pathway (the `TrainingUI.on_step_end` gets loss only; `split_dataset` produces val splits nobody can use inside a run). Lower priority, additive.
 
 ## Suggested order

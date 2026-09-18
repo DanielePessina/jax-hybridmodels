@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from hybridmodels import BoundScaler
-from hybridmodels.transforms import (
+from jaxhybridmodels import BoundScaler
+from jaxhybridmodels.transforms import (
     BOUND_TRANSFORMS,
     WARPS,
     BoundTransform,

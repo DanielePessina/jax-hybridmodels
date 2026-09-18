@@ -17,7 +17,7 @@ The compiled pieces the stock trainers are assembled from. `build_bucket_step` i
 
 ### `apply_length_mask()`
 
-<small>`from hybridmodels.training.kernels import apply_length_mask` &nbsp;·&nbsp; also re-exported as `hybridmodels.apply_length_mask`</small>
+<small>`from jaxhybridmodels.training.kernels import apply_length_mask` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.apply_length_mask`</small>
 
 ```python
 apply_length_mask(bp: 'BucketPayload', length_mask_fraction: 'Array') -> 'BucketPayload'
@@ -37,7 +37,7 @@ The cutoff is clamped at 1. A fraction small enough to floor to zero
 would otherwise give an all-false mask, and every loss here divides by a
 count clamped at 1, so the step would silently score nothing.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L56)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L56)</small>
 
 ---
 
@@ -45,7 +45,7 @@ count clamped at 1, so the step would silently score nothing.
 
 ### `predict_bucket_obs()`
 
-<small>`from hybridmodels.training.kernels import predict_bucket_obs` &nbsp;·&nbsp; also re-exported as `hybridmodels.predict_bucket_obs`</small>
+<small>`from jaxhybridmodels.training.kernels import predict_bucket_obs` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_bucket_obs`</small>
 
 ```python
 predict_bucket_obs(
@@ -60,12 +60,12 @@ predict_bucket_obs(
 Simulate every experiment in the bucket and project to ``[N, T, D]``.
 
 The uncompiled shared core behind both `predict_bucket
-<hybridmodels.prediction.predict_bucket>` and the training kernels.
+<jaxhybridmodels.prediction.predict_bucket>` and the training kernels.
 Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
 the training and prediction jit caches separate (R-J1): this body is
 traced into whichever kernel calls it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L102)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L102)</small>
 
 ---
 
@@ -73,7 +73,7 @@ traced into whichever kernel calls it.
 
 ### `build_bucket_step()`
 
-<small>`from hybridmodels.training.kernels import build_bucket_step` &nbsp;·&nbsp; also re-exported as `hybridmodels.build_bucket_step`</small>
+<small>`from jaxhybridmodels.training.kernels import build_bucket_step` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.build_bucket_step`</small>
 
 ```python
 build_bucket_step(
@@ -105,7 +105,7 @@ penalty's once-per-step charge. When it is ``None`` (the default) this
 kernel is byte-for-byte what it was before — no extra simulate, no
 behaviour change.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L122)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L122)</small>
 
 ---
 
@@ -113,7 +113,7 @@ behaviour change.
 
 ### `build_score_bucket()`
 
-<small>`from hybridmodels.training.kernels import build_score_bucket` &nbsp;·&nbsp; also re-exported as `hybridmodels.build_score_bucket`</small>
+<small>`from jaxhybridmodels.training.kernels import build_score_bucket` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.build_score_bucket`</small>
 
 ```python
 build_score_bucket(
@@ -135,7 +135,7 @@ two attempts. The returned score includes the data loss and, when
 configured, the trajectory penalty; the bound penalty remains
 outside this per-bucket scorer.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L184)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L184)</small>
 
 ---
 
@@ -143,7 +143,7 @@ outside this per-bucket scorer.
 
 ### `build_penalty_step()`
 
-<small>`from hybridmodels.training.kernels import build_penalty_step` &nbsp;·&nbsp; also re-exported as `hybridmodels.build_penalty_step`</small>
+<small>`from jaxhybridmodels.training.kernels import build_penalty_step` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.build_penalty_step`</small>
 
 ```python
 build_penalty_step(
@@ -176,7 +176,7 @@ Returns the gradient of ``weight * penalty``, to add straight onto the
 averaged data gradient. ``penalty`` comes back unweighted, since that
 is what gets reported.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L220)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L220)</small>
 
 ---
 
@@ -184,7 +184,7 @@ is what gets reported.
 
 ### `build_apply_update()`
 
-<small>`from hybridmodels.training.kernels import build_apply_update` &nbsp;·&nbsp; also re-exported as `hybridmodels.build_apply_update`</small>
+<small>`from jaxhybridmodels.training.kernels import build_apply_update` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.build_apply_update`</small>
 
 ```python
 build_apply_update(
@@ -199,4 +199,4 @@ The single optimiser update per training step. Build once per
 optimiser; reuse its returned state across steps, rebuilding only at a
 reset/phase boundary.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/kernels.py#L269)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L269)</small>

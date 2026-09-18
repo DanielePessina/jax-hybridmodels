@@ -65,7 +65,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Float
 from scipy.stats import qmc
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -80,7 +80,7 @@ from hybridmodels import (
     predict_dataset,
     print_metrics,
 )
-from hybridmodels.training import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.training import OptaxTrainingConfig, train_with_optax
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

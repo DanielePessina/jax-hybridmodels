@@ -11,8 +11,8 @@ import io
 import sys
 from typing import Any
 
-from hybridmodels import EvosaxUI, SilentUI, TrainingUI
-from hybridmodels.ui.testing import RecordingUI
+from jaxhybridmodels import EvosaxUI, SilentUI, TrainingUI
+from jaxhybridmodels.ui.testing import RecordingUI
 
 
 def fire_representative_events(ui: Any) -> None:

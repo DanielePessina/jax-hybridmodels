@@ -3,7 +3,7 @@
 Reads an SBML file with python-libsbml, converts every kinetic law from
 libsbml's MathML AST to a sympy expression, and lambdifies the resulting
 species ODEs against JAX. The output is a plain callable vector field
-``(t, y, params) -> dy/dt`` suitable for use inside a ``hybridmodels``
+``(t, y, params) -> dy/dt`` suitable for use inside a ``jaxhybridmodels``
 ``simulate_fn`` — no events, no function definitions, no global config
 changes (in particular, this module never calls ``jax.config.update``).
 

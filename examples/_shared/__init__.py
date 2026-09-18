@@ -1,7 +1,7 @@
 """Reporting machinery the examples would otherwise duplicate.
 
 A high-DPI matplotlib style, per-channel diagnostics (MSE/RMSE/MAE/R^2),
-and two default plots. Deliberately outside ``hybridmodels``, which ships
+and two default plots. Deliberately outside ``jaxhybridmodels``, which ships
 no plotting.
 
 Example scripts run as ``__main__`` under ``examples/<scenario>/``, so they

@@ -17,9 +17,9 @@ import pytest
 from _harness import OMEGA_TRUE, OmegaPredictor, solver_config, y0_fn_factory
 from jax import Array
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
-from hybridmodels.prediction import predict_bucket, predict_dataset
-from hybridmodels.solver import SolverConfig
+from jaxhybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
+from jaxhybridmodels.prediction import predict_bucket, predict_dataset
+from jaxhybridmodels.solver import SolverConfig
 
 
 def _solver() -> SolverConfig:
@@ -308,8 +308,8 @@ class TestCompileCaching:
         # prediction.py jits separately from the training kernels precisely
         # so the two graphs cannot collide. Build a training step over the
         # same bucket and check prediction still traces its own.
-        from hybridmodels.trainable import trainable_mask
-        from hybridmodels.training.kernels import build_bucket_step
+        from jaxhybridmodels.trainable import trainable_mask
+        from jaxhybridmodels.training.kernels import build_bucket_step
 
         traces = {"n": 0}
 

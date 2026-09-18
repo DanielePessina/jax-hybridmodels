@@ -21,7 +21,7 @@ parameters may move. ``save_run`` writes the result to disk.
 
 Every public name below is imported lazily: the ``TYPE_CHECKING`` block
 gives type checkers the real symbols, and ``__getattr__`` resolves a name
-to its module only when read. That keeps ``import hybridmodels`` from
+to its module only when read. That keeps ``import jaxhybridmodels`` from
 pulling in diffrax, optax, evosax and rich on a run that needs none.
 """
 
@@ -37,7 +37,7 @@ except metadata.PackageNotFoundError:
     __version__ = "unknown"
 
 if TYPE_CHECKING:
-    from hybridmodels.data import (
+    from jaxhybridmodels.data import (
         BucketPayload,
         ChannelObs,
         Dataset,
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
         make_experiment,
         split_dataset,
     )
-    from hybridmodels.losses import (
+    from jaxhybridmodels.losses import (
         LOSS_REGISTRY,
         bal_mle,
         bal_mse,
@@ -56,8 +56,8 @@ if TYPE_CHECKING:
         masked_mse,
         resolve_loss_fn,
     )
-    from hybridmodels.metrics import ChannelMetrics, compute_metrics, print_metrics
-    from hybridmodels.penalties import (
+    from jaxhybridmodels.metrics import ChannelMetrics, compute_metrics, print_metrics
+    from jaxhybridmodels.penalties import (
         PenaltyPointSource,
         attach_penalty_state,
         bound_penalty,
@@ -76,14 +76,14 @@ if TYPE_CHECKING:
         trajectory_saturation_penalty,
         validate_penalty_points,
     )
-    from hybridmodels.prediction import (
+    from jaxhybridmodels.prediction import (
         ensemble_predictions,
         evaluate_predictor,
         predict_bucket,
         predict_dataset,
         predict_dense,
     )
-    from hybridmodels.predictors import (
+    from jaxhybridmodels.predictors import (
         BoundedPredictor,
         BoundScaler,
         KANPredictor,
@@ -93,28 +93,28 @@ if TYPE_CHECKING:
         reinitialize_pytree_with_key,
         reinitialize_with_key,
     )
-    from hybridmodels.profiles import (
+    from jaxhybridmodels.profiles import (
         constant_profile,
         piecewise_linear_profile,
         ramp_profile,
         step_profile,
     )
-    from hybridmodels.rng import fold
-    from hybridmodels.schedules import annealing_schedule
-    from hybridmodels.serialise import (
+    from jaxhybridmodels.rng import fold
+    from jaxhybridmodels.schedules import annealing_schedule
+    from jaxhybridmodels.serialise import (
         load_predictors,
         load_run,
         save_predictors,
         save_run,
     )
-    from hybridmodels.solver import (
+    from jaxhybridmodels.solver import (
         ADJOINT_REGISTRY,
         SOLVER_REGISTRY,
         SolverConfig,
         register_adjoint,
         register_solver,
     )
-    from hybridmodels.trainable import (
+    from jaxhybridmodels.trainable import (
         count_trainable_params,
         default_trainable,
         freeze_modules_of_type,
@@ -123,7 +123,7 @@ if TYPE_CHECKING:
         frozen_default_mask,
         trainable_mask,
     )
-    from hybridmodels.training import (
+    from jaxhybridmodels.training import (
         EvosaxTrainingConfig,
         OptaxTrainingConfig,
         train_bootstrap_ensemble,
@@ -131,8 +131,8 @@ if TYPE_CHECKING:
         train_with_evosax,
         train_with_optax,
     )
-    from hybridmodels.training.evosax import register_algorithm
-    from hybridmodels.training.kernels import (
+    from jaxhybridmodels.training.evosax import register_algorithm
+    from jaxhybridmodels.training.kernels import (
         apply_length_mask,
         build_apply_update,
         build_bucket_step,
@@ -140,7 +140,7 @@ if TYPE_CHECKING:
         build_score_bucket,
         predict_bucket_obs,
     )
-    from hybridmodels.transforms import (
+    from jaxhybridmodels.transforms import (
         BOUND_TRANSFORMS,
         WARPS,
         BoundTransform,
@@ -148,7 +148,7 @@ if TYPE_CHECKING:
         register_bound_transform,
         register_warp,
     )
-    from hybridmodels.ui import (
+    from jaxhybridmodels.ui import (
         EvosaxUI,
         RichEvosaxUI,
         RichTrainingUI,
@@ -254,100 +254,100 @@ __all__: list[str] = [
 ]
 
 _EXPORTS: dict[str, str] = {
-    "ADJOINT_REGISTRY": "hybridmodels.solver",
-    "BOUND_TRANSFORMS": "hybridmodels.transforms",
-    "BoundTransform": "hybridmodels.transforms",
-    "annealing_schedule": "hybridmodels.schedules",
-    "BoundedPredictor": "hybridmodels.predictors",
-    "BoundScaler": "hybridmodels.predictors",
-    "BucketPayload": "hybridmodels.data",
-    "ChannelObs": "hybridmodels.data",
-    "Dataset": "hybridmodels.data",
-    "EvosaxTrainingConfig": "hybridmodels.training",
-    "EvosaxUI": "hybridmodels.ui",
-    "Experiment": "hybridmodels.data",
-    "KANPredictor": "hybridmodels.predictors",
-    "LOSS_REGISTRY": "hybridmodels.losses",
-    "MLPPredictor": "hybridmodels.predictors",
-    "NeuralNPolynomial": "hybridmodels.predictors",
-    "OptaxTrainingConfig": "hybridmodels.training",
-    "PenaltyPointSource": "hybridmodels.penalties",
-    "Predictor": "hybridmodels.predictors",
-    "RichEvosaxUI": "hybridmodels.ui",
-    "RichTrainingUI": "hybridmodels.ui",
-    "SOLVER_REGISTRY": "hybridmodels.solver",
-    "SilentUI": "hybridmodels.ui",
-    "SolverConfig": "hybridmodels.solver",
-    "TrainingUI": "hybridmodels.ui",
-    "bal_mle": "hybridmodels.losses",
-    "bal_mse": "hybridmodels.losses",
-    "attach_penalty_state": "hybridmodels.penalties",
-    "bound_penalty": "hybridmodels.penalties",
-    "box_grid": "hybridmodels.penalties",
-    "box_violation": "hybridmodels.penalties",
-    "build_apply_update": "hybridmodels.training.kernels",
-    "build_bucket_step": "hybridmodels.training.kernels",
-    "build_penalty_step": "hybridmodels.training.kernels",
-    "build_score_bucket": "hybridmodels.training.kernels",
-    "ChannelMetrics": "hybridmodels.metrics",
-    "clip_ste": "hybridmodels.penalties",
-    "data_penalty_points": "hybridmodels.penalties",
-    "length_mask_keep": "hybridmodels.penalties",
-    "select_penalty_points": "hybridmodels.penalties",
-    "constant_profile": "hybridmodels.profiles",
-    "penalty_integral": "hybridmodels.penalties",
-    "penalty_vector_field": "hybridmodels.penalties",
-    "compute_metrics": "hybridmodels.metrics",
-    "count_trainable_params": "hybridmodels.trainable",
-    "default_trainable": "hybridmodels.trainable",
-    "describe_buckets": "hybridmodels.data",
-    "ensemble_predictions": "hybridmodels.prediction",
-    "evaluate_predictor": "hybridmodels.prediction",
-    "fold": "hybridmodels.rng",
-    "freeze_modules_of_type": "hybridmodels.trainable",
-    "freeze_paths": "hybridmodels.trainable",
-    "freeze_where": "hybridmodels.trainable",
-    "frozen_default_mask": "hybridmodels.trainable",
-    "load_predictors": "hybridmodels.serialise",
-    "load_run": "hybridmodels.serialise",
-    "make_bootstrap_dataset": "hybridmodels.data",
-    "make_dataset": "hybridmodels.data",
-    "make_experiment": "hybridmodels.data",
-    "masked_mle": "hybridmodels.losses",
-    "masked_mse": "hybridmodels.losses",
-    "piecewise_linear_profile": "hybridmodels.profiles",
-    "predict_bucket": "hybridmodels.prediction",
-    "predict_bucket_obs": "hybridmodels.training.kernels",
-    "predict_dataset": "hybridmodels.prediction",
-    "predict_dense": "hybridmodels.prediction",
-    "print_metrics": "hybridmodels.metrics",
-    "ramp_profile": "hybridmodels.profiles",
-    "register_adjoint": "hybridmodels.solver",
-    "register_algorithm": "hybridmodels.training.evosax",
-    "register_bound_transform": "hybridmodels.transforms",
-    "register_solver": "hybridmodels.solver",
-    "register_warp": "hybridmodels.transforms",
-    "reinitialize_pytree_with_key": "hybridmodels.predictors",
-    "reinitialize_with_key": "hybridmodels.predictors",
-    "resolve_loss_fn": "hybridmodels.losses",
-    "save_predictors": "hybridmodels.serialise",
-    "save_run": "hybridmodels.serialise",
-    "soft_inverse": "hybridmodels.penalties",
-    "step_profile": "hybridmodels.profiles",
-    "strip_penalty_state": "hybridmodels.penalties",
-    "soft_logit": "hybridmodels.penalties",
-    "softclip": "hybridmodels.penalties",
-    "trajectory_saturation_penalty": "hybridmodels.penalties",
-    "split_dataset": "hybridmodels.data",
-    "train_bootstrap_ensemble": "hybridmodels.training",
-    "train_seed_ensemble": "hybridmodels.training",
-    "train_with_evosax": "hybridmodels.training",
-    "train_with_optax": "hybridmodels.training",
-    "trainable_mask": "hybridmodels.trainable",
-    "validate_penalty_points": "hybridmodels.penalties",
-    "apply_length_mask": "hybridmodels.training.kernels",
-    "Warp": "hybridmodels.transforms",
-    "WARPS": "hybridmodels.transforms",
+    "ADJOINT_REGISTRY": "jaxhybridmodels.solver",
+    "BOUND_TRANSFORMS": "jaxhybridmodels.transforms",
+    "BoundTransform": "jaxhybridmodels.transforms",
+    "annealing_schedule": "jaxhybridmodels.schedules",
+    "BoundedPredictor": "jaxhybridmodels.predictors",
+    "BoundScaler": "jaxhybridmodels.predictors",
+    "BucketPayload": "jaxhybridmodels.data",
+    "ChannelObs": "jaxhybridmodels.data",
+    "Dataset": "jaxhybridmodels.data",
+    "EvosaxTrainingConfig": "jaxhybridmodels.training",
+    "EvosaxUI": "jaxhybridmodels.ui",
+    "Experiment": "jaxhybridmodels.data",
+    "KANPredictor": "jaxhybridmodels.predictors",
+    "LOSS_REGISTRY": "jaxhybridmodels.losses",
+    "MLPPredictor": "jaxhybridmodels.predictors",
+    "NeuralNPolynomial": "jaxhybridmodels.predictors",
+    "OptaxTrainingConfig": "jaxhybridmodels.training",
+    "PenaltyPointSource": "jaxhybridmodels.penalties",
+    "Predictor": "jaxhybridmodels.predictors",
+    "RichEvosaxUI": "jaxhybridmodels.ui",
+    "RichTrainingUI": "jaxhybridmodels.ui",
+    "SOLVER_REGISTRY": "jaxhybridmodels.solver",
+    "SilentUI": "jaxhybridmodels.ui",
+    "SolverConfig": "jaxhybridmodels.solver",
+    "TrainingUI": "jaxhybridmodels.ui",
+    "bal_mle": "jaxhybridmodels.losses",
+    "bal_mse": "jaxhybridmodels.losses",
+    "attach_penalty_state": "jaxhybridmodels.penalties",
+    "bound_penalty": "jaxhybridmodels.penalties",
+    "box_grid": "jaxhybridmodels.penalties",
+    "box_violation": "jaxhybridmodels.penalties",
+    "build_apply_update": "jaxhybridmodels.training.kernels",
+    "build_bucket_step": "jaxhybridmodels.training.kernels",
+    "build_penalty_step": "jaxhybridmodels.training.kernels",
+    "build_score_bucket": "jaxhybridmodels.training.kernels",
+    "ChannelMetrics": "jaxhybridmodels.metrics",
+    "clip_ste": "jaxhybridmodels.penalties",
+    "data_penalty_points": "jaxhybridmodels.penalties",
+    "length_mask_keep": "jaxhybridmodels.penalties",
+    "select_penalty_points": "jaxhybridmodels.penalties",
+    "constant_profile": "jaxhybridmodels.profiles",
+    "penalty_integral": "jaxhybridmodels.penalties",
+    "penalty_vector_field": "jaxhybridmodels.penalties",
+    "compute_metrics": "jaxhybridmodels.metrics",
+    "count_trainable_params": "jaxhybridmodels.trainable",
+    "default_trainable": "jaxhybridmodels.trainable",
+    "describe_buckets": "jaxhybridmodels.data",
+    "ensemble_predictions": "jaxhybridmodels.prediction",
+    "evaluate_predictor": "jaxhybridmodels.prediction",
+    "fold": "jaxhybridmodels.rng",
+    "freeze_modules_of_type": "jaxhybridmodels.trainable",
+    "freeze_paths": "jaxhybridmodels.trainable",
+    "freeze_where": "jaxhybridmodels.trainable",
+    "frozen_default_mask": "jaxhybridmodels.trainable",
+    "load_predictors": "jaxhybridmodels.serialise",
+    "load_run": "jaxhybridmodels.serialise",
+    "make_bootstrap_dataset": "jaxhybridmodels.data",
+    "make_dataset": "jaxhybridmodels.data",
+    "make_experiment": "jaxhybridmodels.data",
+    "masked_mle": "jaxhybridmodels.losses",
+    "masked_mse": "jaxhybridmodels.losses",
+    "piecewise_linear_profile": "jaxhybridmodels.profiles",
+    "predict_bucket": "jaxhybridmodels.prediction",
+    "predict_bucket_obs": "jaxhybridmodels.training.kernels",
+    "predict_dataset": "jaxhybridmodels.prediction",
+    "predict_dense": "jaxhybridmodels.prediction",
+    "print_metrics": "jaxhybridmodels.metrics",
+    "ramp_profile": "jaxhybridmodels.profiles",
+    "register_adjoint": "jaxhybridmodels.solver",
+    "register_algorithm": "jaxhybridmodels.training.evosax",
+    "register_bound_transform": "jaxhybridmodels.transforms",
+    "register_solver": "jaxhybridmodels.solver",
+    "register_warp": "jaxhybridmodels.transforms",
+    "reinitialize_pytree_with_key": "jaxhybridmodels.predictors",
+    "reinitialize_with_key": "jaxhybridmodels.predictors",
+    "resolve_loss_fn": "jaxhybridmodels.losses",
+    "save_predictors": "jaxhybridmodels.serialise",
+    "save_run": "jaxhybridmodels.serialise",
+    "soft_inverse": "jaxhybridmodels.penalties",
+    "step_profile": "jaxhybridmodels.profiles",
+    "strip_penalty_state": "jaxhybridmodels.penalties",
+    "soft_logit": "jaxhybridmodels.penalties",
+    "softclip": "jaxhybridmodels.penalties",
+    "trajectory_saturation_penalty": "jaxhybridmodels.penalties",
+    "split_dataset": "jaxhybridmodels.data",
+    "train_bootstrap_ensemble": "jaxhybridmodels.training",
+    "train_seed_ensemble": "jaxhybridmodels.training",
+    "train_with_evosax": "jaxhybridmodels.training",
+    "train_with_optax": "jaxhybridmodels.training",
+    "trainable_mask": "jaxhybridmodels.trainable",
+    "validate_penalty_points": "jaxhybridmodels.penalties",
+    "apply_length_mask": "jaxhybridmodels.training.kernels",
+    "Warp": "jaxhybridmodels.transforms",
+    "WARPS": "jaxhybridmodels.transforms",
 }
 
 

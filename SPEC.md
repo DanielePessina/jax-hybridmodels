@@ -39,7 +39,7 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-D6**: `y0` is the full model state, constructed at data-import time via a user-supplied `y0_fn` hook and stored on `Experiment`.
 - **R-D7**: `state_to_output` maps a full state trajectory to observed channels and is applied externally to `simulate_fn`'s output, before loss. It is a property of the *model*, passed to prediction and training as a keyword argument — not stored on the `Dataset`.
 - **R-D8**: `split_dataset(dataset, *, train, val, test, key)` is provided.
-- **R-D9**: Exogenous time-varying quantities enter through **profile factories** (`hybridmodels.profiles`: `constant_profile`, `step_profile`, `ramp_profile`, `piecewise_linear_profile`). A profile is a pure-JAX callable `t -> Array` evaluated inside the user's vector field at the solver's continuous `t`; its *parameters* travel as ordinary R-D5 covariates, so the data layer, bucketing, and the mandatory `simulate_fn` signature are untouched. The two flat edges are exact: `ramp_profile(t0, t1, v0, v1)` returns `v0` before `t0` and `v1` after `t1`; `piecewise_linear_profile` extends the first/last values outward. Factories validate host-side parameters (`t1 > t0`, strictly increasing knots) and skip validation for traced values so they stay `jit`/`vmap`-safe.
+- **R-D9**: Exogenous time-varying quantities enter through **profile factories** (`jaxhybridmodels.profiles`: `constant_profile`, `step_profile`, `ramp_profile`, `piecewise_linear_profile`). A profile is a pure-JAX callable `t -> Array` evaluated inside the user's vector field at the solver's continuous `t`; its *parameters* travel as ordinary R-D5 covariates, so the data layer, bucketing, and the mandatory `simulate_fn` signature are untouched. The two flat edges are exact: `ramp_profile(t0, t1, v0, v1)` returns `v0` before `t0` and `v1` after `t1`; `piecewise_linear_profile` extends the first/last values outward. Factories validate host-side parameters (`t1 > t0`, strictly increasing knots) and skip validation for traced values so they stay `jit`/`vmap`-safe.
 
 #### Training (Optax)
 
@@ -47,12 +47,12 @@ This section is the contract. Implementation is judged against these line by lin
 - **R-T2**: The phase-keyed config fields (`steps, lr, optimizer, reset_optimiser_state, length_schedule`) are tuples of equal length (no scalar broadcast). `steps`, `lr`, `optimizer`, and `reset_optimiser_state` are required with no default; `length_schedule` defaults to `(1.0,)` for a single phase (scoring everything).
 - **R-T3**: `length_schedule` (per-phase fraction in `(0, 1]`) is implemented as a runtime mask cutoff to avoid JIT recompile across phase boundaries.
 - **R-T4**: `reset_optimiser_state` per phase rebuilds the optimiser at that phase boundary. It is a required per-phase tuple with no default: every phase states explicitly whether it resets, so a phase switch cannot silently keep a stale optimiser.
-- **R-T5**: `bucket_step(predictors, bucket_payload, length_mask_fraction)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. It takes no `opt_state`: the optimiser update lives in a separate jitted `apply_update`, which is what the rest of this requirement already says. The bound penalty is *not* computed here; it is charged once per step by `build_penalty_step` (public in `hybridmodels.training.kernels`), outside the bucket loop.
+- **R-T5**: `bucket_step(predictors, bucket_payload, length_mask_fraction)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. It takes no `opt_state`: the optimiser update lives in a separate jitted `apply_update`, which is what the rest of this requirement already says. The bound penalty is *not* computed here; it is charged once per step by `build_penalty_step` (public in `jaxhybridmodels.training.kernels`), outside the bucket loop.
 - **R-T6**: Shared tournament only. Implicitly enabled when `tournament_steps > 0 AND tournament_attempts > 1`. Reuses the main loop's compiled `bucket_step` and `apply_update`. Every surviving candidate is scored on the data term with a forward-only pass and the **lowest-scoring** one is returned; ties keep the earlier attempt, so the result is a deterministic function of `key`.
 - **R-T7**: Tournament failure handling: on per-attempt failure (diffrax error, non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original `predictors` pytree with a `RuntimeWarning`.
 - **R-T8**: `Predictor.initialized_with_key(key)` is a documented per-leaf protocol used by the tournament; default free-function implementation is `reinitialize_with_key(predictor, key)` for one Module. Across the `predictors` pytree, the tournament splits the per-attempt key by traversal order (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently. Identical-shape sibling predictors get *different* re-init weights.
 - **R-T9**: Per-phase state resets. `patience` and the `restore_best` running minimum are both scoped to a horizon, not to the run. `patience` resets at every phase boundary, so a plateau at the end of one phase cannot stop the next before its new learning rate acts. `best_loss`/`best_predictors` reset at a boundary where `length_schedule` changes, because losses measured over a prefix and losses measured over the full window are not comparable and one running minimum across both lands in the shortest phase. The restored model therefore always comes from the final horizon.
-- **R-T10**: `annealing_schedule` (in `hybridmodels.schedules`) provides epoch-scaled schedule multipliers for custom loops: `schedule(step) -> float` in `[end_value, init_value]` with the run length baked in, built on optax schedule helpers, with kinds `"cosine"`, `"linear"`, `"warmup_cosine"`, `"exponential"`. The stock trainers do not take it (they express strategy changes as phases, R-T2); it composes as `lr = base_lr * schedule(step)`. Named `annealing_schedule` — never "temperature" — to stay distinct from chemistry and `BoundScaler.temperature`.
+- **R-T10**: `annealing_schedule` (in `jaxhybridmodels.schedules`) provides epoch-scaled schedule multipliers for custom loops: `schedule(step) -> float` in `[end_value, init_value]` with the run length baked in, built on optax schedule helpers, with kinds `"cosine"`, `"linear"`, `"warmup_cosine"`, `"exponential"`. The stock trainers do not take it (they express strategy changes as phases, R-T2); it composes as `lr = base_lr * schedule(step)`. Named `annealing_schedule` — never "temperature" — to stay distinct from chemistry and `BoundScaler.temperature`.
 
 #### Training (Evosax)
 
@@ -151,7 +151,7 @@ jax-hybridmodels/                      (repo)
 │   ├── guide/                          (concepts, predictors, penalties, training, ...)
 │   └── examples/                       (per-example walkthroughs)
 ├── src/
-│   └── hybridmodels/
+│   └── jaxhybridmodels/
 │       ├── __init__.py                 (lazy public API re-exports)
 │       ├── data.py                     (Experiment, ChannelObs, Dataset, BucketPayload, make_dataset, split_dataset)
 │       ├── transforms.py                (BOUND_TRANSFORMS, WARPS, register_bound_transform, register_warp)
@@ -205,7 +205,7 @@ jax-hybridmodels/                      (repo)
 
 ```toml
 [project]
-name = "hybridmodels"
+name = "jaxhybridmodels"
 requires-python = ">=3.11"
 dependencies = [
     "jax>=0.4.30",
@@ -251,12 +251,12 @@ Do not invoke `pip`, `python`, or `pytest` directly without `uv run`. The lockfi
 
 ## 4. Public API
 
-All public names are re-exported from `hybridmodels` via lazy `__getattr__` in `src/hybridmodels/__init__.py`.
+All public names are re-exported from `jaxhybridmodels` via lazy `__getattr__` in `src/jaxhybridmodels/__init__.py`.
 
 ### 4.1 Data
 
 ```python
-from hybridmodels import (
+from jaxhybridmodels import (
     ChannelObs,        # NamedTuple-ish, eqx.Module
     Experiment,
     Dataset,
@@ -290,7 +290,7 @@ Inside the function, the user typically unpacks the tuple (`growth, nucleation =
 ### 4.3 Solver
 
 ```python
-from hybridmodels import SolverConfig, SOLVER_REGISTRY, register_solver
+from jaxhybridmodels import SolverConfig, SOLVER_REGISTRY, register_solver
 
 solver = SolverConfig(
     solver=diffrax.Tsit5(),
@@ -304,7 +304,7 @@ solver = SolverConfig(
 ### 4.4 Predictors
 
 ```python
-from hybridmodels.predictors import (
+from jaxhybridmodels.predictors import (
     Predictor,             # abstract base
     BoundScaler,
     BoundedPredictor,
@@ -318,7 +318,7 @@ from hybridmodels.predictors import (
 ### 4.5 Trainability filter
 
 ```python
-from hybridmodels.trainable import (
+from jaxhybridmodels.trainable import (
     default_trainable,           # leaf -> bool predicate (eqx.is_inexact_array)
     trainable_mask,              # (predictors, predicate=default_trainable) -> PyTree[bool]
     freeze_paths,                # (mask, paths: tuple[str, ...]) -> mask  (dot-joined segments, e.g. "0.inner.mlp.layers.0.weight"; raises if a path matches nothing)
@@ -330,13 +330,13 @@ from hybridmodels.trainable import (
 ### 4.6 Losses
 
 ```python
-from hybridmodels.losses import masked_mse, masked_mle, bal_mse, bal_mle
+from jaxhybridmodels.losses import masked_mse, masked_mle, bal_mse, bal_mle
 ```
 
 ### 4.7 Training
 
 ```python
-from hybridmodels.training import (
+from jaxhybridmodels.training import (
     OptaxTrainingConfig,
     EvosaxTrainingConfig,
     train_with_optax,
@@ -379,19 +379,19 @@ def train_with_evosax(
 ### 4.8 Prediction
 
 ```python
-from hybridmodels import predict_bucket, predict_dataset
+from jaxhybridmodels import predict_bucket, predict_dataset
 ```
 
 ### 4.9 UI
 
 ```python
-from hybridmodels.ui import TrainingUI, EvosaxUI, SilentUI, RichTrainingUI, RichEvosaxUI
+from jaxhybridmodels.ui import TrainingUI, EvosaxUI, SilentUI, RichTrainingUI, RichEvosaxUI
 ```
 
 ### 4.10 Serialisation (last-shipped)
 
 ```python
-from hybridmodels import save_predictors, load_predictors, save_run, load_run
+from jaxhybridmodels import save_predictors, load_predictors, save_run, load_run
 ```
 
 ---
@@ -697,19 +697,19 @@ The source package's verification artifacts live in `hybridcrystals/thesis_train
 
 | Source artifact | New location | Notes |
 |---|---|---|
-| `hybridcrystals/data/irregular.py::IrregularDataset/Batch/_prestack_buckets` | `src/hybridmodels/data.py` | Restructured: per-channel sparse Experiment; `state_to_output` passed to prediction/training |
-| `hybridcrystals/regressor_models.py::BoundedRegressor` | `src/hybridmodels/predictors/base.py::BoundedPredictor` | Composition, no inheritance hierarchy |
+| `hybridcrystals/data/irregular.py::IrregularDataset/Batch/_prestack_buckets` | `src/jaxhybridmodels/data.py` | Restructured: per-channel sparse Experiment; `state_to_output` passed to prediction/training |
+| `hybridcrystals/regressor_models.py::BoundedRegressor` | `src/jaxhybridmodels/predictors/base.py::BoundedPredictor` | Composition, no inheritance hierarchy |
 | `hybridcrystals/regressor_models.py::RateRegressorPair` | (deleted) | Multi-rate models compose by unpacking the `predictors` tuple in user vector field. R-A6 |
-| `hybridcrystals/regressors/mlp.py` | `src/hybridmodels/predictors/mlp.py` | Strip embedding-related code |
-| `hybridcrystals/regressors/kan.py` + `regressor_kanx.py` | `src/hybridmodels/predictors/kan.py` | Use `jaxkan` |
-| `hybridcrystals/regressors/polynomial.py::NeuralNPolynomialRegressor` | `src/hybridmodels/predictors/neural_npoly.py` | Now public: exported top level, tested, documented. The latent-vs-physical basis question is open (SPEC §2.3) |
-| `hybridcrystals/mechanistic.py::vector_ode + simulate_ode + ODESimulationOptions` | `examples/crystallisation/ode.py` + `src/hybridmodels/solver.py::SolverConfig` | The `vector_ode` is example code, not framework |
-| `hybridcrystals/losses.py::irregular_*_from_batch` | `src/hybridmodels/losses.py` | Adapt to `(pred_obs, bp)` signature |
-| `hybridcrystals/training/irregular.py` | `src/hybridmodels/training/optax.py` | Drop tournament modes "vmapped"/"serial"/"shared" → keep only shared semantics |
-| `hybridcrystals/training_evosax.py` | `src/hybridmodels/training/evosax.py` | Drop polishing-from-optax-config; new init modes |
-| `hybridcrystals/regressor_registry.py::_build_filter_spec` | `src/hybridmodels/trainable.py` | Replaced by composable freezer functions |
+| `hybridcrystals/regressors/mlp.py` | `src/jaxhybridmodels/predictors/mlp.py` | Strip embedding-related code |
+| `hybridcrystals/regressors/kan.py` + `regressor_kanx.py` | `src/jaxhybridmodels/predictors/kan.py` | Use `jaxkan` |
+| `hybridcrystals/regressors/polynomial.py::NeuralNPolynomialRegressor` | `src/jaxhybridmodels/predictors/neural_npoly.py` | Now public: exported top level, tested, documented. The latent-vs-physical basis question is open (SPEC §2.3) |
+| `hybridcrystals/mechanistic.py::vector_ode + simulate_ode + ODESimulationOptions` | `examples/crystallisation/ode.py` + `src/jaxhybridmodels/solver.py::SolverConfig` | The `vector_ode` is example code, not framework |
+| `hybridcrystals/losses.py::irregular_*_from_batch` | `src/jaxhybridmodels/losses.py` | Adapt to `(pred_obs, bp)` signature |
+| `hybridcrystals/training/irregular.py` | `src/jaxhybridmodels/training/optax.py` | Drop tournament modes "vmapped"/"serial"/"shared" → keep only shared semantics |
+| `hybridcrystals/training_evosax.py` | `src/jaxhybridmodels/training/evosax.py` | Drop polishing-from-optax-config; new init modes |
+| `hybridcrystals/regressor_registry.py::_build_filter_spec` | `src/jaxhybridmodels/trainable.py` | Replaced by composable freezer functions |
 | `hybridcrystals/regressor_constants.py::COVARIATE_BOUNDS / CANONICAL_INPUT_*` | (deleted) | No canonical input order; bounds live with each `BoundedPredictor` instance |
-| `hybridcrystals/thesis_training/rich_ui.py` | `src/hybridmodels/ui/optax.py` | Generalised, single Live + panels |
+| `hybridcrystals/thesis_training/rich_ui.py` | `src/jaxhybridmodels/ui/optax.py` | Generalised, single Live + panels |
 | `hybridcrystals/thesis_training/sharedgrowth.py` | `examples/crystallisation/train_kinetic.py` | Verification script |
 | `hybridcrystals/bayes/*`, `gaussian_process.py`, `_gp_init.py` | (deleted) | Out of scope |
 | `hybridcrystals/regressors/embedded_mlp.py` | (deleted) | Out of scope |

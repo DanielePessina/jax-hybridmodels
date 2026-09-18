@@ -20,7 +20,7 @@ Trainability is encoded as a boolean PyTree mask matching the predictors pytree'
 
 ### `default_trainable()`
 
-<small>`from hybridmodels.trainable import default_trainable` &nbsp;·&nbsp; also re-exported as `hybridmodels.default_trainable`</small>
+<small>`from jaxhybridmodels.trainable import default_trainable` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.default_trainable`</small>
 
 ```python
 default_trainable(leaf: 'Any') -> 'bool'
@@ -32,7 +32,7 @@ Default trainability rule. ``True`` only for inexact-array leaves.
 else is fixed, including ints, bools, Python scalars and static-field
 values, which is what a gradient-based optimiser can actually update.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L35)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L35)</small>
 
 ---
 
@@ -40,7 +40,7 @@ values, which is what a gradient-based optimiser can actually update.
 
 ### `trainable_mask()`
 
-<small>`from hybridmodels.trainable import trainable_mask` &nbsp;·&nbsp; also re-exported as `hybridmodels.trainable_mask`</small>
+<small>`from jaxhybridmodels.trainable import trainable_mask` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.trainable_mask`</small>
 
 ```python
 trainable_mask(
@@ -54,7 +54,7 @@ Build a boolean mask matching the structure of ``predictors``.
 Applies ``predicate`` to every leaf, returning a tree of the same shape
 whose leaves are ``bool``. Both optimisers take the result unchanged.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L45)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L45)</small>
 
 ---
 
@@ -62,7 +62,7 @@ whose leaves are ``bool``. Both optimisers take the result unchanged.
 
 ### `freeze_paths()`
 
-<small>`from hybridmodels.trainable import freeze_paths` &nbsp;·&nbsp; also re-exported as `hybridmodels.freeze_paths`</small>
+<small>`from jaxhybridmodels.trainable import freeze_paths` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.freeze_paths`</small>
 
 ```python
 freeze_paths(mask: 'Any', paths: 'tuple[str, ...]') -> 'Any'
@@ -80,7 +80,7 @@ A path matching nothing raises, listing the closest real paths. Ignoring
 it quietly would leave a leaf the caller believed frozen training as
 normal, which shows up as a wrong experiment, not a wrong program.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L73)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L73)</small>
 
 ---
 
@@ -88,7 +88,7 @@ normal, which shows up as a wrong experiment, not a wrong program.
 
 ### `freeze_modules_of_type()`
 
-<small>`from hybridmodels.trainable import freeze_modules_of_type` &nbsp;·&nbsp; also re-exported as `hybridmodels.freeze_modules_of_type`</small>
+<small>`from jaxhybridmodels.trainable import freeze_modules_of_type` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.freeze_modules_of_type`</small>
 
 ```python
 freeze_modules_of_type(mask: 'Any', predictors: 'Any', cls: 'type') -> 'Any'
@@ -105,7 +105,7 @@ The common use is
 every scaler's ``temperature``. The temperature sets how sharply the
 squash saturates and is not meant to drift while the model trains.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L110)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L110)</small>
 
 ---
 
@@ -113,7 +113,7 @@ squash saturates and is not meant to drift while the model trains.
 
 ### `freeze_where()`
 
-<small>`from hybridmodels.trainable import freeze_where` &nbsp;·&nbsp; also re-exported as `hybridmodels.freeze_where`</small>
+<small>`from jaxhybridmodels.trainable import freeze_where` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.freeze_where`</small>
 
 ```python
 freeze_where(
@@ -130,7 +130,7 @@ look at a static field. It must not compare leaf values. The walk pairs
 a mask node, whose leaves are booleans, with a predictors node, whose
 leaves are arrays, so a value comparison has no defined meaning here.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L134)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L134)</small>
 
 ---
 
@@ -138,7 +138,7 @@ leaves are arrays, so a value comparison has no defined meaning here.
 
 ### `frozen_default_mask()`
 
-<small>`from hybridmodels.trainable import frozen_default_mask` &nbsp;·&nbsp; also re-exported as `hybridmodels.frozen_default_mask`</small>
+<small>`from jaxhybridmodels.trainable import frozen_default_mask` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.frozen_default_mask`</small>
 
 ```python
 frozen_default_mask(predictors: 'Any', *classes: 'type') -> 'Any'
@@ -155,7 +155,7 @@ Freezing ``BoundScaler`` leaves (their ``temperature``) is the common
 case, so ``frozen_default_mask(predictors, BoundScaler)`` is the
 conventional starting mask for a hybrid ODE fit.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L154)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L154)</small>
 
 ---
 
@@ -163,7 +163,7 @@ conventional starting mask for a hybrid ODE fit.
 
 ### `count_trainable_params()`
 
-<small>`from hybridmodels.trainable import count_trainable_params` &nbsp;·&nbsp; also re-exported as `hybridmodels.count_trainable_params`</small>
+<small>`from jaxhybridmodels.trainable import count_trainable_params` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.count_trainable_params`</small>
 
 ```python
 count_trainable_params(predictors: 'Any', mask: 'Any') -> 'int'
@@ -175,4 +175,4 @@ Sums the sizes of every leaf the mask marks ``True``. Useful for
 reporting the effective search dimension before a run (e.g. to sanity
 check an evosax budget or a phase-transition threshold).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/trainable.py#L172)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L172)</small>

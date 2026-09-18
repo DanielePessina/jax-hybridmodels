@@ -14,7 +14,7 @@ phases:
 The temperature is not constant in time: each experiment runs a
 flat-ramp-flat heating profile (jacket heat-up, two flat edges), whose
 parameters travel as ordinary covariates. This is the
-``hybridmodels.profiles`` pattern — the model's ``simulate_fn`` evaluates
+``jaxhybridmodels.profiles`` pattern — the model's ``simulate_fn`` evaluates
 ``ramp_profile(...)(t)`` inside the vector field, so a ramp sweeps a band
 of temperatures within a single run instead of pinning one point.
 
@@ -47,7 +47,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Float
 from scipy.stats import qmc
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -64,7 +64,7 @@ from hybridmodels import (
     ramp_profile,
     save_predictors,
 )
-from hybridmodels.training import (
+from jaxhybridmodels.training import (
     EvosaxTrainingConfig,
     OptaxTrainingConfig,
     train_with_evosax,
@@ -106,7 +106,7 @@ VALIDATION_POINTS: tuple[tuple[float, float], ...] = ((20.0, 5.3), (30.0, 6.8))
 # Heating ramp per experiment: the reactor jacket ramps from T_lo to T_hi
 # between ramp_t0 and ramp_t1, flat on both edges. The ramp parameters are
 # the experiment covariates; the profile callable lives in
-# ``hybridmodels.profiles``.
+# ``jaxhybridmodels.profiles``.
 RAMP_HALF_WIDTH: float = 3.0  # °C, each experiment sweeps T_C ± 3
 RAMP_T0: float = 0.5
 RAMP_T1: float = 4.5  # T_MAX = 5.0, so both flat edges are visible

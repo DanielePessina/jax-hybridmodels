@@ -1,6 +1,6 @@
 # Model interface
 
-`hybridmodels` does not require a model wrapper class. You keep the model
+`jaxhybridmodels` does not require a model wrapper class. You keep the model
 pieces in your own code and pass them to prediction or training functions.
 
 ## The model pieces

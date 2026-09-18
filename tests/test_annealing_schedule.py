@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from hybridmodels.schedules import annealing_schedule
+from jaxhybridmodels.schedules import annealing_schedule
 
 
 @pytest.mark.parametrize(

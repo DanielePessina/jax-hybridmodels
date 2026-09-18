@@ -8,7 +8,7 @@ adjoint is unreliable or the loss surface is full of local minima.
 
 The cost is that evaluations needed grow quickly with parameter count.
 This loop targets small kinetic predictors, roughly 4 to 10 trainable
-scalars. Use ``hybridmodels.training.optax`` for network-sized fits, or
+scalars. Use ``jaxhybridmodels.training.optax`` for network-sized fits, or
 run this first and polish with Optax afterwards.
 
 There are no phases. The run is ``num_generations`` iterations over a
@@ -72,20 +72,20 @@ from evosax.algorithms.distribution_based.simple_es import SimpleES
 from jax import Array
 from scipy.stats import qmc
 
-from hybridmodels.data import BucketPayload, Dataset
-from hybridmodels.losses import resolve_loss_fn
-from hybridmodels.penalties import (
+from jaxhybridmodels.data import BucketPayload, Dataset
+from jaxhybridmodels.losses import resolve_loss_fn
+from jaxhybridmodels.penalties import (
     bound_penalty,
     data_penalty_points,
     select_penalty_points,
     validate_penalty_points,
 )
-from hybridmodels.rng import fold
-from hybridmodels.solver import SolverConfig
-from hybridmodels.trainable import trainable_mask
-from hybridmodels.training.kernels import simulate_bucket
-from hybridmodels.ui.base import EvosaxUI, SilentUI
-from hybridmodels.ui.evosax import RichEvosaxUI
+from jaxhybridmodels.rng import fold
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.training.kernels import simulate_bucket
+from jaxhybridmodels.ui.base import EvosaxUI, SilentUI
+from jaxhybridmodels.ui.evosax import RichEvosaxUI
 
 _SUPPORTED_INIT_MODES: tuple[str, ...] = ("warm", "uniform_box", "lhs_box")
 
@@ -108,7 +108,7 @@ def register_algorithm(name: str, cls: type) -> None:
 
     After registration, ``EvosaxTrainingConfig(algorithm=name)`` builds that
     strategy. Re-registering an existing name overwrites without warning.
-    Mirrors :func:`hybridmodels.solver.register_solver`.
+    Mirrors :func:`jaxhybridmodels.solver.register_solver`.
     """
     ALGORITHM_REGISTRY[name] = cls
 
@@ -117,7 +117,7 @@ def register_algorithm(name: str, cls: type) -> None:
 class EvosaxTrainingConfig:
     """Configuration for :func:`train_with_evosax`.
 
-    Unlike :class:`~hybridmodels.training.optax.OptaxTrainingConfig` there
+    Unlike :class:`~jaxhybridmodels.training.optax.OptaxTrainingConfig` there
     are no phase-keyed tuples: the run is a flat loop, so every field is a
     scalar.
 
@@ -148,7 +148,7 @@ class EvosaxTrainingConfig:
         here, or the run raises.
     penalty_fn
         The regulariser added to each individual's fitness, defaulting to
-        :func:`hybridmodels.penalties.bound_penalty` when ``None``. A
+        :func:`jaxhybridmodels.penalties.bound_penalty` when ``None``. A
         custom callable ``(predictors, points) -> scalar`` replaces
         the bound penalty.
     trajectory_penalty_fn
@@ -156,7 +156,7 @@ class EvosaxTrainingConfig:
         ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]``
         *including* any penalty accumulators carried in the ODE state. Folded
         into each individual's fitness. ``None`` (the default) disables it.
-        See ``hybridmodels.penalties`` (``attach_penalty_state`` /
+        See ``jaxhybridmodels.penalties`` (``attach_penalty_state`` /
         ``penalty_vector_field`` / ``strip_penalty_state`` /
         ``penalty_integral``).
     trajectory_penalty_weight
@@ -173,7 +173,7 @@ class EvosaxTrainingConfig:
         A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``,
         ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``.
     channel_idx, channel_weights
-        Forwarded into the resolved loss. See ``hybridmodels.losses``.
+        Forwarded into the resolved loss. See ``jaxhybridmodels.losses``.
     log_every
         UI heartbeat cadence. Honoured only by the Rich UIs; the silent
         and recording UIs see every generation.
@@ -278,7 +278,7 @@ def _build_single_eval(
 
     The bound penalty evaluates at ``penalty_points``, the per-leaf point
     arrays selected host-side by the caller (the output of
-    :func:`hybridmodels.penalties.select_penalty_points`). Evosax has no
+    :func:`jaxhybridmodels.penalties.select_penalty_points`). Evosax has no
     length-mask curriculum, so every observed cell counts.
 
     ``trajectory_penalty_fn`` reads the full state ``[N, T, S]`` (penalty
@@ -423,7 +423,7 @@ def train_with_evosax(
     ``[T, S] -> [T, D]`` from full simulator state to observed channels; a
     property of the model, passed here rather than stored on the ``Dataset``
     ``trainable`` defaults to
-    :func:`hybridmodels.trainable.trainable_mask`, and must select at
+    :func:`jaxhybridmodels.trainable.trainable_mask`, and must select at
     least one scalar.
 
     Returns
@@ -433,7 +433,7 @@ def train_with_evosax(
         is monotone non-increasing. Length ``config.num_generations``.
 
         It differs from
-        :func:`~hybridmodels.training.optax.train_with_optax`, whose
+        :func:`~jaxhybridmodels.training.optax.train_with_optax`, whose
         history is the raw per-step loss and can go up. Same type, same
         position, different meaning: plotting both on one axis misleads.
 

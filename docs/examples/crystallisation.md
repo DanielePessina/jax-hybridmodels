@@ -77,7 +77,7 @@ measured quantity with its own timestamps. A **covariate** is a
 condition that stays fixed for the whole run.
 
 ```python
-from hybridmodels import ChannelObs, Experiment, make_experiment
+from jaxhybridmodels import ChannelObs, Experiment, make_experiment
 
 EXPERIMENTS_DATA = (
     {
@@ -158,7 +158,7 @@ branch. See
 ## Step 3: build the dataset
 
 ```python
-from hybridmodels import describe_buckets, make_dataset
+from jaxhybridmodels import describe_buckets, make_dataset
 
 dataset = make_dataset(experiments, output_channel_names=("conc", "d43"))
 print(describe_buckets(dataset))
@@ -186,7 +186,7 @@ Bounds, scalers, and the surrounding ODE are identical.
 :::
 
 ```python
-from hybridmodels import BoundedPredictor, BoundScaler, MLPPredictor
+from jaxhybridmodels import BoundedPredictor, BoundScaler, MLPPredictor
 
 INPUT_KEYS = ("temperature_C", "supersaturation")
 TEMPERATURE_BOUNDS = (13.0, 27.0)        # °C, slightly wider than data span
@@ -315,7 +315,7 @@ The moments span roughly 18 decades during an integration, so `atol`
 gets one entry per state component.
 
 ```python
-from hybridmodels import OptaxTrainingConfig, SolverConfig, train_with_optax
+from jaxhybridmodels import OptaxTrainingConfig, SolverConfig, train_with_optax
 
 solver = SolverConfig(
     solver=diffrax.Tsit5(),
@@ -356,7 +356,7 @@ after that runs at full speed.
 ## Step 8: predict and inspect
 
 ```python
-from hybridmodels import predict_dataset
+from jaxhybridmodels import predict_dataset
 
 predictions = predict_dataset(
     trained_predictors, dataset, simulate_fn=simulate_fn,

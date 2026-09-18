@@ -200,7 +200,7 @@ leaves the reachable physical values unchanged.
 def register_bound_transform(name: str, transform: BoundTransform) -> None:
     """Register a squash under ``name`` for use by ``BoundScaler``.
 
-    Mirrors :func:`~hybridmodels.solver.register_solver`. A scaler stores
+    Mirrors :func:`~jaxhybridmodels.solver.register_solver`. A scaler stores
     only the name, so a custom transform must be registered before a saved
     scaler that references it can be rebuilt. Re-registering an existing
     name overwrites without warning.

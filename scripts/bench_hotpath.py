@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import optax
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -37,14 +37,14 @@ from hybridmodels import (
     make_experiment,
     predict_dataset,
 )
-from hybridmodels.penalties import select_penalty_points
-from hybridmodels.trainable import trainable_mask
-from hybridmodels.training.optax import (
+from jaxhybridmodels.penalties import select_penalty_points
+from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.training.optax import (
     OptaxTrainingConfig,
     _build_training_kernels,
     _run_phases,
 )
-from hybridmodels.ui.base import SilentUI
+from jaxhybridmodels.ui.base import SilentUI
 
 N_EXPERIMENTS = 12
 N_STEPS_BENCH = 20

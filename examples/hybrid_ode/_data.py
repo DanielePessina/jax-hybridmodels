@@ -32,7 +32,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float
 
-from hybridmodels import (
+from jaxhybridmodels import (
     ChannelObs,
     Dataset,
     Experiment,

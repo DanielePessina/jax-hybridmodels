@@ -18,7 +18,7 @@ Choose [`train_with_optax`](#train_with_optax) for gradient-based fitting or [`t
 
 ### `OptaxTrainingConfig`
 
-<small>`from hybridmodels.training import OptaxTrainingConfig` &nbsp;·&nbsp; also re-exported as `hybridmodels.OptaxTrainingConfig`</small>
+<small>`from jaxhybridmodels.training import OptaxTrainingConfig` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.OptaxTrainingConfig`</small>
 
 ```python
 OptaxTrainingConfig(
@@ -70,19 +70,19 @@ so a length-1 tuple broadcasts across every phase.
 | `reset_optimiser_state` | `tuple[bool, ...]` | Per phase, rebuild the optimiser and discard its state at that boundary. Set it when switching optimiser, and when a length-schedule change has made the accumulated momentum wrong. |
 | `length_schedule` | `tuple[float, ...]` | Fraction of each experiment's timeline the loss looks at, per phase, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only the first ``fraction`` of the observation times is scored, which stops a long-horizon divergence from drowning the gradient. Being a runtime mask rather than a shape change, a phase boundary costs no recompile. Default ``(1.0,)`` scores everything. |
 | `penalty_weight` | `tuple[float, ...]` | Weight on the bound-saturation penalty. Length 1 broadcasts to every phase; any other length must match ``steps``. Entries must be non-negative. ``0.0`` disables the penalty. The weight is relative to the per-bucket-averaged data term: the penalty is a mean over its points, charged once per step onto the averaged data gradient, so the same weight means the same thing whatever the dataset or point-count size. |
-| `penalty_points` | `tuple[Array, ...] | None` | User-supplied penalty-only points for the bound penalty: one ``[G, n_inputs]`` array of physical input vectors per ``BoundedPredictor`` leaf, in traversal order, matching each leaf's ``input_keys`` column order. No measurements are needed there; saturation is charged at these points regardless of the data. When ``None`` the penalty uses only the measured points gathered from the dataset (leaves whose inputs do not all resolve to dataset covariates must be covered by an entry here, or the run raises). ``hybridmodels.penalties.box_grid`` builds a warp-uniform box sweep for the "police the whole box" recipe. |
+| `penalty_points` | `tuple[Array, ...] | None` | User-supplied penalty-only points for the bound penalty: one ``[G, n_inputs]`` array of physical input vectors per ``BoundedPredictor`` leaf, in traversal order, matching each leaf's ``input_keys`` column order. No measurements are needed there; saturation is charged at these points regardless of the data. When ``None`` the penalty uses only the measured points gathered from the dataset (leaves whose inputs do not all resolve to dataset covariates must be covered by an entry here, or the run raises). ``jaxhybridmodels.penalties.box_grid`` builds a warp-uniform box sweep for the "police the whole box" recipe. |
 | `penalty_fn` | `Callable | None` | The regulariser added to the data objective, defaulting to [`bound_penalty`](/api/penalties#bound_penalty) when ``None``. A custom callable ``(predictors, points) -> scalar`` replaces the bound penalty with e.g. weight decay on inner weights or a monotonicity term; one that ignores points simply does not use them. |
-| `trajectory_penalty_fn` | `Callable | None` | Trajectory-aware penalty for **embedded** hybrid models (the predictor runs inside the vector field). Called as ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]`` *including* any penalty accumulators carried in the ODE state; add it to the data loss inside the same forward pass. ``None`` (the default) disables it. See the helpers in ``hybridmodels.penalties`` (``attach_penalty_state`` / ``penalty_vector_field`` / ``strip_penalty_state`` / ``penalty_integral``). |
+| `trajectory_penalty_fn` | `Callable | None` | Trajectory-aware penalty for **embedded** hybrid models (the predictor runs inside the vector field). Called as ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]`` *including* any penalty accumulators carried in the ODE state; add it to the data loss inside the same forward pass. ``None`` (the default) disables it. See the helpers in ``jaxhybridmodels.penalties`` (``attach_penalty_state`` / ``penalty_vector_field`` / ``strip_penalty_state`` / ``penalty_integral``). |
 | `trajectory_penalty_weight` | `float` | Scalar weight on ``trajectory_penalty_fn``. ``0.0`` disables it even if a function is set. Non-negative. |
 | `loss` | `Callable | str` | A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``, ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``. |
-| `channel_idx, channel_weights` | `tuple | None` | Forwarded into the resolved loss. See ``hybridmodels.losses``. |
+| `channel_idx, channel_weights` | `tuple | None` | Forwarded into the resolved loss. See ``jaxhybridmodels.losses``. |
 | `tournament_attempts, tournament_steps` | `int` | The tournament runs only when ``tournament_steps > 0`` and ``tournament_attempts > 1``. Each attempt re-initialises the predictors, trains for ``tournament_steps`` steps, and is scored on the data term plus any configured trajectory penalty by a forward-only pass; the bound penalty remains excluded. The lowest score wins. An attempt that raises a diffrax error or a non-finite loss is dropped and the next key tried. If all fail, the original predictors are used and a ``RuntimeWarning`` is raised. |
 | `tournament_lr` | `float` | Learning rate for the tournament's short bursts, independent of ``lr``. |
 | `patience` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever ``length_schedule`` changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 | `verbose` | `bool` | Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L88)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L88)</small>
 
 <a id="optaxtrainingconfigpenalty_weight_for_phase"></a>
 
@@ -94,7 +94,7 @@ penalty_weight_for_phase(self, phase_idx: 'int') -> 'float'
 
 Penalty weight for ``phase_idx``, honouring the length-1 broadcast.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L230)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L230)</small>
 
 ---
 
@@ -102,7 +102,7 @@ Penalty weight for ``phase_idx``, honouring the length-1 broadcast.
 
 ### `train_with_optax()`
 
-<small>`from hybridmodels.training import train_with_optax` &nbsp;·&nbsp; also re-exported as `hybridmodels.train_with_optax`</small>
+<small>`from jaxhybridmodels.training import train_with_optax` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.train_with_optax`</small>
 
 ```python
 train_with_optax(
@@ -136,7 +136,7 @@ passed here rather than stored on the ``Dataset``.
 ``trainable`` is a boolean mask matching ``predictors``. Omitting it
 defaults to [`trainable_mask`](/api/trainable#trainable_mask), which marks
 every inexact-array leaf trainable. Pass a custom mask, usually from
-the freezers in ``hybridmodels.trainable``, to hold leaves fixed;
+the freezers in ``jaxhybridmodels.trainable``, to hold leaves fixed;
 freezing ``BoundScaler`` leaves is the common case.
 
 **Returns**
@@ -145,7 +145,7 @@ freezing ``BoundScaler`` leaves is the common case.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step loss**, one entry per step, concatenated across phases. It can go up. It is the data term plus any configured trajectory penalty (charged inside the bucket forward pass); the bound penalty is excluded, so a ramping bound-penalty weight cannot move the series and runs with different bound weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from [`train_with_evosax`](/api/training#train_with_evosax), whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever ``length_schedule`` changes, so the returned model always comes from the last horizon trained on. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L888)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L888)</small>
 
 ---
 
@@ -153,7 +153,7 @@ freezing ``BoundScaler`` leaves is the common case.
 
 ### `train_seed_ensemble()`
 
-<small>`from hybridmodels.training import train_seed_ensemble` &nbsp;·&nbsp; also re-exported as `hybridmodels.train_seed_ensemble`</small>
+<small>`from jaxhybridmodels.training import train_seed_ensemble` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.train_seed_ensemble`</small>
 
 ```python
 train_seed_ensemble(
@@ -199,7 +199,7 @@ land inside the first member's bracket, and ``on_run_start`` /
 ``on_run_end`` are fired once per member, so a live dashboard shows
 each member's phases rather than freezing after the first.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L1258)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1258)</small>
 
 ---
 
@@ -207,7 +207,7 @@ each member's phases rather than freezing after the first.
 
 ### `train_bootstrap_ensemble()`
 
-<small>`from hybridmodels.training import train_bootstrap_ensemble` &nbsp;·&nbsp; also re-exported as `hybridmodels.train_bootstrap_ensemble`</small>
+<small>`from jaxhybridmodels.training import train_bootstrap_ensemble` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.train_bootstrap_ensemble`</small>
 
 ```python
 train_bootstrap_ensemble(
@@ -249,7 +249,7 @@ Every resample and every training run is folded off the one ``key``, so
 the whole ensemble is deterministic given it. Each member is its own
 UI run, bracketed by ``on_run_start`` / ``on_run_end``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/optax.py#L1392)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1392)</small>
 
 ---
 
@@ -257,7 +257,7 @@ UI run, bracketed by ``on_run_start`` / ``on_run_end``.
 
 ### `EvosaxTrainingConfig`
 
-<small>`from hybridmodels.training import EvosaxTrainingConfig` &nbsp;·&nbsp; also re-exported as `hybridmodels.EvosaxTrainingConfig`</small>
+<small>`from jaxhybridmodels.training import EvosaxTrainingConfig` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.EvosaxTrainingConfig`</small>
 
 ```python
 EvosaxTrainingConfig(
@@ -296,16 +296,16 @@ scalar.
 | `penalty_weight` |  | Weight on the bound-saturation penalty, folded into each individual's fitness. ``0.0`` disables it. Scalar, not a tuple. Relative to the per-bucket-averaged data term, charged once per evaluation. |
 | `penalty_points` |  | User-supplied penalty-only points for the bound penalty: one ``[G, n_inputs]`` array of physical input vectors per ``BoundedPredictor`` leaf, in traversal order, matching each leaf's ``input_keys`` column order. ``None`` (the default) uses only the measured points gathered from the dataset; leaves whose inputs do not all resolve to dataset covariates must be covered by an entry here, or the run raises. |
 | `penalty_fn` |  | The regulariser added to each individual's fitness, defaulting to [`bound_penalty`](/api/penalties#bound_penalty) when ``None``. A custom callable ``(predictors, points) -> scalar`` replaces the bound penalty. |
-| `trajectory_penalty_fn` |  | Trajectory-aware penalty for **embedded** hybrid models, called as ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]`` *including* any penalty accumulators carried in the ODE state. Folded into each individual's fitness. ``None`` (the default) disables it. See ``hybridmodels.penalties`` (``attach_penalty_state`` / ``penalty_vector_field`` / ``strip_penalty_state`` / ``penalty_integral``). |
+| `trajectory_penalty_fn` |  | Trajectory-aware penalty for **embedded** hybrid models, called as ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]`` *including* any penalty accumulators carried in the ODE state. Folded into each individual's fitness. ``None`` (the default) disables it. See ``jaxhybridmodels.penalties`` (``attach_penalty_state`` / ``penalty_vector_field`` / ``strip_penalty_state`` / ``penalty_integral``). |
 | `trajectory_penalty_weight` |  | Scalar weight on ``trajectory_penalty_fn``. ``0.0`` disables it even if a function is set. Non-negative. |
 | `init_box_extent` |  | Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``. Ignored by ``"warm"``. |
 | `sigma_init` |  | Initial CMA-ES step size. Used directly by ``"warm"`` and as the prior step size for the box-init modes. CMA-ES adapts it after the first ``tell``. |
 | `loss` |  | A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``, ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``. |
-| `channel_idx, channel_weights` |  | Forwarded into the resolved loss. See ``hybridmodels.losses``. |
+| `channel_idx, channel_weights` |  | Forwarded into the resolved loss. See ``jaxhybridmodels.losses``. |
 | `log_every` |  | UI heartbeat cadence. Honoured only by the Rich UIs; the silent and recording UIs see every generation. |
 | `verbose` |  | Selects ``RichEvosaxUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L116)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L116)</small>
 
 ---
 
@@ -313,7 +313,7 @@ scalar.
 
 ### `train_with_evosax()`
 
-<small>`from hybridmodels.training import train_with_evosax` &nbsp;·&nbsp; also re-exported as `hybridmodels.train_with_evosax`</small>
+<small>`from jaxhybridmodels.training import train_with_evosax` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.train_with_evosax`</small>
 
 ```python
 train_with_evosax(
@@ -351,7 +351,7 @@ least one scalar.
 | `history` | `list[float]` | **Best loss so far** at the end of each generation, so the series is monotone non-increasing. Length ``config.num_generations``.<br><br>It differs from [`train_with_optax`](/api/training#train_with_optax), whose history is the raw per-step loss and can go up. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>When ``config.penalty_weight > 0`` the recorded value is the combined objective, since evosax ranks by one scalar. The optax history excludes its penalty. |
 | `best_predictors` | `Any` | Predictors rebuilt from the lowest-loss flat vector seen in any generation, the warm-up evaluation of the input predictors included. Same container shape as the input. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L402)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L402)</small>
 
 ---
 
@@ -359,7 +359,7 @@ least one scalar.
 
 ### `register_algorithm()`
 
-<small>`from hybridmodels.training.evosax import register_algorithm` &nbsp;·&nbsp; also re-exported as `hybridmodels.register_algorithm`</small>
+<small>`from jaxhybridmodels.training.evosax import register_algorithm` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_algorithm`</small>
 
 ```python
 register_algorithm(name: 'str', cls: 'type') -> 'None'
@@ -371,4 +371,4 @@ After registration, ``EvosaxTrainingConfig(algorithm=name)`` builds that
 strategy. Re-registering an existing name overwrites without warning.
 Mirrors [`register_solver`](/api/solver#register_solver).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/training/evosax.py#L106)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L106)</small>

@@ -55,9 +55,9 @@ import sympy as sp
 from jax import Array
 from sbml_loader import SBMLKineticModel
 
-import hybridmodels as hm
-from hybridmodels.data import ChannelObs, make_dataset, make_experiment
-from hybridmodels.solver import SolverConfig
+import jaxhybridmodels as hm
+from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
+from jaxhybridmodels.solver import SolverConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402

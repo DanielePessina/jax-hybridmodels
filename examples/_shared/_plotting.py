@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
 
-from hybridmodels.metrics import compute_metrics
+from jaxhybridmodels.metrics import compute_metrics
 
 
 def parity_diagnostics(predictions: Any, dataset: Any) -> dict[str, SimpleNamespace]:
@@ -149,7 +149,7 @@ def trajectory_plot(
         Output of ``predict_dataset``, one ``[N_b, T_b, D]`` entry per
         bucket. Always sets the bucket-walk order, so ``max_experiments``
         picks the same rows in either mode.
-    dataset : hybridmodels.Dataset
+    dataset : jaxhybridmodels.Dataset
         Read for ``output_channel_names`` and the bucket payloads.
     predictors, simulate_fn, state_to_output, solver : optional
         The model pieces that turn on dense re-simulation. Pass the same

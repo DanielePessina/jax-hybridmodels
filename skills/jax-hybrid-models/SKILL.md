@@ -1,12 +1,12 @@
 ---
 name: jax-hybrid-models
-description: "Uses the jax-hybridmodels package (JAX/Equinox hybrid ODE + neural models): building experiments and datasets, writing simulate_fn and state_to_output, configuring BoundedPredictor bounds/warps, training with Optax or evosax, prediction, and serialisation. Use when working in this repo or writing code that imports hybridmodels, or when asked to build, train, evaluate, debug, or tune hybrid ODE-neural models with bounded trainable predictors on irregular time-series data."
+description: "Uses the jax-hybridmodels package (JAX/Equinox hybrid ODE + neural models): building experiments and datasets, writing simulate_fn and state_to_output, configuring BoundedPredictor bounds/warps, training with Optax or evosax, prediction, and serialisation. Use when working in this repo or writing code that imports jaxhybridmodels, or when asked to build, train, evaluate, debug, or tune hybrid ODE-neural models with bounded trainable predictors on irregular time-series data."
 ---
 
 # jax-hybridmodels
 
 Use this skill for work that builds, trains, evaluates, debugs, or documents
-`hybridmodels`: a JAX/Equinox library for user-written ODE dynamics with
+`jaxhybridmodels`: a JAX/Equinox library for user-written ODE dynamics with
 trainable predictors and bucketed-irregular observations. Crystallisation is
 the canonical example, not the scope.
 
@@ -38,12 +38,12 @@ uv run ty check src
 
 | Task | Read first | Main surface |
 | --- | --- | --- |
-| Build experiments or handle sparse observations | `docs/guide/data.md`, `src/hybridmodels/data.py` | `make_experiment`, `make_dataset`, `split_dataset` |
+| Build experiments or handle sparse observations | `docs/guide/data.md`, `src/jaxhybridmodels/data.py` | `make_experiment`, `make_dataset`, `split_dataset` |
 | Write or debug the physics boundary | `docs/guide/model-interface.md`, `CONTEXT.md` | `simulate_fn`, `state_to_output`, `SolverConfig` |
 | Add time-varying inputs or smooth schedules | `docs/guide/profiles-and-schedules.md` | profile factories, `annealing_schedule` |
 | Choose or extend a predictor | `docs/guide/predictors.md`, `docs/guide/custom-predictors.md` | `Predictor`, `BoundedPredictor`, `BoundScaler` |
 | Configure or debug training | `docs/guide/training.md`, `skills/jax-hybrid-models/caveats.md` | Optax/Evosax configs and trainers |
-| Evaluate or persist a result | `docs/guide/serialization.md`, `src/hybridmodels/prediction.py` | prediction, metrics, ensembles, save/load |
+| Evaluate or persist a result | `docs/guide/serialization.md`, `src/jaxhybridmodels/prediction.py` | prediction, metrics, ensembles, save/load |
 | Change public API documentation | `README.md`, `docs/README.md`, source docstrings | `scripts/gen_api_docs.py` then `docs/api/` |
 
 ## Model contract
@@ -108,7 +108,7 @@ invalid arithmetic. See `usage.md` for a complete pipeline.
   small, kinetic-parameter-shaped searches; it has no per-individual failure
   handling in v1.
 - For a custom loop, compose the public kernels in
-  `hybridmodels.training.kernels` over `dataset.bucket_payloads` in Python.
+  `jaxhybridmodels.training.kernels` over `dataset.bucket_payloads` in Python.
 - For code changes, follow TDD and update `SPEC.md` or `CONTEXT.md` only when
   a decision or domain term genuinely changes.
 - For documentation changes, edit guide Markdown or source docstrings, never

@@ -48,7 +48,7 @@ page shows where to go for a real hybrid ODE.
 ## In a nutshell
 
 `jaxhybridmodels` keeps the ODE simulation function in user code. The Python
-package is imported as `hybridmodels`. The library
+package is imported as `jaxhybridmodels`. The library
 adds the surrounding data, predictor, and training machinery.
 
 | Part | Responsibility |
@@ -62,7 +62,7 @@ adds the surrounding data, predictor, and training machinery.
 The core training call is:
 
 ```python
-import hybridmodels as hm
+import jaxhybridmodels as hm
 
 dataset = hm.make_dataset(experiments, output_channel_names=("value",))
 history, trained = hm.train_with_optax(

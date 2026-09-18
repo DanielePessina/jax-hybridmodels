@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.metadata as metadata
 
-import hybridmodels
+import jaxhybridmodels
 
 
 def test_distribution_metadata_matches_public_version() -> None:
@@ -15,4 +15,4 @@ def test_distribution_metadata_matches_public_version() -> None:
     assert package["License-Expression"] == "BSD-3-Clause"
     assert "LICENSE" in package.get_all("License-File")
     assert "Development Status :: 4 - Beta" in package.get_all("Classifier")
-    assert hybridmodels.__version__ == package["Version"]
+    assert jaxhybridmodels.__version__ == package["Version"]

@@ -31,12 +31,12 @@ from _harness import (
 )
 from jax import Array
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.solver import SolverConfig
-from hybridmodels.trainable import freeze_paths, trainable_mask
-from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
+from jaxhybridmodels.predictors.base import Predictor
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.trainable import freeze_paths, trainable_mask
+from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 
 class TwoLeafPredictor(Predictor):

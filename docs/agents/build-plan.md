@@ -1,8 +1,8 @@
-# Build plan — `hybridmodels` v1
+# Build plan — `jaxhybridmodels` v1
 
 Companion to [`SPEC.md`](../../SPEC.md), [`CONTEXT.md`](../../CONTEXT.md), and the umbrella PRD at GitHub issue [#1](https://github.com/DanielePessina/jax-hybridmodels/issues/1).
 
-This document is the **fine-grained, orchestrator-driven execution plan** for shipping `hybridmodels` v1 against the locked spec. Read alongside SPEC.md §8 (build order — coarse) and §6 (test plan).
+This document is the **fine-grained, orchestrator-driven execution plan** for shipping `jaxhybridmodels` v1 against the locked spec. Read alongside SPEC.md §8 (build order — coarse) and §6 (test plan).
 
 The plan reorders SPEC §8 step 5 (Data) ahead of step 2 (Solver). Rationale: `data.py` is the deepest module with the most design surface; getting `BucketPayload` and `make_dataset` right early de-risks every subsequent training/prediction phase. Solver is shallow and lifts trivially after data lands.
 
@@ -104,13 +104,13 @@ SPEC §8 step 1.
 
 | # | Task | Who | Verify |
 |---|---|---|---|
-| 0.1 | `uv init --lib` to bootstrap `pyproject.toml` + `src/hybridmodels/` | O | `pyproject.toml` exists |
-| 0.2 | Edit `pyproject.toml`: name=`hybridmodels`, requires-python=`>=3.11`, hatchling backend, project metadata per SPEC §3.1 | O | `cat pyproject.toml` |
+| 0.1 | `uv init --lib` to bootstrap `pyproject.toml` + `src/jaxhybridmodels/` | O | `pyproject.toml` exists |
+| 0.2 | Edit `pyproject.toml`: name=`jaxhybridmodels`, requires-python=`>=3.11`, hatchling backend, project metadata per SPEC §3.1 | O | `cat pyproject.toml` |
 | 0.3 | `uv add jax jaxlib equinox diffrax optax evosax jaxkan jaxtyping rich numpy scipy` | O | `uv sync` |
 | 0.4 | `uv add --dev pytest pytest-cov ruff ty` | O | `uv run pytest --version` |
 | 0.5 | Add `[project.optional-dependencies] examples = ["openpyxl", "matplotlib"]` (hand-edit; uv `--optional` flag varies by version) | O | `cat pyproject.toml` |
-| 0.6 | Create empty module files per SPEC §3 (`data.py`, `solver.py`, `losses.py`, `trainable.py`, `rng.py`, `prediction.py`, `serialise.py`, `predictors/{__init__,base,mlp,kan}.py`, `training/{__init__,optax,evosax}.py`, `ui/{__init__,base,optax,evosax}.py`) | O | `find src/hybridmodels -name '*.py'` |
-| 0.7 | Write `src/hybridmodels/__init__.py` with **lazy `__getattr__`** stub (dispatch skeleton, empty re-export map) | O | `uv run python -c "import hybridmodels"` |
+| 0.6 | Create empty module files per SPEC §3 (`data.py`, `solver.py`, `losses.py`, `trainable.py`, `rng.py`, `prediction.py`, `serialise.py`, `predictors/{__init__,base,mlp,kan}.py`, `training/{__init__,optax,evosax}.py`, `ui/{__init__,base,optax,evosax}.py`) | O | `find src/jaxhybridmodels -name '*.py'` |
+| 0.7 | Write `src/jaxhybridmodels/__init__.py` with **lazy `__getattr__`** stub (dispatch skeleton, empty re-export map) | O | `uv run python -c "import jaxhybridmodels"` |
 | 0.8 | Create `tests/conftest.py` + empty placeholder test files per SPEC §6 | O | `uv run pytest -q` collects 0 tests, exits 0 |
 | 0.9 | Configure ruff in `pyproject.toml` (line-length 100, target-version 311, permissive ruleset to start) | O | `uv run ruff check src tests` |
 | 0.10 | Create `ty.toml` at the repo root; relax `unresolved-attribute`, `invalid-method-override`, `call-non-callable` to tolerate equinox / optax dynamic-attribute patterns | O | `uv run ty check src` passes |
@@ -127,7 +127,7 @@ The deepest module. Build first to lock `BucketPayload` shape and the `simulate_
 |---|---|---|---|
 | 1.1 | Subagent: write `tests/test_data_buckets.py` red — bucketing groups by `len(union_ts)`; mask True iff channel observed at that timestamp; `make_dataset` idempotent; per-experiment `y0` is the full state (built via `y0_fn` hook); covariates dict-shape preserved | S | red |
 | 1.2 | Subagent: write `tests/test_data_split.py` red — `split_dataset(train=0.8, val=0.1, test=0.1, key)` non-overlapping splits, each split valid-bucketed | S | red |
-| 1.3 | Subagent: implement `src/hybridmodels/data.py` — `ChannelObs`, `Experiment`, `BucketPayload`, `Dataset`, `make_experiment`, `make_dataset`, `split_dataset` | S | green |
+| 1.3 | Subagent: implement `src/jaxhybridmodels/data.py` — `ChannelObs`, `Experiment`, `BucketPayload`, `Dataset`, `make_experiment`, `make_dataset`, `split_dataset` | S | green |
 | 1.4 | Smoke check: orchestrator constructs a tiny synthetic 3-experiment dataset and confirms produced `BucketPayload` shapes match what `simulate_fn` later expects | O | `uv run python -c "..."` |
 | 1.5 | ruff + ty | O | clean |
 | 1.6 | Commit `feat(data): bucketed-irregular dataset + split` | O | `git log -1` |
@@ -142,8 +142,8 @@ SPEC §8 step 2. Quick win after the deep data phase.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 2.1 | Subagent: write `tests/test_solver.py` red — (a) `SolverConfig` static-field shape, (b) `to_dict`/`from_dict` round-trip via `SOLVER_REGISTRY`, (c) `register_solver` extends the registry | S | red |
-| 2.2 | Same subagent: implement `src/hybridmodels/solver.py` to green | S | green |
-| 2.3 | Add `SolverConfig`, `SOLVER_REGISTRY`, `register_solver` to `__init__.py` lazy map | O | `uv run python -c "from hybridmodels import SolverConfig"` |
+| 2.2 | Same subagent: implement `src/jaxhybridmodels/solver.py` to green | S | green |
+| 2.3 | Add `SolverConfig`, `SOLVER_REGISTRY`, `register_solver` to `__init__.py` lazy map | O | `uv run python -c "from jaxhybridmodels import SolverConfig"` |
 | 2.4 | ruff + ty | O | clean |
 | 2.5 | Commit `feat(solver): SolverConfig + registry + register_solver` + push | O | clean |
 
@@ -157,7 +157,7 @@ SPEC §8 step 3. **R-A5 round-trip is the gate.** Every predictor in later phase
 |---|---|---|---|
 | 3.1 | Subagent: write `tests/test_predictors_serialise.py` red — parametrised over a placeholder `BoundedPredictor(<stub Predictor>)` fixture; assert `eqx.tree_serialise_leaves` round-trip is bit-exact | S | red |
 | 3.2 | Subagent: write `tests/test_predictors_base.py` red — `BoundedPredictor.input_keys` ordering and dict/Array polymorphism (`TestBoundedPredictorInputKeys`), `BoundScaler` sigmoid bidirection (`from_latent(to_latent(x)) ≈ x` within bounds), `BoundedPredictor` composition, `reinitialize_with_key` re-inits inexact-float leaves of one Module, `reinitialize_pytree_with_key` splits an attempt key by traversal order across a tuple/dict pytree (R-T8) | S | red |
-| 3.3 | Subagent: implement `src/hybridmodels/predictors/base.py` to green | S | green |
+| 3.3 | Subagent: implement `src/jaxhybridmodels/predictors/base.py` to green | S | green |
 | 3.4 | `__init__.py` exports | O | import smoke |
 | 3.5 | ruff + ty | O | clean |
 | 3.6 | Commit `feat(predictors): base — Predictor, BoundedPredictor, BoundScaler, pytree re-init` + push | O | clean |
@@ -171,7 +171,7 @@ SPEC §8 step 4.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 4.1 | Subagent: extend `tests/test_predictors_serialise.py` parametrise list with `MLPPredictor`; add `tests/test_predictors_mlp.py` for shape/forward-pass invariants | S | red |
-| 4.2 | Subagent: implement `src/hybridmodels/predictors/mlp.py` wrapping `eqx.nn.MLP`, all hyperparams in `eqx.field(static=True)` | S | green |
+| 4.2 | Subagent: implement `src/jaxhybridmodels/predictors/mlp.py` wrapping `eqx.nn.MLP`, all hyperparams in `eqx.field(static=True)` | S | green |
 | 4.3 | Cross-check vs source `hybridcrystals/regressors/mlp.py` — strip embedding code; orchestrator confirms no embedding leakage | O | manual |
 | 4.4 | ruff + ty + commit + push | O | clean |
 
@@ -184,8 +184,8 @@ SPEC §8 step 6.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 5.1 | Subagent: write `tests/test_loss_functions.py` red — masked losses respect mask; `channel_idx` restriction; `channel_weights` weighting; `bal_*` per-experiment normalisation | S | red |
-| 5.2 | Subagent: implement `src/hybridmodels/losses.py` (four pure functions + `LOSS_REGISTRY`) | S | green |
-| 5.3 | Subagent: implement `src/hybridmodels/prediction.py` (`predict_bucket`, `predict_dataset`) — thin vmap+jit wrappers, no dedicated test (covered indirectly by `test_train_optax.py` later) | S | smoke |
+| 5.2 | Subagent: implement `src/jaxhybridmodels/losses.py` (four pure functions + `LOSS_REGISTRY`) | S | green |
+| 5.3 | Subagent: implement `src/jaxhybridmodels/prediction.py` (`predict_bucket`, `predict_dataset`) — thin vmap+jit wrappers, no dedicated test (covered indirectly by `test_train_optax.py` later) | S | smoke |
 | 5.4 | **Behaviour parity gate**: orchestrator runs source-package `hybridcrystals/losses.py::irregular_*_from_batch` on a fixture, runs new losses on the same fixture, asserts agreement within `rtol=1e-4` | O | numerical |
 | 5.5 | ruff + ty + commit + push | O | clean |
 
@@ -198,7 +198,7 @@ SPEC §8 step 7.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 6.1 | Subagent: write `tests/test_trainable_filters.py` red — default mask trains all float arrays; `freeze_modules_of_type(mask, predictor, BoundScaler)` zeros the right leaves; `freeze_paths` and `freeze_where` compose; mask shape matches predictor structure | S | red |
-| 6.2 | Subagent: implement `src/hybridmodels/trainable.py` | S | green |
+| 6.2 | Subagent: implement `src/jaxhybridmodels/trainable.py` | S | green |
 | 6.3 | ruff + ty + commit + push | O | clean |
 
 ---
@@ -210,7 +210,7 @@ SPEC §8 step 8.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 7.1 | Subagent: `tests/test_rng.py` red — `fold(root, "name")` is stable; same root + same name = same key; different name = different key; missing root key raises in training entry points | S | red |
-| 7.2 | Subagent: implement `src/hybridmodels/rng.py` | S | green |
+| 7.2 | Subagent: implement `src/jaxhybridmodels/rng.py` | S | green |
 | 7.3 | ruff + ty + commit + push | O | clean |
 
 ---
@@ -222,7 +222,7 @@ SPEC §8 step 9. Pull the spy fixture forward so optax tests can use it.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 8.1 | Subagent: write `tests/test_ui_callbacks.py` red — `SilentUI` produces no stdout (verified via `capsys`); `RecordingUI` spy records lifecycle event fires; protocol shape pinned | S | red |
-| 8.2 | Subagent: implement `src/hybridmodels/ui/base.py` (`TrainingUI` + `EvosaxUI` Protocols, `SilentUI`, `RecordingUI` exported under `hybridmodels.ui.testing`) | S | green |
+| 8.2 | Subagent: implement `src/jaxhybridmodels/ui/base.py` (`TrainingUI` + `EvosaxUI` Protocols, `SilentUI`, `RecordingUI` exported under `jaxhybridmodels.ui.testing`) | S | green |
 | 8.3 | ruff + ty + commit + push | O | clean |
 
 ---
@@ -234,7 +234,7 @@ SPEC §8 step 10. **Fat subagent prompt expected. Re-spawn likely.**
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 9.1 | Subagent: write `tests/test_train_optax.py` red — (a) trains a synthetic harmonic oscillator ODE to known parameters within `rtol=1e-2`; (b) multi-phase config with `reset_optimiser_state=(False, True)` does not crash; (c) `length_schedule=(0.5, 1.0)` does not trigger recompile (verify via JAX trace counter or by side-effect counter on a wrapped function); (d) tournament reduces variance across 5 seeds (`std(with) < std(without)`) | S | red |
-| 9.2 | Subagent: implement `src/hybridmodels/training/optax.py` — `OptaxTrainingConfig`, `bucket_step`, `apply_update`, phase loop, length-schedule mask cutoff, shared tournament with diffrax-error/non-finite drop + fresh-RNG retry, missing-key raise, `RecordingUI` event fires | S | green |
+| 9.2 | Subagent: implement `src/jaxhybridmodels/training/optax.py` — `OptaxTrainingConfig`, `bucket_step`, `apply_update`, phase loop, length-schedule mask cutoff, shared tournament with diffrax-error/non-finite drop + fresh-RNG retry, missing-key raise, `RecordingUI` event fires | S | green |
 | 9.3 | **Behaviour parity gate**: orchestrator runs `hybridcrystals/thesis_training/sharedgrowth.py` for ~50 steps on a tiny dataset, captures final loss; runs the new optax trainer on the same dataset/predictor for 50 steps; asserts within `rtol=1e-2` | O | numerical |
 | 9.4 | ruff + ty + commit + push | O | clean |
 
@@ -246,7 +246,7 @@ SPEC §8 step 11. **No new tests beyond the spy** — Rich rendering is verified
 
 | # | Task | Who | Verify |
 |---|---|---|---|
-| 10.1 | Subagent: implement `src/hybridmodels/ui/optax.py::RichTrainingUI` — single `rich.live.Live`, panels swap on phase transition, compile-progress panel | S | manual |
+| 10.1 | Subagent: implement `src/jaxhybridmodels/ui/optax.py::RichTrainingUI` — single `rich.live.Live`, panels swap on phase transition, compile-progress panel | S | manual |
 | 10.2 | Smoke: orchestrator runs Phase 9's harmonic oscillator with `verbose=True`, eyeballs Rich panel rendering and lifecycle event firing | O | visual |
 | 10.3 | ruff + ty + commit + push | O | clean |
 
@@ -259,7 +259,7 @@ SPEC §8 step 12.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 11.1 | Subagent: write `tests/test_train_evosax.py` red — (a) trains a 4-D synthetic kinetic problem to known minimum within `rtol=1e-2`; (b) `init="lhs_box"` gives wider population spread (max-pairwise-distance) than `"warm"`; (c) flatten/unflatten round-trip via `eqx.partition` + `ravel_pytree` is exact | S | red |
-| 11.2 | Subagent: implement `src/hybridmodels/training/evosax.py` — `EvosaxTrainingConfig`, `_build_strategy`, `single_eval`, `population_eval`, three init modes (LHS via `scipy.stats.qmc` host-side), host-side best tracking | S | green |
+| 11.2 | Subagent: implement `src/jaxhybridmodels/training/evosax.py` — `EvosaxTrainingConfig`, `_build_strategy`, `single_eval`, `population_eval`, three init modes (LHS via `scipy.stats.qmc` host-side), host-side best tracking | S | green |
 | 11.3 | ruff + ty + commit + push | O | clean |
 
 ---
@@ -270,7 +270,7 @@ SPEC §8 step 13.
 
 | # | Task | Who | Verify |
 |---|---|---|---|
-| 12.1 | Subagent: implement `src/hybridmodels/ui/evosax.py::RichEvosaxUI` | S | manual |
+| 12.1 | Subagent: implement `src/jaxhybridmodels/ui/evosax.py::RichEvosaxUI` | S | manual |
 | 12.2 | Smoke + commit + push | O | visual |
 
 ---
@@ -282,7 +282,7 @@ SPEC §8 step 14.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 13.1 | Subagent: extend `tests/test_predictors_serialise.py` parametrise list with `KANPredictor`; add minimal forward-pass test | S | red |
-| 13.2 | Subagent: implement `src/hybridmodels/predictors/kan.py` wrapping `jaxkan`, all hyperparams static | S | green |
+| 13.2 | Subagent: implement `src/jaxhybridmodels/predictors/kan.py` wrapping `jaxkan`, all hyperparams static | S | green |
 | 13.3 | Cross-check vs source `hybridcrystals/regressors/kan.py` and `regressor_kanx.py` | O | manual |
 | 13.4 | ruff + ty + commit + push | O | clean |
 
@@ -312,7 +312,7 @@ SPEC §8 step 16.
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 15.1 | Subagent: write `tests/test_serialise.py` red — `save_predictor`/`load_predictor` round-trip on a tuple-of-BoundedPredictor pytree, `save_run`/`load_run` directory-shape contract per CONTEXT.md | S | red |
-| 15.2 | Subagent: implement `src/hybridmodels/serialise.py` — four functions, `metadata.json` shape | S | green |
+| 15.2 | Subagent: implement `src/jaxhybridmodels/serialise.py` — four functions, `metadata.json` shape | S | green |
 | 15.3 | **Verify against Phase 14**: save a trained predictors pytree, reload, re-run prediction, assert bit-exact agreement | O | numerical |
 | 15.4 | ruff + ty + commit + push | O | clean |
 
@@ -325,7 +325,7 @@ SPEC §8 step 17. **Final v1 deliverable.**
 | # | Task | Who | Verify |
 |---|---|---|---|
 | 16.1 | Subagent: write `examples/pendulum/train.py` — pendulum `simulate_fn` (closed-form `θ̈ = -(g/L)sin(θ)`), single-MLP `predictors = (BoundedPredictor(MLPPredictor(...)),)` for unknown `g/L`, train via `train_with_optax` to recover the constant | S | runs |
-| 16.2 | **Domain-agnostic gate**: orchestrator runs `rg -i "crystal\|moment\|mu0\|d43" src/hybridmodels/`; asserts no matches | O | grep clean |
+| 16.2 | **Domain-agnostic gate**: orchestrator runs `rg -i "crystal\|moment\|mu0\|d43" src/jaxhybridmodels/`; asserts no matches | O | grep clean |
 | 16.3 | Final commit + tag `v0.1.0` + push tags | O | tag pushed |
 
 ---
@@ -442,7 +442,7 @@ EOF
 ### Domain-agnostic gate (Phase 16)
 
 ```bash
-rg -i "crystal|moment|mu0|d43" src/hybridmodels/ && echo "FAIL" || echo "PASS"
+rg -i "crystal|moment|mu0|d43" src/jaxhybridmodels/ && echo "FAIL" || echo "PASS"
 ```
 
 Must print `PASS`.

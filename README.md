@@ -47,8 +47,7 @@ for the other workflows.
 uv add jaxhybridmodels==0.2.0b1
 ```
 
-The distribution is named `jaxhybridmodels`; the Python import remains
-`hybridmodels`.
+The distribution and Python import are both named `jaxhybridmodels`.
 
 ### Development
 
@@ -56,7 +55,7 @@ The distribution is named `jaxhybridmodels`; the Python import remains
 uv sync --extra examples
 ```
 
-This installs `hybridmodels` in editable mode together with `jax`,
+This installs `jaxhybridmodels` in editable mode together with `jax`,
 `equinox`, `diffrax`, `optax`, `evosax`, `jaxkan`, and the small CLI/UI
 dependencies, plus the optional dependencies used by the examples.
 

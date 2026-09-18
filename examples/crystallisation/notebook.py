@@ -71,7 +71,7 @@ import numpy as np  # noqa: E402
 from jax import Array  # noqa: E402
 from jaxtyping import Float  # noqa: E402
 
-from hybridmodels import (  # noqa: E402
+from jaxhybridmodels import (  # noqa: E402
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -82,11 +82,11 @@ from hybridmodels import (  # noqa: E402
     make_experiment,
     predict_dataset,
 )
-from hybridmodels.training.evosax import (  # noqa: E402
+from jaxhybridmodels.training.evosax import (  # noqa: E402
     EvosaxTrainingConfig,
     train_with_evosax,
 )
-from hybridmodels.training.optax import (  # noqa: E402
+from jaxhybridmodels.training.optax import (  # noqa: E402
     OptaxTrainingConfig,
     train_with_optax,
 )

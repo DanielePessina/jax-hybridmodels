@@ -25,7 +25,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -35,7 +35,7 @@ from hybridmodels import (
     make_experiment,
     predict_bucket,
 )
-from hybridmodels.solver import ADJOINT_REGISTRY
+from jaxhybridmodels.solver import ADJOINT_REGISTRY
 
 # How many layout-related ops (copy/retile/transpose) are "normal" for
 # these tiny kernels. A few ``copy`` ops are ordinary buffer-assignment

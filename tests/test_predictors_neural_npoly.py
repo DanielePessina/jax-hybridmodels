@@ -9,7 +9,7 @@ import jax.tree_util as jtu
 import pytest
 from jaxtyping import Array, Float
 
-from hybridmodels.predictors import (
+from jaxhybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     MLPPredictor,
@@ -18,10 +18,10 @@ from hybridmodels.predictors import (
 
 # ``NeuralNPolynomial`` is not part of the public predictor surface yet
 # (the file is kept in-tree as a future candidate; see
-# ``hybridmodels/predictors/__init__.py``). We import it directly from
+# ``jaxhybridmodels/predictors/__init__.py``). We import it directly from
 # the submodule so these tests can still pin the implementation's
 # contract while it lives outside the public API.
-from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
+from jaxhybridmodels.predictors.neural_npoly import NeuralNPolynomial
 
 
 class _ConstantPredictor(Predictor):
@@ -200,7 +200,7 @@ def test_coeff_net_without_size_metadata_is_supported():
     # Predictor's public contract is callable Array -> Array; size metadata
     # is optional. NeuralNPolynomial can validate the actual output at call
     # time instead of rejecting a valid custom predictor at construction.
-    from hybridmodels.predictors.base import Predictor
+    from jaxhybridmodels.predictors.base import Predictor
 
     class ArrayOnlyPredictor(Predictor):
         weights: Float[Array, "1 2"]
@@ -237,11 +237,11 @@ class TestZeroExponentNonNaN:
 def test_is_in_public_export() -> None:
     """``NeuralNPolynomial`` is a supported public predictor family.
 
-    It lives in ``hybridmodels.predictors`` and the top-level namespace,
+    It lives in ``jaxhybridmodels.predictors`` and the top-level namespace,
     alongside ``MLPPredictor`` and ``KANPredictor``. Pin the export so a
     future removal is a deliberate edit, not an accidental leak.
     """
-    import hybridmodels
+    import jaxhybridmodels
 
-    assert hasattr(hybridmodels, "NeuralNPolynomial")
-    assert "NeuralNPolynomial" in hybridmodels.__all__
+    assert hasattr(jaxhybridmodels, "NeuralNPolynomial")
+    assert "NeuralNPolynomial" in jaxhybridmodels.__all__

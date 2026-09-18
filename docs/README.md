@@ -1,7 +1,7 @@
 # jaxhybridmodels docs
 
 VitePress documentation site for the `jaxhybridmodels` distribution and its
-`hybridmodels` Python import.
+`jaxhybridmodels` Python import.
 
 ## Layout
 
@@ -44,7 +44,7 @@ docs/
 ```
 
 `scripts/gen_api_docs.py` regenerates the API reference under `docs/api/`
-from docstrings. Edit the docstrings in `src/hybridmodels/`, never the
+from docstrings. Edit the docstrings in `src/jaxhybridmodels/`, never the
 generated markdown.
 
 `scripts/gen_example_figures.py` regenerates the committed figures under
@@ -80,7 +80,7 @@ result back. A manual `workflow_dispatch` follows the build-and-check path.
 
 ## How API generation works
 
-`scripts/gen_api_docs.py` introspects `hybridmodels.__all__`, groups symbols
+`scripts/gen_api_docs.py` introspects `jaxhybridmodels.__all__`, groups symbols
 by output page (one per concern: data, predictors, training, ...), parses
 each docstring as numpy-style, and emits markdown with:
 
@@ -96,7 +96,7 @@ To document a new public symbol:
 
 1. Write its docstring in numpy style (Parameters / Returns / Attributes /
    Notes / Examples sections).
-2. Add it to `hybridmodels.__all__` and `hybridmodels._EXPORTS`.
+2. Add it to `jaxhybridmodels.__all__` and `jaxhybridmodels._EXPORTS`.
 3. Add it to the appropriate `PAGES` group in `scripts/gen_api_docs.py`.
 4. Run `npm --prefix docs run docs:gen` and commit the regenerated markdown.
 

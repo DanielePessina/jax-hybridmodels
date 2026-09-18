@@ -47,7 +47,7 @@ feature. See section 8.
 
 | Decision | Choice |
 |---|---|
-| Scope | Example only. No `src/hybridmodels` changes, no SPEC.md growth, no new public class. |
+| Scope | Example only. No `src/jaxhybridmodels` changes, no SPEC.md growth, no new public class. |
 | Thesis | Showcase the bounded controller under RL. |
 | Rollout | Free-running on model state, as in the paper's Eq 4c and 4e. |
 | RL stack | `rlax` for the PPO math, equinox actor and critic written here. |
@@ -299,7 +299,7 @@ Plots:
 
 ## 8. Out of scope
 
-- Any change to `src/hybridmodels`. No `train_with_rl`, no config dataclass,
+- Any change to `src/jaxhybridmodels`. No `train_with_rl`, no config dataclass,
   no UI, no SPEC.md requirement.
 - SAC. The paper uses it; PPO is chosen because the MDP is deterministic,
   episodes are 11 steps, and rollouts are nearly free, so off-policy replay

@@ -18,13 +18,13 @@ For ensembles of hybrid models:
   trains the best few.
 - :func:`train_bootstrap_ensemble` trains one (or a seed-set of) model(s)
   per bootstrap resample of the experiments, for bagging-style ensembles.
-- :func:`hybridmodels.ensemble_predictions` averages the members'
-  predictions; :func:`hybridmodels.make_bootstrap_dataset` is the data
+- :func:`jaxhybridmodels.ensemble_predictions` averages the members'
+  predictions; :func:`jaxhybridmodels.make_bootstrap_dataset` is the data
   half of the bagging recipe.
 """
 
-from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
-from hybridmodels.training.optax import (
+from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
+from jaxhybridmodels.training.optax import (
     OptaxTrainingConfig,
     train_bootstrap_ensemble,
     train_seed_ensemble,

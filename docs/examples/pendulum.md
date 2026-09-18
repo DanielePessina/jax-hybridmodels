@@ -45,7 +45,7 @@ import jax.random as jr
 from jax import Array
 from jaxtyping import Float
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -56,7 +56,7 @@ from hybridmodels import (
     train_with_optax,
     OptaxTrainingConfig,
 )
-from hybridmodels.predictors.base import Predictor
+from jaxhybridmodels.predictors.base import Predictor
 
 key, noise_key = jr.split(jr.PRNGKey(0))
 
@@ -80,7 +80,7 @@ fresh starting point on each attempt. Omit it and the default
 Wrap it in a `BoundedPredictor`:
 
 ```python
-from hybridmodels import BoundedPredictor, BoundScaler
+from jaxhybridmodels import BoundedPredictor, BoundScaler
 
 predictor = BoundedPredictor(
     input_keys=("dummy",),                                   # at least one slot is required

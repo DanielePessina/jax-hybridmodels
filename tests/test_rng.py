@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
-from hybridmodels.rng import fold
+from jaxhybridmodels.rng import fold
 
 
 def test_fold_returns_jax_key_shape_and_dtype() -> None:

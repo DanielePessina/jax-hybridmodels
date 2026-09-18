@@ -47,10 +47,10 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxtyping import Array
 
-from hybridmodels.data import Dataset
+from jaxhybridmodels.data import Dataset
 
 if TYPE_CHECKING:
-    from hybridmodels.predictors import BoundedPredictor
+    from jaxhybridmodels.predictors import BoundedPredictor
 
 __all__ = (
     "soft_inverse",
@@ -86,7 +86,7 @@ def _bounded_leaves(predictors: Any) -> list[BoundedPredictor]:
     ``BoundedPredictor`` is imported lazily because ``predictors.base``
     imports this module for :func:`soft_logit`.
     """
-    from hybridmodels.predictors import BoundedPredictor
+    from jaxhybridmodels.predictors import BoundedPredictor
 
     is_bp = lambda node: isinstance(node, BoundedPredictor)  # noqa: E731
 
@@ -138,7 +138,7 @@ def soft_logit(s: Array, eps: float = 1e-3) -> Array:
     tuning knob. The default 1e-3 maps a 1% overshoot to ``|z| ~ 10``, a
     number a network can still consume; 1e-6 would map it to ``|z| ~ 1e4``.
     """
-    from hybridmodels.transforms import BOUND_TRANSFORMS
+    from jaxhybridmodels.transforms import BOUND_TRANSFORMS
 
     t = BOUND_TRANSFORMS["sigmoid"]
     return soft_inverse(s, t.inverse, t.inverse_slope, eps)
@@ -270,7 +270,7 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
             f"(one point per box edge); got {n_per_dim}"
         )
 
-    from hybridmodels.transforms import WARPS
+    from jaxhybridmodels.transforms import WARPS
 
     warp = WARPS[in_scaler.warp]
     lows = jnp.asarray([b[0] for b in in_scaler.warped_bounds])
@@ -352,7 +352,7 @@ def data_penalty_points(
 def length_mask_keep(source: PenaltyPointSource, length_mask_fraction: float) -> Array:
     """Boolean keep-vector over a source's cells, matching the loss's prefix mask.
 
-    Applies the same prefix semantics :func:`~hybridmodels.training.kernels.apply_length_mask`
+    Applies the same prefix semantics :func:`~jaxhybridmodels.training.kernels.apply_length_mask`
     gives the loss: a cell is kept when its timestamp index is below
     ``ceil(T * fraction)``, clamped at 1 so a phase never scores nothing.
     The penalty therefore follows the curriculum exactly, disagreeing with
@@ -470,7 +470,7 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
 
     For each leaf, evaluates ``inner(in_scaler.to_latent(x))`` across the
     leaf's point set and charges
-    :meth:`~hybridmodels.predictors.BoundScaler.saturation` on the
+    :meth:`~jaxhybridmodels.predictors.BoundScaler.saturation` on the
     resulting latents. Leaves are summed.
 
     ``points`` is positional, one ``[G, n_inputs]`` array per leaf in

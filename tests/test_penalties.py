@@ -1,4 +1,4 @@
-"""Tests for the gradient-safe bound primitives in ``hybridmodels.penalties``.
+"""Tests for the gradient-safe bound primitives in ``jaxhybridmodels.penalties``.
 
 These pin the properties the rest of the framework relies on, and they
 are written as *behavioural* claims (what the gradient does at a bound)
@@ -13,7 +13,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from hybridmodels.penalties import box_violation, clip_ste, soft_logit, softclip
+from jaxhybridmodels.penalties import box_violation, clip_ste, soft_logit, softclip
 
 
 class TestSoftLogit:

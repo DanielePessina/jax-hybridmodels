@@ -24,8 +24,8 @@ from _harness import (
     solver_config,
 )
 
-from hybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
-from hybridmodels.ui import EvosaxUI, RichEvosaxUI
+from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
+from jaxhybridmodels.ui import EvosaxUI, RichEvosaxUI
 
 # Significant-figure pattern: ``\d\.\d{4,}`` matches things like 0.5000, 0.16667.
 # Used to assert "fitness rendered to >= 4 sig figs" and to count throttled
@@ -139,11 +139,11 @@ def test_train_with_evosax_verbose_true_runs_with_rich_ui_default(monkeypatch) -
     """verbose=True with ui=None must select RichEvosaxUI and run end-to-end.
 
     Variant implemented: monkeypatch the module-level ``RichEvosaxUI`` symbol
-    in ``hybridmodels.training.evosax`` so the trainer instantiates a
+    in ``jaxhybridmodels.training.evosax`` so the trainer instantiates a
     recording-console-wired UI, then assert the recording captured generation
     output and a fitness number.
     """
-    import hybridmodels.training.evosax as evosax_module
+    import jaxhybridmodels.training.evosax as evosax_module
 
     record_console = recording_console()
 

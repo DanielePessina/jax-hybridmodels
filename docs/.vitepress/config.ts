@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitepress'
 
-// VitePress configuration for the hybridmodels documentation site.
+// VitePress configuration for the jaxhybridmodels documentation site.
 //
 // Keep a flat sidebar per section (Guide, Examples, API), with local search
 // and math rendering enabled for the ODE expressions in the examples.

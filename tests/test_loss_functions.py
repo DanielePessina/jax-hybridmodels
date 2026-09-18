@@ -17,8 +17,8 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
-from hybridmodels.data import BucketPayload
-from hybridmodels.losses import (
+from jaxhybridmodels.data import BucketPayload
+from jaxhybridmodels.losses import (
     LOSS_REGISTRY,
     bal_mle,
     bal_mse,

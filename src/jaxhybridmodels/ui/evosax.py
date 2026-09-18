@@ -1,6 +1,6 @@
 """Rich-based ``EvosaxUI`` for ``train_with_evosax``.
 
-Mirrors :class:`hybridmodels.ui.optax.RichTrainingUI` with phases and
+Mirrors :class:`jaxhybridmodels.ui.optax.RichTrainingUI` with phases and
 per-step losses replaced by generations and population statistics. One
 :class:`rich.live.Live` runs between :meth:`RichEvosaxUI.on_run_start`
 and :meth:`RichEvosaxUI.on_run_end`, rendering:
@@ -41,7 +41,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from hybridmodels.ui._rich import (
+from jaxhybridmodels.ui._rich import (
     format_value,
     half_width,
     render_compile_panel,
@@ -53,7 +53,7 @@ from hybridmodels.ui._rich import (
 
 
 class RichEvosaxUI:
-    """Live Rich dashboard satisfying ``hybridmodels.ui.base.EvosaxUI``.
+    """Live Rich dashboard satisfying ``jaxhybridmodels.ui.base.EvosaxUI``.
 
     Parameters
     ----------

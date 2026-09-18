@@ -26,7 +26,7 @@ import jax.random as jr
 from jax import Array
 from jaxtyping import Float
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -39,8 +39,8 @@ from hybridmodels import (
     predict_dataset,
     print_metrics,
 )
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.predictors.base import Predictor
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 # ``examples/_shared`` is a sibling directory; put it on sys.path so the
 # helpers import without an install step.

@@ -22,7 +22,7 @@ Build [`Experiment`](#experiment) records from sparse observations, then pass th
 
 ### `ChannelObs`
 
-<small>`from hybridmodels.data import ChannelObs` &nbsp;·&nbsp; also re-exported as `hybridmodels.ChannelObs`</small>
+<small>`from jaxhybridmodels.data import ChannelObs` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.ChannelObs`</small>
 
 ```python
 ChannelObs(ts: 'Any', values: 'Any', variance: 'Any' = 1.0) -> 'None'
@@ -50,7 +50,7 @@ not repeat a time within one channel.
 | `values` | `Float[Array, "Tc"]` | Observed channel values aligned with ``ts``. |
 | `variance` | `Float[Array, "Tc"]` | Per-observation variance used by ``masked_mle`` / ``bal_mle``. A scalar passed to the constructor is broadcast to ``values.shape`` so downstream code can assume rank-1. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L57)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L57)</small>
 
 ---
 
@@ -58,7 +58,7 @@ not repeat a time within one channel.
 
 ### `Experiment`
 
-<small>`from hybridmodels.data import Experiment` &nbsp;·&nbsp; also re-exported as `hybridmodels.Experiment`</small>
+<small>`from jaxhybridmodels.data import Experiment` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.Experiment`</small>
 
 ```python
 Experiment(
@@ -84,7 +84,7 @@ after a permutation.
 | `channels` | `dict[str, ChannelObs]` | Sparse observations, one entry per measured quantity. Must contain every name listed in ``make_dataset(..., output_channel_names=...)``. |
 | `exp_id` | `str` | Identifier carried through for diagnostics. A static field, so it is not a JAX array leaf and never reaches a compiled kernel as data. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L137)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L137)</small>
 
 ---
 
@@ -92,7 +92,7 @@ after a permutation.
 
 ### `make_experiment()`
 
-<small>`from hybridmodels.data import make_experiment` &nbsp;·&nbsp; also re-exported as `hybridmodels.make_experiment`</small>
+<small>`from jaxhybridmodels.data import make_experiment` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.make_experiment`</small>
 
 ```python
 make_experiment(
@@ -121,7 +121,7 @@ moment initialised to zero being the common case.
 | `y0_fn` |  | Hook ``(covariates, channels) -> [S]`` building the full initial state, where ``S`` is the state dimension the user's ``simulate_fn`` integrates. |
 | `exp_id` |  | Optional human-readable id copied to ``Experiment.exp_id``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L253)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L253)</small>
 
 ---
 
@@ -129,7 +129,7 @@ moment initialised to zero being the common case.
 
 ### `BucketPayload`
 
-<small>`from hybridmodels.data import BucketPayload` &nbsp;·&nbsp; also re-exported as `hybridmodels.BucketPayload`</small>
+<small>`from jaxhybridmodels.data import BucketPayload` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.BucketPayload`</small>
 
 ```python
 BucketPayload(
@@ -184,7 +184,7 @@ n_obs : Int[Array, ""]
     its own denominator. Kept because examples and smoke scripts assert
     dataset shape with it (R-D4).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L170)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L170)</small>
 
 ---
 
@@ -192,7 +192,7 @@ n_obs : Int[Array, ""]
 
 ### `Dataset`
 
-<small>`from hybridmodels.data import Dataset` &nbsp;·&nbsp; also re-exported as `hybridmodels.Dataset`</small>
+<small>`from jaxhybridmodels.data import Dataset` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.Dataset`</small>
 
 ```python
 Dataset(
@@ -219,7 +219,7 @@ not the data — is passed to prediction and training as a parameter.
 | `covariate_names` | `tuple[str, ...]` | Covariate keys, sorted. Matches each ``Experiment.covariates`` key set. Sorting makes dict iteration deterministic. |
 | `_experiments` | `tuple[Experiment, ...]` | Source experiments, kept so ``split_dataset`` can re-bucket each split. Empty when a ``Dataset`` is built by hand from raw payloads, and ``split_dataset`` then raises. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L222)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L222)</small>
 
 ---
 
@@ -227,7 +227,7 @@ not the data — is passed to prediction and training as a parameter.
 
 ### `make_dataset()`
 
-<small>`from hybridmodels.data import make_dataset` &nbsp;·&nbsp; also re-exported as `hybridmodels.make_dataset`</small>
+<small>`from jaxhybridmodels.data import make_dataset` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.make_dataset`</small>
 
 ```python
 make_dataset(
@@ -266,7 +266,7 @@ the model, is passed to prediction and training separately.
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with ``_experiments`` kept so ``split_dataset`` can re-bucket subsets. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L495)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L495)</small>
 
 ---
 
@@ -274,7 +274,7 @@ the model, is passed to prediction and training separately.
 
 ### `make_bootstrap_dataset()`
 
-<small>`from hybridmodels.data import make_bootstrap_dataset` &nbsp;·&nbsp; also re-exported as `hybridmodels.make_bootstrap_dataset`</small>
+<small>`from jaxhybridmodels.data import make_bootstrap_dataset` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.make_bootstrap_dataset`</small>
 
 ```python
 make_bootstrap_dataset(
@@ -310,7 +310,7 @@ ensemble whose members saw different resamples.
 | --- | --- | --- |
 | `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L641)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L641)</small>
 
 ---
 
@@ -318,7 +318,7 @@ ensemble whose members saw different resamples.
 
 ### `split_dataset()`
 
-<small>`from hybridmodels.data import split_dataset` &nbsp;·&nbsp; also re-exported as `hybridmodels.split_dataset`</small>
+<small>`from jaxhybridmodels.data import split_dataset` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.split_dataset`</small>
 
 ```python
 split_dataset(
@@ -354,7 +354,7 @@ payloads and no ``_experiments``, so it cannot be split again.
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L692)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L692)</small>
 
 ---
 
@@ -362,7 +362,7 @@ payloads and no ``_experiments``, so it cannot be split again.
 
 ### `describe_buckets()`
 
-<small>`from hybridmodels.data import describe_buckets` &nbsp;·&nbsp; also re-exported as `hybridmodels.describe_buckets`</small>
+<small>`from jaxhybridmodels.data import describe_buckets` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.describe_buckets`</small>
 
 ```python
 describe_buckets(dataset: 'Dataset') -> 'str'
@@ -375,4 +375,4 @@ debugging and example output. Each line reports the bucket's ``N``
 (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
 fraction of ``[N, T, D]`` cells the mask marks as real observations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/data.py#L477)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L477)</small>

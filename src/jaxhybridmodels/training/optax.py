@@ -37,27 +37,27 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array
 
-from hybridmodels.data import BucketPayload, Dataset, make_bootstrap_dataset
-from hybridmodels.losses import resolve_loss_fn
-from hybridmodels.penalties import (
+from jaxhybridmodels.data import BucketPayload, Dataset, make_bootstrap_dataset
+from jaxhybridmodels.losses import resolve_loss_fn
+from jaxhybridmodels.penalties import (
     PenaltyPointSource,
     bound_penalty,
     data_penalty_points,
     select_penalty_points,
     validate_penalty_points,
 )
-from hybridmodels.predictors.base import reinitialize_pytree_with_key
-from hybridmodels.rng import fold
-from hybridmodels.solver import SolverConfig
-from hybridmodels.trainable import trainable_mask
-from hybridmodels.training.kernels import (
+from jaxhybridmodels.predictors.base import reinitialize_pytree_with_key
+from jaxhybridmodels.rng import fold
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.training.kernels import (
     build_apply_update,
     build_bucket_step,
     build_penalty_step,
     build_score_bucket,
 )
-from hybridmodels.ui.base import SilentUI, TrainingUI
-from hybridmodels.ui.optax import RichTrainingUI
+from jaxhybridmodels.ui.base import SilentUI, TrainingUI
+from jaxhybridmodels.ui.optax import RichTrainingUI
 
 # An optimizer entry may be a registered name ("adamw"), a factory taking
 # ``learning_rate`` and returning an ``optax.GradientTransformation``, or a
@@ -152,11 +152,11 @@ class OptaxTrainingConfig:
         ``None`` the penalty uses only the measured points gathered from
         the dataset (leaves whose inputs do not all resolve to dataset
         covariates must be covered by an entry here, or the run raises).
-        ``hybridmodels.penalties.box_grid`` builds a warp-uniform box sweep
+        ``jaxhybridmodels.penalties.box_grid`` builds a warp-uniform box sweep
         for the "police the whole box" recipe.
     penalty_fn : Callable | None
         The regulariser added to the data objective, defaulting to
-        :func:`hybridmodels.penalties.bound_penalty` when ``None``. A
+        :func:`jaxhybridmodels.penalties.bound_penalty` when ``None``. A
         custom callable ``(predictors, points) -> scalar`` replaces
         the bound penalty with e.g. weight decay on inner weights or a
         monotonicity term; one that ignores points simply does not use them.
@@ -166,7 +166,7 @@ class OptaxTrainingConfig:
         ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]``
         *including* any penalty accumulators carried in the ODE state; add
         it to the data loss inside the same forward pass. ``None`` (the
-        default) disables it. See the helpers in ``hybridmodels.penalties``
+        default) disables it. See the helpers in ``jaxhybridmodels.penalties``
         (``attach_penalty_state`` / ``penalty_vector_field`` /
         ``strip_penalty_state`` / ``penalty_integral``).
     trajectory_penalty_weight : float
@@ -176,7 +176,7 @@ class OptaxTrainingConfig:
         A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``,
         ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``.
     channel_idx, channel_weights : tuple | None
-        Forwarded into the resolved loss. See ``hybridmodels.losses``.
+        Forwarded into the resolved loss. See ``jaxhybridmodels.losses``.
     tournament_attempts, tournament_steps : int
         The tournament runs only when ``tournament_steps > 0`` and
         ``tournament_attempts > 1``. Each attempt re-initialises the
@@ -307,7 +307,7 @@ def _validate_penalty_points(config: OptaxTrainingConfig) -> None:
 
     Length and input-column checks against the actual ``BoundedPredictor``
     leaves need the predictors pytree, so they happen at kernel build time
-    (:func:`hybridmodels.penalties.validate_penalty_points`); here only the
+    (:func:`jaxhybridmodels.penalties.validate_penalty_points`); here only the
     per-array shape is checkable without it.
     """
     for idx, points in enumerate(config.penalty_points or ()):
@@ -706,7 +706,7 @@ def _warmup_compile(
     tree (``jnp.asarray(1.0)``) to strong-typed and would retrace every
     kernel once — seconds of ODE recompile mid-run. The framework's own
     scalars are strong-typed at construction
-    (:class:`~hybridmodels.predictors.BoundScaler`), so the stock trainer
+    (:class:`~jaxhybridmodels.predictors.BoundScaler`), so the stock trainer
     requests the settle only when :func:`_has_weak_scalar_trainable` finds
     a weak trainable scalar in the supplied tree; strong-typed or frozen
     trees keep the one-trace-per-shape contract exactly. Discovered and
@@ -913,9 +913,9 @@ def train_with_optax(
     passed here rather than stored on the ``Dataset``.
 
     ``trainable`` is a boolean mask matching ``predictors``. Omitting it
-    defaults to :func:`hybridmodels.trainable.trainable_mask`, which marks
+    defaults to :func:`jaxhybridmodels.trainable.trainable_mask`, which marks
     every inexact-array leaf trainable. Pass a custom mask, usually from
-    the freezers in ``hybridmodels.trainable``, to hold leaves fixed;
+    the freezers in ``jaxhybridmodels.trainable``, to hold leaves fixed;
     freezing ``BoundScaler`` leaves is the common case.
 
     Returns
@@ -932,7 +932,7 @@ def train_with_optax(
         these are the values the optimiser saw.
 
         It differs from
-        :func:`~hybridmodels.training.evosax.train_with_evosax`, whose
+        :func:`~jaxhybridmodels.training.evosax.train_with_evosax`, whose
         history is best-so-far and therefore monotone. Same type, same
         position, different meaning: plotting both on one axis misleads.
 
@@ -1407,7 +1407,7 @@ def train_bootstrap_ensemble(
     """Train a bootstrap ensemble: one (or a seed-set of) model(s) per resample.
 
     For each of ``n_bootstraps`` resampled datasets (via
-    :func:`hybridmodels.make_bootstrap_dataset`), trains a model. With
+    :func:`jaxhybridmodels.make_bootstrap_dataset`), trains a model. With
     ``n_seeds > 1`` each resample's member is itself seed-selected by
     :func:`train_seed_ensemble` (so every member both sees different data
     *and* is a good seed); with ``n_seeds == 1`` each resample contributes

@@ -2,7 +2,7 @@
 
 ## What this package does
 
-Use `hybridmodels` when part of your differential equation is known and part
+Use `jaxhybridmodels` when part of your differential equation is known and part
 is represented by a trainable function. You write the ODE simulation. The
 library handles the predictor PyTree, bucketed observations, and training.
 
@@ -50,7 +50,7 @@ uv add jaxhybridmodels==0.2.0b1
 ```
 
 The distribution is named `jaxhybridmodels`; import it in Python as
-`hybridmodels`.
+`jaxhybridmodels`.
 
 If you cloned the repository to work on it:
 
@@ -58,7 +58,7 @@ If you cloned the repository to work on it:
 uv sync
 ```
 
-Either path installs `hybridmodels` with `jax`, `equinox`, `diffrax`,
+Either path installs `jaxhybridmodels` with `jax`, `equinox`, `diffrax`,
 `optax`, `evosax`, and `jaxkan`.
 
 ## The pieces of a hybrid model
@@ -135,7 +135,7 @@ import jax.random as jr
 from jax import Array
 from jaxtyping import Float
 
-import hybridmodels as hm
+import jaxhybridmodels as hm
 
 # 1. A predictor holding one trainable scalar. It ignores its input,
 #    because every experiment shares the same omega.

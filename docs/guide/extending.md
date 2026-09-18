@@ -1,4 +1,4 @@
-# Extending hybridmodels
+# Extending jaxhybridmodels
 
 The library is assembled from small public pieces. A predictor, loss,
 optimizer, regulariser, or training loop is a callable or PyTree that you can
@@ -65,7 +65,7 @@ config = OptaxTrainingConfig(..., loss=my_huber_loss)
 Channel selection composes automatically: a loss that accepts
 `channel_idx`/`channel_weights` gets them as keywords; a plain
 `(pred_obs, bp)` loss is handed the selected channels pre-sliced. See
-`hybridmodels.losses.resolve_loss_fn`.
+`jaxhybridmodels.losses.resolve_loss_fn`.
 
 ## Custom optimisers
 
@@ -115,10 +115,10 @@ the same forward pass. No second simulation, no `simulate_fn` or
 
 For an embedded predictor, the penalty rides in the ODE state as extra
 accumulators (their time-integrals are what you charge). The helpers in
-`hybridmodels.penalties` are the user-side recipe:
+`jaxhybridmodels.penalties` are the user-side recipe:
 
 ```python
-from hybridmodels.penalties import (
+from jaxhybridmodels.penalties import (
     attach_penalty_state, penalty_vector_field,
     strip_penalty_state, penalty_integral,
 )
@@ -157,7 +157,7 @@ penalty fires).
 ## Custom training loops
 
 The kernels a trainer is built from are public, in
-`hybridmodels.training.kernels`: `build_bucket_step` (the jitted
+`jaxhybridmodels.training.kernels`: `build_bucket_step` (the jitted
 per-bucket `(loss, grads)` kernel), `build_score_bucket` (forward-only),
 `build_penalty_step` (the per-step regulariser), and `build_apply_update`
 (the single optimiser update). The following is the bucket/step skeleton;
@@ -194,7 +194,7 @@ ramps in — multiplies a schedule into the value each step. The library's
 length baked in (one step is one epoch):
 
 ```python
-from hybridmodels import annealing_schedule
+from jaxhybridmodels import annealing_schedule
 
 lr_sched = annealing_schedule("warmup_cosine", total_epochs=n_steps, warmup_epochs=5)
 w_sched = annealing_schedule("linear", total_epochs=n_steps, end_value=0.5)

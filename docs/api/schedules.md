@@ -10,7 +10,7 @@
 
 ### `annealing_schedule()`
 
-<small>`from hybridmodels.schedules import annealing_schedule` &nbsp;·&nbsp; also re-exported as `hybridmodels.annealing_schedule`</small>
+<small>`from jaxhybridmodels.schedules import annealing_schedule` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.annealing_schedule`</small>
 
 ```python
 annealing_schedule(
@@ -46,4 +46,4 @@ is genuinely baked in.
 | --- | --- | --- |
 | `optax.Schedule` |  | ``schedule(step)`` in ``[end_value, init_value]``. Compose as a multiplier: ``lr = base_lr * schedule(step)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/schedules.py#L36)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/schedules.py#L36)</small>

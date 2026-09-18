@@ -2,7 +2,7 @@
 
 Covers the four fold-in candidates from the examples:
 
-- ``hybridmodels.metrics`` — masked per-channel MSE/RMSE/MAE/R^2.
+- ``jaxhybridmodels.metrics`` — masked per-channel MSE/RMSE/MAE/R^2.
 - ``SolverConfig.diffeqsolve`` — the invocation boilerplate, forwarding
   ``solver.adjoint`` (the field most hand-written examples ignored).
 - ``describe_buckets`` / ``count_trainable_params`` / ``evaluate_predictor``
@@ -26,11 +26,11 @@ from _harness import (
     oscillator_state_to_output,
 )
 
-from hybridmodels.data import Dataset
-from hybridmodels.metrics import compute_metrics, print_metrics
-from hybridmodels.prediction import evaluate_predictor, predict_bucket
-from hybridmodels.solver import ADJOINT_REGISTRY, SolverConfig
-from hybridmodels.trainable import (
+from jaxhybridmodels.data import Dataset
+from jaxhybridmodels.metrics import compute_metrics, print_metrics
+from jaxhybridmodels.prediction import evaluate_predictor, predict_bucket
+from jaxhybridmodels.solver import ADJOINT_REGISTRY, SolverConfig
+from jaxhybridmodels.trainable import (
     count_trainable_params,
     freeze_modules_of_type,
     frozen_default_mask,
@@ -39,7 +39,7 @@ from hybridmodels.trainable import (
 
 
 def describe_buckets(dataset: Dataset) -> str:
-    from hybridmodels.data import describe_buckets as _db
+    from jaxhybridmodels.data import describe_buckets as _db
 
     return _db(dataset)
 
@@ -90,7 +90,7 @@ def test_compute_metrics_respects_the_mask():
     # Build a dataset whose union mask is genuinely PARTIAL, so an
     # implementation that ignored the mask would report a different n and
     # different error than the mask-respecting one.
-    from hybridmodels.data import ChannelObs, make_dataset, make_experiment
+    from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
 
     ts_full = jnp.linspace(0.0, 5.0, 10)
     # "position" is observed only on the first 4 timestamps; "velocity" is
@@ -158,7 +158,7 @@ def test_compute_metrics_is_jit_compatible():
 
 
 def test_compute_metrics_r2_uses_observations_across_buckets():
-    from hybridmodels.data import BucketPayload
+    from jaxhybridmodels.data import BucketPayload
 
     def payload(value):
         return BucketPayload(
@@ -178,7 +178,7 @@ def test_compute_metrics_r2_uses_observations_across_buckets():
 
 
 def _constant_observation_dataset() -> Dataset:
-    from hybridmodels.data import ChannelObs, make_dataset, make_experiment
+    from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
 
     ts = jnp.linspace(0.0, 5.0, 10)
     exp = make_experiment(
@@ -228,8 +228,8 @@ def test_count_trainable_params_counts_mask_selected_leaves():
 
 
 def test_frozen_default_mask_freezes_module_types():
-    from hybridmodels.predictors.base import BoundedPredictor, BoundScaler
-    from hybridmodels.predictors.mlp import MLPPredictor
+    from jaxhybridmodels.predictors.base import BoundedPredictor, BoundScaler
+    from jaxhybridmodels.predictors.mlp import MLPPredictor
 
     inner = MLPPredictor(in_size=1, out_size=1, width_size=4, depth=1, key=jax.random.PRNGKey(0))
     bp = BoundedPredictor(
@@ -256,7 +256,7 @@ def test_evaluate_predictor_reads_scalar():
 def test_diffeqsolve_forwards_adjoint_and_matches_handwritten():
     # The whole point: SolverConfig.diffeqsolve must forward solver.adjoint,
     # so Backsolve (which needs args-threading) and Direct both work.
-    from hybridmodels.data import ChannelObs, make_dataset, make_experiment
+    from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
 
     ts = jnp.linspace(0.0, 5.0, 10)
     exp = make_experiment(
@@ -303,7 +303,7 @@ def test_diffeqsolve_forwards_adjoint_at_gradient_level():
     # the difference — only a gradient does.
     import equinox as eqx
 
-    from hybridmodels.data import ChannelObs, make_dataset, make_experiment
+    from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
 
     ts = jnp.linspace(0.0, 5.0, 10)
     exp = make_experiment(

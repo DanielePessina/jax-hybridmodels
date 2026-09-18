@@ -11,7 +11,7 @@ import diffrax
 import jax.numpy as jnp
 import jax.random as jr
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,

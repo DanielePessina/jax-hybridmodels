@@ -1,6 +1,6 @@
-"""Generate VitePress API reference markdown from hybridmodels docstrings.
+"""Generate VitePress API reference markdown from jaxhybridmodels docstrings.
 
-Walks ``hybridmodels.__all__``, groups public symbols by their declaring
+Walks ``jaxhybridmodels.__all__``, groups public symbols by their declaring
 submodule, and emits one markdown page per module under ``docs/api/``.
 
 Each entry contains:
@@ -30,14 +30,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import hybridmodels
+import jaxhybridmodels
 
 # --------------------------------------------------------------------------- #
 # Module groupings → output pages                                             #
 # --------------------------------------------------------------------------- #
 
 # Each output page maps to a list of public-API symbols (drawn from
-# ``hybridmodels.__all__``) that should appear on it. Ordering inside a
+# ``jaxhybridmodels.__all__``) that should appear on it. Ordering inside a
 # group controls the rendered order on the page; pages are emitted in the
 # tuple order of ``PAGES``.
 PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
@@ -496,7 +496,7 @@ def get_source_link(obj: Any) -> str | None:
 
 def render_entry(name: str, module_name: str) -> str:
     """Render a single API entry — heading, signature, parsed docstring, link."""
-    obj = getattr(hybridmodels, name)
+    obj = getattr(jaxhybridmodels, name)
     parsed = parse_docstring(inspect.getdoc(obj))
 
     parts: list[str] = []
@@ -512,7 +512,7 @@ def render_entry(name: str, module_name: str) -> str:
     # Module line (so users know the canonical import path).
     parts.append(
         f"<small>`from {module_name} import {name}` &nbsp;·&nbsp; "
-        f"also re-exported as `hybridmodels.{name}`</small>"
+        f"also re-exported as `jaxhybridmodels.{name}`</small>"
     )
 
     # Signature or value block.
@@ -763,9 +763,9 @@ def render_page(slug: str, title: str, symbols: tuple[str, ...]) -> str:
     parts.append("")
 
     # Resolve module path per symbol — used for the import line in each entry.
-    exports = hybridmodels._EXPORTS
+    exports = jaxhybridmodels._EXPORTS
     for name in symbols:
-        module_name = exports.get(name, "hybridmodels")
+        module_name = exports.get(name, "jaxhybridmodels")
         parts.append(render_entry(name, module_name))
         parts.append("")
         parts.append("---")
@@ -783,8 +783,8 @@ def render_index() -> str:
         "",
         "The public surface is split across the pages below, grouped by concern. "
         "Every symbol below is also re-exported at the top level — "
-        "`from hybridmodels import MLPPredictor` works exactly like "
-        "`from hybridmodels.predictors import MLPPredictor`.",
+        "`from jaxhybridmodels import MLPPredictor` works exactly like "
+        "`from jaxhybridmodels.predictors import MLPPredictor`.",
         "",
     ]
     for slug, title, symbols in PAGES:
@@ -810,7 +810,7 @@ def check_coverage() -> list[str]:
     documented: set[str] = set()
     for _, _, symbols in PAGES:
         documented.update(symbols)
-    return sorted(set(hybridmodels.__all__) - documented)
+    return sorted(set(jaxhybridmodels.__all__) - documented)
 
 
 # --------------------------------------------------------------------------- #

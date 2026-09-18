@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from hybridmodels.predictors.base import Predictor
+from jaxhybridmodels.predictors.base import Predictor
 
 _ACTIVATION_MAP: dict[str, Callable[[Array], Array]] = {
     "tanh": jax.nn.tanh,

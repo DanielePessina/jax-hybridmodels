@@ -58,7 +58,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install hybridmodels (editable, for docstring introspection)
+      - name: Install jaxhybridmodels (editable, for docstring introspection)
         run: uv sync --frozen
 
       - name: Set up Node

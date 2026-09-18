@@ -48,8 +48,8 @@ import jax.random as jr
 import jax.tree_util as jtu
 from jaxtyping import Array
 
-from hybridmodels.penalties import box_violation, soft_inverse
-from hybridmodels.transforms import BOUND_TRANSFORMS, WARPS, check_bounds, warp_bounds
+from jaxhybridmodels.penalties import box_violation, soft_inverse
+from jaxhybridmodels.transforms import BOUND_TRANSFORMS, WARPS, check_bounds, warp_bounds
 
 # What this module exports.
 __all__ = (
@@ -286,7 +286,7 @@ class BoundScaler(eqx.Module):
 
         Warp ``x``, normalise it to ``[0, 1]`` against the warped bounds,
         apply the squash inverse through
-        :func:`~hybridmodels.penalties.soft_inverse`, multiply by
+        :func:`~jaxhybridmodels.penalties.soft_inverse`, multiply by
         ``temperature``.
 
         The squash inverse has a pole at each end of ``[0, 1]``, guarded by

@@ -12,7 +12,7 @@ a changing quantity as ordinary covariates, build a profile inside
 
 ```python
 import diffrax
-import hybridmodels as hm
+import jaxhybridmodels as hm
 
 
 def simulate_fn(predictors, ts, covariates, y0, solver):

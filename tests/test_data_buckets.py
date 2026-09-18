@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from hybridmodels.data import (
+from jaxhybridmodels.data import (
     BucketPayload,
     ChannelObs,
     Dataset,

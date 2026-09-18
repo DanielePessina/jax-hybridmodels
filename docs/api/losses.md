@@ -19,7 +19,7 @@ Pass them by name via training-config `loss="mse"` (resolved through [`LOSS_REGI
 
 ### `masked_mse()`
 
-<small>`from hybridmodels.losses import masked_mse` &nbsp;·&nbsp; also re-exported as `hybridmodels.masked_mse`</small>
+<small>`from jaxhybridmodels.losses import masked_mse` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.masked_mse`</small>
 
 ```python
 masked_mse(
@@ -46,7 +46,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 | `channel_idx` |  | Trailing-axis indices to keep. ``None`` keeps all ``D`` channels. |
 | `channel_weights` |  | Per-channel multipliers; length must match ``channel_idx`` (or ``D`` when ``channel_idx`` is ``None``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L131)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L131)</small>
 
 ---
 
@@ -54,7 +54,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 
 ### `masked_mle()`
 
-<small>`from hybridmodels.losses import masked_mle` &nbsp;·&nbsp; also re-exported as `hybridmodels.masked_mle`</small>
+<small>`from jaxhybridmodels.losses import masked_mle` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.masked_mle`</small>
 
 ```python
 masked_mle(
@@ -76,7 +76,7 @@ Nothing is averaged. The result is a sum of log-likelihoods and grows
 linearly with the number of observations. Use ``bal_mle`` for the
 per-experiment averaged version.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L166)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L166)</small>
 
 ---
 
@@ -84,7 +84,7 @@ per-experiment averaged version.
 
 ### `bal_mse()`
 
-<small>`from hybridmodels.losses import bal_mse` &nbsp;·&nbsp; also re-exported as `hybridmodels.bal_mse`</small>
+<small>`from jaxhybridmodels.losses import bal_mse` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.bal_mse`</small>
 
 ```python
 bal_mse(
@@ -108,7 +108,7 @@ channel does not divide by zero. Experiments with no observations in any
 selected channel (for example, a trajectory-penalty probe) are excluded
 from the outer mean rather than diluting measured experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L192)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L192)</small>
 
 ---
 
@@ -116,7 +116,7 @@ from the outer mean rather than diluting measured experiments.
 
 ### `bal_mle()`
 
-<small>`from hybridmodels.losses import bal_mle` &nbsp;·&nbsp; also re-exported as `hybridmodels.bal_mle`</small>
+<small>`from jaxhybridmodels.losses import bal_mle` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.bal_mle`</small>
 
 ```python
 bal_mle(
@@ -135,7 +135,7 @@ experiments. Same reduction as ``bal_mse``, with
 pointwise squared error. Experiments with no observations in any selected
 channel are excluded from the outer mean.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L225)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L225)</small>
 
 ---
 
@@ -143,7 +143,7 @@ channel are excluded from the outer mean.
 
 ### `LOSS_REGISTRY`
 
-<small>`from hybridmodels.losses import LOSS_REGISTRY` &nbsp;·&nbsp; also re-exported as `hybridmodels.LOSS_REGISTRY`</small>
+<small>`from jaxhybridmodels.losses import LOSS_REGISTRY` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.LOSS_REGISTRY`</small>
 
 ```python
 LOSS_REGISTRY = {
@@ -171,7 +171,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `resolve_loss_fn()`
 
-<small>`from hybridmodels.losses import resolve_loss_fn` &nbsp;·&nbsp; also re-exported as `hybridmodels.resolve_loss_fn`</small>
+<small>`from jaxhybridmodels.losses import resolve_loss_fn` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.resolve_loss_fn`</small>
 
 ```python
 resolve_loss_fn(
@@ -209,4 +209,4 @@ How channel selection composes depends on the loss:
 Lives here rather than in the training modules because it is registry
 lookup and channel binding, not training logic, and both loops need it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/losses.py#L263)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L263)</small>

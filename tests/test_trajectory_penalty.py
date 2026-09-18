@@ -26,25 +26,25 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
-import hybridmodels as hm
-from hybridmodels.data import (
+import jaxhybridmodels as hm
+from jaxhybridmodels.data import (
     ChannelObs,
     Dataset,
     make_dataset,
     make_experiment,
 )
-from hybridmodels.penalties import (
+from jaxhybridmodels.penalties import (
     attach_penalty_state,
     penalty_integral,
     penalty_vector_field,
     strip_penalty_state,
     trajectory_saturation_penalty,
 )
-from hybridmodels.predictors.base import BoundedPredictor, BoundScaler, Predictor
-from hybridmodels.solver import SolverConfig
-from hybridmodels.trainable import trainable_mask
-from hybridmodels.training.kernels import build_bucket_step, build_score_bucket
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.predictors.base import BoundedPredictor, BoundScaler, Predictor
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.training.kernels import build_bucket_step, build_score_bucket
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 N_PENALTY = 2  # saturation accumulator + input-violation accumulator
 
@@ -505,7 +505,7 @@ class TestTrajectoryPenaltyEndToEnd:
         assert float(best[0].inner.c) < 4.0
 
     def test_bootstrap_ensemble_with_trajectory_penalty(self):
-        from hybridmodels.training.optax import train_bootstrap_ensemble
+        from jaxhybridmodels.training.optax import train_bootstrap_ensemble
 
         ds = build_embedded_dataset(make_predictor(c=4.0))
         start = (make_predictor(c=4.0),)

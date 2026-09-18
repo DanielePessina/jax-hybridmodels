@@ -1,7 +1,7 @@
 """Write your own training loop against the public gradient kernels.
 
-The stock trainer (:func:`hybridmodels.train_with_optax`) is assembled from
-public pieces in :mod:`hybridmodels.training.kernels`. If you want a
+The stock trainer (:func:`jaxhybridmodels.train_with_optax`) is assembled from
+public pieces in :mod:`jaxhybridmodels.training.kernels`. If you want a
 custom loop — a bespoke schedule, per-bucket weighting, a custom
 regulariser, a different accumulation rule — you compose the same kernels
 the trainer uses, instead of forking it.
@@ -39,11 +39,11 @@ import jax.numpy as jnp
 import optax
 from jax import Array
 
-import hybridmodels as hm
-from hybridmodels.data import ChannelObs, make_dataset, make_experiment
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.solver import SolverConfig
-from hybridmodels.training.kernels import (
+import jaxhybridmodels as hm
+from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
+from jaxhybridmodels.predictors.base import Predictor
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.training.kernels import (
     build_apply_update,
     build_bucket_step,
     build_penalty_step,

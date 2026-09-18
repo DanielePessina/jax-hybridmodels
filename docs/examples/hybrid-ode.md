@@ -100,7 +100,7 @@ Polynomial decay does not make saturation free. Escaping from $z = 100$ under a 
 The residual's box straddles zero, so `log10` is unusable, and a linear box spends resolution evenly, including on large corrections that should never happen. The script registers a signed-logarithmic axis instead, without touching the package:
 
 ```python
-from hybridmodels import Warp, register_warp
+from jaxhybridmodels import Warp, register_warp
 
 register_warp(
     "symlog",

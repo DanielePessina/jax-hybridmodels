@@ -1,6 +1,6 @@
 """The public surface resolves: the entry points examples and docs call work.
 
-Deliberately small. This is not a re-assertion of ``hybridmodels.__all__``
+Deliberately small. This is not a re-assertion of ``jaxhybridmodels.__all__``
 (a list that lives in the source and would have to be hand-kept in sync
 here, which made the previous full-list version an implementation-pinning
 test). Instead it pins the handful of stable, user-facing entry points —
@@ -12,7 +12,7 @@ integration tests.
 
 from __future__ import annotations
 
-import hybridmodels
+import jaxhybridmodels
 
 
 def test_core_entry_points_resolve_and_are_callable() -> None:
@@ -51,5 +51,5 @@ def test_core_entry_points_resolve_and_are_callable() -> None:
         "save_predictors",
         "load_predictors",
     ]
-    missing = [name for name in core if not callable(getattr(hybridmodels, name, None))]
+    missing = [name for name in core if not callable(getattr(jaxhybridmodels, name, None))]
     assert not missing, f"public entry points missing or not callable: {missing}"

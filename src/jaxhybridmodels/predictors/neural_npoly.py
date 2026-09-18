@@ -42,7 +42,7 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from hybridmodels.predictors.base import Predictor, reinitialize_with_key
+from jaxhybridmodels.predictors.base import Predictor, reinitialize_with_key
 
 
 class NeuralNPolynomial(Predictor):

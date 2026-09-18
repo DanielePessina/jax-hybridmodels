@@ -38,7 +38,7 @@ from jax import Array
 from jaxtyping import Float
 from scipy.stats import qmc
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -49,7 +49,7 @@ from hybridmodels import (
     make_experiment,
     trainable_mask,
 )
-from hybridmodels.training import (
+from jaxhybridmodels.training import (
     EvosaxTrainingConfig,
     OptaxTrainingConfig,
     train_with_evosax,

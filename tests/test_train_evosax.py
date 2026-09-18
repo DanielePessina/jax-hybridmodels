@@ -42,23 +42,23 @@ from _harness import (
 )
 from jax import Array
 
-from hybridmodels.data import Dataset
-from hybridmodels.losses import masked_mse
-from hybridmodels.predictors.base import (
+from jaxhybridmodels.data import Dataset
+from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.predictors.base import (
     BoundedPredictor,
     BoundScaler,
     Predictor,
 )
-from hybridmodels.predictors.mlp import MLPPredictor
-from hybridmodels.trainable import trainable_mask
-from hybridmodels.training.evosax import (
+from jaxhybridmodels.predictors.mlp import MLPPredictor
+from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.training.evosax import (
     EvosaxTrainingConfig,
     _box_population,
     _build_single_eval,
     _build_strategy,
     train_with_evosax,
 )
-from hybridmodels.ui.testing import RecordingUI
+from jaxhybridmodels.ui.testing import RecordingUI
 
 
 def _eval_loss(predictor: Predictor, ds: Dataset) -> float:

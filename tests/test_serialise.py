@@ -1,4 +1,4 @@
-"""Tests for ``hybridmodels.serialise``.
+"""Tests for ``jaxhybridmodels.serialise``.
 
 Pins the four public helpers (``save_predictors``,
 ``load_predictors``, ``save_run``, ``load_run``) and the on-disk
@@ -46,23 +46,23 @@ import optax
 import pytest
 from jaxtyping import Array
 
-from hybridmodels.losses import masked_mse
-from hybridmodels.predictors import (
+from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     KANPredictor,
     MLPPredictor,
     Predictor,
 )
-from hybridmodels.serialise import (
+from jaxhybridmodels.serialise import (
     load_predictors,
     load_run,
     save_predictors,
     save_run,
 )
-from hybridmodels.solver import SolverConfig
-from hybridmodels.training.evosax import EvosaxTrainingConfig
-from hybridmodels.training.optax import OptaxTrainingConfig
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.training.evosax import EvosaxTrainingConfig
+from jaxhybridmodels.training.optax import OptaxTrainingConfig
 
 # -- predictor + pytree factories ------------------------------------------
 
@@ -329,7 +329,7 @@ def test_save_run_records_per_leaf_description(
     leaves = desc["leaves"]
     assert [leaf["path"] for leaf in leaves] == expected_paths
     for leaf in leaves:
-        assert leaf["class"] == "hybridmodels.predictors.base.BoundedPredictor"
+        assert leaf["class"] == "jaxhybridmodels.predictors.base.BoundedPredictor"
 
 
 def test_load_run_round_trips_predictors_solver_optax(tmp_path: Path) -> None:
@@ -486,7 +486,7 @@ def test_save_run_stringifies_loss_callable(tmp_path: Path) -> None:
 
     with (run_dir / "metadata.json").open() as f:
         metadata = json.load(f)
-    assert metadata["optax_config"]["loss"] == "hybridmodels.losses.masked_mse"
+    assert metadata["optax_config"]["loss"] == "jaxhybridmodels.losses.masked_mse"
 
     loaded = load_run(
         run_dir,
@@ -494,7 +494,7 @@ def test_save_run_stringifies_loss_callable(tmp_path: Path) -> None:
         optax_cls=OptaxTrainingConfig,
     )
     assert isinstance(loaded["optax_config"], OptaxTrainingConfig)
-    assert loaded["optax_config"].loss == "hybridmodels.losses.masked_mse"
+    assert loaded["optax_config"].loss == "jaxhybridmodels.losses.masked_mse"
 
 
 def test_save_run_describes_callable_training_fields(tmp_path: Path) -> None:
@@ -635,7 +635,7 @@ def test_save_run_describes_bare_predictor_with_empty_path(tmp_path: Path) -> No
     leaves = metadata["predictors"]["leaves"]
     assert len(leaves) == 1
     assert leaves[0]["path"] == ""
-    assert leaves[0]["class"] == "hybridmodels.predictors.base.BoundedPredictor"
+    assert leaves[0]["class"] == "jaxhybridmodels.predictors.base.BoundedPredictor"
 
 
 def test_predictors_eqx_filename_matches_context_md(tmp_path: Path) -> None:

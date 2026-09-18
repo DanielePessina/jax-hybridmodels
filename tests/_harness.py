@@ -31,9 +31,9 @@ import jax.numpy as jnp
 from jax import Array
 from rich.console import Console
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.solver import SolverConfig
+from jaxhybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment
+from jaxhybridmodels.predictors.base import Predictor
+from jaxhybridmodels.solver import SolverConfig
 
 # ---------------------------------------------------------------------------
 # Harmonic oscillator: state ``[position, velocity]``, dy/dt = [v, -w^2 x].

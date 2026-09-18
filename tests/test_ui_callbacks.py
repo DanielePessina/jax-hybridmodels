@@ -1,5 +1,5 @@
-from hybridmodels.ui import EvosaxUI, SilentUI, TrainingUI
-from hybridmodels.ui.testing import RecordingUI
+from jaxhybridmodels.ui import EvosaxUI, SilentUI, TrainingUI
+from jaxhybridmodels.ui.testing import RecordingUI
 
 
 def test_silent_ui_produces_no_output(capsys) -> None:

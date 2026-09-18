@@ -235,7 +235,7 @@ it first, then refine with `train_with_optax`. Both take the same
 Every example freezes all `BoundScaler` leaves.
 
 ```python
-from hybridmodels import BoundScaler, freeze_modules_of_type, trainable_mask
+from jaxhybridmodels import BoundScaler, freeze_modules_of_type, trainable_mask
 
 mask = trainable_mask(predictors)
 mask = freeze_modules_of_type(mask, predictors, BoundScaler)
@@ -252,7 +252,7 @@ byte-identical at every step, because nothing moved. If it changes, some
 part of your pipeline is not doing what you think.
 
 ```python
-from hybridmodels import BoundedPredictor, freeze_where, trainable_mask
+from jaxhybridmodels import BoundedPredictor, freeze_where, trainable_mask
 
 mask = freeze_where(trainable_mask(predictors), predictors,
                     lambda m: isinstance(m, BoundedPredictor))

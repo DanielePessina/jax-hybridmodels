@@ -16,7 +16,7 @@ Training UIs are protocols implemented by `RichTrainingUI` / `RichEvosaxUI` (liv
 
 ### `TrainingUI`
 
-<small>`from hybridmodels.ui import TrainingUI` &nbsp;·&nbsp; also re-exported as `hybridmodels.TrainingUI`</small>
+<small>`from jaxhybridmodels.ui import TrainingUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.TrainingUI`</small>
 
 ```python
 TrainingUI(*args, **kwargs)
@@ -42,7 +42,7 @@ Event order during a typical run::
 ``on_message`` can fire at any point, for log lines such as the
 tournament's fallback warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L31)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L31)</small>
 
 <a id="traininguion_compile_done"></a>
 
@@ -54,7 +54,7 @@ on_compile_done(self, *, bucket_idx: int) -> None
 
 The bucket at ``bucket_idx`` finished compiling.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L66)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L66)</small>
 
 <a id="traininguion_compile_progress"></a>
 
@@ -66,7 +66,7 @@ on_compile_progress(self, *, bucket_idx: int, total_buckets: int) -> None
 
 Periodic heartbeat during long compiles (best-effort, may not fire).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L62)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L62)</small>
 
 <a id="traininguion_compile_start"></a>
 
@@ -78,7 +78,7 @@ on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> Non
 
 A bucket of shape ``bucket_shape`` is about to be JIT-compiled for the first time.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L58)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L58)</small>
 
 <a id="traininguion_message"></a>
 
@@ -90,7 +90,7 @@ on_message(self, *, level: str, text: str) -> None
 
 Free-form log line. ``level`` is one of ``"info"``, ``"warning"``, ``"error"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L99)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L99)</small>
 
 <a id="traininguion_phase_end"></a>
 
@@ -102,7 +102,7 @@ on_phase_end(self, *, phase_idx: int) -> None
 
 Fires after the last step of a phase, before any optimiser reset.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L76)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L76)</small>
 
 <a id="traininguion_phase_start"></a>
 
@@ -120,7 +120,7 @@ on_phase_start(
 
 Fires at the start of each phase; ``phase_steps`` is the per-phase step budget.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L70)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L70)</small>
 
 <a id="traininguion_run_end"></a>
 
@@ -132,7 +132,7 @@ on_run_end(self, *, final_loss: float) -> None
 
 Fires once after every phase has completed (or training was aborted gracefully).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L95)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L95)</small>
 
 <a id="traininguion_run_start"></a>
 
@@ -144,7 +144,7 @@ on_run_start(self, *, total_steps: int, num_phases: int) -> None
 
 Fires once before the first phase. ``total_steps`` is the sum across phases.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L54)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L54)</small>
 
 <a id="traininguion_step_end"></a>
 
@@ -170,7 +170,7 @@ incomparable. ``penalty`` reports the unweighted bound penalty next
 to it, defaulting to ``0.0`` so a UI written against the earlier
 signature still satisfies this protocol.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L80)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L80)</small>
 
 ---
 
@@ -178,7 +178,7 @@ signature still satisfies this protocol.
 
 ### `EvosaxUI`
 
-<small>`from hybridmodels.ui import EvosaxUI` &nbsp;·&nbsp; also re-exported as `hybridmodels.EvosaxUI`</small>
+<small>`from jaxhybridmodels.ui import EvosaxUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.EvosaxUI`</small>
 
 ```python
 EvosaxUI(*args, **kwargs)
@@ -197,7 +197,7 @@ Event order during a typical run::
     on_generation_end (one per generation)
     on_run_end
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L104)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L104)</small>
 
 <a id="evosaxuion_compile_done"></a>
 
@@ -209,7 +209,7 @@ on_compile_done(self, *, bucket_idx: int) -> None
 
 The bucket finished compiling.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L132)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L132)</small>
 
 <a id="evosaxuion_compile_progress"></a>
 
@@ -221,7 +221,7 @@ on_compile_progress(self, *, bucket_idx: int, total_buckets: int) -> None
 
 Periodic compile-time heartbeat (best-effort).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L128)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L128)</small>
 
 <a id="evosaxuion_compile_start"></a>
 
@@ -233,7 +233,7 @@ on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> Non
 
 A bucket of shape ``bucket_shape`` is about to be JIT-compiled.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L124)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L124)</small>
 
 <a id="evosaxuion_generation_end"></a>
 
@@ -250,7 +250,7 @@ on_generation_end(
 
 Fires once per generation with population statistics.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L136)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L136)</small>
 
 <a id="evosaxuion_message"></a>
 
@@ -262,7 +262,7 @@ on_message(self, *, level: str, text: str) -> None
 
 Free-form log line; same level set as ``TrainingUI.on_message``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L144)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L144)</small>
 
 <a id="evosaxuion_run_end"></a>
 
@@ -274,7 +274,7 @@ on_run_end(self, *, best_fitness: float) -> None
 
 Fires once after the last generation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L140)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L140)</small>
 
 <a id="evosaxuion_run_start"></a>
 
@@ -286,7 +286,7 @@ on_run_start(self, *, num_generations: int, population_size: int) -> None
 
 Fires once before the first generation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L120)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L120)</small>
 
 ---
 
@@ -294,7 +294,7 @@ Fires once before the first generation.
 
 ### `SilentUI`
 
-<small>`from hybridmodels.ui import SilentUI` &nbsp;·&nbsp; also re-exported as `hybridmodels.SilentUI`</small>
+<small>`from jaxhybridmodels.ui import SilentUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.SilentUI`</small>
 
 ```python
 SilentUI()
@@ -306,7 +306,7 @@ Selected when ``config.verbose=False``, and used in tests where stdout
 would pollute captured logs. Every method takes ``**kwargs``, so a new
 event argument never breaks it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/base.py#L149)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L149)</small>
 
 ---
 
@@ -314,7 +314,7 @@ event argument never breaks it.
 
 ### `RichTrainingUI`
 
-<small>`from hybridmodels.ui import RichTrainingUI` &nbsp;·&nbsp; also re-exported as `hybridmodels.RichTrainingUI`</small>
+<small>`from jaxhybridmodels.ui import RichTrainingUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.RichTrainingUI`</small>
 
 ```python
 RichTrainingUI(
@@ -323,7 +323,7 @@ RichTrainingUI(
 ) -> None
 ```
 
-Live Rich dashboard satisfying ``hybridmodels.ui.base.TrainingUI``.
+Live Rich dashboard satisfying ``jaxhybridmodels.ui.base.TrainingUI``.
 
 **Parameters**
 
@@ -340,7 +340,7 @@ window updates the model only; the next ``on_run_start`` rebuilds Live
 afresh, so a single ``RichTrainingUI`` instance can be reused for
 sequential runs (used in tests).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/optax.py#L52)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/optax.py#L52)</small>
 
 ---
 
@@ -348,7 +348,7 @@ sequential runs (used in tests).
 
 ### `RichEvosaxUI`
 
-<small>`from hybridmodels.ui import RichEvosaxUI` &nbsp;·&nbsp; also re-exported as `hybridmodels.RichEvosaxUI`</small>
+<small>`from jaxhybridmodels.ui import RichEvosaxUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.RichEvosaxUI`</small>
 
 ```python
 RichEvosaxUI(
@@ -359,7 +359,7 @@ RichEvosaxUI(
 ) -> None
 ```
 
-Live Rich dashboard satisfying ``hybridmodels.ui.base.EvosaxUI``.
+Live Rich dashboard satisfying ``jaxhybridmodels.ui.base.EvosaxUI``.
 
 **Parameters**
 
@@ -377,4 +377,4 @@ The instance carries one `rich.live.Live` between
 ``on_run_start`` so a single instance can be reused across sequential
 runs (used in tests).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/ui/evosax.py#L55)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/evosax.py#L55)</small>

@@ -17,16 +17,16 @@ rates" or "a list of rates", so each predictor's role is named where it
 is used.
 """
 
-from hybridmodels.predictors.base import (
+from jaxhybridmodels.predictors.base import (
     BoundedPredictor,
     BoundScaler,
     Predictor,
     reinitialize_pytree_with_key,
     reinitialize_with_key,
 )
-from hybridmodels.predictors.kan import KANPredictor
-from hybridmodels.predictors.mlp import MLPPredictor
-from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
+from jaxhybridmodels.predictors.kan import KANPredictor
+from jaxhybridmodels.predictors.mlp import MLPPredictor
+from jaxhybridmodels.predictors.neural_npoly import NeuralNPolynomial
 
 __all__ = [
     "BoundedPredictor",

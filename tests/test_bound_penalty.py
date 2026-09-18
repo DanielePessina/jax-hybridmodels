@@ -25,16 +25,16 @@ import jax.numpy as jnp
 import jax.random as jr
 import pytest
 
-from hybridmodels import BoundedPredictor, BoundScaler, MLPPredictor
-from hybridmodels.data import ChannelObs, make_dataset, make_experiment
-from hybridmodels.penalties import (
+from jaxhybridmodels import BoundedPredictor, BoundScaler, MLPPredictor
+from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
+from jaxhybridmodels.penalties import (
     _bounded_leaves,
     bound_penalty,
     box_grid,
     data_penalty_points,
     length_mask_keep,
 )
-from hybridmodels.training.kernels import apply_length_mask
+from jaxhybridmodels.training.kernels import apply_length_mask
 
 
 def _bp(

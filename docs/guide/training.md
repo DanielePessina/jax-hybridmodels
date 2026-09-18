@@ -39,7 +39,7 @@ the same length as `steps`. There is no scalar broadcast, so you spell
 out the learning rate for each phase.
 
 ```python
-from hybridmodels import OptaxTrainingConfig
+from jaxhybridmodels import OptaxTrainingConfig
 
 config = OptaxTrainingConfig(
     steps=(200, 800),
@@ -176,7 +176,7 @@ the loss has many local minima, or when the trainable part is a handful
 of kinetic constants rather than a network.
 
 ```python
-from hybridmodels import EvosaxTrainingConfig, train_with_evosax
+from jaxhybridmodels import EvosaxTrainingConfig, train_with_evosax
 
 config = EvosaxTrainingConfig(
     algorithm="CMA_ES",
@@ -243,7 +243,7 @@ boolean per array. Omit it and every floating-point array trains. Pass
 one to hold parts of the model fixed.
 
 ```python
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundScaler, freeze_modules_of_type, freeze_paths, trainable_mask,
 )
 

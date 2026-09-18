@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import pytest
 
-from hybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment, split_dataset
+from jaxhybridmodels.data import ChannelObs, Dataset, make_dataset, make_experiment, split_dataset
 
 
 def _zero_y0(_cov, _chan):

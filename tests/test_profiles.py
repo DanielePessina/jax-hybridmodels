@@ -1,6 +1,6 @@
 """Tests for the ready-made time profiles (exogenous, time-varying inputs).
 
-``hybridmodels.profiles`` provides factory callables ``t -> Array`` for
+``jaxhybridmodels.profiles`` provides factory callables ``t -> Array`` for
 quantities that change over time inside the user's vector field — a
 reactor temperature ramp, a feed step. The profile *parameters* travel as
 ordinary per-experiment covariates; the factory is evaluated at the
@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
-from hybridmodels.profiles import (
+from jaxhybridmodels.profiles import (
     constant_profile,
     piecewise_linear_profile,
     ramp_profile,

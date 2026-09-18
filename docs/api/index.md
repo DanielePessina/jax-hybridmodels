@@ -1,6 +1,6 @@
 # API Reference
 
-The public surface is split across the pages below, grouped by concern. Every symbol below is also re-exported at the top level — `from hybridmodels import MLPPredictor` works exactly like `from hybridmodels.predictors import MLPPredictor`.
+The public surface is split across the pages below, grouped by concern. Every symbol below is also re-exported at the top level — `from jaxhybridmodels import MLPPredictor` works exactly like `from jaxhybridmodels.predictors import MLPPredictor`.
 
 ## [Data: Experiments, Channels, Datasets](/api/data)
 

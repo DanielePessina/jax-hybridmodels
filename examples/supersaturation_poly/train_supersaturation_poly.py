@@ -48,10 +48,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from jax import Array
 
-import hybridmodels as hm
-from hybridmodels.data import ChannelObs, make_dataset, make_experiment
-from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
-from hybridmodels.solver import SolverConfig
+import jaxhybridmodels as hm
+from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
+from jaxhybridmodels.predictors.neural_npoly import NeuralNPolynomial
+from jaxhybridmodels.solver import SolverConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import (  # noqa: E402

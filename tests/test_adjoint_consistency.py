@@ -38,11 +38,11 @@ import pytest
 from _harness import OmegaPredictor, make_oscillator_dataset, oscillator_state_to_output
 from jax import Array
 
-from hybridmodels.data import BucketPayload, Dataset
-from hybridmodels.losses import masked_mse
-from hybridmodels.prediction import predict_bucket
-from hybridmodels.solver import ADJOINT_REGISTRY, SolverConfig
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.data import BucketPayload, Dataset
+from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.prediction import predict_bucket
+from jaxhybridmodels.solver import ADJOINT_REGISTRY, SolverConfig
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 ADJOINT_NAMES: tuple[str, ...] = ("Direct", "RecursiveCheckpoint")
 # Backsolve needs the args-threading recipe, so it is excluded from the

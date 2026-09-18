@@ -28,9 +28,9 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from hybridmodels.data import BucketPayload, Dataset
-from hybridmodels.solver import SolverConfig
-from hybridmodels.training.kernels import predict_bucket_obs
+from jaxhybridmodels.data import BucketPayload, Dataset
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.training.kernels import predict_bucket_obs
 
 
 @eqx.filter_jit

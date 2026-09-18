@@ -71,4 +71,4 @@ jobs:
           uv venv --python 3.12 "$wheel_env"
           uv pip install --python "$wheel_env/bin/python" dist/*.whl
           uv run --python "$wheel_env/bin/python" --no-project python -c \
-            'import hybridmodels; assert hybridmodels.__version__ == "0.2.0b1"'
+            'import jaxhybridmodels; assert jaxhybridmodels.__version__ == "0.2.0b1"'

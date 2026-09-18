@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from hybridmodels import (
+from jaxhybridmodels import (
     ADJOINT_REGISTRY,
     SOLVER_REGISTRY,
     SolverConfig,
@@ -274,11 +274,11 @@ class TestSolverConfigErrors:
 
 class TestPublicAPI:
     def test_lazy_imports(self):
-        import hybridmodels
+        import jaxhybridmodels
 
-        assert hybridmodels.SolverConfig is SolverConfig
-        assert hybridmodels.SOLVER_REGISTRY is SOLVER_REGISTRY
-        assert hybridmodels.register_solver is register_solver
+        assert jaxhybridmodels.SolverConfig is SolverConfig
+        assert jaxhybridmodels.SOLVER_REGISTRY is SOLVER_REGISTRY
+        assert jaxhybridmodels.register_solver is register_solver
 
 
 class TestAdjointRegistry:

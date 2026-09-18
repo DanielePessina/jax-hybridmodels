@@ -46,7 +46,7 @@ from jax import Array
 from jaxtyping import Float
 from scipy.stats import qmc
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -59,7 +59,7 @@ from hybridmodels import (
     predict_dataset,
     trainable_mask,
 )
-from hybridmodels.training import (
+from jaxhybridmodels.training import (
     EvosaxTrainingConfig,
     OptaxTrainingConfig,
     train_with_evosax,
@@ -227,7 +227,7 @@ def main() -> None:
 
     # ### Experiments and dataset
     #
-    # Each experiment is a hybridmodels.Experiment: its covariates
+    # Each experiment is a jaxhybridmodels.Experiment: its covariates
     # (T, pH, C_A0), its noisy observations, and a y0_fn building the
     # initial ODE state. The state is y = [C_A, C_B], so y0 = [C_A0, 0],
     # and state_to_output picks C_A back out. make_dataset stacks the

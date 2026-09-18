@@ -9,7 +9,7 @@ import jax.random as jr
 import pytest
 from jaxtyping import Array, Float
 
-from hybridmodels.predictors import (
+from jaxhybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     Predictor,
@@ -221,7 +221,7 @@ class TestBoundedPredictorInputKeys:
 
 class TestBoundedPredictor:
     def test_known_inner_dimensions_are_validated(self):
-        from hybridmodels.predictors import MLPPredictor
+        from jaxhybridmodels.predictors import MLPPredictor
 
         with pytest.raises(ValueError, match="input dimension"):
             BoundedPredictor(
@@ -318,7 +318,7 @@ class TestPredictorsTuple:
         # tuple branches uniformly — no special tuple-aware code needed.
         import equinox as eqx
 
-        from hybridmodels.trainable import trainable_mask
+        from jaxhybridmodels.trainable import trainable_mask
 
         predictors = (self._bp(10.0, 20.0), self._bp(1.0, 2.0))
         mask = trainable_mask(predictors)
@@ -516,7 +516,7 @@ class TestBoundedPredictorReinit:
     def _bp(self, key=None):
         import equinox as eqx  # noqa: F401
 
-        from hybridmodels.predictors import MLPPredictor
+        from jaxhybridmodels.predictors import MLPPredictor
 
         key = key if key is not None else jr.PRNGKey(0)
         return BoundedPredictor(

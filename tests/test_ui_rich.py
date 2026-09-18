@@ -22,8 +22,8 @@ from _harness import (
     solver_config,
 )
 
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
-from hybridmodels.ui import RichTrainingUI, TrainingUI
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.ui import RichTrainingUI, TrainingUI
 
 # Significant-figure pattern: ``\d\.\d{4,}`` matches things like 0.5000, 0.16667.
 # Used both to gate on "loss values rendered to >= 4 sig figs" and to count the
@@ -127,7 +127,7 @@ def test_train_with_optax_verbose_true_runs_with_rich_ui_default(monkeypatch) ->
     both that selection happened and that rendering reached the recording
     surface.
     """
-    import hybridmodels.training.optax as optax_module
+    import jaxhybridmodels.training.optax as optax_module
 
     record_console = recording_console()
 

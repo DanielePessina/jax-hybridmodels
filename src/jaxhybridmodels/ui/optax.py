@@ -38,7 +38,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from hybridmodels.ui._rich import (
+from jaxhybridmodels.ui._rich import (
     format_value,
     half_width,
     render_compile_panel,
@@ -50,7 +50,7 @@ from hybridmodels.ui._rich import (
 
 
 class RichTrainingUI:
-    """Live Rich dashboard satisfying ``hybridmodels.ui.base.TrainingUI``.
+    """Live Rich dashboard satisfying ``jaxhybridmodels.ui.base.TrainingUI``.
 
     Parameters
     ----------

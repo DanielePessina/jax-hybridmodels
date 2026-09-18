@@ -60,7 +60,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     MLPPredictor,
@@ -72,9 +72,9 @@ from hybridmodels import (
     print_metrics,
     register_warp,
 )
-from hybridmodels.penalties import bound_penalty, box_grid
-from hybridmodels.predictors.base import Predictor
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.penalties import bound_penalty, box_grid
+from jaxhybridmodels.predictors.base import Predictor
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 # ``_data`` sits alongside this file, ``_shared`` one level up.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -145,7 +145,7 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
             key=key,
         )
     if kind == "kan":
-        from hybridmodels import KANPredictor
+        from jaxhybridmodels import KANPredictor
 
         return KANPredictor(
             in_size=in_size, out_size=out_size, hidden_widths=(width,), grid_size=5, key=key

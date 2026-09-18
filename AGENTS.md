@@ -61,7 +61,7 @@ The latest verification script there is `thesis_training/sharedgrowth.py` (and t
 
 ## Package skill
 
-For code, debugging, or documentation work that uses `hybridmodels`, also read
+For code, debugging, or documentation work that uses `jaxhybridmodels`, also read
 [`skills/jax-hybrid-models/SKILL.md`](./skills/jax-hybrid-models/SKILL.md).
 Its supporting references contain the package API patterns and known JAX,
 Diffrax, training, and serialisation traps.

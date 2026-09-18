@@ -42,7 +42,7 @@ from flax import nnx
 from jaxkan.models.KAN import KAN as _JaxKAN
 from jaxtyping import Array, Float
 
-from hybridmodels.predictors.base import Predictor
+from jaxhybridmodels.predictors.base import Predictor
 
 # Currently supported bases share the ``{k, G}`` parameter shape that
 # jaxkan threads through its ``required_parameters`` dict. Other bases

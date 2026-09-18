@@ -27,11 +27,11 @@ from _harness import (
     oscillator_state_to_output,
 )
 
-import hybridmodels as hm
-from hybridmodels.data import Dataset, make_bootstrap_dataset
-from hybridmodels.prediction import predict_dense
-from hybridmodels.solver import SolverConfig
-from hybridmodels.training.optax import (
+import jaxhybridmodels as hm
+from jaxhybridmodels.data import Dataset, make_bootstrap_dataset
+from jaxhybridmodels.prediction import predict_dense
+from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.training.optax import (
     OptaxTrainingConfig,
     train_bootstrap_ensemble,
     train_seed_ensemble,
@@ -89,7 +89,7 @@ class TestBootstrapDataset:
     def test_handles_irregular_per_channel_timestamps(self):
         # An experiment whose channels are measured on disjoint times must
         # still re-bucket correctly after resampling.
-        from hybridmodels.data import ChannelObs, make_dataset, make_experiment
+        from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
 
         ts_long = jnp.linspace(0.0, 5.0, 10)
         ts_short = ts_long[:5]
@@ -125,7 +125,7 @@ class TestSeedEnsemble:
         )
 
     def _data_loss(self, predictor, dataset) -> float:
-        from hybridmodels.losses import masked_mse
+        from jaxhybridmodels.losses import masked_mse
 
         bp = dataset.bucket_payloads[0]
         pred = hm.predict_bucket(
@@ -139,7 +139,7 @@ class TestSeedEnsemble:
 
     def _avg_data_loss(self, predictor, dataset) -> float:
         """Per-bucket average of the data loss, matching the trainer's step average."""
-        from hybridmodels.losses import masked_mse
+        from jaxhybridmodels.losses import masked_mse
 
         total = 0.0
         for bp in dataset.bucket_payloads:

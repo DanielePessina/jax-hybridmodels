@@ -39,7 +39,7 @@ enough when every experiment shares the same unknown constant.
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
-from hybridmodels import Predictor
+from jaxhybridmodels import Predictor
 
 class OmegaPredictor(Predictor):
     """One trainable scalar; ignores its input."""
@@ -117,7 +117,7 @@ A module therefore cannot declare one of its own arrays fixed. The
 caller freezes it:
 
 ```python
-from hybridmodels import freeze_paths, trainable_mask
+from jaxhybridmodels import freeze_paths, trainable_mask
 
 mask = trainable_mask(predictors)                    # every float array: True
 mask = freeze_paths(mask, ("0.inner.frequencies",))  # that one: False
@@ -149,7 +149,7 @@ never imports user code by name, so loading works like this:
    and the template.
 
 ```python
-from hybridmodels import load_predictors, save_predictors
+from jaxhybridmodels import load_predictors, save_predictors
 
 save_predictors("model.eqx", trained)
 
@@ -167,7 +167,7 @@ class name, which turns that generic error into a readable mismatch.
 Do not put either in your predictor. Wrap it:
 
 ```python
-from hybridmodels import BoundedPredictor, BoundScaler
+from jaxhybridmodels import BoundedPredictor, BoundScaler
 
 BoundedPredictor(
     input_keys=("temperature",),

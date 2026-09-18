@@ -1,6 +1,6 @@
 """Per-channel evaluation metrics for hybrid-model predictions.
 
-Takes the tuple returned by :func:`hybridmodels.prediction.predict_dataset`
+Takes the tuple returned by :func:`jaxhybridmodels.prediction.predict_dataset`
 and its ``Dataset``, flattens the observed/predicted pairs under each
 bucket's mask, and reports MSE, RMSE, MAE and R^2 **per channel**.
 
@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxtyping import Array, Bool, Float, Int
 
-from hybridmodels.data import Dataset
+from jaxhybridmodels.data import Dataset
 
 
 @partial(
@@ -70,7 +70,7 @@ def compute_metrics(
     Parameters
     ----------
     predictions : tuple of arrays, one per bucket
-        From :func:`hybridmodels.prediction.predict_dataset`; each entry is
+        From :func:`jaxhybridmodels.prediction.predict_dataset`; each entry is
         ``[N_b, T_b, D]`` matching its ``BucketPayload``.
     dataset : Dataset
         The dataset that produced ``predictions``. Read for masks,

@@ -19,7 +19,7 @@ A predictor is an Equinox module with an `Array → Array` call signature. [`Bou
 
 ### `Predictor`
 
-<small>`from hybridmodels.predictors import Predictor` &nbsp;·&nbsp; also re-exported as `hybridmodels.Predictor`</small>
+<small>`from jaxhybridmodels.predictors import Predictor` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.Predictor`</small>
 
 ```python
 Predictor() -> None
@@ -46,7 +46,7 @@ standard-normal sample, which skews any considered init scheme.
 Do not subclass to add bound handling or named inputs.
 ``BoundedPredictor`` supplies both by composition.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L64)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L64)</small>
 
 ---
 
@@ -54,7 +54,7 @@ Do not subclass to add bound handling or named inputs.
 
 ### `BoundScaler`
 
-<small>`from hybridmodels.predictors import BoundScaler` &nbsp;·&nbsp; also re-exported as `hybridmodels.BoundScaler`</small>
+<small>`from jaxhybridmodels.predictors import BoundScaler` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.BoundScaler`</small>
 
 ```python
 BoundScaler(
@@ -154,7 +154,7 @@ slow convergence.
 | `logit_eps` | `float` | Static. Half-width of the band at each end of ``[0, 1]`` outside which ``to_latent`` continues linearly instead of running into the squash inverse's pole. Also sets the continuation slope (roughly ``1 / logit_eps``). |
 | `z_knee` | `float` | Static. The knee. Defaults to the transform's own value, which for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the box. Do not share one number across transforms: 2.944 is 12.5% from the bound on softsign, which would charge 2.7x too hard. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L91)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L91)</small>
 
 <a id="boundscalerfrom_latent"></a>
 
@@ -170,7 +170,7 @@ Squash ``z / temperature`` into ``(0, 1)``, affine rescale onto the
 warped box, then unwarp. The result is finite and inside the box for
 any finite ``z``, so this direction needs no guard.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L364)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L364)</small>
 
 <a id="boundscalerinput_violation"></a>
 
@@ -191,7 +191,7 @@ pass finite and differentiable near the box, this term supplies a
 restoring force that keeps working far outside it. Pure, so the
 caller decides whether and where to pay for it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L330)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L330)</small>
 
 <a id="boundscalersaturation"></a>
 
@@ -216,7 +216,7 @@ Reading ``|z| / T`` gives a gradient linear in the overshoot.
 Reduced with ``mean``, not ``sum``, so one weight means the same for
 a one-output and a six-output predictor.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L345)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L345)</small>
 
 <a id="boundscalerto_latent"></a>
 
@@ -250,7 +250,7 @@ sees no kink.
 The continuation reports direction, not magnitude. Pair it with
 `input_violation` when an input can leave its box.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L284)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L284)</small>
 
 ---
 
@@ -258,7 +258,7 @@ The continuation reports direction, not magnitude. Pair it with
 
 ### `BoundedPredictor`
 
-<small>`from hybridmodels.predictors import BoundedPredictor` &nbsp;·&nbsp; also re-exported as `hybridmodels.BoundedPredictor`</small>
+<small>`from jaxhybridmodels.predictors import BoundedPredictor` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.BoundedPredictor`</small>
 
 ```python
 BoundedPredictor(
@@ -321,7 +321,7 @@ predictor always describes its own input contract.
 | `inner` | `Predictor` | Trainable Array -> Array module operating in latent space. |
 | `out_scaler` | `BoundScaler` | Maps the inner network's latent output back to physical units. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L377)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L377)</small>
 
 <a id="boundedpredictorinitialized_with_key"></a>
 
@@ -344,7 +344,7 @@ own init scheme rather than leaf-level normal sampling. The scalers
 hold bound geometry, not learned state, so a restart has no reason
 to touch them.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L511)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L511)</small>
 
 ---
 
@@ -352,7 +352,7 @@ to touch them.
 
 ### `MLPPredictor`
 
-<small>`from hybridmodels.predictors import MLPPredictor` &nbsp;·&nbsp; also re-exported as `hybridmodels.MLPPredictor`</small>
+<small>`from jaxhybridmodels.predictors import MLPPredictor` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.MLPPredictor`</small>
 
 ```python
 MLPPredictor(
@@ -380,7 +380,7 @@ Only the inner ``mlp`` field carries trainable weights; the rest is metadata.
 | `width_size, depth` | `int` | Hidden width and number of hidden layers (static). |
 | `activation_name` | `str` | Key into ``_ACTIVATION_MAP``; stored as a string rather than the callable so the module is JSON-serialisable. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L47)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/mlp.py#L47)</small>
 
 <a id="mlppredictorinitialized_with_key"></a>
 
@@ -399,7 +399,7 @@ Re-instantiating beats reinitialising leaves in place because
 scaled by fan-in, zero biases), which leaf-level normal sampling
 would replace with a badly scaled scheme.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L115)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/mlp.py#L115)</small>
 
 <a id="mlppredictorwith_zero_final_head"></a>
 
@@ -422,7 +422,7 @@ readout draw can stall the solver on step one.
 Structurally identical predictor; only the trailing
 ``eqx.nn.Linear``'s ``weight`` and ``bias`` change.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/mlp.py#L134)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/mlp.py#L134)</small>
 
 ---
 
@@ -430,7 +430,7 @@ Structurally identical predictor; only the trailing
 
 ### `KANPredictor`
 
-<small>`from hybridmodels.predictors import KANPredictor` &nbsp;·&nbsp; also re-exported as `hybridmodels.KANPredictor`</small>
+<small>`from jaxhybridmodels.predictors import KANPredictor` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.KANPredictor`</small>
 
 ```python
 KANPredictor(
@@ -461,7 +461,7 @@ dynamic field is ``params``, everything else is static.
 | `seed` | `int` | Integer seed used to build the underlying jaxkan model and to recreate its rng-state on demand inside ``__call__``. Derived from the user-supplied ``key`` at construction; static thereafter. |
 | `params` | `nnx.State` | The one dynamic field. The ``nnx.Param`` slice of the KAN's state, all float arrays. Trainable, and round-trips through ``eqx.tree_serialise_leaves``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L119)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/kan.py#L119)</small>
 
 <a id="kanpredictorinitialized_with_key"></a>
 
@@ -479,7 +479,7 @@ per-layer init in charge (truncated-normal spline weights, ones
 bias, identity residual), which leaf-level normal sampling would
 replace with a badly scaled scheme.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L234)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/kan.py#L234)</small>
 
 <a id="kanpredictorwith_zero_final_head"></a>
 
@@ -501,7 +501,7 @@ transformation stays non-degenerate. Same intent as
 [`MLPPredictor.with_zero_final_head`](/api/predictors#mlppredictorwith_zero_final_head) over a different
 parameterisation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/kan.py#L252)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/kan.py#L252)</small>
 
 ---
 
@@ -509,7 +509,7 @@ parameterisation.
 
 ### `NeuralNPolynomial`
 
-<small>`from hybridmodels.predictors import NeuralNPolynomial` &nbsp;·&nbsp; also re-exported as `hybridmodels.NeuralNPolynomial`</small>
+<small>`from jaxhybridmodels.predictors import NeuralNPolynomial` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.NeuralNPolynomial`</small>
 
 ```python
 NeuralNPolynomial(
@@ -544,7 +544,7 @@ A 3-term quadratic with two output channels backed by an MLP::
                               exponents=(0.0, 1.0, 2.0),
                               in_size=3, out_size=2)
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/neural_npoly.py#L48)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/neural_npoly.py#L48)</small>
 
 <a id="neuralnpolynomialinitialized_with_key"></a>
 
@@ -561,7 +561,7 @@ prefers the inner predictor's own ``initialized_with_key`` and falls
 back to elementwise sampling only when it offers no scheme.
 ``exponents``, ``in_size`` and ``out_size`` are static.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/neural_npoly.py#L137)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/neural_npoly.py#L137)</small>
 
 ---
 
@@ -569,7 +569,7 @@ back to elementwise sampling only when it offers no scheme.
 
 ### `reinitialize_with_key()`
 
-<small>`from hybridmodels.predictors import reinitialize_with_key` &nbsp;·&nbsp; also re-exported as `hybridmodels.reinitialize_with_key`</small>
+<small>`from jaxhybridmodels.predictors import reinitialize_with_key` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.reinitialize_with_key`</small>
 
 ```python
 reinitialize_with_key(predictor: 'eqx.Module', key: 'Array') -> 'eqx.Module'
@@ -586,7 +586,7 @@ replaced with a standard-normal sample of matching shape and dtype.
 For a *pytree* of predictors, the convention at the ``simulate_fn``
 boundary, use [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L532)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L532)</small>
 
 ---
 
@@ -594,7 +594,7 @@ boundary, use [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytr
 
 ### `reinitialize_pytree_with_key()`
 
-<small>`from hybridmodels.predictors import reinitialize_pytree_with_key` &nbsp;·&nbsp; also re-exported as `hybridmodels.reinitialize_pytree_with_key`</small>
+<small>`from jaxhybridmodels.predictors import reinitialize_pytree_with_key` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.reinitialize_pytree_with_key`</small>
 
 ```python
 reinitialize_pytree_with_key(predictors: 'Any', key: 'Array') -> 'Any'
@@ -615,4 +615,4 @@ Accepts any pytree shape ``jax.tree_util`` can walk, including a bare
 ``eqx.Module``. Returns a structurally identical pytree with fresh
 weights on every ``eqx.Module`` leaf.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/predictors/base.py#L559)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L559)</small>

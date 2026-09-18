@@ -12,7 +12,7 @@ import jax.tree_util as jtu
 import pytest
 from jaxtyping import Array, Float
 
-from hybridmodels.predictors import (
+from jaxhybridmodels.predictors import (
     BoundedPredictor,
     BoundScaler,
     KANPredictor,
@@ -21,10 +21,10 @@ from hybridmodels.predictors import (
 )
 
 # ``NeuralNPolynomial`` is in-tree as a future-candidate predictor and is
-# not part of the public surface (see ``hybridmodels/predictors/__init__.py``).
+# not part of the public surface (see ``jaxhybridmodels/predictors/__init__.py``).
 # Importing it directly from the submodule keeps these serialisation tests
 # green so a future re-introduction starts from a known-working baseline.
-from hybridmodels.predictors.neural_npoly import NeuralNPolynomial
+from jaxhybridmodels.predictors.neural_npoly import NeuralNPolynomial
 
 
 class _LinearPredictor(Predictor):

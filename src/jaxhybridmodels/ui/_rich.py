@@ -5,7 +5,7 @@ per-step losses against generations and population statistics, but they draw
 several panels identically and guard their ``rich.live.Live`` identically.
 Those pieces live here.
 
-Free functions, not a base class. ``hybridmodels.ui.evosax`` explains why the
+Free functions, not a base class. ``jaxhybridmodels.ui.evosax`` explains why the
 two dashboards do not share a supertype: it would force both to negotiate
 every future panel change through one type. Sharing widgets does not,
 because a dashboard that wants a different compile panel just stops calling

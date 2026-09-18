@@ -16,7 +16,7 @@ Forward-simulate trained predictors against a dataset. [`predict_bucket`](#predi
 
 ### `predict_bucket()`
 
-<small>`from hybridmodels.prediction import predict_bucket` &nbsp;·&nbsp; also re-exported as `hybridmodels.predict_bucket`</small>
+<small>`from jaxhybridmodels.prediction import predict_bucket` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_bucket`</small>
 
 ```python
 predict_bucket(
@@ -61,7 +61,7 @@ in ``predict_dataset``, never inside the compiled region.
 
 ### `predict_dataset()`
 
-<small>`from hybridmodels.prediction import predict_dataset` &nbsp;·&nbsp; also re-exported as `hybridmodels.predict_dataset`</small>
+<small>`from jaxhybridmodels.prediction import predict_dataset` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_dataset`</small>
 
 ```python
 predict_dataset(
@@ -91,7 +91,7 @@ is a tuple rather than one array, because buckets differ precisely in
 | --- | --- | --- |
 | `tuple[Float[Array, "N T D"], ...]` |  | One ``[N_b, T_b, D]`` array per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/prediction.py#L88)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L88)</small>
 
 ---
 
@@ -99,7 +99,7 @@ is a tuple rather than one array, because buckets differ precisely in
 
 ### `predict_dense()`
 
-<small>`from hybridmodels.prediction import predict_dense` &nbsp;·&nbsp; also re-exported as `hybridmodels.predict_dense`</small>
+<small>`from jaxhybridmodels.prediction import predict_dense` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_dense`</small>
 
 ```python
 predict_dense(
@@ -135,7 +135,7 @@ folded in ~20 lines).
 | --- | --- | --- |
 | `tuple[Float[Array, "N T_d D"], ...]` |  | One ``[N, T_d, D]`` array per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/prediction.py#L138)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L138)</small>
 
 ---
 
@@ -143,7 +143,7 @@ folded in ~20 lines).
 
 ### `ensemble_predictions()`
 
-<small>`from hybridmodels.prediction import ensemble_predictions` &nbsp;·&nbsp; also re-exported as `hybridmodels.ensemble_predictions`</small>
+<small>`from jaxhybridmodels.prediction import ensemble_predictions` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.ensemble_predictions`</small>
 
 ```python
 ensemble_predictions(
@@ -174,7 +174,7 @@ is the same shape as a single ``predict_dataset`` return.
 | --- | --- | --- |
 | `tuple[Float[Array, "N T D"], ...]` |  | The member-mean prediction per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/prediction.py#L195)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L195)</small>
 
 ---
 
@@ -182,7 +182,7 @@ is the same shape as a single ``predict_dataset`` return.
 
 ### `evaluate_predictor()`
 
-<small>`from hybridmodels.prediction import evaluate_predictor` &nbsp;·&nbsp; also re-exported as `hybridmodels.evaluate_predictor`</small>
+<small>`from jaxhybridmodels.prediction import evaluate_predictor` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.evaluate_predictor`</small>
 
 ```python
 evaluate_predictor(predictor: 'Any', covariates: 'dict[str, float]') -> 'float'
@@ -195,4 +195,4 @@ Shortcut for the recovered-physics readout every example writes by hand
 predictor's named inputs as plain Python floats, calls it, and flattens
 the scalar result to a ``float``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/hybridmodels/prediction.py#L126)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L126)</small>

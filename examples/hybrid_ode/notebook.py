@@ -1,4 +1,4 @@
-"""Hybrid ODE modelling with hybridmodels, walked through end to end.
+"""Hybrid ODE modelling with jaxhybridmodels, walked through end to end.
 
 Keeps a mechanistic model's known structure, learns the two parts of it
 that have no formula, and holds every physical quantity inside a declared
@@ -79,7 +79,7 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 
-from hybridmodels import (
+from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
@@ -91,8 +91,8 @@ from hybridmodels import (
     predict_dataset,
     register_warp,
 )
-from hybridmodels.penalties import bound_penalty, box_grid
-from hybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.penalties import bound_penalty, box_grid
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
 
 
 def main() -> None:
