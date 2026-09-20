@@ -1,0 +1,25 @@
+# ty type checker configuration.
+#
+# Three rules are relaxed because they fire on patterns that are correct at
+# runtime but invisible to ty's static resolver:
+#
+# - unresolved-attribute: equinox helpers like `eqx.is_module` are not
+#   re-exported in ty's view of the package, and `eqx.Module` subclass fields
+#   (declared via `eqx.field` / dataclass-style annotations) are not seen as
+#   attributes by ty. Also covers `optax.inject_hyperparams` opt-state structs.
+# - invalid-method-override: predictor `__call__` overrides routinely rename
+#   the positional parameter (e.g. `x` -> `covariates`); ty flags this as an
+#   LSP violation, but the codebase deliberately treats predictors as
+#   covariate-callable and the rename is documented in CONTEXT.md.
+# - call-non-callable: triggers on `cast(eqx.Module, ...)` paths where ty
+#   loses sight of the underlying callable.
+#
+# These mirror the suppressions we previously needed in mypy via
+# `ignore_missing_imports = true`.
+
+[src]
+
+[rules]
+unresolved-attribute = "ignore"
+invalid-method-override = "ignore"
+call-non-callable = "ignore"

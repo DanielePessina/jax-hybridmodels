@@ -1,0 +1,114 @@
+[project]
+name = "jax-hybridmodels"
+version = "0.2.0b1"
+description = "Hybrid ODE and neural models in JAX"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Daniele Pessina", email = "daniele.pessina18@imperial.ac.uk" }
+]
+keywords = ["jax", "diffrax", "equinox", "hybrid models", "neural ODE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "diffrax>=0.7.2",
+    "equinox>=0.13.7",
+    "evosax>=0.2.0",
+    "flax>=0.12.1,<0.12.9",
+    "jax>=0.10.0,<0.11",
+    "jaxkan>=0.3.7",
+    "jaxlib>=0.10.0,<0.11",
+    "jaxtyping>=0.3.9",
+    "numpy>=2.4.4",
+    "optax>=0.2.8",
+    "rich>=15.0.0",
+    "scipy>=1.17.1",
+]
+
+[project.optional-dependencies]
+examples = [
+    "matplotlib>=3.10.9",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.2",
+    "python-libsbml>=5.20.4",
+    "rlax>=0.1.9",
+    "sympy>=1.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/DanielePessina/jax-hybridmodels"
+Documentation = "https://danielepessina.github.io/jax-hybridmodels/"
+Repository = "https://github.com/DanielePessina/jax-hybridmodels"
+Issues = "https://github.com/DanielePessina/jax-hybridmodels/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The wheel ships only the package (packages = src/jaxhybridmodels). The sdist
+# ships source + docs/examples markdown and scripts, but deliberately not
+# the dependency tree, build artifacts, figures, or large data files.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/pyproject.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/RELEASING.md",
+    "/LICENSE",
+    "/CONTEXT.md",
+    "/SPEC.md",
+    "/docs/**/*.md",
+    "/docs/.vitepress/config.ts",
+    "/docs/package.json",
+    "/docs/examples/assets/**",
+    "/docs/adr",
+    "/examples/**/*.py",
+    "/scripts/**/*.py",
+    "/tests/**/*.py",
+]
+exclude = [
+    "/docs/node_modules",
+    "/docs/.vitepress/cache",
+    "/docs/.vitepress/dist",
+    "/docs/public",
+    "/examples/**/__pycache__",
+    "/examples/**/figures",
+    "/examples/**/figures_rl",
+    "/examples/**/artefacts",
+    "/examples/**/data",
+    "/tests/**/__pycache__",
+    "/tests/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jaxhybridmodels"]
+
+[dependency-groups]
+dev = [
+    "hatchling>=1.29.0",
+    "ty>=0.0.34",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.12",
+    "rlax>=0.1.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = []
