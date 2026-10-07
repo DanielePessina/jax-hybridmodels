@@ -26,6 +26,7 @@ For ensembles of hybrid models:
 from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
 from jaxhybridmodels.training.optax import (
     OptaxTrainingConfig,
+    TrainingPhase,
     train_bootstrap_ensemble,
     train_seed_ensemble,
     train_with_optax,
@@ -34,6 +35,7 @@ from jaxhybridmodels.training.optax import (
 __all__ = [
     "EvosaxTrainingConfig",
     "OptaxTrainingConfig",
+    "TrainingPhase",
     "train_bootstrap_ensemble",
     "train_seed_ensemble",
     "train_with_evosax",

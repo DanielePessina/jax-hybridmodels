@@ -1,7 +1,7 @@
 """Hybrid models: user-written ODE physics with trainable function approximators inside.
 
-A model here is not one object. It is three pieces the user holds
-together:
+HybridModel holds the model pieces together for fitting, prediction, and
+simulation. The functional APIs also accept the pieces separately:
 
 - ``predictors``, a pytree of trainable ``eqx.Module`` leaves, usually a
   tuple of ``BoundedPredictor``. Each one maps named inputs to a physical
@@ -57,6 +57,15 @@ if TYPE_CHECKING:
         resolve_loss_fn,
     )
     from jaxhybridmodels.metrics import ChannelMetrics, compute_metrics, print_metrics
+    from jaxhybridmodels.model import (
+        ExperimentPrediction,
+        FitHistory,
+        FitResult,
+        HybridModel,
+        PredictionResult,
+        fit,
+        predict,
+    )
     from jaxhybridmodels.penalties import (
         PenaltyPointSource,
         attach_penalty_state,
@@ -86,6 +95,7 @@ if TYPE_CHECKING:
     from jaxhybridmodels.predictors import (
         BoundedPredictor,
         BoundScaler,
+        ConstantPredictor,
         KANPredictor,
         MLPPredictor,
         NeuralNPolynomial,
@@ -126,6 +136,7 @@ if TYPE_CHECKING:
     from jaxhybridmodels.training import (
         EvosaxTrainingConfig,
         OptaxTrainingConfig,
+        TrainingPhase,
         train_bootstrap_ensemble,
         train_seed_ensemble,
         train_with_evosax,
@@ -157,10 +168,19 @@ if TYPE_CHECKING:
     )
 
 __all__: list[str] = [
+    "HybridModel",
+    "FitResult",
+    "FitHistory",
+    "PredictionResult",
+    "ExperimentPrediction",
+    "fit",
+    "predict",
     "ADJOINT_REGISTRY",
     "BOUND_TRANSFORMS",
     "BoundedPredictor",
     "BoundScaler",
+    "ConstantPredictor",
+    "TrainingPhase",
     "BoundTransform",
     "BucketPayload",
     "ChannelObs",
@@ -254,12 +274,21 @@ __all__: list[str] = [
 ]
 
 _EXPORTS: dict[str, str] = {
+    "HybridModel": "jaxhybridmodels.model",
+    "FitResult": "jaxhybridmodels.model",
+    "FitHistory": "jaxhybridmodels.model",
+    "PredictionResult": "jaxhybridmodels.model",
+    "ExperimentPrediction": "jaxhybridmodels.model",
+    "fit": "jaxhybridmodels.model",
+    "predict": "jaxhybridmodels.model",
     "ADJOINT_REGISTRY": "jaxhybridmodels.solver",
     "BOUND_TRANSFORMS": "jaxhybridmodels.transforms",
     "BoundTransform": "jaxhybridmodels.transforms",
     "annealing_schedule": "jaxhybridmodels.schedules",
     "BoundedPredictor": "jaxhybridmodels.predictors",
     "BoundScaler": "jaxhybridmodels.predictors",
+    "ConstantPredictor": "jaxhybridmodels.predictors",
+    "TrainingPhase": "jaxhybridmodels.training",
     "BucketPayload": "jaxhybridmodels.data",
     "ChannelObs": "jaxhybridmodels.data",
     "Dataset": "jaxhybridmodels.data",

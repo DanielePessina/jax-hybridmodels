@@ -51,7 +51,7 @@ column order, in physical units.
 | `cell_ts` | `Int[Array, " G"]` | Timestamp index of each cell inside its own experiment. |
 | `cell_T` | `Int[Array, " G"]` | Length of that experiment's time grid. ``cell_ts`` and ``cell_T`` let [`length_mask_keep`](/api/penalties#length_mask_keep) apply the loss's prefix mask to the penalty, so the two never disagree about which points are live. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L212)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L213)</small>
 
 ---
 
@@ -72,7 +72,7 @@ from ``[S]`` to ``[S + n]``, where the trailing components are
 integrated penalty rates supplied by [`penalty_vector_field`](/api/penalties#penalty_vector_field).
 ``y0_fn`` should return ``attach_penalty_state(physics_y0, n)``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L561)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L567)</small>
 
 ---
 
@@ -126,7 +126,7 @@ is the right instrument.
 | --- | --- | --- |
 | `Array` |  | Non-negative scalar. Exactly zero when no leaf saturates. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L468)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L474)</small>
 
 ---
 
@@ -170,7 +170,7 @@ negligible beside an ODE solve. Lower it if that stops holding.
 | --- | --- | --- |
 | `Array` |  | ``[n_per_dim ** n_inputs, n_inputs]`` physical points, positional in the scaler's input dimension order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L237)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L238)</small>
 
 ---
 
@@ -209,7 +209,7 @@ widest channel dominate on units alone.
 | --- | --- | --- |
 | `Array` |  | Scalar sum of squared fractional violations. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L181)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L182)</small>
 
 ---
 
@@ -235,7 +235,7 @@ the data loss asks for, including "go further out of bounds", forever.
 Pair it with [`box_violation`](/api/penalties#box_violation) on the pre-clip value for the
 restoring force.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L165)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L166)</small>
 
 ---
 
@@ -268,7 +268,7 @@ Covariates must be scalar per experiment (constant in time, the v1
 contract); a per-experiment covariate with extra dimensions has no
 unambiguous column to feed an input key and raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L286)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L290)</small>
 
 ---
 
@@ -295,7 +295,7 @@ the keep-vector is used to *index* the gathered points, and JAX rejects
 boolean indexing with tracers. The penalty kernel retraces only when
 the fraction changes (a phase boundary), never per step.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L352)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L358)</small>
 
 ---
 
@@ -317,7 +317,7 @@ components at the final time, ``[..., n]``. The training hook charges
 these; divide by the time span to get the time-mean instead of the
 integral.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L619)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L625)</small>
 
 ---
 
@@ -347,7 +347,7 @@ The rates must read the physical components (typically ``y[:-n]``) and
 are closed over the user's predictors — only the user knows the latent
 ``z`` or input ``x`` of an embedded predictor at call time.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L574)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L580)</small>
 
 ---
 
@@ -378,7 +378,7 @@ the gathered points, so call it with the phase's Python float outside
 any jit (the stock trainers do, once per phase). The returned arrays
 are what a ``penalty_step`` receives.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L434)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L440)</small>
 
 ---
 
@@ -410,7 +410,7 @@ The ``stop_gradient`` on the clamp is load-bearing: without it the
 correction term picks up a contribution through the clip and the
 interior derivative comes out wrong.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L101)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L102)</small>
 
 ---
 
@@ -440,7 +440,7 @@ enough to keep gradient far outside the box also distorts the middle.
 tuning knob. The default 1e-3 maps a 1% overshoot to ``|z| ~ 10``, a
 number a network can still consume; 1e-6 would map it to ``|z| ~ 1e4``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L124)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L125)</small>
 
 ---
 
@@ -472,7 +472,7 @@ Repairs the near field only. Several widths out the derivative
 underflows as a hard clip's does, so pair it with [`box_violation`](/api/penalties#box_violation)
 for unbounded push-back.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L147)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L148)</small>
 
 ---
 
@@ -492,7 +492,7 @@ Use in ``state_to_output``: the loss and the observed channels should
 see only the physics, not the integrated penalty components. ``state``
 is ``[..., S + n]``; the result is ``[..., S]``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L608)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L614)</small>
 
 ---
 
@@ -520,7 +520,7 @@ actually predicted, not across a synthetic grid.
 predictor's channel); ``out_scaler`` is the ``BoundScaler`` whose
 ``from_latent`` produced those outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L632)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L638)</small>
 
 ---
 
@@ -555,4 +555,4 @@ is the instrument, and the error says so.
 Point-shape mismatches are checked unconditionally, so a user cannot
 carry a silently-wrong extras array into a run that later enables it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L373)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L379)</small>

@@ -10,8 +10,8 @@ via ``eqx.filter_value_and_grad``; Evosax partitions to derive the flat
 parameter vector via ``eqx.partition(predictors, mask)``. Either way the
 mask's pytree shape is what the partitioner walks.
 
-The default predicate marks every inexact (floating-point) array leaf as
-trainable. The freezers here are free functions ``(mask, predictors) ->
+The default mask trains inexact parameter arrays and freezes ConstantPredictor
+and BoundScaler subtrees. The freezers here are free functions ``(mask, predictors) ->
 mask`` that never mutate their input, so masks compose by chaining:
 
     mask = trainable_mask(predictors)
@@ -48,10 +48,22 @@ def trainable_mask(
 ) -> Any:
     """Build a boolean mask matching the structure of ``predictors``.
 
-    Applies ``predicate`` to every leaf, returning a tree of the same shape
-    whose leaves are ``bool``. Both optimisers take the result unchanged.
+    Applies ``predicate`` to parameter leaves, returning a tree of the same
+    shape whose leaves are ``bool``. Constants stay fixed. The default
+    predicate also freezes scaler temperatures; a custom predicate can opt
+    into training scalers. Both optimisers take the result unchanged.
     """
-    return jtu.tree_map(predicate, predictors)
+    from jaxhybridmodels.predictors.base import BoundScaler, ConstantPredictor
+
+    fixed = lambda node: (  # noqa: E731
+        isinstance(node, ConstantPredictor)
+        or (predicate is default_trainable and isinstance(node, BoundScaler))
+    )
+    return jtu.tree_map(
+        lambda node: jtu.tree_map(lambda _: False, node) if fixed(node) else predicate(node),
+        predictors,
+        is_leaf=fixed,
+    )
 
 
 def _path_to_dotted(path: tuple[Any, ...]) -> str:
@@ -177,9 +189,7 @@ def count_trainable_params(predictors: Any, mask: Any) -> int:
     check an evosax budget or a phase-transition threshold).
     """
     total = 0
-    for leaf, m in zip(
-        jtu.tree_leaves(predictors), jtu.tree_leaves(mask), strict=True
-    ):
+    for leaf, m in zip(jtu.tree_leaves(predictors), jtu.tree_leaves(mask), strict=True):
         if eqx.is_inexact_array(leaf) and bool(m):
             total += int(jnp.size(leaf))
     return total

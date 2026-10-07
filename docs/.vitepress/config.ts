@@ -55,6 +55,7 @@ export default defineConfig({
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },
+        { text: 'Models and results', link: '/api/model' },
         { text: 'Data', link: '/api/data' },
         { text: 'Predictors', link: '/api/predictors' },
         { text: 'Penalties', link: '/api/penalties' },

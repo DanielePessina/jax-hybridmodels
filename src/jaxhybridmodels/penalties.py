@@ -39,6 +39,7 @@ none of the double-``where`` guarding ``losses.py`` applies around ``log``.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -266,12 +267,15 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
     """
     if n_per_dim < 2:
         raise ValueError(
-            "box_grid n_per_dim must be at least 2 "
-            f"(one point per box edge); got {n_per_dim}"
+            f"box_grid n_per_dim must be at least 2 (one point per box edge); got {n_per_dim}"
         )
 
     from jaxhybridmodels.transforms import WARPS
 
+    if any(not all(map(math.isfinite, pair)) for pair in in_scaler.bounds):
+        raise ValueError("box_grid requires finite input bounds; supply explicit penalty points")
+    if not in_scaler.bounds:
+        return jnp.zeros((1, 0))
     warp = WARPS[in_scaler.warp]
     lows = jnp.asarray([b[0] for b in in_scaler.warped_bounds])
     highs = jnp.asarray([b[1] for b in in_scaler.warped_bounds])
@@ -283,9 +287,7 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
     return jnp.stack([m.reshape(-1) for m in mesh], axis=-1)
 
 
-def data_penalty_points(
-    predictors: Any, dataset: Dataset
-) -> tuple[PenaltyPointSource | None, ...]:
+def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPointSource | None, ...]:
     """Gather one :class:`PenaltyPointSource` per ``BoundedPredictor`` leaf.
 
     A leaf is *resolvable* when every ``input_keys`` name is a dataset
@@ -317,7 +319,11 @@ def data_penalty_points(
         ts_chunks: list[Array] = []
         t_chunks: list[Array] = []
         for bp in dataset.bucket_payloads:
-            vectors = jnp.stack([bp.covariates[key] for key in keys], axis=-1)
+            vectors = (
+                jnp.stack([bp.covariates[key] for key in keys], axis=-1)
+                if keys
+                else jnp.zeros((bp.ts.shape[0], 0))
+            )
             if vectors.ndim != 2:
                 raise ValueError(
                     "penalty: covariates feeding a BoundedPredictor's penalty points "
@@ -519,7 +525,7 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
     for leaf, leaf_points in zip(leaves, points, strict=True):
         if leaf_points.shape[0] == 0:
             continue
-        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.to_latent(x)))(leaf_points)
+        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.scale_inputs(x)))(leaf_points)
         total = total + leaf.out_scaler.saturation(latents)
     return total
 

@@ -25,6 +25,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
@@ -135,6 +136,26 @@ def evaluate_predictor(predictor: Any, covariates: dict[str, float]) -> float:
     return float(predictor(x).reshape(()))
 
 
+@eqx.filter_jit
+def _predict_dense_bucket(
+    predictors: Any,
+    bp: BucketPayload,
+    dense_ts: Array,
+    *,
+    simulate_fn: Callable[..., Array],
+    state_to_output: Callable[[Array], Array],
+    solver: SolverConfig,
+) -> Array:
+    """Preserve the initial time with a reusable compiled dense-grid kernel."""
+
+    def per_experiment(ts, start, covariates, y0):
+        integration_ts = jnp.concatenate((start[None], ts))
+        state = simulate_fn(predictors, integration_ts, covariates, y0, solver)
+        return state_to_output(state)[1:]
+
+    return jax.vmap(per_experiment)(dense_ts, bp.ts[:, 0], bp.covariates, bp.y0)
+
+
 def predict_dense(
     predictors: Any,
     dataset: Dataset,
@@ -169,6 +190,12 @@ def predict_dense(
     tuple[Float[Array, "N T_d D"], ...]
         One ``[N, T_d, D]`` array per bucket, in bucket-payload order.
     """
+    if ts_grid is None and n_points < 1:
+        raise ValueError("n_points must be at least 1")
+    if ts_grid is not None:
+        grid = jnp.asarray(ts_grid)
+        if grid.ndim != 1 or grid.size == 0 or not bool(jnp.all(jnp.isfinite(grid))):
+            raise ValueError("ts_grid must be a nonempty finite rank-1 array")
     out = []
     for bp in dataset.bucket_payloads:
         n = int(bp.ts.shape[0])
@@ -179,11 +206,16 @@ def predict_dense(
             dense_ts = jnp.stack(
                 [jnp.linspace(bp.ts[i, 0], bp.ts[i, -1], n_points) for i in range(n)]
             )
-        dense_bp = bp._replace(ts=dense_ts)
+        if bool(jnp.any(dense_ts[:, 0] < bp.ts[:, 0])):
+            raise ValueError("Dense prediction times must not precede the initial state time")
+        if dense_ts.shape[1] == 0 or bool(jnp.any(jnp.diff(dense_ts, axis=1) <= 0)):
+            raise ValueError("Dense prediction times must be nonempty and strictly increasing")
+
         out.append(
-            predict_bucket(
+            _predict_dense_bucket(
                 predictors,
-                dense_bp,
+                bp,
+                dense_ts,
                 simulate_fn=simulate_fn,
                 state_to_output=state_to_output,
                 solver=solver,
@@ -231,6 +263,4 @@ def ensemble_predictions(
         for m in members
     )
     n_buckets = len(dataset.bucket_payloads)
-    return tuple(
-        jnp.mean(jnp.stack([p[b] for p in per_member]), axis=0) for b in range(n_buckets)
-    )
+    return tuple(jnp.mean(jnp.stack([p[b] for p in per_member]), axis=0) for b in range(n_buckets))

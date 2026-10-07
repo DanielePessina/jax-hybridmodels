@@ -120,7 +120,8 @@ in Python control flow.
 
 ## Random keys
 
-Training and predictor constructors require explicit JAX keys. Internal
+Training and network constructors require explicit JAX keys. Fixed values
+and directly initialized parameters need no constructor key. Internal
 randomness is derived from named folds of the root key. This makes a run a
 deterministic function of its supplied root key.
 

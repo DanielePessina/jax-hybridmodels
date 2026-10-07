@@ -2,13 +2,17 @@
 
 The public surface is split across the pages below, grouped by concern. Every symbol below is also re-exported at the top level — `from jaxhybridmodels import MLPPredictor` works exactly like `from jaxhybridmodels.predictors import MLPPredictor`.
 
+## [Models and Results](/api/model)
+
+[`HybridModel`](/api/model#hybridmodel), [`FitResult`](/api/model#fitresult), [`FitHistory`](/api/model#fithistory), [`PredictionResult`](/api/model#predictionresult), [`ExperimentPrediction`](/api/model#experimentprediction), [`fit`](/api/model#fit), [`predict`](/api/model#predict)
+
 ## [Data: Experiments, Channels, Datasets](/api/data)
 
 [`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
 
 ## [Predictors: Trainable Components](/api/predictors)
 
-[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
+[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`ConstantPredictor`](/api/predictors#constantpredictor), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 
@@ -24,7 +28,7 @@ The public surface is split across the pages below, grouped by concern. Every sy
 
 ## [Training: Optax & Evosax Loops](/api/training)
 
-[`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`train_with_optax`](/api/training#train_with_optax), [`train_seed_ensemble`](/api/training#train_seed_ensemble), [`train_bootstrap_ensemble`](/api/training#train_bootstrap_ensemble), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
+[`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`TrainingPhase`](/api/training#trainingphase), [`train_with_optax`](/api/training#train_with_optax), [`train_seed_ensemble`](/api/training#train_seed_ensemble), [`train_bootstrap_ensemble`](/api/training#train_bootstrap_ensemble), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
 
 ## [Training Kernels: Build Your Own Loop](/api/kernels)
 

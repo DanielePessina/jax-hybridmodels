@@ -170,14 +170,13 @@ class TestWarps:
 
 
 class TestBoundsValidation:
-    def test_infinite_bound_raises(self):
-        # Used to construct silently, then map every finite input to one
-        # latent, return inf from from_latent, and nan from input_violation.
-        with pytest.raises(ValueError, match="finite"):
-            BoundScaler(bounds=((0.0, float("inf")),), transform="sigmoid")
+    def test_infinite_bound_uses_one_sided_transform(self):
+        scaler = BoundScaler(bounds=((0.0, float("inf")),), transform="sigmoid")
+        assert jnp.isfinite(scaler.from_latent(jnp.array([0.0]))).all()
+        assert float(scaler.input_violation(jnp.array([-2.0]))) == 4.0
 
     def test_nan_bound_raises(self):
-        with pytest.raises(ValueError, match="finite"):
+        with pytest.raises(ValueError, match="NaN"):
             BoundScaler(bounds=((float("nan"), 1.0),), transform="sigmoid")
 
     def test_inverted_bound_raises(self):

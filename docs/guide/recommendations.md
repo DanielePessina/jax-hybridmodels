@@ -232,7 +232,8 @@ it first, then refine with `train_with_optax`. Both take the same
 
 ### Freeze BoundScaler.temperature
 
-Every example freezes all `BoundScaler` leaves.
+The default training mask now freezes all `BoundScaler` leaves. Explicit
+freezing remains supported for existing code:
 
 ```python
 from jaxhybridmodels import BoundScaler, freeze_modules_of_type, trainable_mask

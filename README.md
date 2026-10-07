@@ -31,10 +31,11 @@ The examples are plain scripts. From a checkout:
 
 ```bash
 uv sync --extra examples
-uv run python examples/pendulum/train_harmonic.py --no-plot
+uv run python examples/pendulum/train_model_api.py
 ```
 
-The harmonic oscillator has a known optimum, so it is a useful wiring check.
+The harmonic oscillator learns a physical frequency through `.value`, uses
+model methods for fitting and prediction, and simulates new initial conditions.
 See the [examples overview](https://danielepessina.github.io/jax-hybridmodels/examples/)
 for the other workflows.
 

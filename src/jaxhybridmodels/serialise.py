@@ -49,6 +49,7 @@ import dataclasses
 import datetime as dt
 import importlib.metadata as ilm
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,8 @@ def _callable_path(value: Any) -> str:
 
 def _json_safe(value: Any) -> Any:
     """Convert metadata values into JSON-safe values without losing identity hints."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"__float__": str(value)}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if callable(value):

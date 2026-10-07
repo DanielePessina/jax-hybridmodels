@@ -1,7 +1,48 @@
 # Model interface
 
-`jaxhybridmodels` does not require a model wrapper class. You keep the model
-pieces in your own code and pass them to prediction or training functions.
+`HybridModel` holds the model pieces together. Its methods call the same
+functional training and prediction machinery used by custom loops.
+
+```python
+model = hm.HybridModel(
+    predictors=predictors,
+    simulate_fn=simulate_fn,
+    state_to_output=state_to_output,
+    output_channels=("concentration",),
+    solver=solver,
+)
+result = model.fit(dataset, steps=1000, lr=1e-3, key=key)
+fitted = result.model
+predictions = fitted.predict(dataset)
+experiment = predictions["experiment_A"]
+concentration = experiment.outputs["concentration"]
+```
+
+`experiment.times`, `experiment.observed`, and `experiment.observation_mask`
+keep predictions aligned with measurements. Unobserved values are NaN.
+The result preserves input experiment order across different buckets. Empty
+IDs receive `experiment_<index>` names; duplicate names raise an error.
+Use `predictions.buckets` with existing metrics or JAX code, and
+`predictions.to_dataframe()` for a long table (requires optional pandas).
+
+Simulate new conditions without constructing observations:
+
+```python
+trajectory = fitted.simulate(
+    ts=jnp.linspace(1.0, 10.0, 100), t0=0.0,
+    y0=jnp.array([1.0]), covariates={"temperature": 300.0},
+)
+concentration = trajectory["concentration"]
+full_state = trajectory.state
+```
+
+The initial state belongs to `t0`, which defaults to the first requested time.
+The simulator must integrate from the first timestamp it receives; the
+method prepends t0 when needed and removes that point from its result.
+
+`hm.fit(model, ...)` and `hm.predict(model, dataset)` are functional
+equivalents. Existing `train_with_*` and `predict_dataset` calls remain
+available without constructing a model wrapper.
 
 ## The model pieces
 

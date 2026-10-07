@@ -236,28 +236,18 @@ def warp_bounds(
 
 
 def check_bounds(bounds: tuple[tuple[float, float], ...], warp_name: str) -> None:
-    """Validate a bounds tuple against a warp, raising with the offending pair.
+    """Validate ordered endpoints and the warp's domain.
 
-    Each of these otherwise produces wrong numbers during a compiled solve
-    without raising:
-
-    - Non-finite edges make the box width ``inf``. Every finite input
-      normalises to 0, ``from_latent`` returns ``inf``, and
-      ``box_violation`` returns ``nan``.
-    - A non-positive edge under ``log`` or ``log10`` gives ``-inf`` or
-      ``nan`` edges, just as quietly.
-    - ``low >= high`` gives a zero or negative width, so the normalisation
-      divides by zero or flips orientation.
+    Signed infinities represent open endpoints; NaN and reversed endpoints
+    raise. Open intervals require a linear warp. Finite intervals with a
+    positive-only warp require a strictly positive lower endpoint.
     """
     warp = WARPS[warp_name]
     for low, high in bounds:
-        if not (math.isfinite(low) and math.isfinite(high)):
-            raise ValueError(
-                f"BoundScaler bounds must be finite; got ({low}, {high}). "
-                "One-sided quantities are not supported: use a finite box "
-                "wide enough to hold the plausible range, with warp='log10' "
-                "if it spans decades."
-            )
+        if math.isnan(low) or math.isnan(high) or low == math.inf or high == -math.inf:
+            raise ValueError(f"BoundScaler bounds must be ordered and not NaN; got ({low}, {high})")
+        if (not math.isfinite(low) or not math.isfinite(high)) and warp_name != "linear":
+            raise ValueError("Open bounds require warp='linear'")
         if low >= high:
             raise ValueError(f"BoundScaler bounds require low < high; got ({low}, {high}).")
         if warp.requires_positive and low <= 0.0:

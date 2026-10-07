@@ -21,6 +21,43 @@ The two histories mean different things. Optax returns the raw loss at
 each step, which can go up. Evosax returns best-so-far per generation,
 which cannot. Do not plot them on one axis.
 
+## Model methods and fit results
+
+```python
+config = hm.OptaxTrainingConfig(steps=1000, lr=1e-3)
+result = model.fit(dataset, config, key=key)
+# Or: result = model.fit(dataset, steps=1000, lr=1e-3, key=key)
+
+result.model
+result.history.data_loss       # Data alone, before each update
+result.history.tracked_loss    # Data + weighted trajectory penalty
+result.history.objective       # All terms used for optimization
+result.best_step                # Zero-based pre-update checkpoint; None for final update
+result.stop_reason              # budget_exhausted / training_patience / validation_patience
+```
+
+For validation-based model selection:
+
+```python
+result = model.fit(
+    train_data, config, validation=validation_data,
+    select_best="validation_loss", key=key,
+)
+```
+
+Supplying validation defaults to validation selection. It scores the full
+validation horizon with data loss only, performing an additional forward
+pass each step. Patience applies to that score, and the best validation
+checkpoint is returned even when `restore_best=False`. Use
+`select_best="training_loss"` to monitor validation but keep training-based
+selection. Without validation, selection follows the existing tracked loss
+and resets when the training horizon changes. Histories describe pre-update
+parameters; the final update is not a scored checkpoint.
+
+Pass an `EvosaxTrainingConfig` to `model.fit` for population search. Its result
+fills `history.best_fitness`, rather than the Optax loss series. Per-generation
+validation selection is currently supported only for Optax.
+
 ## Optax: gradient-based, multi-phase
 
 [`train_with_optax`](/api/training#train_with_optax) runs a gradient
@@ -32,11 +69,20 @@ A step is not one bucket.
 
 ### Phases
 
-A **phase** is a contiguous block of steps sharing one set of
-hyperparameters. A run is a tuple of phases. Every phase-keyed field on
-[`OptaxTrainingConfig`](/api/training#optaxtrainingconfig) is a tuple of
-the same length as `steps`. There is no scalar broadcast, so you spell
-out the learning rate for each phase.
+A **phase** is a contiguous block of steps sharing hyperparameters. Use
+scalar fields for a simple run, or explicit phase objects:
+
+```python
+config = hm.OptaxTrainingConfig(phases=[
+    hm.TrainingPhase(steps=200, lr=1e-2, horizon=0.5),
+    hm.TrainingPhase(steps=800, lr=1e-3, reset_optimizer=True),
+])
+```
+
+The original parallel tuples remain supported. Scalar fields broadcast to
+every phase; explicit tuples must match the length of `steps`. Do not combine
+`phases=` with `steps=`. Configurations normalize to tuples for the training
+loop and saved metadata.
 
 ```python
 from jaxhybridmodels import OptaxTrainingConfig
@@ -92,9 +138,8 @@ config = OptaxTrainingConfig(
 )
 ```
 
-`penalty_weight` is the one phase-keyed field that broadcasts from
-length 1, because it has an unambiguous off state. Any other length must
-match `steps` exactly.
+`penalty_weight` also broadcasts from a length-one tuple. Other explicit
+tuples must match `steps` exactly.
 
 `loss_history`, `restore_best`, early stopping, and the tournament score
 track the data term plus any configured trajectory penalty. The fixed-point
@@ -239,7 +284,8 @@ two-phase fit in exactly this shape.
 ## Freezing leaves
 
 `trainable=` takes a boolean pytree matching your predictors, one
-boolean per array. Omit it and every floating-point array trains. Pass
+boolean per array. Omit it and floating-point parameter arrays train; constants and scaler
+temperatures stay fixed. Pass
 one to hold parts of the model fixed.
 
 ```python
@@ -247,8 +293,7 @@ from jaxhybridmodels import (
     BoundScaler, freeze_modules_of_type, freeze_paths, trainable_mask,
 )
 
-mask = trainable_mask(predictors)
-mask = freeze_modules_of_type(mask, predictors, BoundScaler)          # every scaler
+mask = trainable_mask(predictors)  # Constants and scalers already fixed
 mask = freeze_paths(mask, ("0.inner.mlp.layers.0.weight",))           # one specific array
 
 history, trained = train_with_optax(

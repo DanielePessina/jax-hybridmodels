@@ -149,7 +149,8 @@ class Experiment(eqx.Module):
         Every experiment passed to one ``make_dataset`` call must define the
         same keys and shapes.
     y0 : Float[Array, "S"]
-        Full model state at ``t=0``, of length ``S``. Built by the user's
+        Full model state at ``t0`` (or the first observation time), of length
+        ``S``. Built by the user's
         ``y0_fn`` hook when the experiment is constructed. The state may
         contain components that are never observed, so ``S`` need not equal
         the channel count. The framework never inspects ``S``.
@@ -165,6 +166,7 @@ class Experiment(eqx.Module):
     y0: Float[Array, " S"]
     channels: dict[str, ChannelObs]
     exp_id: str = eqx.field(static=True)
+    t0: float | None = eqx.field(static=True, default=None)
 
 
 class BucketPayload(NamedTuple):
@@ -254,8 +256,10 @@ def make_experiment(
     *,
     covariates: dict[str, float | Array],
     channels: dict[str, ChannelObs],
-    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array],
+    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
     exp_id: str = "",
+    t0: float | None = None,
+    y0: Any = None,
 ) -> Experiment:
     """Build one ``Experiment`` from raw covariates, channels, and a state-init hook.
 
@@ -280,6 +284,12 @@ def make_experiment(
         integrates.
     exp_id
         Optional human-readable id copied to ``Experiment.exp_id``.
+    t0
+        Initial state time, at or before the first observation. Added as an
+        unobserved integration point. None preserves the first-observation
+        convention.
+    y0
+        Direct initial state, as an alternative to y0_fn. Supply exactly one.
     """
     cov_arr: dict[str, Array] = {}
     for key, value in covariates.items():
@@ -289,10 +299,17 @@ def make_experiment(
                 f"Experiment covariate {key!r} must be scalar or rank-1; got shape {array.shape}"
             )
         cov_arr[key] = array
-    y0 = jnp.asarray(y0_fn(cov_arr, channels))
+    if (y0 is None) == (y0_fn is None):
+        raise ValueError("Pass exactly one of y0= or y0_fn=")
+    if t0 is not None and not np.isfinite(t0):
+        raise ValueError("Experiment t0 must be finite")
+    if y0_fn is not None:
+        y0 = jnp.asarray(y0_fn(cov_arr, channels))
+    else:
+        y0 = jnp.asarray(y0, dtype=jnp.result_type(jnp.asarray(y0).dtype, float))
     if y0.ndim != 1:
         raise ValueError(f"Experiment y0 must be rank-1; got shape {y0.shape}")
-    return Experiment(covariates=cov_arr, y0=y0, channels=channels, exp_id=exp_id)
+    return Experiment(covariates=cov_arr, y0=y0, channels=channels, exp_id=exp_id, t0=t0)
 
 
 class _ExperimentArrays(NamedTuple):
@@ -369,10 +386,21 @@ def _per_experiment_arrays(
     if float_ts_dtypes:
         key_dtype = np.dtype(f"float{min(dtype.itemsize for dtype in float_ts_dtypes) * 8}")
     else:
-        key_dtype = np.result_type(*ts_dtypes) if ts_dtypes else np.dtype(np.float32)
+        key_dtype = (
+            np.result_type(*ts_dtypes, np.float32)
+            if experiment.t0 is not None
+            else np.result_type(*ts_dtypes)
+            if ts_dtypes
+            else np.dtype(np.float32)
+        )
     for ts_np, _values_np, _variance_np in channel_arrays:
         union_ts.update(float(np.asarray(t, dtype=key_dtype)) for t in ts_np.tolist())
 
+    if experiment.t0 is not None:
+        start = float(np.asarray(experiment.t0, dtype=key_dtype))
+        if union_ts and start > min(union_ts):
+            raise ValueError(f"Experiment {experiment.exp_id!r}: t0 must precede observations")
+        union_ts.add(start)
     sorted_ts = sorted(union_ts)
     ts_to_idx = {t: i for i, t in enumerate(sorted_ts)}
 
@@ -380,7 +408,13 @@ def _per_experiment_arrays(
     D = len(output_channel_names)
     val_dtype = np.result_type(*val_dtypes) if val_dtypes else np.dtype(np.float32)
     var_dtype = np.result_type(*var_dtypes) if var_dtypes else np.dtype(np.float32)
-    ts_dtype = np.result_type(*ts_dtypes) if ts_dtypes else np.dtype(np.float32)
+    ts_dtype = (
+        np.result_type(*ts_dtypes, np.float32)
+        if experiment.t0 is not None
+        else np.result_type(*ts_dtypes)
+        if ts_dtypes
+        else np.dtype(np.float32)
+    )
 
     y_observed = np.zeros((T, D), dtype=val_dtype)
     yvar = np.ones((T, D), dtype=var_dtype)

@@ -4,6 +4,20 @@
 
 This spec is the architectural source of truth. It pairs with [`CONTEXT.md`](./CONTEXT.md), the domain glossary. Read CONTEXT.md first if any term here looks unfamiliar.
 
+
+### Model API amendment (2026-10-07)
+
+The user-approved model workflow supersedes the earlier no-wrapper and
+finite-bounds-only restrictions below. `HybridModel` is an optional container
+with fit, predict, and simulate methods; functional APIs remain supported.
+`ConstantPredictor.value` stores fixed scalar/array/tuple values, while
+`BoundedPredictor(value=...).value` stores trainable scalars or arrays without
+an inner class or dummy inputs. Bounds may be finite, one-sided, or absent.
+Scalers and constants are fixed by the default mask. Scalar Optax configs
+and explicit TrainingPhase schedules normalize to the existing tuple fields.
+Named prediction and fit results expose experiment identity and loss semantics.
+Explicit experiment t0 is inserted as an unobserved integration point.
+
 ---
 
 ## 1. Purpose

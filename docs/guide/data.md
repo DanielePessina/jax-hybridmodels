@@ -94,3 +94,21 @@ train, validation, test = hm.split_dataset(
 ```
 
 Use `make_bootstrap_dataset` for sampling experiments with replacement.
+
+## Initial time and initial state
+
+`make_experiment` accepts either `y0=` or a `y0_fn=` callback, never both.
+Set `t0=` when the initial state is defined before the first measurement:
+
+```python
+experiment = hm.make_experiment(
+    exp_id="run_A", covariates={}, y0=[1.0], t0=0.0,
+    channels={"concentration": hm.ChannelObs(ts=[1.0, 2.0], values=[0.8, 0.6])},
+)
+```
+
+The dataset inserts t0 as an unobserved timestamp when needed. The simulator
+receives that point as `ts[0]`, and losses continue to score only observed
+cells. A t0 later than any observation raises. When t0 is omitted, y0 belongs
+to the first union timestamp, preserving existing workflows. An inserted
+point contributes to timestamp counts used by horizon schedules.

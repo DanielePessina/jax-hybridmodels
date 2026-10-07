@@ -91,7 +91,7 @@ is a tuple rather than one array, because buckets differ precisely in
 | --- | --- | --- |
 | `tuple[Float[Array, "N T D"], ...]` |  | One ``[N_b, T_b, D]`` array per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L88)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L89)</small>
 
 ---
 
@@ -135,7 +135,7 @@ folded in ~20 lines).
 | --- | --- | --- |
 | `tuple[Float[Array, "N T_d D"], ...]` |  | One ``[N, T_d, D]`` array per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L138)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L159)</small>
 
 ---
 
@@ -174,7 +174,7 @@ is the same shape as a single ``predict_dataset`` return.
 | --- | --- | --- |
 | `tuple[Float[Array, "N T D"], ...]` |  | The member-mean prediction per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L195)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L227)</small>
 
 ---
 
@@ -195,4 +195,4 @@ Shortcut for the recovered-physics readout every example writes by hand
 predictor's named inputs as plain Python floats, calls it, and flattens
 the scalar result to a ``float``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L126)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L127)</small>

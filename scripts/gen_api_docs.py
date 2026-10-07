@@ -41,6 +41,10 @@ import jaxhybridmodels
 # group controls the rendered order on the page; pages are emitted in the
 # tuple order of ``PAGES``.
 PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("model", "Models and Results", (
+        "HybridModel", "FitResult", "FitHistory", "PredictionResult",
+        "ExperimentPrediction", "fit", "predict",
+    )),
     (
         "data",
         "Data: Experiments, Channels, Datasets",
@@ -63,6 +67,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "Predictor",
             "BoundScaler",
             "BoundedPredictor",
+            "ConstantPredictor",
             "MLPPredictor",
             "KANPredictor",
             "NeuralNPolynomial",
@@ -121,6 +126,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "Training: Optax & Evosax Loops",
         (
             "OptaxTrainingConfig",
+            "TrainingPhase",
             "train_with_optax",
             "train_seed_ensemble",
             "train_bootstrap_ensemble",

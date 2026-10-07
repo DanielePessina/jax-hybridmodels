@@ -73,7 +73,8 @@ optimiser touches and what ends up in a checkpoint.
 
 Two consequences follow.
 
-**Anything that is a float array is trainable by default.** That includes
+**Float arrays in custom predictors are trainable by default.** Built-in
+constants and scaler temperatures are fixed. The custom-predictor rule includes
 arrays you meant to hold fixed, such as a precomputed grid or a random
 feature bank. Freezing them is a separate step, covered below.
 

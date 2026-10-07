@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Add `HybridModel` fitting, named predictions, direct simulation, and typed
+  fit/history results, with optional Optax validation selection.
+- Add fixed `ConstantPredictor.value` and trainable
+  `BoundedPredictor(value=...).value` without dummy inputs.
+- Support missing/infinite bounds, one-sided softplus output transforms,
+  and unbounded identity transforms.
+- Accept scalar Optax configurations and `TrainingPhase` objects alongside
+  existing tuples. Freeze constants and scaler temperatures by default.
+- Add explicit experiment initial times and direct initial states. Preserve
+  the original integration start when predicting on a later dense grid.
+
+
 ## 0.2.0b1 — 2026-09-18
 
 First public beta of the current v1 architecture.

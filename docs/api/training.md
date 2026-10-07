@@ -5,6 +5,7 @@ Choose [`train_with_optax`](#train_with_optax) for gradient-based fitting or [`t
 ## Quick links
 
 - [`OptaxTrainingConfig`](#optaxtrainingconfig)
+- [`TrainingPhase`](#trainingphase)
 - [`train_with_optax`](#train_with_optax)
 - [`train_seed_ensemble`](#train_seed_ensemble)
 - [`train_bootstrap_ensemble`](#train_bootstrap_ensemble)
@@ -22,12 +23,12 @@ Choose [`train_with_optax`](#train_with_optax) for gradient-based fitting or [`t
 
 ```python
 OptaxTrainingConfig(
-    steps: 'tuple[int, ...]',
-    lr: 'tuple[float, ...]',
-    optimizer: 'tuple[OptimizerSpec, ...]',
-    reset_optimiser_state: 'tuple[bool, ...]',
-    length_schedule: 'tuple[float, ...]' = (1.0,),
-    penalty_weight: 'tuple[float, ...]' = (0.0,),
+    steps: 'tuple[int, ...] | int | None' = None,
+    lr: 'tuple[float, ...] | float' = 0.001,
+    optimizer: 'tuple[OptimizerSpec, ...] | OptimizerSpec' = 'adamw',
+    reset_optimiser_state: 'tuple[bool, ...] | bool' = False,
+    length_schedule: 'tuple[float, ...] | float' = 1.0,
+    penalty_weight: 'tuple[float, ...] | float' = 0.0,
     penalty_points: 'tuple[Array, ...] | None' = None,
     penalty_fn: 'Callable[..., Array] | None' = None,
     trajectory_penalty_fn: 'Callable[..., Array] | None' = None,
@@ -41,24 +42,17 @@ OptaxTrainingConfig(
     patience: 'int' = 0,
     restore_best: 'bool' = True,
     verbose: 'bool' = True,
+    phases: 'Sequence[TrainingPhase] | None' = None,
 ) -> None
 ```
 
 Configuration for [`train_with_optax`](/api/training#train_with_optax).
 
-The first five fields are **phase-keyed**: ``steps``, ``lr``,
-``optimizer``, ``reset_optimiser_state`` and ``length_schedule`` carry
-one entry per phase, must have the same length, and do not broadcast.
-None has a defensible default, so a single-phase run spells out
-one-element tuples::
-
-    OptaxTrainingConfig(
-        steps=(500,), lr=(1e-3,), optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-    )
-
-``penalty_weight`` is the exception. It has an unambiguous off state,
-so a length-1 tuple broadcasts across every phase.
+Use scalar fields for a single phase, ``phases=`` with TrainingPhase
+objects for a schedule, or the original parallel tuples. Scalars
+broadcast across phases; explicit tuples must match ``steps`` (except
+the length-one penalty weight). Stored fields normalize to tuples.
+Do not combine ``phases=`` with ``steps=``.
 
 **Attributes**
 
@@ -82,7 +76,7 @@ so a length-1 tuple broadcasts across every phase.
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever ``length_schedule`` changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 | `verbose` | `bool` | Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L88)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L98)</small>
 
 <a id="optaxtrainingconfigpenalty_weight_for_phase"></a>
 
@@ -94,7 +88,30 @@ penalty_weight_for_phase(self, phase_idx: 'int') -> 'float'
 
 Penalty weight for ``phase_idx``, honouring the length-1 broadcast.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L230)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L279)</small>
+
+---
+
+<a id="trainingphase"></a>
+
+### `TrainingPhase`
+
+<small>`from jaxhybridmodels.training import TrainingPhase` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.TrainingPhase`</small>
+
+```python
+TrainingPhase(
+    steps: 'int',
+    lr: 'float' = 0.001,
+    optimizer: 'OptimizerSpec' = 'adamw',
+    horizon: 'float' = 1.0,
+    reset_optimizer: 'bool' = False,
+    penalty_weight: 'float' = 0.0,
+) -> None
+```
+
+One contiguous Optax phase, configured without parallel tuples.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L86)</small>
 
 ---
 
@@ -135,9 +152,8 @@ passed here rather than stored on the ``Dataset``.
 
 ``trainable`` is a boolean mask matching ``predictors``. Omitting it
 defaults to [`trainable_mask`](/api/trainable#trainable_mask), which marks
-every inexact-array leaf trainable. Pass a custom mask, usually from
-the freezers in ``jaxhybridmodels.trainable``, to hold leaves fixed;
-freezing ``BoundScaler`` leaves is the common case.
+inexact parameter arrays trainable, with constants and scalers fixed.
+Pass a custom mask to hold additional leaves fixed.
 
 **Returns**
 
@@ -145,7 +161,7 @@ freezing ``BoundScaler`` leaves is the common case.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step loss**, one entry per step, concatenated across phases. It can go up. It is the data term plus any configured trajectory penalty (charged inside the bucket forward pass); the bound penalty is excluded, so a ramping bound-penalty weight cannot move the series and runs with different bound weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from [`train_with_evosax`](/api/training#train_with_evosax), whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever ``length_schedule`` changes, so the returned model always comes from the last horizon trained on. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L888)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L951)</small>
 
 ---
 
@@ -199,7 +215,7 @@ land inside the first member's bracket, and ``on_run_start`` /
 ``on_run_end`` are fired once per member, so a live dashboard shows
 each member's phases rather than freezing after the first.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1258)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1350)</small>
 
 ---
 
@@ -249,7 +265,7 @@ Every resample and every training run is folded off the one ``key``, so
 the whole ensemble is deterministic given it. Each member is its own
 UI run, bracketed by ``on_run_start`` / ``on_run_end``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1392)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1484)</small>
 
 ---
 

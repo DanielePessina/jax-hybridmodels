@@ -20,6 +20,7 @@ is used.
 from jaxhybridmodels.predictors.base import (
     BoundedPredictor,
     BoundScaler,
+    ConstantPredictor,
     Predictor,
     reinitialize_pytree_with_key,
     reinitialize_with_key,
@@ -31,6 +32,7 @@ from jaxhybridmodels.predictors.neural_npoly import NeuralNPolynomial
 __all__ = [
     "BoundedPredictor",
     "BoundScaler",
+    "ConstantPredictor",
     "KANPredictor",
     "MLPPredictor",
     "NeuralNPolynomial",
