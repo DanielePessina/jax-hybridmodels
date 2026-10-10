@@ -5,99 +5,161 @@ outline: false
 
 # Batch reactor
 
-A first-order reaction $A \to B$ whose rate constant depends on
-temperature through Arrhenius, which we know, and on pH through a curve
-with no first-principles form, which we do not. Fitting Arrhenius
-separately at each pH gives one set of constants per pH and no way to
-predict between them. The hybrid model keeps the Arrhenius trunk and adds
-a small bounded residual network, so one model covers every pH and
-interpolates. It is fitted in two phases: CMA-ES for the trunk, then
-gradients for the residual.
+A first-order reaction $A \to B$ whose rate depends on temperature through
+Arrhenius, which is known, and on pH through a curve with no
+first-principles form. The hybrid model keeps a two-scalar Arrhenius trunk
+and adds a small bounded residual network, fitted in two phases on one
+`HybridModel`: CMA-ES for the trunk, then AdamW for the residual. A second
+script compares it with the classical alternative, one Arrhenius fit per
+pH, on runs neither model trained on. Read this for staged training with
+`trainable` masks, or for a worked case of when a residual network earns
+its place. The [RL example](/examples/batch-reactor-rl) continues from the
+fitted model.
+
+## Run it
 
 ```bash
 uv run python examples/batch_reactor/train_hybrid.py
+uv run python examples/batch_reactor/compare_baselines.py
 ```
+
+`train_hybrid.py` takes about 30 s and writes seven figures to
+`examples/batch_reactor/figures/`. `compare_baselines.py` runs 54 fits in
+about two minutes and writes three more. Both accept `--no-plot`, and
+`--generations` / `--steps` for a short run. `train_hybrid.py
+--save-predictors PATH` writes the fitted predictors for the RL example.
 
 ## The model
 
-The rate is split log-additively into a pH-blind trunk and a residual:
-
 $$
+\frac{\mathrm{d}C_A}{\mathrm{d}t} = -k\,C_A,
+\qquad
 \log_{10} k(T, \text{pH}) = \log_{10} k_\text{param}(T) + \Delta\log_{10} k(T, \text{pH})
 $$
 
-The trunk is centred Arrhenius with two bounded scalars,
-$\log k_\text{ref}$ and $E_a$. The residual is a 16-neuron MLP inside a
-`BoundedPredictor` whose output box is $[-2, 2]$ decades. The box is
-symmetric, so a freshly initialised network outputs about zero and the
-hybrid starts out equal to the trunk. Both live in `_model.py`, which the
-[RL example](/examples/batch-reactor-rl) also imports.
+The trunk is Arrhenius centred at 25 °C, with two bounded scalars:
 
-Each run heats along a flat-ramp-flat profile. The ramp parameters are
-covariates, and `simulate_fn` turns them into $T(t)$ with `ramp_profile`
-inside the vector field, so one run sweeps a band of temperatures.
+$$
+k_\text{param}(T) = \exp\!\left(\log k_\text{ref} - \frac{E_a}{R}\left(\frac{1}{T} - \frac{1}{T_\text{ref}}\right)\right)
+$$
 
-## Two phases on one model
+The residual is a 16-neuron MLP inside a `BoundedPredictor` whose output box
+is $[-2, 2]$ decades. The box is symmetric, so a fresh network outputs about
+zero and the hybrid starts out equal to the trunk. Both live in `_model.py`.
 
-Both phases call `HybridModel.fit` on the same model. A `trainable` mask
-picks which half of the predictor tuple moves:
+The hidden truth is Arrhenius with $E_a = 30$ kJ/mol times a Hill-type
+saturation in pH: fast below pH 5, a plateau above 7, a knee at 5.85. Each
+run heats along a flat-ramp-flat profile of $\pm 3$ °C around its midpoint.
+The four ramp parameters are covariates, and `simulate_fn` turns them into
+$T(t)$ with `ramp_profile` inside the vector field. Only $C_A$ is measured,
+12 times per run, with 3% noise. Truth and data generation are in
+`_data.py`.
+
+## Code
+
+Both phases call `fit` on the same model. A mask built with
+`freeze_modules_of_type` picks which half of the predictor tuple trains:
 
 ```python
 model = HybridModel(
-    predictors=build_predictors(key=k_init),  # (ArrheniusKinetics, BoundedPredictor)
+    predictors=build_predictors(key=k_init),
     simulate_fn=simulate_fn,
     state_to_output=state_to_output,
-    output_channel_names=("Ca",),
-    solver=solver,
+    output_channel_names=OUTPUT_CHANNELS,
+    solver=SOLVER,
 )
 
-# Phase 1: CMA-ES on the trunk. The residual is frozen.
 mask_p1 = freeze_modules_of_type(
     trainable_mask(model.predictors), model.predictors, BoundedPredictor
 )
 fit_p1 = model.fit(train_dataset, config_p1, key=k_p1, trainable=mask_p1)
+model_p1 = fit_p1.model
 
-# Phase 2: AdamW on the residual. The trunk is frozen.
 mask_p2 = freeze_modules_of_type(
-    trainable_mask(fit_p1.model.predictors), fit_p1.model.predictors, ArrheniusKinetics
+    trainable_mask(model_p1.predictors), model_p1.predictors, ArrheniusKinetics
 )
-fit_p2 = fit_p1.model.fit(train_dataset, config_p2, key=k_p2, trainable=mask_p2)
+fit_p2 = model_p1.fit(train_dataset, config_p2, key=k_p2, trainable=mask_p2)
 ```
 
 `config_p1` is an `EvosaxTrainingConfig` (CMA-ES, 60 generations,
-`init="lhs_box"`) and `config_p2` an `OptaxTrainingConfig` (800 steps).
-`fit` returns a `FitResult`; the script reads
-`fit_p1.history.best_fitness` and `fit_p2.history.loss` for the combined
-loss curve. Because the residual starts at zero, phase 2's first loss
-equals phase 1's last.
+`init="lhs_box"`) and `config_p2` an `OptaxTrainingConfig` (800 steps). The
+script asserts that phase 1 trains exactly two scalars and that the frozen
+half is bit-identical after each phase.
 
-The script checks each step as it goes: that phase 1 trains exactly two
-scalars, that the frozen half is bit-identical after each phase, and that
-phase 2 at least halves the loss.
+`compare_baselines.py` builds the classical baseline from the same
+predictor tuple. `simulate_trunk_fn` integrates the trunk alone and ignores
+the residual, so both models share every mask:
+
+```python
+hybrid = HybridModel(
+    predictors=build_predictors(key=k_init),
+    simulate_fn=simulate_fn,
+    state_to_output=state_to_output,
+    output_channel_names=OUTPUT_CHANNELS,
+    solver=SOLVER,
+)
+baseline = replace(hybrid, simulate_fn=simulate_trunk_fn)
+```
 
 ## Results
 
-Default settings, seed 0. The parametric trunk cannot see pH, so its
-curves are flat; the hybrid follows the truth across the pH range:
+### Two-phase fit
 
-![Recovered log10 k(pH): truth, parametric and hybrid](assets/batch-reactor/06_k_reveal_phase2.png)
+Nine training runs on a Latin hypercube in $(T, \text{pH})$, two validation
+runs off the design. Seed 0.
 
-![Fitted Ca(t) against the nine training experiments](assets/batch-reactor/04_trajectory_grid_phase2.png)
+| model | train $R^2$ | validation $R^2$ |
+|---|---|---|
+| trunk only, after CMA-ES | 0.959 | 0.962 |
+| hybrid, after AdamW | 0.9985 | 0.9973 |
 
-The validation points (triangles) at `(20 °C, 5.3)` and `(30 °C, 6.8)`
-were never fitted.
+The pH-blind trunk settles on $E_a = 15$ kJ/mol against a true 30. With
+nine runs, temperature and pH are partly correlated in the design, so a
+trunk that cannot see pH trades some of the pH effect into the temperature
+slope. The residual takes both inputs and corrects both: the dotted hybrid
+curves follow the truth at all three temperatures, while the dashed trunk
+is flat in pH by construction.
 
-## Other scripts in the folder
+![log10 k(pH) at 15, 25 and 35 °C: truth, trunk and hybrid](assets/batch-reactor/06_k_reveal_phase2.png)
 
-- `notebook.py` is a longer walkthrough with constant temperature per run
-  and three pH bins. It fits the per-pH Arrhenius baseline, shows it
-  failing to transfer between bins, and scores the hybrid with
-  leave-one-out and leave-one-pH-out cross-validation. It runs about 40
-  fits.
-- `presentation_plots.py` draws slide figures comparing per-bin,
-  joint, linear-in-pH and hybrid fits on a harder truth whose activation
-  energy varies with pH.
+![Fitted Ca(t) against the nine training runs](assets/batch-reactor/04_trajectory_grid_phase2.png)
 
-`--save-predictors PATH` writes the phase-2 predictors for [part two, the
-RL example](/examples/batch-reactor-rl), which freezes this fitted model
-and learns a catalyst-activity policy on top of it.
+### Against per-pH Arrhenius fits
+
+`compare_baselines.py` uses a different design, chosen so the classical
+method can be fitted at all: four ramp runs at each of pH 5.0, 5.85 and
+7.0. Fitted bin by bin, Arrhenius recovers $E_a$ within 3.5 kJ/mol of the
+truth in each bin and absorbs pH into $\log k_\text{ref}$. Every score below
+is on runs the model never trained on.
+
+| model | test | $R^2$ |
+|---|---|---|
+| Arrhenius, one fit per pH | leave one run out, same pH | 0.996 |
+| Arrhenius, one fit across all pH | leave one run out | 0.924 |
+| hybrid | leave one run out | 0.994 |
+| Arrhenius, pH 5.0 fit | held-out pH 5.85 | 0.957 |
+| Arrhenius, one fit on pH 5.0 and 7.0 | held-out pH 5.85 | 0.990 |
+| hybrid, trained on pH 5.0 and 7.0 | held-out pH 5.85 | 0.995 |
+
+Per-pH fits are as good as the hybrid inside their own bin and give no model
+for any other pH. A single Arrhenius fit across all pH loses the most,
+because one prefactor has to stand in for a rate that changes by a factor of
+two across the bins. The hybrid matches the per-bin fits with one model.
+
+On the held-out pH the margin is smaller. Borrowing the nearest bin's fit
+is clearly worse. A joint Arrhenius fit on the two outer bins lands close,
+because pH 5.85 sits near the midpoint of their rates and averaging the two
+happens to be about right there. The hybrid is still the best of the three,
+and the rate law it learned without pH 5.85 bridges the gap:
+
+![Out-of-sample parity for all six tests](assets/batch-reactor/compare_parity.png)
+
+![log10 k(pH) learned without the pH 5.85 runs](assets/batch-reactor/compare_k_reveal.png)
+
+## Things to try
+
+- `--doe-seed` on `train_hybrid.py` draws a different design. Watch the
+  trunk's $E_a$ move with how correlated $T$ and pH happen to be.
+- `--generations 5 --steps 20` on either script for a quick check.
+- Move `HELD_OUT_BIN` in `compare_baselines.py` to an edge bin. Neither
+  model was built to extrapolate in pH.

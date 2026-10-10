@@ -5,22 +5,22 @@
 express, compose the same pieces instead of forking the trainer. This
 script recovers a harmonic oscillator's frequency with a loop that weights
 each bucket's loss and gradients by its experiment count, which the stock
-trainer has no option for. It also shows where a custom loss (masked
-Huber, passed to ``build_bucket_step``) and a custom regulariser (L2 on a
-second parameter, passed to ``build_penalty_step``) enter a hand-written
-loop.
+trainer has no option for.
 
-``build_apply_update`` applies one optimiser update per step. A step is
-one pass over every bucket, accumulating gradients, then that one update.
-Change the accumulation rule and you have a different trainer.
+Shows:
+
+- ``build_bucket_step``, ``build_penalty_step`` and ``build_apply_update``
+- a custom loss (masked Huber) and a custom regulariser (L2 on a second
+  ``Parameter``) entering a hand-written loop
+- ``predict_dataset`` and ``compute_metrics`` on raw predictors
 
 Run::
 
     uv run python examples/custom_loop/train_custom_loop.py
+    uv run python examples/custom_loop/train_custom_loop.py --steps 5 --no-plot
 
-Prints the loss, penalty and ``omega`` every 25 steps, then the recovered
-values and per-channel metrics. Writes ``figures/parity.png`` unless
-``--no-plot`` is given.
+Prints the loss, penalty and ``omega`` every 25 steps, the recovered values
+and metrics; writes ``figures/parity.png``. Under a minute on CPU.
 """
 
 from __future__ import annotations
@@ -66,7 +66,6 @@ INITIAL_STATES: tuple[tuple[float, float], ...] = (
     (0.5, -0.5),
     (1.0, 1.0),
 )
-N_STEPS: int = 150
 
 
 def simulate_fn(predictors, ts, covariates, y0, solver):
@@ -131,11 +130,13 @@ def main() -> None:
     parser.add_argument(
         "--plot-dir", type=Path, default=Path(__file__).resolve().parent / "figures"
     )
+    parser.add_argument("--steps", type=int, default=150)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
     apply_default_style()
     ds = build_dataset()
+    print("[data]")
     print(hm.describe_buckets(ds))
 
     # ``scale`` exists only for the regulariser to pull toward zero.
@@ -163,8 +164,8 @@ def main() -> None:
     # a schedule over this value is how the stock trainer's horizon works.
     horizon = jnp.asarray(1.0)
     penalty_weight = jnp.asarray(0.1)
-    print()
-    for step in range(N_STEPS):
+    print("\n[fit]")
+    for step in range(args.steps):
         # Weighted mean over buckets of the loss and its gradient. Dividing
         # by the total weight keeps the weights relative.
         total_loss = jnp.asarray(0.0)
@@ -191,7 +192,8 @@ def main() -> None:
                 f"omega={float(predictors['omega'].value):.4f}"
             )
 
-    print(f"\nrecovered omega = {float(predictors['omega'].value):.4f}  (truth {OMEGA_TRUE})")
+    print("\n[results]")
+    print(f"recovered omega = {float(predictors['omega'].value):.4f}  (truth {OMEGA_TRUE})")
     print(f"final scale     = {float(predictors['scale'].value):.6f}  (regularised toward 0)")
 
     preds = hm.predict_dataset(

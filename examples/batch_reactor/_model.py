@@ -1,13 +1,13 @@
-"""Model definitions shared by the two batch reactor scripts.
+"""Model definitions shared by the batch reactor scripts.
 
-``train_hybrid.py`` fits these predictors and ``train_rl_deactivation.py``
-loads the result with ``load_predictors``. Loading needs a template whose
-leaves have the same classes and static configuration as the saved tree, so
-both scripts must build the predictors from this one definition. Data
-generation stays in each script: they build different datasets (fresh and
-aged catalyst) and share only the physics.
+``train_hybrid.py`` and ``compare_baselines.py`` fit these predictors, and
+``train_rl_deactivation.py`` loads the fitted ones with ``load_predictors``.
+Loading needs a template whose leaves have the same classes and static
+configuration as the saved tree, so every script builds the predictors from
+this one definition. The hidden truth and data generation are in
+``_data.py``.
 
-Not an importable package module. Both scripts run as ``__main__`` with
+Not an importable package module. The scripts run as ``__main__`` with
 their own directory on ``sys.path``, which is what resolves ``from _model
 import ...``.
 """
@@ -15,6 +15,8 @@ import ...``.
 # ruff: noqa: F722
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import diffrax
 import equinox as eqx
@@ -51,6 +53,9 @@ EA_BOUNDS: tuple[float, float] = (0.0, 80.0)
 RES_LOG10_BOUNDS: tuple[float, float] = (-2.0, 2.0)
 
 INPUT_KEYS: tuple[str, ...] = ("temperature_C", "pH")
+
+# Every fit and prediction in these examples integrates with this solver.
+SOLVER = SolverConfig(solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=10_000, dt0=0.05)
 
 
 def y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Float[Array, " 2"]:
@@ -118,23 +123,21 @@ def log10_k(
     return log10_k_trunk(parametric, temperature_C) + delta
 
 
-def simulate_fn(
-    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
+def _integrate_ramp(
+    log10_k_at: Callable[[Array], Array],
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
     solver: SolverConfig,
 ) -> Float[Array, "T 2"]:
-    """Integrate ``A -> B`` first-order kinetics under the hybrid rate :func:`log10_k`.
+    """Integrate ``A -> B`` with rate ``10 ** log10_k_at(T(t))`` along the run's ramp.
 
-    The temperature changes during each run. The covariates carry the
-    parameters of a flat-ramp-flat heating profile (``ramp_t0``,
-    ``ramp_t1``, ``T_lo``, ``T_hi``) and ``ramp_profile`` turns them into
-    ``T(t)``, evaluated inside the vector field at the solver's ``t``. Profile
-    parameters travel as ordinary scalar covariates; the profile callable is
-    pure JAX, so it differentiates and vmaps like the rest of the model.
+    The covariates carry the four parameters of a flat-ramp-flat heating
+    profile (``ramp_t0``, ``ramp_t1``, ``T_lo``, ``T_hi``), and
+    ``ramp_profile`` turns them into ``T(t)``, evaluated inside the vector
+    field at the solver's ``t``. The profile is pure JAX, so it
+    differentiates and vmaps like the rest of the model.
     """
-    pH = covariates["pH"]
     T_profile = ramp_profile(
         t0=covariates["ramp_t0"],
         t1=covariates["ramp_t1"],
@@ -143,14 +146,45 @@ def simulate_fn(
     )
 
     def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
-        # T(t) changes with t, so the residual is re-evaluated every step.
-        k = jnp.power(10.0, log10_k(predictors, T_profile(t), pH))
+        k = jnp.power(10.0, log10_k_at(T_profile(t)))
         # Clipping guards rare negative solver excursions near the asymptote.
         rate = k * jnp.maximum(y[0], 0.0)
         return jnp.stack([-rate, rate])
 
     term = diffrax.ODETerm(vector_field)
     return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
+
+
+def simulate_fn(
+    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
+    ts: Float[Array, " T"],
+    covariates: dict[str, Array],
+    y0: Float[Array, " 2"],
+    solver: SolverConfig,
+) -> Float[Array, "T 2"]:
+    """The hybrid model: trunk plus residual, :func:`log10_k`.
+
+    ``T(t)`` changes with ``t``, so the residual is re-evaluated every step.
+    """
+    pH = covariates["pH"]
+    return _integrate_ramp(lambda T: log10_k(predictors, T, pH), ts, covariates, y0, solver)
+
+
+def simulate_trunk_fn(
+    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
+    ts: Float[Array, " T"],
+    covariates: dict[str, Array],
+    y0: Float[Array, " 2"],
+    solver: SolverConfig,
+) -> Float[Array, "T 2"]:
+    """The classical baseline: the Arrhenius trunk alone, pH-blind.
+
+    Takes the same predictor tuple as :func:`simulate_fn` and ignores the
+    residual, so one ``trainable`` mask serves both models. A fresh residual
+    is close to zero but not exactly zero; letting it into the rate would add
+    a spurious temperature dependence and blur the fitted ``Ea``.
+    """
+    return _integrate_ramp(lambda T: log10_k_trunk(predictors[0], T), ts, covariates, y0, solver)
 
 
 def build_predictors(*, key: Array) -> tuple[ArrheniusKinetics, BoundedPredictor]:

@@ -1,24 +1,31 @@
-"""Learn crystallisation kinetics with two networks inside a moment ODE.
+"""Learn crystallisation growth and nucleation rates with two networks inside a moment ODE.
 
-Two ``BoundedPredictor`` networks read ``(temperature_C, supersaturation)``
-and return bounded log-rates, ``log10(G)`` for growth and ``log10(J)`` for
-nucleation. The vector field exponentiates them and drives a
-method-of-moments population balance with a mass balance on the solute.
-Supersaturation is computed from the state at every solver step, so the
-networks see a time-varying input.
+Four batch crystallisation experiments, two at 17 °C and two at 21 °C,
+each with an irregular concentration series and one terminal mean
+crystal size ``d43``. A method-of-moments population balance is known;
+the growth rate ``G`` and nucleation rate ``J`` are not. Two networks
+learn ``log10 G`` and ``log10 J`` from temperature and supersaturation,
+which is computed from the state at every solver step. The same model is
+fitted twice, once with MLPs and once with KANs. The data are inlined, so
+no data file is needed.
 
-The script fits the same model twice, once with MLPs and once with KANs,
-and compares the final losses. Four experiments from the thesis
-``Unseeded_LowData4`` cut are inlined, so it needs no data file. Each has
-an irregular concentration series and one terminal ``d43`` size.
+Shows:
 
-Run:
-    uv run python examples/crystallisation/train_kinetic.py [--steps N] [--no-plot]
+- ``BoundedPredictor`` reading a covariate and a state-derived input by name
+- per-state ``atol`` in ``SolverConfig`` for states spanning 18 decades
+- a ``simulate_fn`` that calls diffrax directly to convert time units
+- swapping ``MLPPredictor`` for ``KANPredictor`` with nothing else changed
+- ``evaluate_predictor`` to read a learned rate at any condition
 
-Prints the dataset buckets, the rates at a reference condition before and
-after training, and per-channel metrics for each family. Writes
-``parity.png`` and ``trajectories.png`` to ``figures/mlp/`` and
-``figures/kan/``.
+Run::
+
+    uv run python examples/crystallisation/train_kinetic.py
+    uv run python examples/crystallisation/train_kinetic.py --steps 20 --no-plot
+
+Prints the buckets, the rates at a reference condition before and after
+training, and metrics per family. Writes ``parity.png`` and
+``trajectories.png`` to ``figures/mlp/`` and ``figures/kan/``. About two
+minutes on CPU at the default 600 steps per family.
 """
 
 # ruff: noqa: F722
@@ -288,6 +295,7 @@ def main() -> None:
     apply_default_style()
 
     dataset = make_dataset()
+    print("[data]")
     print(hm.describe_buckets(dataset))
 
     k_init, k_train = jr.split(jr.key(args.seed))
@@ -332,12 +340,13 @@ def main() -> None:
             output_channel_names=OUTPUT_CHANNELS,
             solver=SOLVER,
         )
-        print(f"\n[{label}]")
+        print(f"\n[fit] {label}")
         report_rates("init", model.predictors)
         result = model.fit(dataset, config, key=k_train)
         report_rates("trained", result.model.predictors)
         final_losses[label] = min(result.history.loss)
 
+        print(f"\n[results] {label}")
         predictions = result.model.predict(dataset)
         hm.print_metrics(hm.compute_metrics(predictions.buckets, dataset))
 
@@ -360,9 +369,9 @@ def main() -> None:
             title=f"Crystallisation trajectories ({label})",
             save_path=family_dir / "trajectories.png",
         )
-        print(f"  figures written to {family_dir}")
+        print(f"[plot] figures written to {family_dir}")
 
-    print(f"\nbest loss: mlp {final_losses['mlp']:.6f}, kan {final_losses['kan']:.6f}")
+    print(f"\n[results] best loss: mlp {final_losses['mlp']:.6f}, kan {final_losses['kan']:.6f}")
 
 
 if __name__ == "__main__":

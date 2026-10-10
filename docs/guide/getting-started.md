@@ -77,10 +77,10 @@ dataset adds an unobserved point at t0, so `predictions["oscillator"].times`
 has 21 entries for 20 measurements. Without `t0`, the initial state belongs to
 the first observation time.
 
-Run the complete example from a checkout:
+The complete example fits six noisy oscillators and adds metrics and plots:
 
 ```bash
-uv run python examples/pendulum/train_model_api.py
+uv run python examples/pendulum/train_harmonic.py
 ```
 
 ## Next steps

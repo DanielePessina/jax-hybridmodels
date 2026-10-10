@@ -1,35 +1,26 @@
 """Learn a nucleation rate law with a ``NeuralNPolynomial`` predictor.
 
-``NeuralNPolynomial`` is the third predictor family after MLP and KAN. It
-writes each output as a polynomial whose coefficients come from an inner
-network. For nucleation kinetics that is a power-law prior in
-supersaturation ``S - 1`` rather than a black-box MLP.
+Two moments of a crystal size distribution, ``d mu0/dt = J`` and
+``d mu1/dt = G * mu0``, with growth ``G`` known and the nucleation rate
+``J(S)`` learned. ``J`` is a polynomial in a latent coordinate of
+``S - 1`` with exponents 2, 3 and 4, whose coefficients come from a small
+MLP. Only ``mu0`` is measured. The synthetic truth is
+``J = 0.02 + 0.15 (S - 1)^4`` at five supersaturations.
 
-Model: two moments of a crystal size distribution,
+Shows:
 
-    d mu0/dt = J           (nucleation)
-    d mu1/dt = G * mu0     (growth)
+- ``NeuralNPolynomial`` inside a ``BoundedPredictor``
+- a ``"log"`` output warp for a rate spanning two decades
+- a predictor evaluated once per solve from a constant covariate
 
-with growth ``G`` known and the nucleation rate ``J(S)`` learned. ``J`` is
-a polynomial with exponents 2, 3 and 4, its coefficients come from a small
-MLP, and a ``BoundedPredictor`` keeps it inside ``J_BOUNDS``. Only ``mu0``
-is measured.
+Run::
 
-One caveat: the polynomial is evaluated at the sum of the predictor's
-inputs *after* the input scaler, so the basis is a latent coordinate of
-``S - 1``, not ``S - 1`` itself. A polynomial in one variable with
-coefficients conditioned on another needs two predictors composed in the
-vector field.
+    uv run python examples/supersaturation_poly/train_supersaturation_poly.py
+    uv run python examples/supersaturation_poly/train_supersaturation_poly.py --steps 5 --no-plot
 
-The data is synthetic, ``J_true = 0.02 + 0.15 (S - 1)^4`` plus noise on
-``mu0``, at five supersaturations.
-
-Run:
-    uv run python examples/supersaturation_poly/train_supersaturation_poly.py [--no-plot]
-
-Prints the dataset buckets, per-channel fit metrics, and the learned rate
-next to the truth at each supersaturation. Writes ``parity.png`` and
-``recovered_rate.png`` to ``figures/``.
+Prints the buckets, metrics and the learned rate at each supersaturation;
+writes ``parity.png`` and ``recovered_rate.png`` to ``figures/``. About a
+minute on CPU.
 """
 
 from __future__ import annotations
@@ -113,6 +104,7 @@ def main() -> None:
     parser.add_argument(
         "--plot-dir", type=Path, default=Path(__file__).resolve().parent / "figures"
     )
+    parser.add_argument("--steps", type=int, default=400)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
     apply_default_style()
@@ -120,6 +112,7 @@ def main() -> None:
     # One root key drives the data noise, the initialisation and training.
     k_data, k_model, k_train = jax.random.split(jax.random.key(0), 3)
     dataset = make_data(k_data)
+    print("[data]")
     print(hm.describe_buckets(dataset))
 
     # The coefficient network outputs one coefficient per exponent.
@@ -145,9 +138,11 @@ def main() -> None:
         output_channel_names=("mu0",),
         solver=SOLVER,
     )
-    result = model.fit(dataset, hm.OptaxTrainingConfig(steps=400, lr=1e-2), key=k_train)
+    print("\n[fit]")
+    result = model.fit(dataset, hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2), key=k_train)
 
     predictions = result.model.predict(dataset)
+    print("\n[results]")
     hm.print_metrics(
         hm.compute_metrics(predictions.buckets, dataset),
         header=f"fit (best loss {min(result.history.loss):.3e})",

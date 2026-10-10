@@ -37,7 +37,7 @@ From a repository checkout:
 
 ```bash
 uv sync --extra examples
-uv run python examples/pendulum/train_model_api.py
+uv run python examples/pendulum/train_harmonic.py
 ```
 
 It fits the frequency of a harmonic oscillator and predicts with the fitted

@@ -60,8 +60,17 @@
 
 - Guide pages, example pages and example scripts rewritten for the new API.
   Examples train through `HybridModel.fit` unless they teach the lower
-  layer. Quoted results come from fresh runs, except the batch reactor RL
-  page, whose numbers and figures still need regenerating.
+  layer, and quoted results come from fresh runs.
+- Examples are plain scripts with one docs page each, all in the same
+  layout. The notebook scripts, the batch reactor slide figures and the
+  example SPEC files are gone; their content is on the pages. The two
+  pendulum scripts are merged into one quickstart.
+- New tubular reactor example: an advection-dispersion-reaction PDE solved
+  by the method of lines, with a learned rate law and four sensors.
+- New `batch_reactor/compare_baselines.py`: per-pH Arrhenius fits against
+  the hybrid, scored on held-out runs. The RL example now scores against
+  the true rate law and the noise-limited optimum, and its committed trunk
+  artefact is regenerated from the current `train_hybrid.py`.
 
 ## 0.2.0b1 — 2026-09-18
 

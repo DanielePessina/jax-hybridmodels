@@ -1,55 +1,27 @@
 """Write your own predictor family and train it like any other.
 
-The library ships ``MLPPredictor`` and ``KANPredictor``, but a predictor
-is only an ``eqx.Module`` mapping an array to an array. This script
-writes a third family from scratch, a random-Fourier-features
-regressor, and trains it inside a hybrid ODE without the framework
-knowing or caring that it is not an MLP.
+A predictor is only an ``eqx.Module`` mapping an array to an array. This
+script writes a random-Fourier-features regressor from scratch and learns
+an Arrhenius rate ``k(T)`` inside first-order decay,
+``dy/dt = -k(T) y``, from noisy isothermal runs. The feature bank is drawn
+once and held fixed; only the output weights and bias train.
 
-The physics
------------
-First-order decay whose rate depends on temperature::
+Shows:
 
-    dy/dt = -k(T) y,     k(T) = A exp(-Ea / (R T))
-
-Each experiment is one isothermal run: a temperature, a decay curve
-sampled with Gaussian noise, and the same initial concentration. The
-Arrhenius form is the answer, not an input. The predictor sees only the
-temperature covariate and has to learn the rate.
-
-What this example is for
-------------------------
-**A predictor with a fixed part and a trained part.** Random Fourier
-features project the input through a random bank of cosines and fit
-linear weights on top. The bank is drawn once and held still; only the
-output weights and bias learn. That splits the module's arrays into two
-groups and forces every question the contract asks:
-
-- Which fields are trainable arrays, and which are static
-  hyperparameters? Static fields are not saved, so the load site has to
-  be able to rebuild them.
-- How does the module re-initialise itself? The restart tournament calls
-  ``initialized_with_key``. Without it, every float array is resampled
-  from a standard normal, which would destroy the feature bank's scale.
-- How do you keep the optimiser off the fixed arrays? With a
-  trainability mask, not a field flag. ``freeze_paths`` names the two
-  bank leaves, and ``HybridModel.fit(trainable=...)`` takes the mask.
-- Does it survive a save and reload? ``save_predictors`` and
-  ``load_predictors`` round-trip through a template built by the same
-  code path.
-
-The narrative walkthrough is in ``docs/guide/custom-predictors.md``.
+- a custom ``Predictor`` with static fields and ``initialized_with_key``
+- ``freeze_paths`` and ``HybridModel.fit(trainable=...)`` to hold the bank
+- the restart tournament (``tournament_attempts``)
+- ``save_predictors`` / ``load_predictors`` round-trip through a template
 
 Run::
 
     uv run python examples/custom_predictor/train_custom_predictor.py
     uv run python examples/custom_predictor/train_custom_predictor.py --train-bank
-    uv run python examples/custom_predictor/train_custom_predictor.py --n-features 128
+    uv run python examples/custom_predictor/train_custom_predictor.py --steps 5 --no-plot
 
-Prints the learned rate against the Arrhenius truth before and after
-training, the save/load drift, and per-channel metrics. Writes
-``figures/parity.png`` and ``figures/trajectories.png`` unless
-``--no-plot`` is given.
+Prints the learned rate against the truth before and after training, the
+save/load drift and metrics; writes ``figures/parity.png`` and
+``figures/trajectories.png``. About a minute on CPU.
 """
 
 # ruff: noqa: F722
@@ -71,7 +43,6 @@ from jax.typing import ArrayLike
 from jaxtyping import Float
 
 import jaxhybridmodels as hm
-from jaxhybridmodels.prediction import evaluate_predictor
 
 # ``examples/_shared`` is a sibling directory; put it on sys.path so the
 # helpers import without an install step.
@@ -123,9 +94,9 @@ class RandomFourierPredictor(hm.Predictor):
     construction and never updated, which is what makes this random
     *features* rather than a one-hidden-layer network with a cosine
     activation. Holding them still is the caller's job, via the
-    trainability mask built in :func:`_build_mask`; a module cannot
-    declare a field untrainable, because trainability is a mask over the
-    pytree rather than a property of a class.
+    trainability mask built in ``main``; a module cannot declare a field
+    untrainable, because trainability is a mask over the pytree rather
+    than a property of a class.
 
     ``bandwidth`` is the standard deviation of the frequency draw. It
     sets the length scale the features can resolve: large values fit
@@ -287,7 +258,7 @@ def print_rate_table(predictors: dict[str, Any], header: str) -> None:
     print(f"    {'T [K]':>7}  {'k_true':>9}  {'k_learned':>9}  {'rel. err':>9}")
     for temperature in TEMPERATURES:
         truth = float(true_k(temperature))
-        learned = evaluate_predictor(predictors["rate"], {"temperature": temperature})
+        learned = hm.evaluate_predictor(predictors["rate"], {"temperature": temperature})
         rel = abs(learned - truth) / truth
         print(f"    {temperature:7.0f}  {truth:9.4f}  {learned:9.4f}  {rel:9.2%}")
 
@@ -314,6 +285,7 @@ def main() -> None:
     k_data, k_init, k_train = jr.split(jr.key(args.seed), 3)
 
     dataset = build_dataset(k_data)
+    print("[data]")
     print(hm.describe_buckets(dataset))
     print(
         f"true k spans {float(true_k(TEMPERATURES[0])):.4f} to "
@@ -337,7 +309,8 @@ def main() -> None:
     if not args.train_bank:
         mask = hm.freeze_paths(mask, BANK_PATHS)
     frozen = "none (--train-bank)" if args.train_bank else ", ".join(BANK_PATHS)
-    print(f"\nRandomFourierPredictor: {args.n_features} features, bandwidth {args.bandwidth}")
+    print("\n[fit]")
+    print(f"RandomFourierPredictor: {args.n_features} features, bandwidth {args.bandwidth}")
     print(f"frozen leaves: {frozen}")
     print_rate_table(model.predictors, "rates before training:")
 
@@ -354,7 +327,8 @@ def main() -> None:
     )
     result = model.fit(dataset, config, key=k_train, trainable=mask)
     trained = result.model.predictors
-    print(f"\n{len(result.history.loss)} steps; final loss {result.history.loss[-1]:.6e}")
+    print("\n[results]")
+    print(f"{len(result.history.loss)} steps; final loss {result.history.loss[-1]:.6e}")
     print_rate_table(trained, "rates after training:")
 
     # Static fields are not saved. ``load_predictors`` takes them from a
@@ -366,8 +340,8 @@ def main() -> None:
         reloaded = hm.load_predictors(path, template)
     drift = max(
         abs(
-            evaluate_predictor(reloaded["rate"], {"temperature": t})
-            - evaluate_predictor(trained["rate"], {"temperature": t})
+            hm.evaluate_predictor(reloaded["rate"], {"temperature": t})
+            - hm.evaluate_predictor(trained["rate"], {"temperature": t})
         )
         for t in TEMPERATURES
     )
@@ -394,7 +368,7 @@ def main() -> None:
             title="Custom predictor trajectories",
             save_path=args.plot_dir / "trajectories.png",
         )
-        print(f"\nfigures written to {args.plot_dir}")
+        print(f"\n[plot] figures written to {args.plot_dir}")
 
 
 if __name__ == "__main__":

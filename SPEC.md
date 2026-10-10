@@ -201,66 +201,27 @@ jax-hybridmodels/                      (repo)
 │           ├── optax.py                (RichTrainingUI)
 │           └── evosax.py               (RichEvosaxUI)
 ├── tests/
-│   ├── _models.py                  (shared decay model, dataset and solver)
-│   ├── conftest.py                 (session datasets and one shared fit)
-│   ├── test_workflow.py            (HybridModel fit, predict, save/load, UIs)
-│   ├── test_training.py            (trainers, ensembles, evosax, adjoints, masks)
-│   ├── test_penalties.py           (bound and trajectory penalties)
-│   ├── test_bounds.py              (BoundScaler transforms, warps, Parameter)
-│   ├── test_predictors.py          (MLP, KAN, NeuralNPolynomial, BoundedPredictor)
-│   ├── test_data.py                (datasets, buckets, splits, losses)
-│   ├── test_config.py              (config validation, solver, schedules, profiles)
-│   └── test_api.py                 (public namespace)
-└── examples/                       (per-example walkthroughs)
-├── src/
-│   └── jaxhybridmodels/
-│       ├── __init__.py                 (lazy public API re-exports)
-│       ├── data.py                     (Experiment, ChannelObs, Dataset, BucketPayload, make_dataset, split_dataset)
-│       ├── transforms.py                (BOUND_TRANSFORMS, WARPS, register_bound_transform, register_warp)
-│       ├── penalties.py                (soft_logit, softclip, clip_ste, box_violation, box_grid, data_penalty_points, bound_penalty)
-│       ├── solver.py                   (SolverConfig, SOLVER_REGISTRY, register_solver)
-│       ├── losses.py                   (masked_mse, masked_mle, bal_mse, bal_mle)
-│       ├── metrics.py                  (compute_metrics, print_metrics, ChannelMetrics)
-│       ├── trainable.py                (default_trainable, trainable_mask, freeze_paths/_modules_of_type/_where)
-│       ├── rng.py                      (named-fold helper)
-│       ├── prediction.py               (predict_bucket, predict_dataset, predict_dense, ensemble_predictions)
-│       ├── profiles.py                 (constant/step/ramp/piecewise_linear time profiles, R-D9)
-│       ├── schedules.py                (annealing_schedule, R-T10)
-│       ├── serialise.py                (save/load, last-shipped)
-│       ├── penalties.py                (bound_penalty, box_grid, data_penalty_points, penalty_points, trajectory-penalty helpers, R-P8)
-│       ├── predictors/
-│       │   ├── __init__.py
-│       │   ├── base.py                 (Predictor, BoundScaler, BoundedPredictor, reinitialize_with_key, reinitialize_pytree_with_key)
-│       │   ├── mlp.py                  (MLPPredictor)
-│       │   ├── kan.py                  (KANPredictor, uses jaxkan)
-│       │   └── neural_npoly.py         (NeuralNPolynomial)
-│       ├── training/
-│       │   ├── __init__.py
-│       │   ├── kernels.py              (build_bucket_step, build_score_bucket, build_penalty_step, build_apply_update)
-│       │   ├── optax.py                (train_with_optax, OptaxTrainingConfig, _shared_tournament, ensembles)
-│       │   └── evosax.py               (train_with_evosax, EvosaxTrainingConfig, _build_strategy)
-│       └── ui/
-│           ├── __init__.py
-│           ├── base.py                 (TrainingUI, EvosaxUI protocols, SilentUI)
-│           ├── optax.py                (RichTrainingUI)
-│           └── evosax.py               (RichEvosaxUI)
-├── tests/
-│   ├── conftest.py
-│   ├── test_data_buckets.py
-│   ├── test_predictors_serialise.py    (R-A5 enforcement)
-│   ├── test_trainable_filters.py
-│   ├── test_solver.py
-│   ├── test_train_optax.py             (synthetic ODE: harmonic oscillator)
-│   ├── test_train_evosax.py
-│   ├── test_loss_functions.py
-│   └── test_ui_callbacks.py
-└── examples/
-    ├── crystallisation/
-    │   ├── train_kinetic.py            (MLP/KAN direct-rate fit; end-to-end script, verification target)
-    │   ├── train_crystallisation_mechanistic.py  (CNT/parametric fit via evosax)
-    │   └── notebook.py                 (walkthrough, plain script since the marimo removal)
-    └── pendulum/
-        └── train_harmonic.py           (proves domain-agnostic; known optimum)
+│   ├── _models.py                      (shared decay model, solver, experiments)
+│   ├── conftest.py                     (session fixtures: datasets, one shared fit)
+│   ├── test_workflow.py                (HybridModel fit/predict/simulate, save/load, UI)
+│   ├── test_training.py                (trainers, tournament, ensembles, adjoints)
+│   ├── test_penalties.py
+│   ├── test_bounds.py
+│   ├── test_predictors.py              (R-A5 enforcement)
+│   ├── test_data.py
+│   ├── test_config.py
+│   ├── test_api.py
+│   └── test_example_batch_reactor_rl.py  (slow)
+└── examples/                           (one script per lesson, one docs page each)
+    ├── pendulum/                       (quickstart; known optimum)
+    ├── crystallisation/                (MLP/KAN rates; mechanistic CMA-ES fit)
+    ├── hybrid_ode/                     (networks above and inside the solver)
+    ├── tubular_reactor/                (PDE by method of lines, sensor observations)
+    ├── batch_reactor/                  (Evosax then Optax; per-pH baselines; RL)
+    ├── sbml_hybrid/
+    ├── supersaturation_poly/
+    ├── custom_predictor/
+    └── custom_loop/
 ```
 
 ### 3.1 `pyproject.toml` (sketch)

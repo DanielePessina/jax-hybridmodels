@@ -1,127 +1,146 @@
-# Crystallisation (mechanistic, CNT + power-law)
+# Crystallisation (mechanistic)
 
-The parametric counterpart to the [hybrid example](/examples/crystallisation).
-It uses the same four experiments, moment ODE and `state_to_output`, and
-replaces the two rate networks with closed-form kinetics: classical
-nucleation theory (CNT) for nucleation and a power law for growth. Four
-fitted scalars on this dataset are the baseline a hybrid model has to
-beat.
+The parametric baseline for the [hybrid crystallisation
+example](/examples/crystallisation). Same data, moment ODE and observation
+model; the two rate networks are replaced by closed-form kinetics with
+four fitted constants, searched with CMA-ES. Use it as a template for
+fitting a handful of bounded physical constants without gradients, and as
+the number a hybrid model has to beat.
+
+## Run it
 
 ```bash
 uv run python examples/crystallisation/train_crystallisation_mechanistic.py
+uv run python examples/crystallisation/train_crystallisation_mechanistic.py \
+    --generations 2 --population-size 8 --no-plot   # smoke check
 ```
 
-The script imports the dataset, the moment equations and the observation
-model from `train_kinetic.py`, so read the
-[hybrid page](/examples/crystallisation) first. This page covers what
-differs.
+The default runs 80 generations of 64 candidates, under a minute on CPU.
+It prints the four constants before and after the fit and per-channel
+metrics, and writes `parity_mechanistic.png` and
+`trajectories_mechanistic.png` to `examples/crystallisation/figures/`.
 
-## Rate laws
+## The model
+
+The dataset, the moment equations and `state_to_output` are imported from
+`train_kinetic.py`; the [hybrid page](/examples/crystallisation#the-model)
+describes them. Only the rate laws differ. Nucleation follows classical
+nucleation theory (CNT) and growth a power law in $S - 1$:
 
 $$
-J = \exp(\log A) \cdot S \cdot \exp\!\left( -\frac{16\pi\, \gamma^3\, v^2}{3 (k_B T)^3 \ln^2 S} \right)
+J = e^{\log A}\, S\, \exp\!\left( -\frac{16\pi\, \gamma^3\, v^2}{3 (k_B T)^3 \ln^2 S} \right)
 \qquad
-G = \frac{10^{A_g}}{60} \cdot \max(S - 1,\ 0)^{g}
+G = \frac{10^{A_g}}{60}\, \max(S - 1,\ 0)^{g}
 $$
 
-| name    | meaning                                 | bounds        |
-|---------|-----------------------------------------|---------------|
-| `logA`  | $\ln A$, CNT pre-exponential factor     | (20.0, 65.0)  |
-| `gamma` | interfacial energy [mJ/m²]              | (0.15, 1.0)   |
-| `Ag`    | $\log_{10}$ growth pre-factor [m/min]   | (-20.0, -5.0) |
-| `g`     | growth exponent                         | (1.0, 3.5)    |
+| name    | meaning                               | bounds        |
+|---------|---------------------------------------|---------------|
+| `logA`  | $\ln A$, CNT pre-exponential factor   | (20.0, 65.0)  |
+| `gamma` | interfacial energy [mJ/m²]            | (0.15, 1.0)   |
+| `Ag`    | $\log_{10}$ growth pre-factor [m/min] | (-20.0, -5.0) |
+| `g`     | growth exponent                       | (1.0, 3.5)    |
 
 The bounds come from the thesis package, so the fitted values are
-comparable with its runs.
+comparable with its runs. All four constants are shared by every
+experiment; temperature enters only through CNT and the solubility.
 
-## Parameters
+## Code
 
 Each constant is a `Parameter` that starts at the midpoint of its bounds:
 
 ```python
-PARAMETER_BOUNDS = {
-    "logA": (20.0, 65.0),
-    "gamma": (0.15, 1.0),
-    "Ag": (-20.0, -5.0),
-    "g": (1.0, 3.5),
-}
-predictors = {
-    name: hm.Parameter((low + high) / 2, bounds=(low, high))
-    for name, (low, high) in PARAMETER_BOUNDS.items()
-}
+model = hm.HybridModel(
+    predictors={
+        name: hm.Parameter((low + high) / 2, bounds=(low, high))
+        for name, (low, high) in PARAMETER_BOUNDS.items()
+    },
+    simulate_fn=simulate_fn,
+    state_to_output=state_to_output,
+    output_channel_names=OUTPUT_CHANNELS,
+    solver=SOLVER,
+)
 ```
 
-A `Parameter` stores an unbounded latent and returns a bounded physical
-value from `.value`. CMA-ES searches the latents, and every candidate it
-proposes maps inside the box, so the search needs no constraint handling.
-
-## Vector field
-
-The constants are the same for every experiment, so `simulate_fn` reads
-them once, outside the vector field:
+A `Parameter` stores an unbounded latent and returns its bounded physical
+value from `.value`. CMA-ES searches the latents, so every candidate maps
+inside the box and the search needs no constraint handling. The constants
+are read once per solve, outside the vector field:
 
 ```python
-def simulate_fn(predictors, ts, covariates, y0, solver):
-    logA = predictors["logA"].value
-    gamma = predictors["gamma"].value * 1e-3  # mJ/m^2 to J/m^2
-    Ag = predictors["Ag"].value
-    g = predictors["g"].value
-
-    temperature_C = covariates["temperature_C"]
-    T_K = temperature_C + 273.15
-    conc_sat = saturation_conc(temperature_C)
-
-    def vector_field(t, y, args):
+    def vector_field(t: ArrayLike, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
         S = y[5] / conc_sat
         meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
 
+        # Keep S just above 1 inside the log. The mask already zeros the
+        # rate below saturation, but ln(1) = 0 in the denominator would
+        # still put a nan into the gradient of every step.
         S_safe = jnp.clip(S, min=1.0 + 1e-12)
-        cnt_exponent = (-16.0 * jnp.pi * gamma**3 * M_V**2
-                        / (3.0 * (K_B * T_K) ** 3 * jnp.log(S_safe) ** 2))
+        cnt_exponent = (
+            -16.0 * jnp.pi * gamma**3 * M_V**2 / (3.0 * (K_B * T_K) ** 3 * jnp.log(S_safe) ** 2)
+        )
         J = meta_mask * jnp.exp(logA) * S_safe * jnp.exp(cnt_exponent)
+
+        # Ag is per minute, as in the thesis package; /60 gives per second.
         G = meta_mask * 10.0**Ag / 60.0 * jnp.maximum(S - 1.0, 0.0) ** g
         return moment_rhs(y, G, J)
-
-    return integrate_minutes(vector_field, ts, y0, solver)
-```
-
-`S_safe` is the one structural difference from the hybrid vector field.
-At `S <= 1`, `ln S` is zero or negative and sits squared in a
-denominator. `meta_mask` zeros the rate there, but the gradient through
-the unclipped expression is still `nan`, and it reaches every step of a
-sub-saturated trajectory. Clip the argument, not the result.
-
-## Training with CMA-ES
-
-```python
-config = hm.EvosaxTrainingConfig(
-    algorithm="CMA_ES",
-    population_size=64,
-    num_generations=80,
-    init="lhs_box",
-    init_box_extent=2.0,
-    sigma_init=0.5,
-)
-result = model.fit(dataset, config, key=jr.key(0))
 ```
 
 Passing an `EvosaxTrainingConfig` to `fit` selects the evolutionary
-trainer. Four scalars suit a population search, and CMA-ES gets past the
-local minima the CNT exponential creates near the metastable limit.
-`init="lhs_box"` fills generation 0 with a Latin hypercube over the
-latent box, so the first evaluation covers the whole box. Each generation
-evaluates the population in one compiled, vmapped call.
+trainer:
 
-`result.history.best_fitness` holds the best loss so far at each
-generation, and `result.model.predictors` the fitted constants. Prediction
-and plots work as in the hybrid example.
+```python
+    config = hm.EvosaxTrainingConfig(
+        algorithm="CMA_ES",
+        population_size=args.population_size,
+        num_generations=args.generations,
+        init=args.init,
+        init_box_extent=args.init_box_extent,
+        sigma_init=args.sigma_init,
+    )
+```
 
-## Hybrid and mechanistic side by side
+`init="lhs_box"` fills generation 0 with a Latin hypercube over the latent
+box, and each generation is one compiled, vmapped evaluation of the whole
+population. CNT makes the ODE stiff for many candidates, so this script
+uses the implicit `Kvaerno3` solver. `result.history.best_fitness` holds
+the best loss so far at each generation.
 
-| Aspect     | hybrid                                     | mechanistic                         |
-|------------|--------------------------------------------|-------------------------------------|
-| Predictors | two `BoundedPredictor` networks            | four `Parameter` scalars            |
-| Inputs     | `temperature_C`, `supersaturation`         | none                                |
-| Rate laws  | learned $\log_{10} G$, $\log_{10} J$       | CNT nucleation, power-law growth    |
-| Config     | `OptaxTrainingConfig`                      | `EvosaxTrainingConfig` (CMA-ES)     |
-| Budget     | 600 gradient steps                         | 80 generations of 64 candidates     |
+## Results
+
+Seed 0, 80 generations of 64:
+
+| constant | init   | fitted |
+|----------|-------:|-------:|
+| `logA`   | 42.50  | 26.03  |
+| `gamma`  | 0.575  | 0.444  |
+| `Ag`     | -12.50 | -9.14  |
+| `g`      | 2.250  | 3.198  |
+
+Against the hybrid model on the same data, from the default run of
+`train_kinetic.py`:
+
+| model                     | trained                  | best loss | conc $R^2$ | d43 $R^2$ |
+|---------------------------|--------------------------|----------:|-----------:|----------:|
+| hybrid, two MLPs          | 600 Adam steps           | 0.274     | 0.970      | 0.983     |
+| mechanistic, 4 constants  | 80 × 64 CMA-ES           | 1.230     | 0.884      | 0.404     |
+
+![Fitted trajectories with CNT nucleation and power-law growth](assets/crystallisation/trajectories_mechanistic.png)
+
+The mechanistic fit gets the shape of each concentration curve but not
+the timing. Its rates depend only on temperature and supersaturation,
+with four constants shared by every experiment, so the two 17 °C runs
+differ only in their starting concentration (14.7 and 11.6). One drops
+within an hour, the other stays flat for about 150 minutes. CNT and a
+power law cannot produce that much difference from that change in $S$,
+so the fit misses the delayed run's timing and overshoots its terminal
+`d43`. The hybrid rates face the same constraint but have a free shape in
+$S$, which is enough to fit both runs. Neither model can say why
+the replicates differ; a hybrid that fits them better is not evidence of
+a better mechanism.
+
+## Things to try
+
+- `--init uniform_box` or `--init warm` to compare generation-0 strategies.
+- `--population-size 16` to see how much a smaller population costs.
+- Fix `g` at 2 by replacing its `Parameter` with `hm.Constant(2.0)`, and
+  fit three constants instead of four.

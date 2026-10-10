@@ -1,43 +1,21 @@
-"""Hybrid ODE fit: keep the physics you know, learn the parts you do not.
+"""Hybrid ODE: keep the physics you know, learn the two parts you do not.
 
-A mechanistic model with two gaps: a rate constant that varies with an
-operating condition in a way you cannot write down, and a term missing
-from the model entirely. The ground truth is::
+A damped rotation, ``dy/dt = [[-k, w], [-w, -k]] y + C y^3``, with ``w``
+known. The damping rate ``k`` follows an Arrhenius law in temperature that
+the model is never told, and the cubic coupling ``C y^3`` is missing from
+the model entirely. One network learns ``k(T)`` from a covariate, another
+learns the missing term from trajectories alone.
 
-    dy/dt = [[-k, w], [-w, -k]] y  +  C y^3        w = 1, k = k(temperature)
+Shows:
 
-The model keeps the rotation and knows ``w``. One network learns ``k`` from
-a temperature covariate, another learns ``C y^3``.
-
-What it shows
--------------
-**Two network placements.** ``rate_net`` reads a covariate that is constant
-along a trajectory, so it runs once per experiment above ``diffeqsolve``
-and never touches the solver tape. ``residual_net`` depends on the state,
-so it runs inside the vector field, once per step (a network there is a
-neural ODE, which diffrax and Equinox document). The two travel as a plain
-tuple, unpacked at the top of ``simulate_fn``. The library never inspects
-the container, so ``--mechanistic-only`` just shortens the tuple.
-
-**Bounds that hold by construction.** ``BoundedPredictor`` means neither
-network sees a bound or can leave one. ``k`` is bounded to ``(1e-3, 1)``
-under ``warp="log10"``, since the true rates span 1.6 decades and a linear
-box would put 99% of the latent range above 0.5. The residual uses
-``softsign``, whose gradient decays polynomially, because a term that
-visits the edge of its box needs one that does not underflow.
-
-**Two data layouts, one model.** ``--data rectangular`` gives one bucket
-with a full mask, ``--data irregular`` gives three about half full. The
-model code is identical: regular data is the degenerate case, not a
-separate path.
-
-**A saturation penalty on the latent**, evaluated on a grid over each
-predictor's declared input box rather than along the trajectories, so it
-reports extrapolation trouble the training loss cannot see.
-
-The residual's box straddles zero, so ``log10`` is unusable and a linear
-box wastes resolution on corrections that should never happen. The script
-registers a signed-logarithmic warp of its own with ``register_warp``.
+- a network above the solver (``rate_net``, once per experiment) and one
+  inside the vector field (``residual_net``, once per solver step)
+- ``BoundScaler`` warps: ``log10`` for a rate spanning decades, and a
+  custom ``symlog`` warp registered with ``register_warp``
+- ``softsign`` output squash for a network that visits its bounds
+- irregular per-channel sampling (three buckets) against a rectangular grid
+- the saturation penalty on a ``box_grid`` over each network's input box
+- ``RecursiveCheckpointAdjoint`` for a network on the solver tape
 
 Run::
 
@@ -46,12 +24,10 @@ Run::
     uv run python examples/hybrid_ode/train_hybrid_ode.py --mechanistic-only
     uv run python examples/hybrid_ode/train_hybrid_ode.py --inner kan
 
-Prints the bucket layout, the loss at each phase start, the end-of-run
-saturation penalty per network, the recovered ``k(T)`` against the
-Arrhenius truth, the residual error, and per-channel metrics. Writes
-``figures/parity_<data>_<variant>.png`` and
-``figures/trajectories_<data>_<variant>.png`` unless ``--no-plot`` is
-given.
+Prints the bucket layout, losses, per-network saturation penalty, recovered
+``k(T)`` and residual error, and per-channel metrics. Writes parity and
+trajectory figures to ``figures/`` unless ``--no-plot``. About a minute on
+CPU.
 """
 
 # ruff: noqa: F722
@@ -149,7 +125,7 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
 
 
 def simulate_fn(
-    predictors: tuple[hm.BoundedPredictor, ...],
+    predictors: dict[str, hm.BoundedPredictor],
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
@@ -157,13 +133,13 @@ def simulate_fn(
 ) -> Float[Array, "T 2"]:
     """Integrate the hybrid field for one experiment.
 
-    Both placements are visible in the first six lines: the rate network
-    runs here once and its output is closed over as a constant, the
-    residual network runs inside ``vector_field`` once per step. Ordinary
-    calls either way; the library is never told which is which.
+    The rate network runs here once and its output is closed over as a
+    constant; the residual network runs inside ``vector_field`` once per
+    step. Ordinary calls either way: the library is never told which is
+    which. Without a ``"residual"`` entry the model is mechanistic only.
     """
-    rate_net = predictors[0]
-    residual_net = predictors[1] if len(predictors) > 1 else None
+    rate_net = predictors["rate"]
+    residual_net = predictors.get("residual")
 
     k = rate_net(covariates).reshape(())
     rotation = jnp.array([[-k, OMEGA_TRUE], [-OMEGA_TRUE, -k]])
@@ -192,7 +168,7 @@ def main() -> None:
     parser.add_argument(
         "--mechanistic-only",
         action="store_true",
-        help="Drop the residual network. The predictors tuple becomes length one.",
+        help="Drop the residual network, leaving the rate network alone.",
     )
     parser.add_argument(
         "--penalty-weight",
@@ -206,7 +182,7 @@ def main() -> None:
     args = parser.parse_args()
 
     apply_default_style()
-    k_data, k_rate, k_res, k_train = jr.split(jr.PRNGKey(args.seed), 4)
+    k_data, k_rate, k_res, k_train = jr.split(jr.key(args.seed), 4)
 
     print(f"[data] {args.data} sampling")
     if args.data == "rectangular":
@@ -240,20 +216,17 @@ def main() -> None:
         inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
         out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
     )
-    predictors: tuple[hm.BoundedPredictor, ...] = (rate_net,)
+    predictors = {"rate": rate_net}
     if not args.mechanistic_only:
         # ``[y1, y2] -> correction``, evaluated once per solver step inside
-        # the vector field.
-        predictors = (
-            *predictors,
-            hm.BoundedPredictor(
-                input_keys=("y1", "y2"),
-                in_scaler=hm.BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
-                inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
-                out_scaler=hm.BoundScaler(
-                    bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"
-                ),
-            ),
+        # the vector field. softsign keeps a usable gradient far past the
+        # point where a sigmoid's underflows, for a term that visits the
+        # edge of its box early in training.
+        predictors["residual"] = hm.BoundedPredictor(
+            input_keys=("y1", "y2"),
+            in_scaler=hm.BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
+            inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
+            out_scaler=hm.BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
         )
     model = hm.HybridModel(
         predictors=predictors,
@@ -262,7 +235,6 @@ def main() -> None:
         output_channel_names=CHANNELS,
         solver=solver,
     )
-    print(f"\n[model] {len(predictors)} predictor(s), inner architecture {args.inner!r}")
 
     config = hm.OptaxTrainingConfig(
         # Fit the first 40% of each trajectory, then all of it. The
@@ -276,11 +248,12 @@ def main() -> None:
         # The residual network reads the ODE state ("y1", "y2"), so the
         # dataset can resolve no measured points for it. Both leaves get a
         # grid over their input box in warped space instead (``box_grid``).
-        penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors),
+        # One array per leaf, in pytree order (dict keys sorted).
+        penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors.values()),
         loss="mse",
         verbose=False,
     )
-    print("[train] two phases, saturation penalty on")
+    print(f"\n[fit] {list(predictors)} with {args.inner!r} inner networks, two phases")
     result = model.fit(dataset, config, key=k_train)
     trained = result.model.predictors
     loss, phase = result.history.loss, result.history.phase
@@ -291,28 +264,27 @@ def main() -> None:
     # Zero means no predictor is pinned against a bound anywhere in its
     # declared input box, which is what you want to ship. Non-zero says a
     # network is leaning on its bound, which is probably in the wrong place.
-    print("  end-of-run saturation penalty, by leaf:")
-    names = ("rate_net", "residual_net")[: len(trained)]
-    for name, leaf in zip(names, trained, strict=True):
-        print(f"    {name:13s} {float(bound_penalty((leaf,), (box_grid(leaf.in_scaler),))):.4e}")
+    print("  end-of-run saturation penalty, by network:")
+    for name, leaf in trained.items():
+        print(f"    {name:9s} {float(bound_penalty((leaf,), (box_grid(leaf.in_scaler),))):.4e}")
 
-    print("\n[rate network] recovered temperature dependence")
+    print("\n[results] recovered rate law k(T)")
     # The check that matters for the outside-the-solver network: it sees only
     # trajectories, so agreeing with the Arrhenius law here means the
     # covariate dependence was recovered, not memorised per experiment.
     print("  temperature   true k     fitted k    ratio")
     for temperature in TEMPERATURES:
         truth = float(true_k(temperature))
-        fitted = evaluate_predictor(trained[0], {"temperature": temperature})
+        fitted = evaluate_predictor(trained["rate"], {"temperature": temperature})
         print(f"    {temperature:6.1f}    {truth:.5f}    {fitted:.5f}    {fitted / truth:5.2f}")
-    if len(trained) > 1:
-        print("\n[residual network] recovered cubic coupling")
+    if "residual" in trained:
+        print("\n[results] recovered cubic coupling")
         # Relative RMS over the grid rather than pointwise, since the residual
         # is only identifiable where trajectories actually went.
         axis = jnp.linspace(-0.8, 1.0, 9)
         grid = jnp.stack(jnp.meshgrid(axis, axis, indexing="ij"), axis=-1).reshape(-1, 2)
         truth = (COUPLING @ (grid**3).T).T
-        fitted = jnp.stack([trained[1](point) for point in grid])
+        fitted = jnp.stack([trained["residual"](point) for point in grid])
         rms_error = float(jnp.sqrt(jnp.mean((fitted - truth) ** 2)))
         rms_truth = float(jnp.sqrt(jnp.mean(truth**2)))
         print(f"  residual RMS error {rms_error:.4f} against a true RMS of {rms_truth:.4f}")

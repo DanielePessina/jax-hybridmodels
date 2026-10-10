@@ -30,13 +30,17 @@ TRUNK_ARTEFACT = ROOT / "examples" / "batch_reactor" / "artefacts" / "trunk_fres
 # (script, scenario assets subdirectory). The plot filenames are fixed by the
 # scripts; only the destination directory changes.
 EXAMPLES: tuple[tuple[str, str], ...] = (
+    ("examples/pendulum/train_harmonic.py", "pendulum"),
     ("examples/custom_loop/train_custom_loop.py", "custom-loop"),
     ("examples/supersaturation_poly/train_supersaturation_poly.py", "supersaturation-poly"),
     ("examples/custom_predictor/train_custom_predictor.py", "custom-predictor"),
     ("examples/hybrid_ode/train_hybrid_ode.py", "hybrid-ode"),
     ("examples/sbml_hybrid/train_sbml_hybrid.py", "sbml-hybrid"),
     ("examples/crystallisation/train_kinetic.py", "crystallisation"),
+    ("examples/crystallisation/train_crystallisation_mechanistic.py", "crystallisation"),
+    ("examples/tubular_reactor/train_tubular_reactor.py", "tubular-reactor"),
     ("examples/batch_reactor/train_hybrid.py", "batch-reactor"),
+    ("examples/batch_reactor/compare_baselines.py", "batch-reactor"),
     ("examples/batch_reactor/train_rl_deactivation.py", "batch-reactor-rl"),
 )
 
@@ -45,8 +49,11 @@ EXAMPLES: tuple[tuple[str, str], ...] = (
 QUICK_ARGS: dict[str, tuple[str, ...]] = {
     "examples/crystallisation/train_kinetic.py": ("--steps", "120"),
     "examples/hybrid_ode/train_hybrid_ode.py": ("--steps", "100"),
+    "examples/batch_reactor/compare_baselines.py": ("--generations", "20", "--steps", "200"),
+    "examples/crystallisation/train_crystallisation_mechanistic.py": ("--generations", "20"),
+    "examples/tubular_reactor/train_tubular_reactor.py": ("--steps", "100"),
     "examples/custom_predictor/train_custom_predictor.py": ("--steps", "150"),
-    "examples/batch_reactor/train_hybrid.py": ("--num-generations", "20", "--steps", "200"),
+    "examples/batch_reactor/train_hybrid.py": ("--generations", "20", "--steps", "200"),
     "examples/batch_reactor/train_rl_deactivation.py": (
         "--updates",
         "120",

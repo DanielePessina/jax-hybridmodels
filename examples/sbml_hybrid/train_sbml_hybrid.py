@@ -1,34 +1,26 @@
 """Learn one rate law inside a published SBML model (Fujita et al. 2010, EGF/ERK).
 
-The SBML file supplies the mechanism: 9 species, 11 reactions, and the
-paper's scaled readouts ``pEGFR_tot``, ``pAkt_tot`` and ``pS6_tot``.
-``sbml_loader.py`` turns it into a JAX vector field. One rate law is
-replaced by a neural ``BoundedPredictor`` and learned from data.
+The SBML file supplies the mechanism: 9 species, 11 reactions and three
+scaled readouts. ``sbml_loader.py`` turns it into a JAX vector field. The
+forward constant of reaction ``v1``, EGF binding to its receptor, becomes
+``Vmax(dose)``, a network of the EGF dose, learned from noisy readouts at
+four doses. The synthetic truth is ``Vmax = 2 * dose``.
 
-Reaction ``v1``, EGF binding to its receptor, is reversible mass action:
+Shows:
 
-    v1 = Cell * (EGF * EGFR * k1 - EGF_EGFR * k2)
+- an external mechanism (SBML) with one flux swapped for a predictor
+- ``BoundedPredictor`` with ``input_bounds`` / ``output_bounds``
+- the SBML's assignment rules as ``state_to_output``
+- a stiff solver (Kvaerno3) in ``SolverConfig``
 
-The forward constant ``k1`` becomes ``Vmax(dose)``, a network of the EGF
-dose. The reverse constant ``k2`` stays as published. The synthetic truth
-is ``Vmax(dose) = 2 * dose``; the data are the three readouts with 2%
-noise at four doses.
+Run (needs the ``examples`` extra for python-libsbml and sympy)::
 
-Two numerical choices matter here:
+    uv run python examples/sbml_hybrid/train_sbml_hybrid.py
+    uv run python examples/sbml_hybrid/train_sbml_hybrid.py --steps 5 --no-plot
 
-- Keep the reverse term. An irreversible uptake law drives EGFR to exactly
-  zero, and the solver stalls on the resulting kink (over 50k steps at
-  some parameter values). The reversible law has a smooth equilibrium.
-- Use Kvaerno3. Kvaerno5's Newton solve diverges at isolated parameter
-  values (``Vmax = 0.5445`` fails, ``0.54450196`` succeeds); Kvaerno3
-  integrates the whole range in 50 to 100 steps.
-
-Run (needs the ``examples`` extra for python-libsbml and sympy):
-    uv run python examples/sbml_hybrid/train_sbml_hybrid.py [--no-plot]
-
-Prints the dataset buckets, per-channel fit metrics, and the learned
-``Vmax`` next to the truth at each dose. Writes ``parity.png`` and
-``recovered_vmax.png`` to ``figures/``.
+Prints the buckets, per-channel metrics and the learned ``Vmax`` at each
+dose; writes ``parity.png`` and ``recovered_vmax.png`` to ``figures/``.
+About a minute on CPU.
 """
 
 from __future__ import annotations
@@ -118,6 +110,7 @@ def main() -> None:
     parser.add_argument(
         "--plot-dir", type=Path, default=Path(__file__).resolve().parent / "figures"
     )
+    parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
     apply_default_style()
@@ -125,6 +118,7 @@ def main() -> None:
     # One root key drives the data noise, the initialisation and training.
     k_data, k_model, k_train = jax.random.split(jax.random.key(0), 3)
     dataset = make_data(k_data)
+    print("[data]")
     print(hm.describe_buckets(dataset))
 
     vmax = hm.BoundedPredictor(
@@ -143,10 +137,12 @@ def main() -> None:
         solver=SOLVER,
     )
     # A small bound penalty keeps the output squash away from saturation.
-    config = hm.OptaxTrainingConfig(steps=120, lr=1e-2, penalty_weight=1e-2)
+    config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2, penalty_weight=1e-2)
+    print("\n[fit]")
     result = model.fit(dataset, config, key=k_train)
 
     predictions = result.model.predict(dataset)
+    print("\n[results]")
     hm.print_metrics(
         hm.compute_metrics(predictions.buckets, dataset),
         header=f"fit (best loss {min(result.history.loss):.3e})",

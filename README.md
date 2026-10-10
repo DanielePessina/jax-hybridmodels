@@ -26,12 +26,13 @@ The examples are plain scripts. From a checkout:
 
 ```bash
 uv sync --extra examples
-uv run python examples/pendulum/train_model_api.py
+uv run python examples/pendulum/train_harmonic.py
 ```
 
-It fits the frequency of a harmonic oscillator to position data with
+It fits the frequency of a harmonic oscillator to noisy position data with
 `HybridModel.fit`, then predicts the data and simulates a new initial
-condition. The Getting started page walks through the same script.
+condition. The Getting started page walks through a one-oscillator version
+of the same code.
 
 ## Installation
 

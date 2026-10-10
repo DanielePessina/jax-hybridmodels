@@ -17,7 +17,8 @@ uv sync --extra examples
 | [Harmonic oscillator](/examples/pendulum) | `HybridModel` fit, predict and simulate on a one-`Parameter` problem with a known answer. Start here. | `uv run python examples/pendulum/train_harmonic.py --no-plot` |
 | [Crystallisation](/examples/crystallisation) | Irregular multi-channel data, two bounded neural rates, and a population-balance ODE. | `uv run python examples/crystallisation/train_kinetic.py` |
 | [Hybrid ODE](/examples/hybrid-ode) | One network above the solver and one inside the vector field, log warps, and the saturation penalty. | `uv run python examples/hybrid_ode/train_hybrid_ode.py` |
-| [Batch reactor](/examples/batch-reactor) | Evosax search, then Optax refinement, on an Arrhenius trunk with a learned residual. | `uv run python examples/batch_reactor/train_hybrid.py` |
+| [Tubular reactor](/examples/tubular-reactor) | A PDE by the method of lines: a learned rate law in a 50-cell tube observed by four sensors. | `uv run python examples/tubular_reactor/train_tubular_reactor.py` |
+| [Batch reactor](/examples/batch-reactor) | Evosax search, then Optax refinement, on an Arrhenius trunk with a learned residual, compared against per-pH Arrhenius fits on held-out runs. | `uv run python examples/batch_reactor/train_hybrid.py`, then `compare_baselines.py` |
 | [Batch reactor RL](/examples/batch-reactor-rl) | A bounded controller trained with PPO around a frozen hybrid model. | `uv run python examples/batch_reactor/train_rl_deactivation.py` |
 | [SBML hybrid kinetics](/examples/sbml-hybrid) | An external SBML mechanism with one rate law learned by a predictor. | `uv run python examples/sbml_hybrid/train_sbml_hybrid.py` |
 | [Neural polynomial kinetics](/examples/supersaturation-poly) | A structured `NeuralNPolynomial` rate law in place of a black-box MLP. | `uv run python examples/supersaturation_poly/train_supersaturation_poly.py` |

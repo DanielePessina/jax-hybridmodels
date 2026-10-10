@@ -1,25 +1,29 @@
-"""Fit four mechanistic kinetic constants with CMA-ES, no networks.
+"""Fit four mechanistic kinetic constants to the crystallisation data with CMA-ES.
 
-The data, moment ODE and observation model are those of
-``train_kinetic.py``, imported from it. The two rate networks are replaced
-by kinetic laws shared by every experiment:
+The parametric baseline for ``train_kinetic.py``. The data, moment ODE and
+observation model are imported from it; only the rate laws change. The two
+networks are replaced by classical nucleation theory for ``J`` and a power
+law for ``G``, with four constants shared by every experiment: ``logA``,
+``gamma``, ``Ag`` and ``g``. Four bounded scalars on a surface with local
+minima near the metastable limit suit a population search.
 
-* classical nucleation theory: ``J = exp(logA) * S * exp(-16π γ³ v² / (3 (k_B T)³ ln²S))``
-* power-law growth: ``G = (10**Ag / 60) * max(S - 1, 0)**g``
+Shows:
 
-Each of ``logA``, ``gamma``, ``Ag`` and ``g`` is a bounded ``Parameter``.
-CMA-ES searches the unbounded latent values, and every candidate maps to
-a physical value inside its bounds. Four scalars suit a population search,
-which also escapes the local minima the CNT exponential creates near the
-metastable limit.
+- ``Parameter`` scalars with physical bounds, read through ``.value``
+- ``HybridModel.fit`` with an ``EvosaxTrainingConfig`` (CMA-ES)
+- ``init="lhs_box"`` to spread generation 0 over the bounded box
+- an implicit solver (``Kvaerno3``) for stiff candidates
 
-Run:
+Run::
+
     uv run python examples/crystallisation/train_crystallisation_mechanistic.py
-        [--num-generations N] [--population-size N] [--no-plot]
+    uv run python examples/crystallisation/train_crystallisation_mechanistic.py \
+        --generations 2 --population-size 8 --no-plot
 
-Prints the dataset buckets, the four constants before and after the fit,
-and per-channel metrics. Writes ``parity_mechanistic.png`` and
-``trajectories_mechanistic.png`` to ``figures/``.
+Prints the buckets, the four constants before and after the fit, and
+per-channel metrics. Writes ``parity_mechanistic.png`` and
+``trajectories_mechanistic.png`` to ``figures/``. Under a minute on CPU
+at the default 80 generations of 64.
 """
 
 # ruff: noqa: F722
@@ -126,7 +130,7 @@ def print_constants(stage: str, predictors: dict[str, hm.Parameter]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--population-size", type=int, default=64)
-    parser.add_argument("--num-generations", type=int, default=80)
+    parser.add_argument("--generations", type=int, default=80)
     parser.add_argument("--sigma-init", type=float, default=0.5)
     parser.add_argument(
         "--init",
@@ -144,6 +148,7 @@ def main() -> None:
     apply_default_style()
 
     dataset = make_dataset()
+    print("[data]")
     print(hm.describe_buckets(dataset))
 
     model = hm.HybridModel(
@@ -159,16 +164,18 @@ def main() -> None:
     config = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
-        num_generations=args.num_generations,
+        num_generations=args.generations,
         init=args.init,
         init_box_extent=args.init_box_extent,
         sigma_init=args.sigma_init,
     )
+    print("\n[fit] CMA-ES")
     print_constants("init", model.predictors)
     result = model.fit(dataset, config, key=jr.key(args.seed))
     print_constants("fitted", result.model.predictors)
     print(f"  best loss {min(result.history.best_fitness):.6f}")
 
+    print("\n[results]")
     predictions = result.model.predict(dataset)
     hm.print_metrics(hm.compute_metrics(predictions.buckets, dataset))
 
@@ -190,7 +197,7 @@ def main() -> None:
         title="Crystallisation trajectories (mechanistic)",
         save_path=args.plot_dir / "trajectories_mechanistic.png",
     )
-    print(f"\n[plot] figures written to {args.plot_dir}")
+    print(f"[plot] figures written to {args.plot_dir}")
 
 
 if __name__ == "__main__":
