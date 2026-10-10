@@ -147,11 +147,24 @@ def main():
     ui = SilentUI()
     ui.on_run_start(total_steps=N_STEPS_BENCH, num_phases=1)
     t0 = time.perf_counter()
-    (bucket_step, penalty_step, score_bucket, optimizer, apply_update,
-     step_update, sources, extras) = _build_training_kernels(
-        predictors=predictor, dataset=dataset, config=config,
-        simulate_fn=simulate_fn, state_to_output=state_to_output,
-        solver=solver, trainable=trainable, ui=ui,
+    (
+        bucket_step,
+        penalty_step,
+        score_bucket,
+        optimizer,
+        apply_update,
+        step_update,
+        sources,
+        extras,
+    ) = _build_training_kernels(
+        predictors=predictor,
+        dataset=dataset,
+        config=config,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
+        trainable=trainable,
+        ui=ui,
     )
     t_build = time.perf_counter() - t0
 
@@ -172,14 +185,16 @@ def main():
         jax.block_until_ready(out)
         return (time.perf_counter() - t0) / n * 1000
 
-    print(f"\nprediction (compile+run, all buckets): {t_pred_total*1000:.1f} ms")
-    print(f"kernel build + warm-up + settle: {t_build*1000:.1f} ms")
-    print(f"  bucket_step steady-state: "
-          f"{bench(bucket_step, predictor, bp0, jnp.asarray(1.0)):.3f} ms")
-    print(f"  penalty_step steady-state: "
-          f"{bench(penalty_step, predictor, jnp.asarray(0.0), pen_points):.3f} ms")
-    print(f"  apply_update steady-state: "
-          f"{bench(apply_update, predictor, grads, opt_state):.3f} ms")
+    print(f"\nprediction (compile+run, all buckets): {t_pred_total * 1000:.1f} ms")
+    print(f"kernel build + warm-up + settle: {t_build * 1000:.1f} ms")
+    print(
+        f"  bucket_step steady-state: {bench(bucket_step, predictor, bp0, jnp.asarray(1.0)):.3f} ms"
+    )
+    print(
+        f"  penalty_step steady-state: "
+        f"{bench(penalty_step, predictor, jnp.asarray(0.0), pen_points):.3f} ms"
+    )
+    print(f"  apply_update steady-state: {bench(apply_update, predictor, grads, opt_state):.3f} ms")
 
     # full _run_phases loop timing (host overhead incl.) — caches pre-settled
     ui2 = SilentUI()
@@ -190,7 +205,8 @@ def main():
         config,
         optimizer=optimizer,
         apply_update=apply_update,
-        step_update=step_update,        bucket_step=bucket_step,
+        step_update=step_update,
+        bucket_step=bucket_step,
         penalty_step=penalty_step,
         sources=sources,
         extras=extras,
@@ -198,8 +214,10 @@ def main():
         ui=ui2,
     )
     t_loop = time.perf_counter() - t0
-    print(f"\n_run_phases {N_STEPS_BENCH} steps (settled): {t_loop*1000:.1f} ms total, "
-          f"{t_loop/N_STEPS_BENCH*1000:.1f} ms/step (host+device)")
+    print(
+        f"\n_run_phases {N_STEPS_BENCH} steps (settled): {t_loop * 1000:.1f} ms total, "
+        f"{t_loop / N_STEPS_BENCH * 1000:.1f} ms/step (host+device)"
+    )
 
     floor = (
         bench(bucket_step, predictor, bp0, jnp.asarray(1.0))
@@ -207,8 +225,10 @@ def main():
         + bench(apply_update, predictor, grads, opt_state)
     )
     print(f"  sum of 3 steady-state device calls: {floor:.3f} ms/step")
-    print(f"  => host/orchestration overhead per step: "
-          f"{max(0.0, t_loop/N_STEPS_BENCH*1000 - floor):.3f} ms")
+    print(
+        f"  => host/orchestration overhead per step: "
+        f"{max(0.0, t_loop / N_STEPS_BENCH * 1000 - floor):.3f} ms"
+    )
 
 
 if __name__ == "__main__":

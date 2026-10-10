@@ -55,9 +55,7 @@ def step_profile(before: float, after: float, jump_at: float) -> Callable[[Array
     return profile
 
 
-def ramp_profile(
-    t0: float, t1: float, v0: float, v1: float
-) -> Callable[[Array], Array]:
+def ramp_profile(t0: float, t1: float, v0: float, v1: float) -> Callable[[Array], Array]:
     """Return a flat-ramp-flat profile: ``v0`` until ``t0``, linear to ``v1`` by ``t1``, then flat.
 
     The reactor heat-up shape: hold at the initial set point, ramp to the
@@ -84,9 +82,7 @@ def ramp_profile(
         # jnp.minimum/maximum, not min()/max(): the edge values may be
         # traced (per-experiment parameters from covariates), and the
         # Python builtins would bool-convert a tracer.
-        return jnp.clip(
-            v0 + rate * (t - t0), jnp.minimum(v0, v1), jnp.maximum(v0, v1)
-        )
+        return jnp.clip(v0 + rate * (t - t0), jnp.minimum(v0, v1), jnp.maximum(v0, v1))
 
     return profile
 
@@ -109,9 +105,7 @@ def piecewise_linear_profile(knots: tuple[tuple[float, float], ...]) -> Callable
     # factory built inside jit/vmap) skip it rather than bool-converting
     # a tracer.
     try:
-        increasing = all(
-            k[0] < k2[0] for k, k2 in zip(knots, knots[1:], strict=False)
-        )
+        increasing = all(k[0] < k2[0] for k, k2 in zip(knots, knots[1:], strict=False))
     except jax.errors.TracerBoolConversionError:
         increasing = True
     if not increasing:

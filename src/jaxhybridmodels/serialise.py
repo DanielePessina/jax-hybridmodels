@@ -145,9 +145,7 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
     """
     raw_unprocessed = dataclasses.asdict(config)
     if hasattr(config, "optimizer"):
-        raw_unprocessed["optimizer"] = [
-            _json_safe_optimizer(spec) for spec in config.optimizer
-        ]
+        raw_unprocessed["optimizer"] = [_json_safe_optimizer(spec) for spec in config.optimizer]
     raw = _json_safe(raw_unprocessed)
     if "loss" in raw:
         # Read ``loss`` from the live config, not the asdict'd copy, so the
@@ -329,9 +327,7 @@ def _filter_dataclass_kwargs(cls: type, raw: dict[str, Any]) -> dict[str, Any]:
     valid = {f.name for f in dataclasses.fields(cls)}
     unknown = sorted(set(raw) - valid)
     if unknown:
-        raise ValueError(
-            f"Saved {cls.__name__} contains unknown configuration fields: {unknown}"
-        )
+        raise ValueError(f"Saved {cls.__name__} contains unknown configuration fields: {unknown}")
     return {k: v for k, v in raw.items() if k in valid}
 
 

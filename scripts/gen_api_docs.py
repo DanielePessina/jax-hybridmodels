@@ -41,10 +41,19 @@ import jaxhybridmodels
 # group controls the rendered order on the page; pages are emitted in the
 # tuple order of ``PAGES``.
 PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("model", "Models and Results", (
-        "HybridModel", "FitResult", "FitHistory", "PredictionResult",
-        "ExperimentPrediction", "fit", "predict",
-    )),
+    (
+        "model",
+        "Models and Results",
+        (
+            "HybridModel",
+            "FitResult",
+            "FitHistory",
+            "PredictionResult",
+            "ExperimentPrediction",
+            "fit",
+            "predict",
+        ),
+    ),
     (
         "data",
         "Data: Experiments, Channels, Datasets",
@@ -253,9 +262,7 @@ _PARAM_SECTIONS = {"Parameters", "Returns", "Yields", "Attributes", "Raises", "O
 # reading the source in an IDE. VitePress does not render those roles, so the
 # generator converts them to ordinary Markdown links (when the target is a
 # public API symbol) or inline code.
-_RST_ROLE_RE = re.compile(
-    r":(?P<role>func|class|meth|attr|mod|ref):`(?P<target>~?[^`]+)`"
-)
+_RST_ROLE_RE = re.compile(r":(?P<role>func|class|meth|attr|mod|ref):`(?P<target>~?[^`]+)`")
 
 # Match a section header: a line whose next line is a row of dashes of the
 # same length. Captures the header name. Multiline / non-greedy.

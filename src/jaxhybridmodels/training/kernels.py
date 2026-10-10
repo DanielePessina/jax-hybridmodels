@@ -203,15 +203,11 @@ def build_score_bucket(
     @eqx.filter_jit
     def score_bucket(predictors: Any, bp: BucketPayload, length_mask_fraction: Array) -> Array:
         bp_masked = apply_length_mask(bp, length_mask_fraction)
-        full_state = simulate_bucket(
-            predictors, bp_masked, simulate_fn=simulate_fn, solver=solver
-        )
+        full_state = simulate_bucket(predictors, bp_masked, simulate_fn=simulate_fn, solver=solver)
         pred_obs = jax.vmap(state_to_output)(full_state)
         loss = loss_fn(pred_obs, bp_masked)
         if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-            loss = loss + trajectory_penalty_weight * trajectory_penalty_fn(
-                full_state, bp_masked
-            )
+            loss = loss + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp_masked)
         return loss
 
     return score_bucket

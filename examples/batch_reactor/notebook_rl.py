@@ -336,11 +336,17 @@ def main() -> None:
     for _name, (_predictors, _kind) in models.items():
         _sim = ex.make_simulate_fn(trunk, kind=_kind)
         _vp = predict_dataset(
-            _predictors, val_dataset, simulate_fn=_sim, state_to_output=ex.state_to_output,
+            _predictors,
+            val_dataset,
+            simulate_fn=_sim,
+            state_to_output=ex.state_to_output,
             solver=solver,
         )
         _tp = predict_dataset(
-            _predictors, train_dataset, simulate_fn=_sim, state_to_output=ex.state_to_output,
+            _predictors,
+            train_dataset,
+            simulate_fn=_sim,
+            state_to_output=ex.state_to_output,
             solver=solver,
         )
         _dv = compute_diagnostics(_vp, val_dataset)["Ca"]
@@ -363,8 +369,9 @@ def main() -> None:
     }
     for _i, (_ax, _exp) in enumerate(zip(axes, val_experiments, strict=True)):
         _ts = np.asarray(_exp.channels["Ca"].ts)
-        _ax.plot(_ts, np.asarray(_exp.channels["Ca"].values), "o", ms=4, color="black",
-                 label="data")
+        _ax.plot(
+            _ts, np.asarray(_exp.channels["Ca"].values), "o", ms=4, color="black", label="data"
+        )
         for _name, _series in val_predictions.items():
             _ax.plot(_ts, _series[_i], lw=1.6, color=colours[_name], label=_name)
         _ax.set_title(

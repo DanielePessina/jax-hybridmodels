@@ -180,9 +180,7 @@ class TestMakeDatasetUnion:
             y0_fn=_zero_y0,
             exp_id="e",
         )
-        ds = make_dataset(
-            [exp], output_channel_names=("x", "y")
-        )
+        ds = make_dataset([exp], output_channel_names=("x", "y"))
         assert len(ds.bucket_payloads) == 1
         bp = ds.bucket_payloads[0]
         assert bp.ts.shape == (1, 4)
@@ -208,9 +206,7 @@ class TestMakeDatasetUnion:
         ]
         bp = make_dataset(experiments, output_channel_names=("c",)).bucket_payloads[0]
         assert bp.covariates["features"].shape == (2, 2)
-        assert jnp.array_equal(
-            bp.covariates["features"], jnp.array([[1.0, 2.0], [3.0, 4.0]])
-        )
+        assert jnp.array_equal(bp.covariates["features"], jnp.array([[1.0, 2.0], [3.0, 4.0]]))
 
     def test_vector_covariate_shape_mismatch_raises(self):
         channels = {"c": ChannelObs(ts=jnp.array([0.0]), values=jnp.array([1.0]))}
@@ -241,9 +237,7 @@ class TestMakeDatasetUnion:
             y0_fn=_zero_y0,
             exp_id="e",
         )
-        ds = make_dataset(
-            [exp], output_channel_names=("x", "y")
-        )
+        ds = make_dataset([exp], output_channel_names=("x", "y"))
         bp = ds.bucket_payloads[0]
         assert jnp.allclose(bp.ts[0], jnp.array([0.0, 1.0, 2.0]))
         expected_mask = jnp.array([[True, False], [False, True], [True, False]])
@@ -266,9 +260,7 @@ class TestMakeDatasetUnion:
             y0_fn=_zero_y0,
             exp_id="e",
         )
-        ds = make_dataset(
-            [exp], output_channel_names=("x", "y")
-        )
+        ds = make_dataset([exp], output_channel_names=("x", "y"))
         bp = ds.bucket_payloads[0]
         assert float(bp.yvar[0, 0, 0]) == pytest.approx(0.1)
         assert float(bp.yvar[0, 1, 0]) == pytest.approx(0.2)
@@ -376,9 +368,7 @@ class TestBucketPayloadShapes:
             )
             for i in range(n)
         ]
-        ds = make_dataset(
-            exps, output_channel_names=("x", "y")
-        )
+        ds = make_dataset(exps, output_channel_names=("x", "y"))
         bp = ds.bucket_payloads[0]
         T, D, S = 2, 2, 4
         assert bp.ts.shape == (n, T)
@@ -394,9 +384,7 @@ class TestBucketPayloadShapes:
 
     def test_bucket_payload_is_namedtuple(self):
         exp = _make_simple_experiment()
-        ds = make_dataset(
-            [exp], output_channel_names=("c",)
-        )
+        ds = make_dataset([exp], output_channel_names=("c",))
         bp = ds.bucket_payloads[0]
         assert isinstance(bp, BucketPayload)
         assert hasattr(bp, "_fields")
@@ -424,12 +412,8 @@ class TestOutputChannelOrdering:
             y0_fn=_zero_y0,
             exp_id="e",
         )
-        ds_xy = make_dataset(
-            [exp], output_channel_names=("x", "y")
-        )
-        ds_yx = make_dataset(
-            [exp], output_channel_names=("y", "x")
-        )
+        ds_xy = make_dataset([exp], output_channel_names=("x", "y"))
+        ds_yx = make_dataset([exp], output_channel_names=("y", "x"))
         assert float(ds_xy.bucket_payloads[0].y_observed[0, 0, 0]) == 10.0
         assert float(ds_yx.bucket_payloads[0].y_observed[0, 0, 0]) == 20.0
         assert ds_xy.output_channel_names == ("x", "y")
@@ -439,9 +423,7 @@ class TestOutputChannelOrdering:
 class TestDatasetMetadata:
     def test_names_stored_and_dataset_carries_no_state_to_output(self):
         exp = _make_simple_experiment()
-        ds = make_dataset(
-            [exp], output_channel_names=("c",)
-        )
+        ds = make_dataset([exp], output_channel_names=("c",))
         assert isinstance(ds, Dataset)
         assert ds.output_channel_names == ("c",)
         # covariate_names follow declared keys (sorted, since order isn't user-controlled).
@@ -457,12 +439,8 @@ class TestIdempotence:
             _make_simple_experiment(exp_id="e1"),
             _make_simple_experiment(exp_id="e2", c_vals=(20.0, 21.0, 22.0)),
         ]
-        ds1 = make_dataset(
-            exps, output_channel_names=("c",)
-        )
-        ds2 = make_dataset(
-            exps, output_channel_names=("c",)
-        )
+        ds1 = make_dataset(exps, output_channel_names=("c",))
+        ds2 = make_dataset(exps, output_channel_names=("c",))
         assert len(ds1.bucket_payloads) == len(ds2.bucket_payloads)
         for bp1, bp2 in zip(ds1.bucket_payloads, ds2.bucket_payloads, strict=True):
             assert jnp.array_equal(bp1.ts, bp2.ts)
@@ -557,9 +535,7 @@ class TestDtypePreservation:
             y0_fn=_zero_y0,
             exp_id="e",
         )
-        ds = make_dataset(
-            [exp], output_channel_names=("x",)
-        )
+        ds = make_dataset([exp], output_channel_names=("x",))
         bp = ds.bucket_payloads[0]
         assert bp.ts.dtype == jnp.float32
         assert bp.y_observed.dtype == jnp.float32
@@ -578,9 +554,7 @@ class TestDtypePreservation:
             y0_fn=_zero_y0,
             exp_id="e",
         )
-        ds = make_dataset(
-            [exp], output_channel_names=("x",)
-        )
+        ds = make_dataset([exp], output_channel_names=("x",))
         bp = ds.bucket_payloads[0]
         # No silent downcast to float32 — the float16 inputs should round-trip.
         assert bp.ts.dtype == jnp.float16
@@ -601,9 +575,7 @@ class TestDtypePreservation:
             y0_fn=_zero_y0,
             exp_id="e",
         )
-        ds = make_dataset(
-            [exp], output_channel_names=("x",)
-        )
+        ds = make_dataset([exp], output_channel_names=("x",))
         bp = ds.bucket_payloads[0]
         assert bp.y_observed.dtype == jnp.float16
         assert bp.yvar.dtype == jnp.float32

@@ -119,9 +119,7 @@ model = SBMLKineticModel.from_file(SBML_PATH)
 egf, egfr, e_egfr = sp.Symbol("EGF"), sp.Symbol("EGFR"), sp.Symbol("EGF_EGFR")
 model.replace_flux(
     "v1_reaction_1",
-    expr=sp.Symbol("Cell") * (
-        sp.Symbol("Vmax") * egf * egfr - sp.Symbol("reaction_1_k2") * e_egfr
-    ),
+    expr=sp.Symbol("Cell") * (sp.Symbol("Vmax") * egf * egfr - sp.Symbol("reaction_1_k2") * e_egfr),
     extra_params=("Vmax",),
 )
 
@@ -192,8 +190,12 @@ def main() -> None:
         input_keys=("dose",),
         in_scaler=hm.BoundScaler(bounds=((0.03, 0.5),)),
         inner=hm.MLPPredictor(
-            in_size=1, out_size=1, width_size=16, depth=2,
-            activation_name="tanh", key=k_model,
+            in_size=1,
+            out_size=1,
+            width_size=16,
+            depth=2,
+            activation_name="tanh",
+            key=k_model,
         ),
         out_scaler=hm.BoundScaler(bounds=((0.05, 1.0),)),
     )
@@ -219,8 +221,11 @@ def main() -> None:
 
     # Diagnostics on the held-in data.
     preds = hm.predict_dataset(
-        trained, ds, simulate_fn=simulate_fn,
-        state_to_output=state_to_output, solver=_solver(),
+        trained,
+        ds,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=_solver(),
     )
     hm.print_metrics(
         hm.compute_metrics(preds, ds), header=f"fit (final data loss {history[-1]:.3e})"

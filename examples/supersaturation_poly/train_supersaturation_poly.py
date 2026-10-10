@@ -80,9 +80,7 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
 
     def vector_field(t, y, args):
         mu0 = y[0]
-        j_rate = predictors[0](
-            {"super_sat": covariates["super_sat"]}
-        ).reshape(())
+        j_rate = predictors[0]({"super_sat": covariates["super_sat"]}).reshape(())
         return jnp.stack([j_rate, G_TRUE * mu0], dtype=jnp.float32)
 
     sol = solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
@@ -122,7 +120,10 @@ def main() -> None:
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(vector_field),
             diffrax.Tsit5(),
-            t0=ts[0], t1=ts[-1], dt0=0.05, y0=jnp.asarray([0.0, 0.0]),
+            t0=ts[0],
+            t1=ts[-1],
+            dt0=0.05,
+            y0=jnp.asarray([0.0, 0.0]),
             saveat=diffrax.SaveAt(ts=ts),
             stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-10),
             max_steps=4096,
@@ -145,8 +146,12 @@ def main() -> None:
     # data noise, so the whole script is reproducible from one seed.
     key, k_model, k_train = jax.random.split(key, 3)
     coeff_net = hm.MLPPredictor(
-        in_size=1, out_size=len(EXPONENTS), width_size=16, depth=2,
-        activation_name="tanh", key=k_model,
+        in_size=1,
+        out_size=len(EXPONENTS),
+        width_size=16,
+        depth=2,
+        activation_name="tanh",
+        key=k_model,
     )
     npoly = NeuralNPolynomial(
         coeff_net=coeff_net,
@@ -162,7 +167,11 @@ def main() -> None:
     )
     predictors = (predictor,)
     solver = SolverConfig(
-        solver=diffrax.Tsit5(), rtol=1e-7, atol=1e-9, max_steps=4096, dt0=0.05,
+        solver=diffrax.Tsit5(),
+        rtol=1e-7,
+        atol=1e-9,
+        max_steps=4096,
+        dt0=0.05,
     )
     mask = hm.trainable_mask(predictors)
 
@@ -183,8 +192,11 @@ def main() -> None:
     )
 
     preds = hm.predict_dataset(
-        trained, ds, simulate_fn=simulate_fn,
-        state_to_output=state_to_output, solver=solver,
+        trained,
+        ds,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
     )
     hm.print_metrics(
         hm.compute_metrics(preds, ds), header=f"fit (final data loss {history[-1]:.3e})"

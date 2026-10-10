@@ -26,9 +26,7 @@ def _dataset(n: int, *, mixed_lens: bool = False):
     for i in range(n):
         n_ts = 2 + (i % 3) if mixed_lens else 2
         exps.append(_make_exp(i, n_ts=n_ts))
-    return make_dataset(
-        exps, output_channel_names=("c",)
-    )
+    return make_dataset(exps, output_channel_names=("c",))
 
 
 def _exp_ids(ds: Dataset) -> tuple[str, ...]:

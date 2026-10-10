@@ -293,15 +293,11 @@ def _build_single_eval(
 
         total = jnp.asarray(0.0)
         for bp in bucket_payloads:
-            full_state = simulate_bucket(
-                predictor, bp, simulate_fn=simulate_fn, solver=solver
-            )
+            full_state = simulate_bucket(predictor, bp, simulate_fn=simulate_fn, solver=solver)
             pred_obs = jax.vmap(state_to_output)(full_state)
             total = total + loss_fn(pred_obs, bp)
             if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-                total = total + trajectory_penalty_weight * trajectory_penalty_fn(
-                    full_state, bp
-                )
+                total = total + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp)
         total = total / float(max(len(bucket_payloads), 1))
         if penalty_weight > 0.0:
             # The search roams the latent space with nothing holding it in

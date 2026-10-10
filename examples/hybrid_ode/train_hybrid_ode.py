@@ -255,9 +255,7 @@ def main() -> None:
                 input_keys=("y1", "y2"),
                 in_scaler=BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
                 inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
-                out_scaler=BoundScaler(
-                    bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"
-                ),
+                out_scaler=BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
             ),
         )
     print(f"\n[model] {len(predictors)} predictor(s), inner architecture {args.inner!r}")

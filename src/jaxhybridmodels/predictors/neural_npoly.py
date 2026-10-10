@@ -93,9 +93,7 @@ class NeuralNPolynomial(Predictor):
         if not exponents:
             raise ValueError("exponents must contain at least one entry.")
         resolved_exponents = tuple(float(e) for e in exponents)
-        if any(
-            not math.isfinite(e) or e < 0.0 or not e.is_integer() for e in resolved_exponents
-        ):
+        if any(not math.isfinite(e) or e < 0.0 or not e.is_integer() for e in resolved_exponents):
             raise ValueError(
                 "exponents must be finite, non-negative integers for a real polynomial"
             )

@@ -241,7 +241,9 @@ class TestEmbeddedTrajectoryPenalty:
         ds_sat = build_embedded_dataset(make_predictor(c=5.0))  # deep saturation
         ds_mild = build_embedded_dataset(make_predictor(c=0.1))
         cfg = OptaxTrainingConfig(
-            steps=(1,), lr=(1e-3,), optimizer=("adamw",),
+            steps=(1,),
+            lr=(1e-3,),
+            optimizer=("adamw",),
             reset_optimiser_state=(False,),
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=1.0,
@@ -256,7 +258,9 @@ class TestEmbeddedTrajectoryPenalty:
         # the direction that reduces saturation (negative for c > 0).
         ds = build_embedded_dataset(make_predictor(c=3.0))
         cfg = OptaxTrainingConfig(
-            steps=(1,), lr=(1e-3,), optimizer=("adamw",),
+            steps=(1,),
+            lr=(1e-3,),
+            optimizer=("adamw",),
             reset_optimiser_state=(False,),
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=1.0,
@@ -398,14 +402,18 @@ class TestProbeExperiments:
     def test_probe_scores_zero_data_loss_but_fires_penalty(self):
         ds = build_probe_dataset(make_predictor(c=5.0))
         cfg = OptaxTrainingConfig(
-            steps=(1,), lr=(1e-3,), optimizer=("adamw",),
+            steps=(1,),
+            lr=(1e-3,),
+            optimizer=("adamw",),
             reset_optimiser_state=(False,),
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=1.0,
         )
         # Data-only loss on the probe is exactly zero (all-False mask)...
         no_pen_cfg = OptaxTrainingConfig(
-            steps=(1,), lr=(1e-3,), optimizer=("adamw",),
+            steps=(1,),
+            lr=(1e-3,),
+            optimizer=("adamw",),
             reset_optimiser_state=(False,),
         )
         data_loss, _ = bucket_step_loss((make_predictor(c=5.0),), ds, no_pen_cfg)
@@ -445,7 +453,9 @@ class TestConfigValidation:
     def test_negative_weight_raises(self):
         with pytest.raises(ValueError, match="non-negative"):
             OptaxTrainingConfig(
-                steps=(1,), lr=(1e-3,), optimizer=("adamw",),
+                steps=(1,),
+                lr=(1e-3,),
+                optimizer=("adamw",),
                 reset_optimiser_state=(False,),
                 trajectory_penalty_weight=-1.0,
             )
@@ -455,7 +465,9 @@ class TestConfigValidation:
     def test_weight_without_fn_raises(self):
         with pytest.raises(ValueError, match="trajectory_penalty_fn is None"):
             OptaxTrainingConfig(
-                steps=(1,), lr=(1e-3,), optimizer=("adamw",),
+                steps=(1,),
+                lr=(1e-3,),
+                optimizer=("adamw",),
                 reset_optimiser_state=(False,),
                 trajectory_penalty_weight=1.0,
             )
@@ -464,7 +476,9 @@ class TestConfigValidation:
 
     def test_zero_weight_with_fn_is_a_noop(self):
         cfg = OptaxTrainingConfig(
-            steps=(1,), lr=(1e-3,), optimizer=("adamw",),
+            steps=(1,),
+            lr=(1e-3,),
+            optimizer=("adamw",),
             reset_optimiser_state=(False,),
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=0.0,

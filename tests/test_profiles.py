@@ -137,8 +137,10 @@ def test_parameters_ride_as_covariates_in_a_vmapped_field():
     ts = jnp.linspace(0.0, 6.0, 7)
     field = jax.vmap(
         lambda t: jnp.stack(
-            [per_experiment(t, lo, hi, t0, t1) for lo, hi, t0, t1 in
-             zip(cov_lo, cov_hi, cov_t0, cov_t1, strict=True)]
+            [
+                per_experiment(t, lo, hi, t0, t1)
+                for lo, hi, t0, t1 in zip(cov_lo, cov_hi, cov_t0, cov_t1, strict=True)
+            ]
         )
     )(ts)
     assert field.shape == (7, 2)

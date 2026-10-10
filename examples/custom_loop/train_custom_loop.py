@@ -136,7 +136,7 @@ def weight_decay(predictors, points):
     argument is the per-leaf point set the bound penalty would use; a
     custom regulariser that does not need points just ignores them.
     """
-    return predictors[0].scale**2
+    return predictors[0].scale ** 2
 
 
 def per_bucket_weight(bp) -> float:
@@ -266,8 +266,11 @@ def main() -> None:
 
     # Evaluate with the library's per-channel metrics.
     preds = hm.predict_dataset(
-        predictors, ds, simulate_fn=simulate_fn,
-        state_to_output=state_to_output, solver=solver,
+        predictors,
+        ds,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
     )
     hm.print_metrics(hm.compute_metrics(preds, ds), header="custom-loop result")
 

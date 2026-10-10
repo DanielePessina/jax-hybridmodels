@@ -368,10 +368,7 @@ def _k_vs_ph_reveal_plot(
     train_pH = np.array([float(e.covariates["pH"]) for e in train_experiments])
     train_log10k = np.log10(np.asarray(_k_true(train_T, train_pH)))
     val_T = np.array(
-        [
-            (float(e.covariates["T_lo"]) + float(e.covariates["T_hi"])) / 2.0
-            for e in val_experiments
-        ]
+        [(float(e.covariates["T_lo"]) + float(e.covariates["T_hi"])) / 2.0 for e in val_experiments]
     )
     val_pH = np.array([float(e.covariates["pH"]) for e in val_experiments])
     val_log10k = np.log10(np.asarray(_k_true(val_T, val_pH)))
@@ -508,8 +505,7 @@ def main() -> None:
     print("[verify §9.2] dataset shapes")
     # Bucket layout and DOE coverage.
     print(
-        f"  LHS training (T_mid, pH) samples ({len(train_design)}), "
-        f"ramp ±{RAMP_HALF_WIDTH:.0f}°C:"
+        f"  LHS training (T_mid, pH) samples ({len(train_design)}), ramp ±{RAMP_HALF_WIDTH:.0f}°C:"
     )
     for i, (T_C, pH) in enumerate(train_design):
         print(

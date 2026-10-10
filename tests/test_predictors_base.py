@@ -227,9 +227,7 @@ class TestBoundedPredictor:
             BoundedPredictor(
                 input_keys=("x",),
                 in_scaler=BoundScaler(bounds=((0.0, 1.0),)),
-                inner=MLPPredictor(
-                    in_size=2, out_size=1, width_size=2, depth=1, key=jr.PRNGKey(0)
-                ),
+                inner=MLPPredictor(in_size=2, out_size=1, width_size=2, depth=1, key=jr.PRNGKey(0)),
                 out_scaler=BoundScaler(bounds=((0.0, 1.0),)),
             )
 
@@ -237,9 +235,7 @@ class TestBoundedPredictor:
             BoundedPredictor(
                 input_keys=("x",),
                 in_scaler=BoundScaler(bounds=((0.0, 1.0),)),
-                inner=MLPPredictor(
-                    in_size=1, out_size=1, width_size=2, depth=1, key=jr.PRNGKey(0)
-                ),
+                inner=MLPPredictor(in_size=1, out_size=1, width_size=2, depth=1, key=jr.PRNGKey(0)),
                 out_scaler=BoundScaler(bounds=((0.0, 1.0), (0.0, 1.0))),
             )
 

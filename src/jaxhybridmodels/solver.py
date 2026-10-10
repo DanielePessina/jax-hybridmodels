@@ -166,10 +166,7 @@ class SolverConfig(eqx.Module):
         if not atol_values or any(
             not math.isfinite(float(value)) or float(value) <= 0.0 for value in atol_values
         ):
-            raise ValueError(
-                "SolverConfig.atol values must be finite and positive; "
-                f"got {atol}"
-            )
+            raise ValueError(f"SolverConfig.atol values must be finite and positive; got {atol}")
 
         try:
             valid_max_steps = int(max_steps) == max_steps and int(max_steps) > 0

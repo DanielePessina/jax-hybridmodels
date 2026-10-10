@@ -28,9 +28,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import optax
 
-_SCHEDULE_KINDS: frozenset[str] = frozenset(
-    ("cosine", "linear", "warmup_cosine", "exponential")
-)
+_SCHEDULE_KINDS: frozenset[str] = frozenset(("cosine", "linear", "warmup_cosine", "exponential"))
 
 
 def annealing_schedule(
@@ -77,22 +75,16 @@ def annealing_schedule(
         multiplier: ``lr = base_lr * schedule(step)``.
     """
     if total_epochs < 1:
-        raise ValueError(
-            f"annealing_schedule: total_epochs must be at least 1, got {total_epochs}"
-        )
+        raise ValueError(f"annealing_schedule: total_epochs must be at least 1, got {total_epochs}")
     if kind not in _SCHEDULE_KINDS:
         raise ValueError(
-            f"annealing_schedule: unknown kind={kind!r}; "
-            f"expected one of {sorted(_SCHEDULE_KINDS)}"
+            f"annealing_schedule: unknown kind={kind!r}; expected one of {sorted(_SCHEDULE_KINDS)}"
         )
     if init_value <= 0.0:
-        raise ValueError(
-            f"annealing_schedule: init_value must be positive, got {init_value}"
-        )
+        raise ValueError(f"annealing_schedule: init_value must be positive, got {init_value}")
     if not 0.0 <= end_value <= init_value:
         raise ValueError(
-            f"annealing_schedule: end_value={end_value} must lie in "
-            f"[0, init_value={init_value}]"
+            f"annealing_schedule: end_value={end_value} must lie in [0, init_value={init_value}]"
         )
     if kind == "warmup_cosine" and not 0 <= warmup_epochs < total_epochs:
         raise ValueError(

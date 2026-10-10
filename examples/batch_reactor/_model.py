@@ -140,9 +140,7 @@ def simulate_fn(
 
         # log10 conversion: Arrhenius is naturally base-e; one /ln(10) at
         # the end.
-        log10_k_param = (
-            log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)
-        ) / jnp.log(10.0)
+        log10_k_param = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
 
         # The input dict is rebuilt at every solver step: T(t) changes
         # with t, so the residual must be re-read at the current value.

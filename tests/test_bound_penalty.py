@@ -319,9 +319,7 @@ class TestBoundPenaltyBehaviour:
         saturated = (_bp(key=jr.PRNGKey(0), scale=50.0),)
         p_fresh = (box_grid(fresh[0].in_scaler, 5),)
         p_sat = (box_grid(saturated[0].in_scaler, 5),)
-        assert float(bound_penalty(saturated, p_sat)) > 100.0 * float(
-            bound_penalty(fresh, p_fresh)
-        )
+        assert float(bound_penalty(saturated, p_sat)) > 100.0 * float(bound_penalty(fresh, p_fresh))
 
     def test_gradient_reaches_the_inner_weights(self):
         preds = (_bp(key=jr.PRNGKey(0), scale=50.0),)

@@ -430,9 +430,7 @@ def main() -> None:
             + 17.97e-5 * temperature_C**3
         )
 
-        def vector_field(
-            t: Array, y: Float[Array, " 6"], args: object
-        ) -> Float[Array, " 6"]:
+        def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
             mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
             S = conc / conc_sat
             meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
@@ -508,10 +506,7 @@ def main() -> None:
     )
     print(f"MLP final loss: {history_mlp[-1]:.6f}  ({len(history_mlp)} steps)")
     _sample_every = max(1, len(history_mlp) // 8)
-    print(
-        "MLP loss trace: "
-        + ", ".join(f"{loss:.4f}" for loss in history_mlp[::_sample_every])
-    )
+    print("MLP loss trace: " + ", ".join(f"{loss:.4f}" for loss in history_mlp[::_sample_every]))
 
     fig_loss_mlp, _ax = plt.subplots(figsize=(7, 3))
     _ax.plot(history_mlp, color="tab:blue", linewidth=1.2)
@@ -644,22 +639,14 @@ def main() -> None:
             + 17.97e-5 * temperature_C**3
         )
 
-        def vector_field(
-            t: Array, y: Float[Array, " 6"], args: object
-        ) -> Float[Array, " 6"]:
+        def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
             mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
             S = conc / conc_sat
             meta_mask = (S > 1.0 + META_EPS_M).astype(y.dtype)
 
             S_safe = jnp.clip(S, min=1.0 + 1e-12)
             logS = jnp.log(S_safe)
-            cnt_exp = (
-                -16.0
-                * jnp.pi
-                * gamma_J_m2**3
-                * M_V**2
-                / (3.0 * (K_B * T_K) ** 3 * logS**2)
-            )
+            cnt_exp = -16.0 * jnp.pi * gamma_J_m2**3 * M_V**2 / (3.0 * (K_B * T_K) ** 3 * logS**2)
             J = meta_mask * jnp.exp(logA) * S_safe * jnp.exp(cnt_exp)
 
             growth_drive = jnp.maximum(S - 1.0, 0.0)
@@ -736,10 +723,7 @@ def main() -> None:
         solver=solver_mech,
         key=jr.PRNGKey(0),
     )
-    print(
-        f"mechanistic final best loss: {history_mech[-1]:.6f}  "
-        f"({len(history_mech)} generations)"
-    )
+    print(f"mechanistic final best loss: {history_mech[-1]:.6f}  ({len(history_mech)} generations)")
     _sample_every = max(1, len(history_mech) // 8)
     print(
         "mech best-loss trace: "
@@ -812,9 +796,7 @@ def main() -> None:
                 _residuals = _pred - _obs
                 _mse = float(np.mean(_residuals**2))
                 _ss_tot = float(np.sum((_obs - _obs.mean()) ** 2))
-                _r2 = (
-                    1.0 - float(np.sum(_residuals**2)) / _ss_tot if _ss_tot > 0 else float("nan")
-                )
+                _r2 = 1.0 - float(np.sum(_residuals**2)) / _ss_tot if _ss_tot > 0 else float("nan")
                 _stats = {
                     "n": _n,
                     "mse": _mse,
@@ -828,10 +810,7 @@ def main() -> None:
     diag_mlp = gather(predictions_mlp)
     diag_mech = gather(predictions_mech)
 
-    print(
-        f"  {'channel':<6} {'model':<7} {'n':>4} "
-        f"{'MSE':>12} {'RMSE':>12} {'MAE':>12} {'R^2':>8}"
-    )
+    print(f"  {'channel':<6} {'model':<7} {'n':>4} {'MSE':>12} {'RMSE':>12} {'MAE':>12} {'R^2':>8}")
     for _name in dataset.output_channel_names:
         for _label, _diag in (("MLP", diag_mlp), ("mech", diag_mech)):
             _s = _diag[_name]

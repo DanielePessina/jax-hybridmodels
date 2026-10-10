@@ -1348,9 +1348,7 @@ def main() -> None:
         )
         diag_val = compute_metrics(val_pred, val_dataset)["Ca"]
         diag_train = compute_metrics(train_pred, train_dataset)["Ca"]
-        table.append(
-            (name, float(diag_train.r2), float(diag_val.r2), float(diag_val.rmse))
-        )
+        table.append((name, float(diag_train.r2), float(diag_val.r2), float(diag_val.rmse)))
         val_predictions[name] = [
             np.asarray(val_pred[0][i, :, 0]) for i in range(len(val_experiments))
         ]

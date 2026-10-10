@@ -201,9 +201,7 @@ def main() -> None:
 
     def build_experiment(ts_per_channel, values_per_channel, temperature, exp_id):
         channels = {
-            name: ChannelObs(
-                ts=ts, values=vals, variance=jnp.full(ts.shape, NOISE_STD**2)
-            )
+            name: ChannelObs(ts=ts, values=vals, variance=jnp.full(ts.shape, NOISE_STD**2))
             for name, ts, vals in zip(CHANNELS, ts_per_channel, values_per_channel, strict=True)
         }
         return make_experiment(
@@ -503,10 +501,7 @@ def main() -> None:
     # library can walk is accepted; it never inspects the container, which
     # is why dropping the residual later is a one-line change.
     predictors = (rate_net, residual_net)
-    print(
-        f"rate_net expects {rate_net.input_keys}, "
-        f"residual_net expects {residual_net.input_keys}"
-    )
+    print(f"rate_net expects {rate_net.input_keys}, residual_net expects {residual_net.input_keys}")
 
     # simulate_fn: the one function you always write yourself. Its contract
     # is fixed:

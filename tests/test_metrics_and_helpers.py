@@ -273,9 +273,7 @@ def test_diffeqsolve_forwards_adjoint_and_matches_handwritten():
             omega = args[0].omega
             return jnp.stack([y[1], -(omega**2) * y[0]])
 
-        sol = solver.diffeqsolve(
-            diffrax.ODETerm(vf), ts, y0, args=predictor
-        )
+        sol = solver.diffeqsolve(diffrax.ODETerm(vf), ts, y0, args=predictor)
         return jnp.asarray(sol.ys)
 
     for name in ("Direct", "RecursiveCheckpoint", "Backsolve"):
