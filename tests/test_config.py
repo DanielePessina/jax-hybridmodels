@@ -336,6 +336,8 @@ def test_stepsize_controller_drives_a_real_solve():
         ("cosine", {"end_value": 0.1}, {0: 1.0, 100: 0.1}),
         ("linear", {"end_value": 0.2}, {0: 1.0, 50: 0.6, 100: 0.2, 500: 0.2}),
         ("warmup_cosine", {"warmup_epochs": 20}, {0: 0.0, 20: 1.0, 100: 0.0}),
+        # Decay spans the remaining 50 steps, so the midpoint of the decay is step 75.
+        ("warmup_cosine", {"warmup_epochs": 50}, {50: 1.0, 75: 0.5, 99: 0.0, 100: 0.0}),
         ("exponential", {"end_value": 0.01}, {0: 1.0, 100: 0.01, 500: 0.01}),
         ("exponential", {"end_value": 0.0}, {0: 1.0, 100: 0.0, 500: 0.0}),
     ],

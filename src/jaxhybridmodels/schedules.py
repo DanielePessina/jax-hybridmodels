@@ -1,10 +1,9 @@
 """Epoch-scaled schedule multipliers for custom training loops.
 
-The stock trainers express changing hyperparameters as **phases** —
-contiguous blocks of steps sharing an lr or penalty weight. When a run
-wants a smooth curve instead of blocks — a cosine-decayed learning rate,
-a penalty weight that ramps in — the loop is custom, and this factory is
-the missing piece: :func:`annealing_schedule` returns an optax-style
+The stock trainers express changing hyperparameters as **phases**,
+contiguous blocks of steps sharing an lr or penalty weight. A smooth curve
+instead, such as a cosine-decayed learning rate or a penalty weight that
+ramps in, needs a custom loop, and :func:`annealing_schedule` returns an optax-style
 callable ``(step: int) -> float`` that is already normalised to a
 multiplier, with the run length baked in.
 
@@ -16,7 +15,7 @@ the step budget of the run it scales:
 
     penalty_weight = 0.5 * annealing_schedule("linear", total_epochs=steps)(step)
 
-The name is deliberate: it is an *annealing* schedule — it only ever
+The name is deliberate: it is an *annealing* schedule, which only
 smooths a training hyperparameter. It has nothing to do with a physical
 temperature, and is distinct from ``BoundScaler.temperature``, so the
 word "temperature" is never used here (it collides with chemistry).
@@ -75,7 +74,8 @@ def annealing_schedule(
     Returns
     -------
     optax.Schedule
-        ``schedule(step)`` in ``[end_value, init_value]``. Compose as a
+        ``schedule(step)`` in ``[end_value, init_value]``, except during
+        the ``"warmup_cosine"`` warmup, which starts at 0. Compose as a
         multiplier: ``lr = base_lr * schedule(step)``.
     """
     if total_epochs < 1:
@@ -127,7 +127,7 @@ def _optax_schedule(
             init_value=0.0,
             peak_value=init_value,
             warmup_steps=warmup_epochs,
-            decay_steps=total_epochs - warmup_epochs,
+            decay_steps=total_epochs,
             end_value=end_value,
         )
     # exponential: the per-epoch geometric factor is derived from the end

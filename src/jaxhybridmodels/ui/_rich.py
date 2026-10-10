@@ -70,6 +70,11 @@ def safe_stop(live: Live | None, render: Callable[[], RenderableType]) -> None:
         pass
     try:
         live.stop()
+        # Rich ends the final frame with a newline only on a terminal. Piped
+        # to a file or CI log, the next print would land on the panel's
+        # bottom border.
+        if not live.console.is_terminal:
+            live.console.line()
     except Exception:
         pass
 

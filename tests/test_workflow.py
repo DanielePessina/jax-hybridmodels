@@ -622,6 +622,8 @@ def test_training_dashboard_renders_a_real_run(fitted):
     assert "phase" in lower and "adamw" in lower
     assert "final" in lower[-len(lower) // 3 :]
     assert _SIG4.search(text) is not None
+    # Piped output must end on a fresh line, or the next print joins the border.
+    assert text.endswith("\n") and text.rstrip().endswith("╯")
 
 
 def test_evosax_dashboard_renders_a_real_run(evosax_fit):
