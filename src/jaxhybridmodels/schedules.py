@@ -25,8 +25,12 @@ word "temperature" is never used here (it collides with chemistry).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import jax.numpy as jnp
 import optax
+from jax.typing import ArrayLike
+from jaxtyping import Array
 
 _SCHEDULE_KINDS: frozenset[str] = frozenset(("cosine", "linear", "warmup_cosine", "exponential"))
 
@@ -38,8 +42,8 @@ def annealing_schedule(
     init_value: float = 1.0,
     end_value: float = 0.0,
     warmup_epochs: int = 0,
-) -> optax.Schedule:
-    """Return ``schedule(step: int) -> float``, a multiplier over ``[0, total_epochs]``.
+) -> Callable[[ArrayLike], Array]:
+    """Return ``schedule(step) -> Array``, a scalar multiplier over ``[0, total_epochs]``.
 
     Built on optax's own schedule helpers, so the returned callable is a
     plain pure function of the integer step count: ``jit``-safe, usable
@@ -92,6 +96,18 @@ def annealing_schedule(
             f"[0, total_epochs={total_epochs})"
         )
 
+    schedule = _optax_schedule(kind, total_epochs, init_value, end_value, warmup_epochs)
+
+    def multiplier(step: ArrayLike) -> Array:
+        return jnp.asarray(schedule(step))
+
+    return multiplier
+
+
+def _optax_schedule(
+    kind: str, total_epochs: int, init_value: float, end_value: float, warmup_epochs: int
+) -> optax.Schedule:
+    """The optax schedule behind :func:`annealing_schedule`, inputs already validated."""
     if kind == "cosine":
         # optax's cosine lands exactly on alpha * init_value at decay_steps.
         return optax.cosine_decay_schedule(

@@ -100,7 +100,7 @@ scalar/array tolerances — this is the whole invocation.
 | --- | --- | --- |
 | `diffrax.Solution` |  | The diffrax solution; call ``.ys`` for the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L216)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L213)</small>
 
 <a id="solverconfigstepsize_controller"></a>
 
@@ -122,7 +122,7 @@ I-control, so this reproduces the ``PIDController(rtol, atol)`` the
 examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L194)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L191)</small>
 
 <a id="solverconfigto_dict"></a>
 
@@ -138,7 +138,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L275)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L272)</small>
 
 ---
 
@@ -146,7 +146,7 @@ than being guessed at.
 
 ### `SOLVER_REGISTRY`
 
-<small>`from jaxhybridmodels.solver import SOLVER_REGISTRY` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.SOLVER_REGISTRY`</small>
+<small>`from jaxhybridmodels.solver import SOLVER_REGISTRY`</small>
 
 ```python
 SOLVER_REGISTRY = {
@@ -174,7 +174,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_solver()`
 
-<small>`from jaxhybridmodels.solver import register_solver` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_solver`</small>
+<small>`from jaxhybridmodels.solver import register_solver`</small>
 
 ```python
 register_solver(name: 'str', cls: 'type[diffrax.AbstractSolver[Any]]') -> 'None'
@@ -195,7 +195,7 @@ owns the naming.
 
 ### `ADJOINT_REGISTRY`
 
-<small>`from jaxhybridmodels.solver import ADJOINT_REGISTRY` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.ADJOINT_REGISTRY`</small>
+<small>`from jaxhybridmodels.solver import ADJOINT_REGISTRY`</small>
 
 ```python
 ADJOINT_REGISTRY = {
@@ -223,7 +223,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_adjoint()`
 
-<small>`from jaxhybridmodels.solver import register_adjoint` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_adjoint`</small>
+<small>`from jaxhybridmodels.solver import register_adjoint`</small>
 
 ```python
 register_adjoint(name: 'str', cls: 'type[diffrax.AbstractAdjoint]') -> 'None'

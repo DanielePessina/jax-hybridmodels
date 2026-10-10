@@ -36,7 +36,7 @@ from jaxhybridmodels.predictors.base import Predictor
 from jaxhybridmodels.solver import SolverConfig
 from jaxhybridmodels.trainable import freeze_paths, trainable_mask
 from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, TrainingPhase, train_with_optax
 
 
 class TwoLeafPredictor(Predictor):
@@ -95,9 +95,7 @@ class TestTrainableEndToEnd:
         _, final = train_with_optax(
             two_leaf,
             two_leaf_dataset(),
-            OptaxTrainingConfig(
-                steps=(6,), lr=(1e-2,), optimizer=("adamw",), reset_optimiser_state=(False,)
-            ),
+            OptaxTrainingConfig(steps=6, lr=1e-2),
             simulate_fn=two_leaf_simulate_fn,
             state_to_output=two_leaf_state_to_output,
             solver=solver,
@@ -135,13 +133,7 @@ class TestCustomLossEndToEnd:
         _, final = train_with_optax(
             two_leaf,
             two_leaf_dataset(),
-            OptaxTrainingConfig(
-                steps=(3,),
-                lr=(1e-3,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                loss=my_loss,
-            ),
+            OptaxTrainingConfig(steps=3, lr=1e-3, loss=my_loss),
             simulate_fn=two_leaf_simulate_fn,
             state_to_output=two_leaf_state_to_output,
             solver=solver,
@@ -162,9 +154,7 @@ class TestPytreeShapes:
         _, final = train_with_optax(
             preds,
             make_oscillator_dataset(),
-            OptaxTrainingConfig(
-                steps=(4,), lr=(5e-3,), optimizer=("adamw",), reset_optimiser_state=(False,)
-            ),
+            OptaxTrainingConfig(steps=4, lr=5e-3),
             simulate_fn=dict_simulate_fn,
             state_to_output=oscillator_state_to_output,
             solver=solver,
@@ -197,14 +187,11 @@ class TestInjectableOptimizer:
             two_leaf,
             two_leaf_dataset(),
             OptaxTrainingConfig(
-                steps=(4,),
-                lr=(1e-3,),
-                optimizer=(
-                    lambda learning_rate: optax.chain(
-                        optax.clip_by_global_norm(1.0), optax.adam(learning_rate)
-                    ),
+                steps=4,
+                lr=1e-3,
+                optimizer=lambda learning_rate: optax.chain(
+                    optax.clip_by_global_norm(1.0), optax.adam(learning_rate)
                 ),
-                reset_optimiser_state=(False,),
             ),
             simulate_fn=two_leaf_simulate_fn,
             state_to_output=two_leaf_state_to_output,
@@ -219,12 +206,7 @@ class TestInjectableOptimizer:
         _, final = train_with_optax(
             two_leaf,
             two_leaf_dataset(),
-            OptaxTrainingConfig(
-                steps=(4,),
-                lr=(1e-3,),
-                optimizer=(optax.adam(1e-3),),
-                reset_optimiser_state=(False,),
-            ),
+            OptaxTrainingConfig(steps=4, lr=1e-3, optimizer=optax.adam(1e-3)),
             simulate_fn=two_leaf_simulate_fn,
             state_to_output=two_leaf_state_to_output,
             solver=solver,
@@ -243,11 +225,10 @@ class TestInjectableOptimizer:
                 two_leaf,
                 two_leaf_dataset(),
                 OptaxTrainingConfig(
-                    steps=(2, 2),
-                    lr=(1e-3, 1e-2),
-                    optimizer=(raw, raw),
-                    reset_optimiser_state=(False, False),
-                    length_schedule=(1.0, 1.0),
+                    phases=(
+                        TrainingPhase(steps=2, lr=1e-3, optimizer=raw),
+                        TrainingPhase(steps=2, lr=1e-2, optimizer=raw),
+                    )
                 ),
                 simulate_fn=two_leaf_simulate_fn,
                 state_to_output=two_leaf_state_to_output,
@@ -267,14 +248,7 @@ class TestPenaltyFnHook:
         _, _ = train_with_optax(
             two_leaf,
             two_leaf_dataset(),
-            OptaxTrainingConfig(
-                steps=(2,),
-                lr=(1e-3,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                penalty_weight=(1.0,),
-                penalty_fn=my_penalty,
-            ),
+            OptaxTrainingConfig(steps=2, lr=1e-3, penalty_weight=1.0, penalty_fn=my_penalty),
             simulate_fn=two_leaf_simulate_fn,
             state_to_output=two_leaf_state_to_output,
             solver=solver,

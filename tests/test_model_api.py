@@ -1,5 +1,7 @@
 """User workflows: fixed physics, learned parameters, irregular prediction, and selection."""
 
+from typing import Any
+
 import diffrax
 import equinox as eqx
 import jax
@@ -25,12 +27,12 @@ def _simulate(predictors, ts, covariates, y0, solver):
 def _model(rate=0.3):
     return hm.HybridModel(
         predictors={
-            "rate": hm.BoundedPredictor(value=rate, bounds=(0.0, None)),
-            "fixed": hm.ConstantPredictor(0.0),
+            "rate": hm.Parameter(rate, bounds=(0.0, None)),
+            "fixed": hm.Constant(0.0),
         },
         simulate_fn=_simulate,
         state_to_output=lambda y: y,
-        output_channels=("concentration",),
+        output_channel_names=("concentration",),
         solver=_solver(),
     )
 
@@ -39,7 +41,6 @@ def _dataset(rate=0.8):
     return hm.make_dataset(
         [
             hm.make_experiment(
-                covariates={},
                 y0=[1.0],
                 t0=0.0,
                 exp_id=name,
@@ -52,12 +53,12 @@ def _dataset(rate=0.8):
 
 
 def test_fixed_scalar_tuple_and_list_survive_training_and_restart():
-    constant = hm.ConstantPredictor((1.0, [2.0, 3.0], (4.0, 5.0)))
+    constant = hm.Constant((1.0, [2.0, 3.0], (4.0, 5.0)))
     assert isinstance(constant.value, tuple)
     assert constant.value[0].shape == ()
     assert constant.value[1].shape == (2,)
     assert not any(jax.tree_util.tree_leaves(hm.trainable_mask(constant)))
-    fresh = hm.reinitialize_pytree_with_key({"c": constant}, jr.key(0))["c"]
+    fresh = hm.predictors.reinitialize_pytree_with_key({"c": constant}, jr.key(0))["c"]
     for a, b in zip(
         jax.tree_util.tree_leaves(constant), jax.tree_util.tree_leaves(fresh), strict=True
     ):
@@ -75,26 +76,39 @@ def test_fixed_scalar_tuple_and_list_survive_training_and_restart():
     ],
 )
 def test_parameter_initializes_in_physical_units_and_differentiates(bounds, value):
-    parameter = hm.BoundedPredictor(value=value, bounds=bounds)
+    parameter = hm.Parameter(value, bounds=bounds)
     np.testing.assert_allclose(parameter.value, value, rtol=1e-5, atol=1e-7)
     mask = hm.trainable_mask(parameter)
-    assert mask.inner.latent is True
-    assert mask.out_scaler.temperature is False
+    assert mask.latent is True
+    assert mask.scaler.temperature is False
     gradient = eqx.filter_grad(lambda p: p.value)(parameter)
-    assert jnp.isfinite(gradient.inner.latent).all()
-    assert float(jnp.abs(gradient.inner.latent).sum()) > 0
+    assert jnp.isfinite(gradient.latent).all()
+    assert float(jnp.abs(gradient.latent).sum()) > 0
     np.testing.assert_allclose(eqx.filter_jit(lambda p: p.value)(parameter), value, rtol=1e-5)
 
 
 def test_mixed_array_bounds_have_finite_gradients_and_zero_unbounded_penalty():
-    parameter = hm.BoundedPredictor(
-        value=[[0.2, 0.4], [-2.0, 0.8]], bounds=[(0.0, None), (None, 1.0), (None, None), (0.0, 1.0)]
+    parameter = hm.Parameter(
+        [[0.2, 0.4], [-2.0, 0.8]], bounds=[(0.0, None), (None, 1.0), (None, None), (0.0, 1.0)]
     )
     assert parameter.value.shape == (2, 2)
     gradient = eqx.filter_grad(lambda p: p.value.sum())(parameter)
-    assert jnp.isfinite(gradient.inner.latent).all()
-    unbounded = hm.BoundedPredictor(value=[-100.0, 100.0])
-    assert float(unbounded.out_scaler.saturation(unbounded.inner.latent)) == 0.0
+    assert jnp.isfinite(gradient.latent).all()
+    unbounded = hm.Parameter([-100.0, 100.0])
+    assert float(unbounded.scaler.saturation(unbounded.latent)) == 0.0
+
+
+def test_log_warp_parameter_round_trips():
+    rate = hm.Parameter(1e-3, bounds=(1e-6, 1e2), warp="log10")
+    np.testing.assert_allclose(rate.value, 1e-3, rtol=1e-5)
+
+
+def test_parameter_restart_draws_a_new_latent_and_keeps_the_scaler():
+    rate = hm.Parameter(0.3, bounds=(0.0, 1.0))
+    fresh = rate.initialized_with_key(jr.key(0))
+    assert float(fresh.latent[0]) != float(rate.latent[0])
+    assert fresh.scaler.bounds == rate.scaler.bounds
+    assert float(fresh.scaler.temperature) == float(rate.scaler.temperature)
 
 
 def test_network_open_input_scaling_is_identity():
@@ -109,26 +123,25 @@ def test_network_open_input_scaling_is_identity():
         inner=Identity(), input_keys=("a", "b"), input_bounds=((0.0, None), (None, None))
     )
     np.testing.assert_allclose(network({"a": -3.0, "b": 4.0}), [-3.0, 4.0])
-    with pytest.raises(AttributeError, match="inputs"):
-        _ = network.value
 
 
-def test_phase_config_normalizes_and_roundtrips(tmp_path):
+def test_phase_config_roundtrips(tmp_path):
     config = hm.OptaxTrainingConfig(
-        phases=[hm.TrainingPhase(3, lr=0.1, horizon=0.5), hm.TrainingPhase(4, lr=0.02)]
+        phases=(hm.TrainingPhase(3, lr=0.1, horizon=0.5), hm.TrainingPhase(4, lr=0.02))
     )
-    assert config.steps == (3, 4)
-    assert config.length_schedule == (0.5, 1.0)
-    assert hm.OptaxTrainingConfig(steps=(3, 4), lr=0.1).lr == (0.1, 0.1)
+    assert config.total_steps == 7
+    assert [phase.horizon for phase in config.phases] == [0.5, 1.0]
+    single = hm.OptaxTrainingConfig(steps=3, lr=0.1)
+    assert single.phases == (hm.TrainingPhase(3, lr=0.1),)
     model = _model()
     hm.save_run(tmp_path, predictors=model.predictors, solver=model.solver, optax_config=config)
     loaded = hm.load_run(
         tmp_path, predictors_template=model.predictors, optax_cls=hm.OptaxTrainingConfig
     )
-    assert loaded["optax_config"].steps == (3, 4)
+    assert loaded["optax_config"].phases == config.phases
     np.testing.assert_allclose(loaded["predictors"]["rate"].value, 0.3, rtol=1e-6)
     with pytest.raises(ValueError, match="steps= or phases="):
-        hm.OptaxTrainingConfig(steps=2, phases=[hm.TrainingPhase(3)])
+        hm.OptaxTrainingConfig(steps=2, phases=(hm.TrainingPhase(3),))
 
 
 def test_fit_reduces_loss_and_preserves_fixed_values_and_original_model():
@@ -137,10 +150,10 @@ def test_fit_reduces_loss_and_preserves_fixed_values_and_original_model():
     result = model.fit(
         dataset, hm.OptaxTrainingConfig(steps=35, lr=0.06, verbose=False), key=jr.key(1)
     )
-    assert result.history.data_loss[-1] < result.history.data_loss[0] * 0.1
+    assert result.history.loss[-1] < result.history.loss[0] * 0.1
     assert result.best_step is not None
     assert result.stop_reason == "budget_exhausted"
-    np.testing.assert_allclose(result.history.data_loss, result.history.objective)
+    assert result.history.penalty == (0.0,) * 35
     np.testing.assert_allclose(model.predictors["rate"].value, 0.3, rtol=1e-6)
     assert result.model.predictors["fixed"].value == 0.0
     assert abs(float(result.model.predictors["rate"].value) - 0.8) < 0.08
@@ -164,7 +177,7 @@ def test_simulation_and_dense_grid_keep_original_initial_time():
     model = _model(0.8)
     trajectory = model.simulate(ts=[1.0, 2.0], y0=[1.0], t0=0.0)
     np.testing.assert_allclose(
-        trajectory["concentration"], jnp.exp(-0.8 * jnp.array([1.0, 2.0])), rtol=1e-4
+        trajectory.outputs["concentration"], jnp.exp(-0.8 * jnp.array([1.0, 2.0])), rtol=1e-4
     )
     dense = hm.predict_dense(
         model.predictors,
@@ -175,7 +188,7 @@ def test_simulation_and_dense_grid_keep_original_initial_time():
         solver=model.solver,
     )
     for bucket in dense:
-        np.testing.assert_allclose(bucket[0, :, 0], trajectory["concentration"], rtol=1e-4)
+        np.testing.assert_allclose(bucket[0, :, 0], trajectory.outputs["concentration"], rtol=1e-4)
 
 
 def test_validation_selects_checkpoint_and_stops_for_validation_patience():
@@ -183,20 +196,17 @@ def test_validation_selects_checkpoint_and_stops_for_validation_patience():
     config = hm.OptaxTrainingConfig(steps=20, lr=0.03, patience=2, verbose=False)
     # Validation prefers the original value; fitting training data moves away.
     result = model.fit(_dataset(), config, validation=_dataset(0.3), key=jr.key(2))
-    assert result.selected_by == "validation_loss"
-    assert result.stop_reason == "validation_patience"
+    assert result.stop_reason == "patience"
     assert result.best_step == 0
     assert len(result.history.validation_loss) == 3
     np.testing.assert_allclose(result.model.predictors["rate"].value, 0.3, rtol=1e-6)
 
 
 def test_value_and_input_validation():
-    with pytest.raises(ValueError, match="exactly one"):
-        hm.BoundedPredictor()
     with pytest.raises(ValueError, match="strictly inside"):
-        hm.BoundedPredictor(value=0.0, bounds=(0.0, 1.0))
+        hm.Parameter(0.0, bounds=(0.0, 1.0))
     with pytest.raises(ValueError, match="nonempty and finite"):
-        hm.BoundedPredictor(value=float("nan"))
+        hm.Parameter(float("nan"))
     with pytest.raises(ValueError, match="t0"):
         _model().simulate(ts=[1.0, 2.0], y0=[1.0], t0=1.5)
 
@@ -211,40 +221,36 @@ def test_fit_histories_separate_data_trajectory_and_fixed_penalties():
     config = hm.OptaxTrainingConfig(
         steps=2,
         lr=0.01,
+        penalty_weight=0.25,
         verbose=False,
         trajectory_penalty_fn=constant_trajectory_penalty,
         trajectory_penalty_weight=0.5,
         penalty_fn=constant_fixed_penalty,
-        penalty_weight=0.25,
     )
     result = _model().fit(_dataset(), config, key=jr.key(3))
-    np.testing.assert_allclose(
-        np.array(result.history.tracked_loss) - result.history.data_loss,
-        1.0,
-        atol=1e-6,
+    # The tracked loss carries the weighted trajectory penalty (0.5 * 2.0);
+    # the fixed-point penalty is recorded separately, already weighted.
+    plain = _model().fit(
+        _dataset(), hm.OptaxTrainingConfig(steps=2, lr=0.01, verbose=False), key=jr.key(3)
     )
-    np.testing.assert_allclose(
-        np.array(result.history.objective) - result.history.tracked_loss,
-        0.75,
-        atol=1e-6,
-    )
+    np.testing.assert_allclose(result.history.loss[0] - plain.history.loss[0], 1.0, atol=1e-6)
+    np.testing.assert_allclose(result.history.penalty, 0.75, atol=1e-6)
 
 
 def test_population_fit_uses_value_parameters_and_preserves_constants():
     model = hm.HybridModel(
         predictors={
-            "theta": hm.BoundedPredictor(value=[0.0, 0.0]),
-            "fixed": hm.ConstantPredictor((1.0, 2.0)),
+            "theta": hm.Parameter([0.0, 0.0]),
+            "fixed": hm.Constant((1.0, 2.0)),
         },
         simulate_fn=lambda p, ts, c, y0, solver: jnp.broadcast_to(p["theta"].value, (len(ts), 2)),
         state_to_output=lambda y: y,
-        output_channels=("a", "b"),
+        output_channel_names=("a", "b"),
         solver=_solver(),
     )
     dataset = hm.make_dataset(
         [
             hm.make_experiment(
-                covariates={},
                 y0=[0.0, 0.0],
                 channels={
                     "a": hm.ChannelObs([0.0, 1.0], [1.0, 1.0]),
@@ -265,7 +271,7 @@ def test_population_fit_uses_value_parameters_and_preserves_constants():
         key=jr.key(4),
     )
     assert result.history.best_fitness[-1] < 0.05
-    assert not result.history.data_loss
+    assert not result.history.loss
     assert result.model.predictors["fixed"].value[0] == 1.0
     assert len(result.history.best_fitness) == 30
 
@@ -273,16 +279,13 @@ def test_population_fit_uses_value_parameters_and_preserves_constants():
 def test_all_fixed_model_cannot_be_fitted():
     from dataclasses import replace
 
-    model = replace(
-        _model(), predictors={"rate": hm.ConstantPredictor(0.3), "fixed": hm.ConstantPredictor(0.0)}
-    )
+    model = replace(_model(), predictors={"rate": hm.Constant(0.3), "fixed": hm.Constant(0.0)})
     with pytest.raises(ValueError, match="no trainable"):
-        model.fit(_dataset(), steps=2, key=jr.key(0))
+        model.fit(_dataset(), hm.OptaxTrainingConfig(steps=2), key=jr.key(0))
 
 
 def test_initial_time_and_duplicate_experiment_ids_raise():
     exp = hm.make_experiment(
-        covariates={},
         y0=[1.0],
         t0=2.0,
         channels={"concentration": hm.ChannelObs([1.0, 3.0], [0.8, 0.6])},
@@ -306,7 +309,9 @@ def test_dense_prediction_reuses_compilation_for_same_shapes():
 
     model = _model()
     dataset = _dataset()
-    kwargs = dict(simulate_fn=simulate, state_to_output=model.state_to_output, solver=model.solver)
+    kwargs: dict[str, Any] = dict(
+        simulate_fn=simulate, state_to_output=model.state_to_output, solver=model.solver
+    )
     hm.predict_dense(model.predictors, dataset, n_points=10, **kwargs)
     compiled = len(calls)
     hm.predict_dense(model.predictors, dataset, n_points=10, **kwargs)
@@ -315,7 +320,7 @@ def test_dense_prediction_reuses_compilation_for_same_shapes():
 
 def test_fractional_initial_time_with_integer_observations_and_state():
     experiment = hm.make_experiment(
-        covariates={}, y0=[1], t0=0.5, channels={"concentration": hm.ChannelObs([1, 2], [0.8, 0.6])}
+        y0=[1], t0=0.5, channels={"concentration": hm.ChannelObs([1, 2], [0.8, 0.6])}
     )
     dataset = hm.make_dataset([experiment], output_channel_names=("concentration",))
     assert jnp.issubdtype(experiment.y0.dtype, jnp.floating)
@@ -361,3 +366,18 @@ def test_open_scalers_accept_scalar_queries(bounds):
     latent = scaler.to_latent(value)
     np.testing.assert_allclose(scaler.from_latent(latent), [0.2], atol=1e-6)
     assert eqx.filter_jit(scaler.from_latent)(jnp.array(0.0)).shape == (1,)
+
+
+def test_stop_reason_follows_the_final_phase():
+    # Phase 1 cannot improve (lr=0), so patience cuts it short. Phase 2
+    # improves every step after its first and runs to its budget, so the
+    # run as a whole ended on budget, not patience.
+    config = hm.OptaxTrainingConfig(
+        phases=(hm.TrainingPhase(10, lr=0.0), hm.TrainingPhase(3, lr=0.05)),
+        patience=2,
+        verbose=False,
+    )
+    result = _model().fit(_dataset(), config, key=jr.key(5))
+    assert result.history.phase.count(0) < 10
+    assert result.history.phase.count(1) == 3
+    assert result.stop_reason == "budget_exhausted"

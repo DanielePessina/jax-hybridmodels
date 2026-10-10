@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaxhybridmodels.data import Dataset
@@ -197,7 +198,7 @@ def box_violation(x: Array, lows: Array, highs: Array) -> Array:
     x : Array
         Values in physical units; broadcast against ``lows`` / ``highs``.
     lows, highs : Array
-        Per-component box edges, as produced by ``BoundScaler._lows_highs``.
+        Per-component box edges, in physical units.
 
     Returns
     -------
@@ -274,8 +275,6 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
 
     if any(not all(map(math.isfinite, pair)) for pair in in_scaler.bounds):
         raise ValueError("box_grid requires finite input bounds; supply explicit penalty points")
-    if not in_scaler.bounds:
-        return jnp.zeros((1, 0))
     warp = WARPS[in_scaler.warp]
     lows = jnp.asarray([b[0] for b in in_scaler.warped_bounds])
     highs = jnp.asarray([b[1] for b in in_scaler.warped_bounds])
@@ -319,11 +318,7 @@ def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPoint
         ts_chunks: list[Array] = []
         t_chunks: list[Array] = []
         for bp in dataset.bucket_payloads:
-            vectors = (
-                jnp.stack([bp.covariates[key] for key in keys], axis=-1)
-                if keys
-                else jnp.zeros((bp.ts.shape[0], 0))
-            )
+            vectors = jnp.stack([bp.covariates[key] for key in keys], axis=-1)
             if vectors.ndim != 2:
                 raise ValueError(
                     "penalty: covariates feeding a BoundedPredictor's penalty points "
@@ -578,9 +573,9 @@ def attach_penalty_state(y0: Array, n: int = 1) -> Array:
 
 
 def penalty_vector_field(
-    base_rhs: Callable[[Array, Array, Any], Array],
-    penalty_rhs: Callable[[Array, Array, Any], Array],
-) -> Callable[[Array, Array, Any], Array]:
+    base_rhs: Callable[[ArrayLike, Array, Any], Array],
+    penalty_rhs: Callable[[ArrayLike, Array, Any], Array],
+) -> Callable[[ArrayLike, Array, Any], Array]:
     """Wrap a physics vector field with per-call penalty rates.
 
     Returns ``(t, y, args) -> [physics_dot, penalty_rates]``. ``base_rhs``
@@ -595,7 +590,7 @@ def penalty_vector_field(
     ``z`` or input ``x`` of an embedded predictor at call time.
     """
 
-    def wrapped(t: Array, y: Array, args: Any) -> Array:
+    def wrapped(t: ArrayLike, y: Array, args: Any) -> Array:
         rates = jnp.asarray(penalty_rhs(t, y, args))
         if rates.ndim != 1:
             raise ValueError(f"penalty_rhs must return a rank-1 vector; got shape {rates.shape}")

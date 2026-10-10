@@ -6,9 +6,9 @@ accumulated and averaged, then a single ``optimizer.update``. A bucket is
 not a step, and there is no minibatching.
 
 A run is a sequence of **phases**, contiguous blocks of steps sharing
-hyperparameters. Each has its own step count, learning rate, optimizer
-name, length-schedule fraction and reset flag, carried in
-``OptaxTrainingConfig`` as same-length tuples. Phases are how a run
+hyperparameters. Each is a ``TrainingPhase`` with its own step count,
+learning rate, optimizer, horizon, reset flag and penalty weight, held in
+``OptaxTrainingConfig.phases``. Phases are how a run
 changes strategy partway through, say a coarse pass at a high learning
 rate followed by a slow refinement.
 
@@ -25,10 +25,11 @@ kernels, so it adds no compilation cost.
 
 from __future__ import annotations
 
+import itertools
 import math
 import warnings
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import InitVar, dataclass
 from typing import Any
 
 import equinox as eqx
@@ -75,17 +76,49 @@ _TOURNAMENT_FAILURES: tuple[type[BaseException], ...] = (
     eqx.EquinoxRuntimeError,
 )
 
-_PHASE_KEYED_FIELDS: tuple[str, ...] = (
-    "lr",
-    "optimizer",
-    "reset_optimiser_state",
-    "length_schedule",
-)
-
 
 @dataclass(frozen=True)
 class TrainingPhase:
-    """One contiguous Optax phase, configured without parallel tuples."""
+    """One contiguous block of Optax steps with its own schedule settings.
+
+    Attributes
+    ----------
+    steps : int
+        Step budget for the phase. At least 1.
+    lr : float
+        Learning rate. Applied to the live optimiser state unless the
+        phase also sets ``reset_optimizer``.
+    optimizer : OptimizerSpec
+        A registered name (``"adamw"``, ``"adabelief"``), a factory taking
+        ``learning_rate`` and returning an ``optax.GradientTransformation``
+        (e.g. ``optax.adamw``, or ``lambda learning_rate: optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adamw(learning_rate))``), or
+        a ready-made transformation instance. Names and factories are
+        wrapped in ``optax.inject_hyperparams``, so a phase boundary can
+        move the learning rate without a rebuild. A raw instance cannot be
+        re-hyperparametrised, so a phase that changes ``lr`` with a raw
+        instance must set ``reset_optimizer``. A phase that changes the
+        optimiser must set it too, because optimiser state belongs to the
+        optimiser that built it.
+    horizon : float
+        Fraction of each experiment's timeline the loss looks at, in
+        ``(0, 1]``. It masks the **loss**, never the integration: the
+        solver still runs the full trajectory, and only the first
+        ``horizon`` of the observation times is scored, which stops a
+        long-horizon divergence from drowning the gradient. Being a
+        runtime mask rather than a shape change, a phase boundary costs no
+        recompile.
+    reset_optimizer : bool
+        Rebuild the optimiser and discard its state at the start of this
+        phase. Set it when switching optimiser, and when a horizon change
+        has made the accumulated momentum wrong.
+    penalty_weight : float
+        Weight on the bound-saturation penalty. ``0.0`` disables it. The
+        weight is relative to the per-bucket-averaged data term: the
+        penalty is a mean over its points, charged once per step onto the
+        averaged data gradient, so the same weight means the same thing
+        whatever the dataset or point-count size.
+    """
 
     steps: int
     lr: float = 1e-3
@@ -94,57 +127,42 @@ class TrainingPhase:
     reset_optimizer: bool = False
     penalty_weight: float = 0.0
 
+    def __post_init__(self) -> None:
+        if self.steps < 1:
+            raise ValueError(f"TrainingPhase.steps must be at least 1; got {self.steps}")
+        if not math.isfinite(float(self.lr)) or float(self.lr) < 0.0:
+            raise ValueError(f"TrainingPhase.lr must be finite and non-negative; got {self.lr}")
+        if not 0.0 < float(self.horizon) <= 1.0:
+            raise ValueError(f"TrainingPhase.horizon must lie in (0, 1]; got {self.horizon}")
+        weight = float(self.penalty_weight)
+        if not math.isfinite(weight) or weight < 0.0:
+            raise ValueError(
+                f"TrainingPhase.penalty_weight must be finite and non-negative; got {weight}"
+            )
 
-@dataclass(frozen=True, init=False)
+
+@dataclass(frozen=True)
 class OptaxTrainingConfig:
-    """Configuration for :func:`train_with_optax`.
+    """Configuration for :func:`train_with_optax` and Optax ``HybridModel.fit``.
 
-    Use scalar fields for a single phase, ``phases=`` with TrainingPhase
-    objects for a schedule, or the original parallel tuples. Scalars
-    broadcast across phases; explicit tuples must match ``steps`` (except
-    the length-one penalty weight). Stored fields normalize to tuples.
-    Do not combine ``phases=`` with ``steps=``.
+    A single phase is spelled with ``steps=`` (plus optional ``lr=``,
+    ``optimizer=``, ``penalty_weight=``). A schedule is spelled with
+    ``phases=``, a tuple of :class:`TrainingPhase`. The two forms do not
+    mix; either way the config stores ``phases``::
+
+        OptaxTrainingConfig(steps=500, lr=1e-3)
+        OptaxTrainingConfig(
+            phases=(
+                TrainingPhase(steps=200, lr=3e-2, horizon=0.5),
+                TrainingPhase(steps=200, lr=5e-3, reset_optimizer=True),
+            )
+        )
 
     Attributes
     ----------
-    steps : tuple[int, ...]
-        Step budget per phase. Its length is the number of phases.
-    lr : tuple[float, ...]
-        Learning rate per phase. Applied to the live optimiser state
-        unless that phase also resets it.
-    optimizer : tuple[OptimizerSpec, ...]
-        Optimiser per phase: a registered name (``"adamw"``,
-        ``"adabelief"``), a factory taking ``learning_rate`` and returning
-        an ``optax.GradientTransformation`` (e.g. ``optax.adamw``, or
-        ``lambda learning_rate: optax.chain(optax.clip_by_global_norm(1.0),
-        optax.adamw(learning_rate))``), or a ready-made transformation instance.
-        Names and factories are wrapped in ``optax.inject_hyperparams``, so
-        a phase boundary can move the learning rate without a rebuild; a
-        raw instance cannot be re-hyperparametrised, so a phase that
-        changes ``lr`` with a raw instance must also set
-        ``reset_optimiser_state``. A phase that changes the optimiser must
-        set ``reset_optimiser_state``, because optimiser state belongs to
-        the optimiser that built it.
-    reset_optimiser_state : tuple[bool, ...]
-        Per phase, rebuild the optimiser and discard its state at that
-        boundary. Set it when switching optimiser, and when a
-        length-schedule change has made the accumulated momentum wrong.
-    length_schedule : tuple[float, ...]
-        Fraction of each experiment's timeline the loss looks at, per
-        phase, in ``(0, 1]``. It masks the **loss**, never the
-        integration: the solver still runs the full trajectory, and only
-        the first ``fraction`` of the observation times is scored, which
-        stops a long-horizon divergence from drowning the gradient. Being
-        a runtime mask rather than a shape change, a phase boundary costs
-        no recompile. Default ``(1.0,)`` scores everything.
-    penalty_weight : tuple[float, ...]
-        Weight on the bound-saturation penalty. Length 1 broadcasts to
-        every phase; any other length must match ``steps``. Entries must
-        be non-negative. ``0.0`` disables the penalty. The weight is
-        relative to the per-bucket-averaged data term: the penalty is a
-        mean over its points, charged once per step onto the averaged data
-        gradient, so the same weight means the same thing whatever the
-        dataset or point-count size.
+    phases : tuple[TrainingPhase, ...]
+        The schedule, run in order. See :class:`TrainingPhase` for the
+        per-phase settings.
     penalty_points : tuple[Array, ...] | None
         User-supplied penalty-only points for the bound penalty: one
         ``[G, n_inputs]`` array of physical input vectors per
@@ -190,7 +208,7 @@ class OptaxTrainingConfig:
         predictors are used and a ``RuntimeWarning`` is raised.
     tournament_lr : float
         Learning rate for the tournament's short bursts, independent of
-        ``lr``.
+        the phase learning rates.
     patience : int
         Consecutive steps without a new best tracked loss before the current
         phase stops early. The tracked loss is the data term plus any
@@ -200,7 +218,7 @@ class OptaxTrainingConfig:
         acts. ``0`` disables early stopping.
     restore_best : bool
         Return the predictors from the lowest tracked-loss step instead of
-        the last one. The running minimum resets whenever ``length_schedule``
+        the last one. The running minimum resets whenever the horizon
         changes, since tracked losses over different horizons are not
         comparable and the shortest horizon would otherwise always own the
         minimum.
@@ -209,13 +227,13 @@ class OptaxTrainingConfig:
         explicit ``ui=...`` argument always wins.
     """
 
-    steps: tuple[int, ...]
-    lr: tuple[float, ...]
-    optimizer: tuple[OptimizerSpec, ...]
-    reset_optimiser_state: tuple[bool, ...]
-    length_schedule: tuple[float, ...]
-    penalty_weight: tuple[float, ...]
-    phases: tuple[TrainingPhase, ...] | None = None
+    # Single-phase shorthand. Init-only: after construction the schedule
+    # lives in ``phases`` alone, so these class attributes read as None.
+    steps: InitVar[int | None] = None
+    lr: InitVar[float | None] = None
+    optimizer: InitVar[OptimizerSpec | None] = None
+    penalty_weight: InitVar[float | None] = None
+    phases: tuple[TrainingPhase, ...] = ()
     penalty_points: tuple[Array, ...] | None = None
     penalty_fn: Callable[..., Array] | None = None
     trajectory_penalty_fn: Callable[..., Array] | None = None
@@ -230,154 +248,39 @@ class OptaxTrainingConfig:
     restore_best: bool = True
     verbose: bool = True
 
-    def __init__(
+    def __post_init__(
         self,
-        steps: tuple[int, ...] | int | None = None,
-        lr: tuple[float, ...] | float = 0.001,
-        optimizer: tuple[OptimizerSpec, ...] | OptimizerSpec = "adamw",
-        reset_optimiser_state: tuple[bool, ...] | bool = False,
-        length_schedule: tuple[float, ...] | float = 1.0,
-        penalty_weight: tuple[float, ...] | float = 0.0,
-        penalty_points: tuple[Array, ...] | None = None,
-        penalty_fn: Callable[..., Array] | None = None,
-        trajectory_penalty_fn: Callable[..., Array] | None = None,
-        trajectory_penalty_weight: float = 0.0,
-        loss: Callable[..., Array] | str = "mse",
-        channel_idx: tuple[int, ...] | None = None,
-        channel_weights: tuple[float, ...] | None = None,
-        tournament_attempts: int = 1,
-        tournament_steps: int = 0,
-        tournament_lr: float = 0.0001,
-        patience: int = 0,
-        restore_best: bool = True,
-        verbose: bool = True,
-        *,
-        phases: Sequence[TrainingPhase] | None = None,
+        steps: int | None,
+        lr: float | None,
+        optimizer: OptimizerSpec | None,
+        penalty_weight: float | None,
     ) -> None:
-        object.__setattr__(self, "steps", steps)
-        object.__setattr__(self, "lr", lr)
-        object.__setattr__(self, "optimizer", optimizer)
-        object.__setattr__(self, "reset_optimiser_state", reset_optimiser_state)
-        object.__setattr__(self, "length_schedule", length_schedule)
-        object.__setattr__(self, "penalty_weight", penalty_weight)
-        object.__setattr__(self, "phases", phases)
-        object.__setattr__(self, "penalty_points", penalty_points)
-        object.__setattr__(self, "penalty_fn", penalty_fn)
-        object.__setattr__(self, "trajectory_penalty_fn", trajectory_penalty_fn)
-        object.__setattr__(self, "trajectory_penalty_weight", trajectory_penalty_weight)
-        object.__setattr__(self, "loss", loss)
-        object.__setattr__(self, "channel_idx", channel_idx)
-        object.__setattr__(self, "channel_weights", channel_weights)
-        object.__setattr__(self, "tournament_attempts", tournament_attempts)
-        object.__setattr__(self, "tournament_steps", tournament_steps)
-        object.__setattr__(self, "tournament_lr", tournament_lr)
-        object.__setattr__(self, "patience", patience)
-        object.__setattr__(self, "restore_best", restore_best)
-        object.__setattr__(self, "verbose", verbose)
-        self.__post_init__()
-
-    def penalty_weight_for_phase(self, phase_idx: int) -> float:
-        """Penalty weight for ``phase_idx``, honouring the length-1 broadcast."""
-        if len(self.penalty_weight) == 1:
-            return float(self.penalty_weight[0])
-        return float(self.penalty_weight[phase_idx])
-
-    def __post_init__(self) -> None:
-        if self.phases is not None:
-            if self.steps is not None:
+        if steps is not None:
+            if self.phases:
                 raise ValueError("Use steps= or phases=, not both")
-            phases = tuple(self.phases)
-            for name, attr in (
-                ("steps", "steps"),
-                ("lr", "lr"),
-                ("optimizer", "optimizer"),
-                ("reset_optimiser_state", "reset_optimizer"),
-                ("length_schedule", "horizon"),
-                ("penalty_weight", "penalty_weight"),
-            ):
-                object.__setattr__(self, name, tuple(getattr(p, attr) for p in phases))
-            # Store only normalized legacy fields; serialization remains backward-compatible.
-            object.__setattr__(self, "phases", None)
-        if self.steps is None:
-            raise ValueError("Supply steps= or phases=")
-        if isinstance(self.steps, int):
-            object.__setattr__(self, "steps", (self.steps,))
-        n = len(self.steps)
-        for name in (
-            "lr",
-            "optimizer",
-            "reset_optimiser_state",
-            "length_schedule",
-            "penalty_weight",
-        ):
-            value = getattr(self, name)
-            # An Optax transformation is itself a named tuple, not a phase tuple.
-            if not isinstance(value, tuple) or (name == "optimizer" and hasattr(value, "init")):
-                object.__setattr__(self, name, (value,) * n)
-        # Lengths first: every later rule indexes a phase-keyed field, and on a
-        # short tuple would raise IndexError instead of the real message.
-        _validate_phase_lengths(self)
-        _validate_penalty(self)
+            # None means "not given"; fall back to the TrainingPhase defaults.
+            default = TrainingPhase(steps)
+            phase = TrainingPhase(
+                steps,
+                lr=default.lr if lr is None else lr,
+                optimizer=default.optimizer if optimizer is None else optimizer,
+                penalty_weight=default.penalty_weight if penalty_weight is None else penalty_weight,
+            )
+            object.__setattr__(self, "phases", (phase,))
+        elif lr is not None or optimizer is not None or penalty_weight is not None:
+            raise ValueError("With phases=, set lr, optimizer and penalty_weight per TrainingPhase")
+        object.__setattr__(self, "phases", tuple(self.phases))
+        if not self.phases:
+            raise ValueError("Supply steps= for one phase or phases= for a schedule")
         _validate_penalty_points(self)
         _validate_optimizer_transitions(self)
-        _validate_length_schedule(self)
         _validate_trajectory_penalty(self)
         _validate_tournament(self)
 
-
-def _validate_phase_lengths(config: OptaxTrainingConfig) -> None:
-    """Every phase-keyed field must be exactly as long as ``steps``.
-
-    Scalar constructor inputs have already broadcast to tuples. Explicit
-    tuples must match the step count so phases are never silently truncated.
-    """
-    n = len(config.steps)
-    if n == 0:
-        raise ValueError("OptaxTrainingConfig.steps must contain at least one phase")
-    for step_count in config.steps:
-        if step_count < 1:
-            raise ValueError(
-                f"OptaxTrainingConfig.steps entries must be at least 1; got {step_count}"
-            )
-    for learning_rate in config.lr:
-        if not math.isfinite(float(learning_rate)) or float(learning_rate) < 0.0:
-            raise ValueError(
-                "OptaxTrainingConfig.lr entries must be finite and non-negative; "
-                f"got {learning_rate}"
-            )
-    for name in _PHASE_KEYED_FIELDS:
-        value = getattr(config, name)
-        if len(value) != n:
-            raise ValueError(
-                f"OptaxTrainingConfig: phase-keyed field {name!r} has length "
-                f"{len(value)}, expected {n} (matching steps)"
-            )
-
-
-def _validate_penalty(config: OptaxTrainingConfig) -> None:
-    """``penalty_weight`` broadcasts from length 1, and entries are non-negative.
-
-    It is deliberately not in ``_PHASE_KEYED_FIELDS``: those fields lack a
-    safe default, while this one has an unambiguous off state. A length-1
-    tuple broadcasts across every phase; any other length must match ``steps``
-    exactly, so a real per-phase schedule cannot be silently truncated.
-    """
-    n = len(config.steps)
-    if len(config.penalty_weight) not in (1, n):
-        raise ValueError(
-            "OptaxTrainingConfig.penalty_weight must have length 1 "
-            f"(broadcast across phases) or {n} (one per phase); "
-            f"got {len(config.penalty_weight)}"
-        )
-    for weight in config.penalty_weight:
-        if not math.isfinite(float(weight)):
-            raise ValueError(
-                f"OptaxTrainingConfig.penalty_weight entries must be finite; got {weight}"
-            )
-        if float(weight) < 0.0:
-            raise ValueError(
-                f"OptaxTrainingConfig.penalty_weight entries must be non-negative; got {weight}"
-            )
+    @property
+    def total_steps(self) -> int:
+        """Step budget summed over every phase."""
+        return sum(phase.steps for phase in self.phases)
 
 
 def _validate_penalty_points(config: OptaxTrainingConfig) -> None:
@@ -410,31 +313,13 @@ def _validate_optimizer_transitions(config: OptaxTrainingConfig) -> None:
     is fixed anyway, so a raw spec across an lr change needs a reset
     regardless).
     """
-    for phase_idx in range(1, len(config.steps)):
-        if (
-            config.optimizer[phase_idx] != config.optimizer[phase_idx - 1]
-            and not config.reset_optimiser_state[phase_idx]
-        ):
+    for idx, (before, phase) in enumerate(itertools.pairwise(config.phases), start=1):
+        if phase.optimizer != before.optimizer and not phase.reset_optimizer:
             raise ValueError(
-                f"OptaxTrainingConfig: phase {phase_idx} changes optimizer from "
-                f"{config.optimizer[phase_idx - 1]!r} to {config.optimizer[phase_idx]!r} "
-                f"but reset_optimiser_state[{phase_idx}] is False. Optimiser state is "
-                "specific to the optimiser that built it, so switching without a "
-                "reset would keep running the previous one. Set "
-                f"reset_optimiser_state[{phase_idx}]=True."
-            )
-
-
-def _validate_length_schedule(config: OptaxTrainingConfig) -> None:
-    """Every fraction lies in ``(0, 1]``.
-
-    Zero would score no timestamps at all, and above one would claim more of
-    the trajectory than there is.
-    """
-    for fraction in config.length_schedule:
-        if not (0.0 < float(fraction) <= 1.0):
-            raise ValueError(
-                f"OptaxTrainingConfig.length_schedule entries must lie in (0, 1]; got {fraction}"
+                f"OptaxTrainingConfig: phase {idx} changes optimizer from "
+                f"{before.optimizer!r} to {phase.optimizer!r} without reset_optimizer=True. "
+                "Optimiser state is specific to the optimiser that built it, so switching "
+                "without a reset would keep running the previous one."
             )
 
 
@@ -720,13 +605,13 @@ def _tournament_enabled(config: OptaxTrainingConfig) -> bool:
 def _horizon_changed(config: OptaxTrainingConfig, phase_idx: int) -> bool:
     """Does this phase score a different slice of each trajectory than the last?
 
-    ``length_schedule`` masks the loss to a prefix, so a change here means
+    ``TrainingPhase.horizon`` masks the loss to a prefix, so a change here means
     the losses either side of the boundary measure different quantities.
     Phase 0 has no predecessor and so never counts as a change.
     """
     if phase_idx == 0:
         return False
-    return config.length_schedule[phase_idx] != config.length_schedule[phase_idx - 1]
+    return config.phases[phase_idx].horizon != config.phases[phase_idx - 1].horizon
 
 
 def _has_weak_scalar_trainable(predictors: Any, trainable: Any) -> bool:
@@ -860,8 +745,9 @@ def _begin_phase(
     if phase_idx == 0:
         return optimizer, opt_state
 
-    if config.reset_optimiser_state[phase_idx]:
-        optimizer = _build_optimizer(config.optimizer[phase_idx], config.lr[phase_idx])
+    phase = config.phases[phase_idx]
+    if phase.reset_optimizer:
+        optimizer = _build_optimizer(phase.optimizer, phase.lr)
         return optimizer, optimizer.init(eqx.filter(predictors, trainable))
 
     # No reset, so only the learning rate moves. ``__post_init__`` has already
@@ -869,16 +755,16 @@ def _begin_phase(
     # state still belongs to the optimiser this phase names. A raw
     # ``optax.GradientTransformation`` has no injectable ``hyperparams``, so
     # an lr change on one is refused here rather than silently ignored.
-    if config.lr[phase_idx] != config.lr[phase_idx - 1]:
+    if phase.lr != config.phases[phase_idx - 1].lr:
         if not _optimiser_state_supports_lr(opt_state):
             raise ValueError(
                 "OptaxTrainingConfig: phase "
                 f"{phase_idx} changes lr with a raw optax.GradientTransformation "
                 "that cannot be re-hyperparametrised. Set "
-                f"reset_optimiser_state[{phase_idx}]=True to rebuild it, or pass "
+                f"reset_optimizer=True on that phase to rebuild it, or pass "
                 "an optimiser name / factory so the learning rate stays injectable."
             )
-        opt_state.hyperparams["learning_rate"] = jnp.asarray(config.lr[phase_idx])
+        opt_state.hyperparams["learning_rate"] = jnp.asarray(phase.lr)
     return optimizer, opt_state
 
 
@@ -899,6 +785,7 @@ class _BestTracker:
     def __init__(self, predictors: Any) -> None:
         self.best_loss = float("inf")
         self.best_predictors = predictors
+        self.best_step: int | None = None
         self.steps_since_improvement = 0
 
     def begin_phase(self, predictors: Any, *, horizon_changed: bool) -> None:
@@ -918,17 +805,20 @@ class _BestTracker:
         if horizon_changed:
             self.best_loss = float("inf")
             self.best_predictors = predictors
+            self.best_step = None
 
-    def update(self, loss: float, predictors: Any) -> None:
+    def update(self, loss: float, predictors: Any, step: int) -> None:
         """Record ``loss``, which must have been measured at ``predictors``.
 
         Pass the **pre-update** parameters. Passing the ones the optimiser
         just produced hands back a model whose loss is not the reported
         minimum, and ``loss_history`` then describes a different model.
+        ``step`` is the run-wide index of this step in the loss history.
         """
         if loss < self.best_loss:
             self.best_loss = loss
             self.best_predictors = predictors
+            self.best_step = step
             self.steps_since_improvement = 0
         else:
             self.steps_since_improvement += 1
@@ -936,6 +826,28 @@ class _BestTracker:
     def out_of_patience(self, patience: int) -> bool:
         """``patience`` consecutive steps with no new minimum. ``0`` disables it."""
         return patience > 0 and self.steps_since_improvement >= patience
+
+
+@dataclass
+class _PhaseRun:
+    """What one pass of :func:`_run_phases` produced, step by step.
+
+    ``loss`` is the tracked loss (data term plus any trajectory penalty)
+    and ``penalty`` the weighted bound penalty, so their sum is the
+    objective the optimiser minimised. ``selection`` holds the
+    ``select_score`` values and is empty when selection follows ``loss``.
+    ``best_step`` indexes these lists. ``stopped_early`` is set when
+    patience ended the final phase before its step budget.
+    """
+
+    predictors: Any
+    final_loss: float
+    loss: list[float]
+    penalty: list[float]
+    phase: list[int]
+    selection: list[float]
+    best_step: int | None
+    stopped_early: bool
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
@@ -1000,9 +912,9 @@ def train_with_optax(
 
         ``trained_predictors`` comes from the lowest-loss step when
         ``config.restore_best=True``, else the final step. That minimum
-        resets whenever ``length_schedule`` changes, so the returned model
+        resets whenever the phase horizon changes, so the returned model
         always comes from the last horizon trained on."""
-    return _train_with_optax(
+    run = _train_with_optax(
         predictors,
         dataset,
         config,
@@ -1013,6 +925,7 @@ def train_with_optax(
         key=key,
         ui=ui,
     )
+    return run.loss, run.predictors
 
 
 def _train_with_optax(
@@ -1026,9 +939,14 @@ def _train_with_optax(
     trainable: Any = None,
     key: Array,
     ui: TrainingUI | None = None,
-    _step_callback: Callable[..., bool] | None = None,
-) -> tuple[list[float], Any]:
-    """Internal trainer with an optional pre-update observer for model results."""
+    select_score: Callable[[Any], float] | None = None,
+) -> _PhaseRun:
+    """Train and return the full per-step record behind ``train_with_optax``.
+
+    ``select_score`` maps pre-update predictors to the number that picks
+    the best step and drives patience, in place of the tracked loss.
+    ``HybridModel.fit`` passes a validation scorer here.
+    """
     if trainable is None:
         trainable = trainable_mask(predictors)
 
@@ -1037,7 +955,7 @@ def _train_with_optax(
         raise ValueError("train_with_optax: dataset has no bucket payloads")
 
     ui_ = _select_ui(ui, config.verbose)
-    ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
+    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
 
     (
         bucket_step,
@@ -1078,7 +996,7 @@ def _train_with_optax(
         )
         predictors = ranked[0][1]
 
-    _history, final_predictors, _final_loss = _run_phases(
+    return _run_phases(
         predictors,
         dataset,
         config,
@@ -1090,9 +1008,8 @@ def _train_with_optax(
         trainable=trainable,
         ui=ui_,
         step_update=step_update,
-        step_callback=_step_callback,
+        select_score=select_score,
     )
-    return _history, final_predictors
 
 
 def _run_phases(
@@ -1108,8 +1025,8 @@ def _run_phases(
     trainable: Any,
     ui: TrainingUI,
     step_update: Callable[..., tuple[Any, Any]] | None = None,
-    step_callback: Callable[..., bool] | None = None,
-) -> tuple[list[float], Any, float]:
+    select_score: Callable[[Any], float] | None = None,
+) -> _PhaseRun:
     """Run the phase schedule from a starting ``predictors``.
 
     The shared main-loop body behind :func:`train_with_optax` and the
@@ -1122,8 +1039,8 @@ def _run_phases(
     body several times (the ensembles, once per member) fires
     ``on_run_start`` before each call, so every member is its own UI run.
 
-    Returns ``(losses_history, final_predictors, final_loss)`` where
-    ``final_loss`` is the loss that labels the returned predictors: the
+    Returns a :class:`_PhaseRun`. Its ``final_loss`` labels the returned
+    predictors: the
     best-step loss when ``config.restore_best`` is set (measured exactly
     at the returned parameters), else the last step's reported loss
     (measured one update before the returned parameters, as the loop
@@ -1135,6 +1052,10 @@ def _run_phases(
     update in one kernel. The stock callers pass the instance the
     warm-up settled; when ``None`` (or when a phase reset rebuilds the
     optimiser) it is rebuilt here from the live optimiser.
+
+    ``select_score``, when given, replaces the tracked loss for picking the
+    best step and for patience. It scores a fixed full-horizon target, so
+    the running minimum then survives horizon changes.
     """
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
     if step_update is None:
@@ -1143,9 +1064,13 @@ def _run_phases(
     n_buckets_arg = jnp.asarray(len(dataset.bucket_payloads), dtype=jnp.int32)
 
     losses_history: list[float] = []
+    penalties: list[float] = []
+    phases: list[int] = []
+    selection: list[float] = []
+    stopped_early = False
     best = _BestTracker(predictors)
 
-    for phase_idx, n_steps in enumerate(config.steps):
+    for phase_idx, phase in enumerate(config.phases):
         optimizer, opt_state = _begin_phase(
             phase_idx,
             predictors,
@@ -1159,26 +1084,31 @@ def _run_phases(
             step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
             step_update_optimizer = optimizer
 
-        length_mask_fraction = jnp.asarray(config.length_schedule[phase_idx])
+        length_mask_fraction = jnp.asarray(phase.horizon)
         # Traced, not closed over: a Python float that changed per phase
         # would retrace ``bucket_step`` at every phase boundary. Same reason
         # ``length_mask_fraction`` is passed rather than baked in.
-        penalty_weight = jnp.asarray(config.penalty_weight_for_phase(phase_idx))
+        penalty_weight = jnp.asarray(phase.penalty_weight)
         # Host-side per phase: the keep-mask must be concrete to index the
         # gathered points. A shape change across phases retraces only the
         # small penalty kernel, never ``bucket_step``.
-        phase_points = select_penalty_points(sources, extras, config.length_schedule[phase_idx])
+        phase_points = select_penalty_points(sources, extras, phase.horizon)
 
-        best.begin_phase(predictors, horizon_changed=_horizon_changed(config, phase_idx))
+        best.begin_phase(
+            predictors,
+            horizon_changed=select_score is None and _horizon_changed(config, phase_idx),
+        )
+        # Only the last phase decides the reported stop reason.
+        stopped_early = False
 
         ui.on_phase_start(
             phase_idx=phase_idx,
-            phase_steps=int(n_steps),
-            lr=float(config.lr[phase_idx]),
-            optimizer=config.optimizer[phase_idx],
+            phase_steps=phase.steps,
+            lr=float(phase.lr),
+            optimizer=phase.optimizer,
         )
 
-        for step in range(int(n_steps)):
+        for step in range(phase.steps):
             total_loss, acc_grads, n_buckets = _training_step(
                 predictors, dataset, bucket_step, length_mask_fraction, trainable
             )
@@ -1201,9 +1131,15 @@ def _run_phases(
             loss_value = float(total_loss / float(max(n_buckets, 1)))
             penalty_value = float(avg_penalty)
             losses_history.append(loss_value)
+            penalties.append(float(phase.penalty_weight) * penalty_value)
+            phases.append(phase_idx)
+            score = loss_value
+            if select_score is not None:
+                score = select_score(previous_predictors)
+                selection.append(score)
             # ``previous_predictors``, not ``predictors``: avg_data was
             # measured before the update was applied.
-            best.update(loss_value, previous_predictors)
+            best.update(score, previous_predictors, len(losses_history) - 1)
 
             ui.on_step_end(
                 step_idx=step,
@@ -1212,14 +1148,8 @@ def _run_phases(
                 penalty=penalty_value,
             )
 
-            if step_callback is not None and step_callback(
-                previous_predictors, phase_idx, step, loss_value, penalty_value
-            ):
-                ui.on_phase_end(phase_idx=phase_idx)
-                ui.on_run_end(final_loss=loss_value)
-                return losses_history, previous_predictors, loss_value
-
             if best.out_of_patience(config.patience):
+                stopped_early = step < phase.steps - 1
                 break
 
         ui.on_phase_end(phase_idx=phase_idx)
@@ -1236,7 +1166,16 @@ def _run_phases(
     else:
         final_loss = losses_history[-1]
     ui.on_run_end(final_loss=final_loss)
-    return losses_history, final_predictors, final_loss
+    return _PhaseRun(
+        predictors=final_predictors,
+        final_loss=final_loss,
+        loss=losses_history,
+        penalty=penalties,
+        phase=phases,
+        selection=selection,
+        best_step=best.best_step if config.restore_best else None,
+        stopped_early=stopped_early,
+    )
 
 
 def _build_training_kernels(
@@ -1285,7 +1224,8 @@ def _build_training_kernels(
         extras,
         # Coverage is the default bound penalty's contract; a custom
         # ``penalty_fn`` owns its points and needs no coverage check.
-        enabled=any(w > 0.0 for w in config.penalty_weight) and config.penalty_fn is None,
+        enabled=any(phase.penalty_weight > 0.0 for phase in config.phases)
+        and config.penalty_fn is None,
     )
 
     bucket_step = build_bucket_step(
@@ -1317,7 +1257,7 @@ def _build_training_kernels(
     # Strong-typed or frozen scalars never flip — skip the settle entirely
     # and keep the "one trace per bucket shape" contract untouched.
     settle = _has_weak_scalar_trainable(predictors, trainable)
-    optimizer = _build_optimizer(config.optimizer[0], config.lr[0])
+    optimizer = _build_optimizer(config.phases[0].optimizer, config.phases[0].lr)
     apply_update = build_apply_update(optimizer, trainable)
     step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
     settle_points = select_penalty_points(sources, extras, 1.0)
@@ -1403,7 +1343,7 @@ def train_seed_ensemble(
         raise ValueError("train_seed_ensemble: dataset has no bucket payloads")
 
     ui_ = _select_ui(ui, config.verbose)
-    ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
+    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
     (
         bucket_step,
         penalty_step,
@@ -1449,8 +1389,8 @@ def train_seed_ensemble(
         # (the first also brackets the warm-up compile), and _run_phases
         # fires the matching on_run_end.
         if member_idx > 0:
-            ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
-        _history, final, final_loss = _run_phases(
+            ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+        run = _run_phases(
             candidate,
             dataset,
             config,
@@ -1463,7 +1403,7 @@ def train_seed_ensemble(
             ui=ui_,
             step_update=step_update,
         )
-        trained.append((final_loss, final))
+        trained.append((run.final_loss, run.predictors))
 
     if not trained:
         warnings.warn(
@@ -1531,7 +1471,7 @@ def train_bootstrap_ensemble(
         raise ValueError("train_bootstrap_ensemble: dataset has no bucket payloads")
 
     ui_ = _select_ui(ui, config.verbose)
-    ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
+    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
 
     (
         bucket_step,
@@ -1580,8 +1520,8 @@ def train_bootstrap_ensemble(
             # on_run_start (the first also brackets the warm-up compile),
             # and _run_phases fires the matching on_run_end.
             if s > 0 or member_idx > 0:
-                ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
-            _history, final, final_loss = _run_phases(
+                ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+            run = _run_phases(
                 candidate,
                 boot,
                 config,
@@ -1596,7 +1536,7 @@ def train_bootstrap_ensemble(
                 ui=ui_,
                 step_update=step_update,
             )
-            all_trained.append((final_loss, final))
+            all_trained.append((run.final_loss, run.predictors))
 
     if not all_trained:
         warnings.warn(

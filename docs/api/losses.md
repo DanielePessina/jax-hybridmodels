@@ -19,7 +19,7 @@ Pass them by name via training-config `loss="mse"` (resolved through [`LOSS_REGI
 
 ### `masked_mse()`
 
-<small>`from jaxhybridmodels.losses import masked_mse` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.masked_mse`</small>
+<small>`from jaxhybridmodels.losses import masked_mse`</small>
 
 ```python
 masked_mse(
@@ -54,7 +54,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 
 ### `masked_mle()`
 
-<small>`from jaxhybridmodels.losses import masked_mle` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.masked_mle`</small>
+<small>`from jaxhybridmodels.losses import masked_mle`</small>
 
 ```python
 masked_mle(
@@ -84,7 +84,7 @@ per-experiment averaged version.
 
 ### `bal_mse()`
 
-<small>`from jaxhybridmodels.losses import bal_mse` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.bal_mse`</small>
+<small>`from jaxhybridmodels.losses import bal_mse`</small>
 
 ```python
 bal_mse(
@@ -116,7 +116,7 @@ from the outer mean rather than diluting measured experiments.
 
 ### `bal_mle()`
 
-<small>`from jaxhybridmodels.losses import bal_mle` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.bal_mle`</small>
+<small>`from jaxhybridmodels.losses import bal_mle`</small>
 
 ```python
 bal_mle(
@@ -143,7 +143,7 @@ channel are excluded from the outer mean.
 
 ### `LOSS_REGISTRY`
 
-<small>`from jaxhybridmodels.losses import LOSS_REGISTRY` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.LOSS_REGISTRY`</small>
+<small>`from jaxhybridmodels.losses import LOSS_REGISTRY`</small>
 
 ```python
 LOSS_REGISTRY = {
@@ -171,7 +171,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `resolve_loss_fn()`
 
-<small>`from jaxhybridmodels.losses import resolve_loss_fn` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.resolve_loss_fn`</small>
+<small>`from jaxhybridmodels.losses import resolve_loss_fn`</small>
 
 ```python
 resolve_loss_fn(

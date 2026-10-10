@@ -102,27 +102,27 @@ class TestTrainableMask:
 
     def test_custom_predicate_all_true(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda _: True)
+        mask = trainable_mask(bp, predicate=lambda _: True, train_scalers=True)
         assert _all_true(mask)
 
 
 class TestFreezeModulesOfType:
     def test_zeros_boundscaler_temperature_leaves(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_modules_of_type(mask, bp, BoundScaler)
         assert bool(new_mask.in_scaler.temperature) is False
         assert bool(new_mask.out_scaler.temperature) is False
 
     def test_leaves_other_subtrees_unchanged(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_modules_of_type(mask, bp, BoundScaler)
         assert _leaves_equal(mask.inner, new_mask.inner)
 
     def test_returns_new_mask_input_unmutated(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_modules_of_type(mask, bp, BoundScaler)
         assert new_mask is not mask
         assert bool(mask.in_scaler.temperature) is True
@@ -130,7 +130,7 @@ class TestFreezeModulesOfType:
 
     def test_no_match_returns_equivalent_mask(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
 
         class _Unrelated(eqx.Module):
             pass
@@ -141,16 +141,14 @@ class TestFreezeModulesOfType:
 
     def test_composable_union_of_two_types(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         m1 = freeze_modules_of_type(mask, bp, BoundScaler)
         m2 = freeze_modules_of_type(m1, bp, MLPPredictor)
         assert bool(m2.in_scaler.temperature) is False
         assert bool(m2.out_scaler.temperature) is False
         assert _all_false(m2.inner)
         # Original mask still untouched.
-        assert _leaves_equal(
-            mask, trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
-        )
+        assert _leaves_equal(mask, trainable_mask(bp, train_scalers=True))
         # Intermediate m1 has MLP leaves still as in default.
         assert _leaves_equal(m1.inner, mask.inner)
 
@@ -158,7 +156,7 @@ class TestFreezeModulesOfType:
 class TestFreezeWhere:
     def test_isinstance_predicate_zeros_matching_subtrees(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_where(mask, bp, lambda m: isinstance(m, BoundScaler))
         assert bool(new_mask.in_scaler.temperature) is False
         assert bool(new_mask.out_scaler.temperature) is False
@@ -166,14 +164,14 @@ class TestFreezeWhere:
 
     def test_predicate_never_true_is_no_op(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_where(mask, bp, lambda _: False)
         for o, n in zip(jtu.tree_leaves(mask), jtu.tree_leaves(new_mask), strict=True):
             assert bool(o) is bool(n)
 
     def test_returns_new_mask_input_unmutated(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_where(mask, bp, lambda m: isinstance(m, BoundScaler))
         assert new_mask is not mask
         assert bool(mask.in_scaler.temperature) is True
@@ -192,7 +190,7 @@ class TestFreezeWhere:
                 return x
 
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_where(mask, bp, lambda m: isinstance(m, _LeaflessPredictor))
         for o, n in zip(jtu.tree_leaves(mask), jtu.tree_leaves(new_mask), strict=True):
             assert bool(o) is bool(n)
@@ -201,14 +199,14 @@ class TestFreezeWhere:
 class TestFreezePaths:
     def test_zeros_named_leaf(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_paths(mask, ("in_scaler.temperature",))
         assert bool(new_mask.in_scaler.temperature) is False
         assert bool(new_mask.out_scaler.temperature) is True
 
     def test_zeros_multiple_named_leaves(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_paths(mask, ("in_scaler.temperature", "out_scaler.temperature"))
         assert bool(new_mask.in_scaler.temperature) is False
         assert bool(new_mask.out_scaler.temperature) is False
@@ -218,13 +216,13 @@ class TestFreezePaths:
         # frozen training normally: a wrong experiment, not a wrong program,
         # and nothing to notice at the time.
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         with pytest.raises(ValueError, match="no leaf matches"):
             freeze_paths(mask, ("does.not.exist",))
 
     def test_unknown_path_error_suggests_close_matches(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         real = _path_to_dotted_first_leaf(mask)
         typo = real[:-1] + "X"
         with pytest.raises(ValueError, match="Closest matches"):
@@ -232,28 +230,28 @@ class TestFreezePaths:
 
     def test_a_valid_path_alongside_an_invalid_one_still_raises(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         real = _path_to_dotted_first_leaf(mask)
         with pytest.raises(ValueError, match="no leaf matches"):
             freeze_paths(mask, (real, "nope.nope"))
 
     def test_empty_paths_is_no_op(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_paths(mask, ())
         for o, n in zip(jtu.tree_leaves(mask), jtu.tree_leaves(new_mask), strict=True):
             assert bool(o) is bool(n)
 
     def test_returns_new_mask_input_unmutated(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         new_mask = freeze_paths(mask, ("in_scaler.temperature",))
         assert new_mask is not mask
         assert bool(mask.in_scaler.temperature) is True
 
     def test_freezes_only_one_leaf_total(self):
         bp = _bounded()
-        mask = trainable_mask(bp, predicate=lambda leaf: default_trainable(leaf))
+        mask = trainable_mask(bp, train_scalers=True)
         before = _count_true(mask)
         new_mask = freeze_paths(mask, ("in_scaler.temperature",))
         after = _count_true(new_mask)

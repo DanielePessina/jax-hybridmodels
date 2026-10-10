@@ -24,6 +24,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
+from jax.typing import ArrayLike
 from jaxtyping import Float
 
 from jaxhybridmodels import (
@@ -134,7 +135,7 @@ def simulate_fn(
         v1=covariates["T_hi"],
     )
 
-    def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
         T_C = T_profile(t)
         T_K = T_C + 273.15
 

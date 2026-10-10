@@ -1,10 +1,10 @@
 # API Reference
 
-The public surface is split across the pages below, grouped by concern. Every symbol below is also re-exported at the top level — `from jaxhybridmodels import MLPPredictor` works exactly like `from jaxhybridmodels.predictors import MLPPredictor`.
+The public surface is split across the pages below, grouped by concern. The modelling workflow is re-exported at the top level, so `from jaxhybridmodels import MLPPredictor` works like `from jaxhybridmodels.predictors import MLPPredictor`. Lower-level pieces (kernels, penalties, losses, transforms, registries, UI) are imported from their submodule; each entry shows its import line.
 
 ## [Models and Results](/api/model)
 
-[`HybridModel`](/api/model#hybridmodel), [`FitResult`](/api/model#fitresult), [`FitHistory`](/api/model#fithistory), [`PredictionResult`](/api/model#predictionresult), [`ExperimentPrediction`](/api/model#experimentprediction), [`fit`](/api/model#fit), [`predict`](/api/model#predict)
+[`HybridModel`](/api/model#hybridmodel), [`FitResult`](/api/model#fitresult), [`FitHistory`](/api/model#fithistory), [`PredictionResult`](/api/model#predictionresult), [`ExperimentPrediction`](/api/model#experimentprediction)
 
 ## [Data: Experiments, Channels, Datasets](/api/data)
 
@@ -12,7 +12,7 @@ The public surface is split across the pages below, grouped by concern. Every sy
 
 ## [Predictors: Trainable Components](/api/predictors)
 
-[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`ConstantPredictor`](/api/predictors#constantpredictor), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
+[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 
@@ -40,7 +40,7 @@ The public surface is split across the pages below, grouped by concern. Every sy
 
 ## [Trainable Masks: Freezing Leaves](/api/trainable)
 
-[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_paths`](/api/trainable#freeze_paths), [`freeze_modules_of_type`](/api/trainable#freeze_modules_of_type), [`freeze_where`](/api/trainable#freeze_where), [`frozen_default_mask`](/api/trainable#frozen_default_mask), [`count_trainable_params`](/api/trainable#count_trainable_params)
+[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_paths`](/api/trainable#freeze_paths), [`freeze_modules_of_type`](/api/trainable#freeze_modules_of_type), [`freeze_where`](/api/trainable#freeze_where), [`count_trainable_params`](/api/trainable#count_trainable_params)
 
 ## [Prediction: Forward Simulation](/api/prediction)
 

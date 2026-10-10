@@ -11,7 +11,6 @@ Trainability is encoded as a boolean PyTree mask matching the predictors pytree'
 - [`freeze_paths`](#freeze_paths)
 - [`freeze_modules_of_type`](#freeze_modules_of_type)
 - [`freeze_where`](#freeze_where)
-- [`frozen_default_mask`](#frozen_default_mask)
 - [`count_trainable_params`](#count_trainable_params)
 
 ---
@@ -20,7 +19,7 @@ Trainability is encoded as a boolean PyTree mask matching the predictors pytree'
 
 ### `default_trainable()`
 
-<small>`from jaxhybridmodels.trainable import default_trainable` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.default_trainable`</small>
+<small>`from jaxhybridmodels.trainable import default_trainable`</small>
 
 ```python
 default_trainable(leaf: 'Any') -> 'bool'
@@ -32,7 +31,7 @@ Default trainability rule. ``True`` only for inexact-array leaves.
 else is fixed, including ints, bools, Python scalars and static-field
 values, which is what a gradient-based optimiser can actually update.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L35)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L36)</small>
 
 ---
 
@@ -46,17 +45,20 @@ values, which is what a gradient-based optimiser can actually update.
 trainable_mask(
     predictors: 'Any',
     predicate: 'Callable[[Any], bool]' = <default_trainable>,
+    train_scalers: 'bool' = False,
 ) -> Any
 ```
 
 Build a boolean mask matching the structure of ``predictors``.
 
 Applies ``predicate`` to parameter leaves, returning a tree of the same
-shape whose leaves are ``bool``. Constants stay fixed. The default
-predicate also freezes scaler temperatures; a custom predicate can opt
-into training scalers. Both optimisers take the result unchanged.
+shape whose leaves are ``bool``. ``Constant`` subtrees are always
+fixed. ``BoundScaler`` subtrees are fixed unless ``train_scalers`` is
+set: a trainable temperature moves gradient between the scaler and the
+inner network and tends to slow convergence. Both optimisers take the
+result unchanged.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L45)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L46)</small>
 
 ---
 
@@ -82,7 +84,7 @@ A path matching nothing raises, listing the closest real paths. Ignoring
 it quietly would leave a leaf the caller believed frozen training as
 normal, which shows up as a wrong experiment, not a wrong program.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L85)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L89)</small>
 
 ---
 
@@ -107,7 +109,7 @@ The common use is
 every scaler's ``temperature``. The temperature sets how sharply the
 squash saturates and is not meant to drift while the model trains.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L122)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L126)</small>
 
 ---
 
@@ -132,32 +134,7 @@ look at a static field. It must not compare leaf values. The walk pairs
 a mask node, whose leaves are booleans, with a predictors node, whose
 leaves are arrays, so a value comparison has no defined meaning here.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L146)</small>
-
----
-
-<a id="frozen_default_mask"></a>
-
-### `frozen_default_mask()`
-
-<small>`from jaxhybridmodels.trainable import frozen_default_mask` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.frozen_default_mask`</small>
-
-```python
-frozen_default_mask(predictors: 'Any', *classes: 'type') -> 'Any'
-```
-
-The default mask with every leaf of ``classes`` frozen.
-
-Shortcut for the composition every example writes by hand::
-
-    mask = trainable_mask(predictors)
-    mask = freeze_modules_of_type(mask, predictors, BoundScaler)
-
-Freezing ``BoundScaler`` leaves (their ``temperature``) is the common
-case, so ``frozen_default_mask(predictors, BoundScaler)`` is the
-conventional starting mask for a hybrid ODE fit.
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L166)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L150)</small>
 
 ---
 
@@ -177,4 +154,4 @@ Sums the sizes of every leaf the mask marks ``True``. Useful for
 reporting the effective search dimension before a run (e.g. to sanity
 check an evosax budget or a phase-transition threshold).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L184)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L170)</small>

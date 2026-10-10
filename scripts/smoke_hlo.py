@@ -33,8 +33,8 @@ from jaxhybridmodels import (
     SolverConfig,
     make_dataset,
     make_experiment,
-    predict_bucket,
 )
+from jaxhybridmodels.prediction import predict_bucket
 from jaxhybridmodels.solver import ADJOINT_REGISTRY
 
 # How many layout-related ops (copy/retile/transpose) are "normal" for

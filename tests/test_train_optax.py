@@ -41,7 +41,12 @@ from jaxhybridmodels.prediction import predict_dataset
 from jaxhybridmodels.predictors import BoundedPredictor, BoundScaler, MLPPredictor
 from jaxhybridmodels.trainable import trainable_mask
 from jaxhybridmodels.training.kernels import apply_length_mask
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, _shared_tournament, train_with_optax
+from jaxhybridmodels.training.optax import (
+    OptaxTrainingConfig,
+    TrainingPhase,
+    _shared_tournament,
+    train_with_optax,
+)
 from jaxhybridmodels.ui.testing import RecordingUI
 
 # The ``_bounded_predictors`` leaf reads ``input_keys=("omega_input",)``,
@@ -93,14 +98,7 @@ def test_convergence_recovers_omega():
     # rather than the global optimum.
     pred = OmegaPredictor(omega=1.5)
     ds = make_oscillator_dataset()
-    config = OptaxTrainingConfig(
-        steps=(150,),
-        lr=(5e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        verbose=False,
-    )
+    config = OptaxTrainingConfig(steps=150, lr=5e-2, verbose=False)
     history, trained = train_with_optax(
         pred,
         ds,
@@ -119,12 +117,7 @@ def test_multi_phase_runs_and_improves():
     ds = make_oscillator_dataset()
 
     config_phase0 = OptaxTrainingConfig(
-        steps=(40,),
-        lr=(5e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(0.5,),
-        verbose=False,
+        phases=(TrainingPhase(steps=40, lr=5e-2, horizon=0.5),), verbose=False
     )
     _, after_phase0 = train_with_optax(
         pred,
@@ -137,11 +130,10 @@ def test_multi_phase_runs_and_improves():
     )
 
     config_two_phase = OptaxTrainingConfig(
-        steps=(40, 40),
-        lr=(5e-2, 1e-2),
-        optimizer=("adamw", "adamw"),
-        reset_optimiser_state=(False, True),
-        length_schedule=(0.5, 1.0),
+        phases=(
+            TrainingPhase(steps=40, lr=5e-2, horizon=0.5),
+            TrainingPhase(steps=40, lr=1e-2, reset_optimizer=True),
+        ),
         verbose=False,
     )
     _, after_two = train_with_optax(
@@ -158,7 +150,7 @@ def test_multi_phase_runs_and_improves():
     assert err_two < err_phase0
 
 
-def test_length_schedule_does_not_recompile():
+def test_horizon_change_does_not_recompile():
     trace_count = [0]
     base_simulate = make_oscillator_simulate_fn()
 
@@ -170,11 +162,10 @@ def test_length_schedule_does_not_recompile():
     ds = make_oscillator_dataset()
 
     config = OptaxTrainingConfig(
-        steps=(2, 2),
-        lr=(1e-2, 1e-2),
-        optimizer=("adamw", "adamw"),
-        reset_optimiser_state=(False, False),
-        length_schedule=(0.5, 1.0),
+        phases=(
+            TrainingPhase(steps=2, lr=1e-2, horizon=0.5),
+            TrainingPhase(steps=2, lr=1e-2),
+        ),
         verbose=False,
     )
     train_with_optax(
@@ -214,13 +205,7 @@ def test_weak_zero_d_scalar_trains_via_settle_path():
     )
     assert jax.typeof(pred.scale).weak_type
     ds = make_oscillator_dataset()
-    config = OptaxTrainingConfig(
-        steps=(6,),
-        lr=(1e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        verbose=False,
-    )
+    config = OptaxTrainingConfig(steps=6, lr=1e-2, verbose=False)
     history, _trained = train_with_optax(
         pred,
         ds,
@@ -237,14 +222,7 @@ def test_weak_zero_d_scalar_trains_via_settle_path():
 def test_missing_key_raises():
     pred = OmegaPredictor(omega=1.0)
     ds = make_oscillator_dataset()
-    config = OptaxTrainingConfig(
-        steps=(1,),
-        lr=(1e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        verbose=False,
-    )
+    config = OptaxTrainingConfig(steps=1, lr=1e-2, verbose=False)
     with pytest.raises(TypeError):
         train_with_optax(  # ty: ignore[missing-argument]
             pred,
@@ -261,23 +239,9 @@ def test_tournament_reduces_across_seed_variance():
     base_losses: list[float] = []
     tournament_losses: list[float] = []
 
-    config_no_tournament = OptaxTrainingConfig(
-        steps=(1,),
-        lr=(0.0,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        verbose=False,
-    )
+    config_no_tournament = OptaxTrainingConfig(steps=1, lr=0.0, verbose=False)
     config_tournament = OptaxTrainingConfig(
-        steps=(1,),
-        lr=(0.0,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        tournament_attempts=4,
-        tournament_steps=20,
-        verbose=False,
+        steps=1, lr=0.0, tournament_attempts=4, tournament_steps=20, verbose=False
     )
 
     for seed in seeds:
@@ -328,14 +292,7 @@ def test_tournament_falls_back_when_all_attempts_fail():
     pred = OmegaPredictor(omega=2.0)
     ds = make_oscillator_dataset()
     config = OptaxTrainingConfig(
-        steps=(1,),
-        lr=(1e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        tournament_attempts=2,
-        tournament_steps=2,
-        verbose=False,
+        steps=1, lr=1e-2, tournament_attempts=2, tournament_steps=2, verbose=False
     )
     with pytest.warns(RuntimeWarning):
         train_with_optax(
@@ -352,14 +309,7 @@ def test_tournament_falls_back_when_all_attempts_fail():
 def test_recording_ui_lifecycle_events_fire():
     pred = OmegaPredictor(omega=2.0)
     ds = make_oscillator_dataset()
-    config = OptaxTrainingConfig(
-        steps=(2,),
-        lr=(1e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        verbose=False,
-    )
+    config = OptaxTrainingConfig(steps=2, lr=1e-2, verbose=False)
     ui = RecordingUI()
     train_with_optax(
         pred,
@@ -384,14 +334,7 @@ def test_recording_ui_lifecycle_events_fire():
 def test_silent_default_when_no_ui_and_verbose_false(capsys):
     pred = OmegaPredictor(omega=2.0)
     ds = make_oscillator_dataset()
-    config = OptaxTrainingConfig(
-        steps=(1,),
-        lr=(1e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        verbose=False,
-    )
+    config = OptaxTrainingConfig(steps=1, lr=1e-2, verbose=False)
     train_with_optax(
         pred,
         ds,
@@ -440,21 +383,14 @@ class TestPenaltyWiring:
     def _config(
         self,
         *,
-        steps: tuple[int, ...] = (3,),
-        lr: tuple[float, ...] = (1e-2,),
-        optimizer: tuple[str, ...] = ("adamw",),
-        reset_optimiser_state: tuple[bool, ...] = (False,),
-        length_schedule: tuple[float, ...] = (1.0,),
-        penalty_weight: tuple[float, ...] = (0.0,),
+        steps: int = 3,
+        penalty_weight: float = 0.0,
         penalty_points: tuple[Array, ...] | None = None,
         restore_best: bool = True,
     ) -> OptaxTrainingConfig:
         return OptaxTrainingConfig(
             steps=steps,
-            lr=lr,
-            optimizer=optimizer,
-            reset_optimiser_state=reset_optimiser_state,
-            length_schedule=length_schedule,
+            lr=1e-2,
             penalty_weight=penalty_weight,
             penalty_points=penalty_points,
             restore_best=restore_best,
@@ -485,52 +421,29 @@ class TestPenaltyWiring:
         # penalty never reached the loss at all.
         assert float(bound_penalty(preds, (box_grid(preds[0].in_scaler, 5),))) > 0.0
         h_off, _ = self._run(preds, ds, self._config())
-        h_zero, _ = self._run(preds, ds, self._config(penalty_weight=(0.0,)))
+        h_zero, _ = self._run(preds, ds, self._config(penalty_weight=0.0))
         assert h_off == h_zero
 
-    def test_penalty_weight_broadcasts_across_phases(self):
-        cfg = self._config(
-            steps=(2, 2),
-            lr=(1e-2, 1e-2),
-            optimizer=("adamw", "adamw"),
-            reset_optimiser_state=(False, False),
-            length_schedule=(1.0, 1.0),
-            penalty_weight=(1e-3,),
-        )
-        assert cfg.penalty_weight_for_phase(0) == 1e-3
-        assert cfg.penalty_weight_for_phase(1) == 1e-3
-
     def test_per_phase_penalty_weight_is_respected(self):
-        cfg = self._config(
-            steps=(2, 2),
-            lr=(1e-2, 1e-2),
-            optimizer=("adamw", "adamw"),
-            reset_optimiser_state=(False, False),
-            length_schedule=(1.0, 1.0),
-            penalty_weight=(0.0, 1e-2),
+        cfg = OptaxTrainingConfig(
+            phases=(TrainingPhase(2), TrainingPhase(2, penalty_weight=1e-2)),
+            verbose=False,
         )
-        assert cfg.penalty_weight_for_phase(0) == 0.0
-        assert cfg.penalty_weight_for_phase(1) == 1e-2
+        assert [phase.penalty_weight for phase in cfg.phases] == [0.0, 1e-2]
 
-    def test_wrong_length_penalty_weight_raises(self):
-        with pytest.raises(ValueError, match="penalty_weight"):
-            self._config(
-                steps=(2, 2),
-                lr=(1e-2, 1e-2),
-                optimizer=("adamw", "adamw"),
-                reset_optimiser_state=(False, False),
-                length_schedule=(1.0, 1.0),
-                penalty_weight=(0.0, 1e-2, 1e-2),
-            )
+    def test_shorthand_with_phases_raises(self):
+        # Per-phase settings belong on TrainingPhase once phases= is used.
+        with pytest.raises(ValueError, match="per TrainingPhase"):
+            OptaxTrainingConfig(phases=(TrainingPhase(2),), penalty_weight=1e-2)
 
     def test_negative_penalty_weight_raises(self):
         with pytest.raises(ValueError, match="non-negative"):
-            self._config(penalty_weight=(-1.0,))
+            self._config(penalty_weight=-1.0)
 
     @pytest.mark.parametrize("weight", [float("nan"), float("inf")])
     def test_nonfinite_penalty_weight_raises(self, weight):
         with pytest.raises(ValueError, match="finite"):
-            self._config(penalty_weight=(weight,))
+            self._config(penalty_weight=weight)
 
     def test_history_tracks_the_data_term_not_the_combined_objective(self):
         # A large penalty must not inflate the reported loss; otherwise
@@ -542,7 +455,7 @@ class TestPenaltyWiring:
         h_on, _ = self._run(
             preds,
             ds,
-            self._config(penalty_weight=(1e3,), penalty_points=(_EXTRA_POINTS,)),
+            self._config(penalty_weight=1e3, penalty_points=(_EXTRA_POINTS,)),
         )
         # Step 0 is evaluated at identical parameters in both runs, so the
         # data term must agree exactly even though the objectives differ.
@@ -559,9 +472,7 @@ class TestPenaltyWiring:
         _, on = self._run(
             preds,
             ds,
-            self._config(
-                penalty_weight=(1e2,), penalty_points=(_EXTRA_POINTS,), restore_best=False
-            ),
+            self._config(penalty_weight=1e2, penalty_points=(_EXTRA_POINTS,), restore_best=False),
         )
         w_off = off[0].inner.mlp.layers[-1].weight
         w_on = on[0].inner.mlp.layers[-1].weight
@@ -578,8 +489,8 @@ class TestPenaltyWiring:
             preds,
             ds,
             self._config(
-                steps=(25,),
-                penalty_weight=(1e2,),
+                steps=25,
+                penalty_weight=1e2,
                 penalty_points=(_EXTRA_POINTS,),
                 restore_best=False,
             ),
@@ -593,7 +504,7 @@ class TestPenaltyWiring:
         self._run(
             self._bounded_predictors(scale=50.0),
             ds,
-            self._config(penalty_weight=(1e-1,), penalty_points=(_EXTRA_POINTS,)),
+            self._config(penalty_weight=1e-1, penalty_points=(_EXTRA_POINTS,)),
             ui=ui,
         )
         steps = [kw for name, kw in ui.events if name == "on_step_end"]
@@ -606,7 +517,7 @@ class TestPenaltyWiring:
         ds = make_oscillator_dataset()
         preds = self._bounded_predictors(scale=50.0)
         with pytest.raises(ValueError, match="trajectory_penalty_fn"):
-            self._run(preds, ds, self._config(penalty_weight=(1e-2,)))
+            self._run(preds, ds, self._config(penalty_weight=1e-2))
 
     def test_extras_cover_an_unresolvable_leaf(self):
         ds = make_oscillator_dataset()
@@ -614,7 +525,7 @@ class TestPenaltyWiring:
         h, _ = self._run(
             preds,
             ds,
-            self._config(penalty_weight=(1e-2,), penalty_points=(_EXTRA_POINTS,)),
+            self._config(penalty_weight=1e-2, penalty_points=(_EXTRA_POINTS,)),
         )
         assert h  # ran to completion
 
@@ -634,7 +545,7 @@ class TestPenaltyWiring:
                 preds,
                 ds,
                 self._config(
-                    penalty_weight=(1e-2,),
+                    penalty_weight=1e-2,
                     penalty_points=(_EXTRA_POINTS, _EXTRA_POINTS),
                 ),
             )
@@ -646,18 +557,17 @@ class TestPenaltyWiring:
             self._run(
                 preds,
                 ds,
-                self._config(penalty_weight=(1e-2,), penalty_points=(jnp.zeros((2, 3)),)),
+                self._config(penalty_weight=1e-2, penalty_points=(jnp.zeros((2, 3)),)),
             )
 
 
 class TestPhaseOptimiserSwitch:
-    def _cfg(self, optimizer, reset):
+    def _cfg(self, second_optimizer, reset):
         return OptaxTrainingConfig(
-            steps=(2, 2),
-            lr=(1e-2, 1e-2),
-            optimizer=optimizer,
-            reset_optimiser_state=reset,
-            length_schedule=(1.0, 1.0),
+            phases=(
+                TrainingPhase(steps=2, lr=1e-2),
+                TrainingPhase(steps=2, lr=1e-2, optimizer=second_optimizer, reset_optimizer=reset),
+            ),
             verbose=False,
         )
 
@@ -665,16 +575,16 @@ class TestPhaseOptimiserSwitch:
         # It used to be accepted and then ignored: without a reset only the
         # learning rate is pushed into the existing opt_state, so phase 1
         # kept running adamw.
-        with pytest.raises(ValueError, match="reset_optimiser_state"):
-            self._cfg(("adamw", "adabelief"), (False, False))
+        with pytest.raises(ValueError, match="reset_optimizer"):
+            self._cfg("adabelief", False)
 
     def test_switching_optimizer_with_a_reset_is_allowed(self):
-        cfg = self._cfg(("adamw", "adabelief"), (False, True))
-        assert cfg.optimizer == ("adamw", "adabelief")
+        cfg = self._cfg("adabelief", True)
+        assert [phase.optimizer for phase in cfg.phases] == ["adamw", "adabelief"]
 
     def test_keeping_the_same_optimizer_needs_no_reset(self):
-        cfg = self._cfg(("adamw", "adamw"), (False, False))
-        assert cfg.reset_optimiser_state == (False, False)
+        cfg = self._cfg("adamw", False)
+        assert not cfg.phases[1].reset_optimizer
 
 
 class TestConfigValidation:
@@ -684,42 +594,22 @@ class TestConfigValidation:
     then quietly do the wrong thing, so the raise is the contract.
     """
 
-    def _kwargs(self, **overrides):
-        base = dict(
-            steps=(2,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            length_schedule=(1.0,),
-            verbose=False,
-        )
-        base.update(overrides)
-        return base
+    def test_no_phases_raises(self):
+        # Zero phases means the run loop never executes and the caller gets
+        # an empty history with no hint why.
+        with pytest.raises(ValueError, match="steps= for one phase"):
+            OptaxTrainingConfig(verbose=False)
+        with pytest.raises(ValueError, match="steps= for one phase"):
+            OptaxTrainingConfig(phases=(), verbose=False)
 
-    def test_empty_steps_raises(self):
-        # The phase count is len(steps), so zero phases means the run loop
-        # never executes and the caller gets an empty history with no hint why.
-        with pytest.raises(ValueError, match="at least one phase"):
-            OptaxTrainingConfig(
-                **self._kwargs(
-                    steps=(), lr=(), optimizer=(), reset_optimiser_state=(), length_schedule=()
-                )
-            )
+    def test_steps_and_phases_together_raise(self):
+        with pytest.raises(ValueError, match="steps= or phases="):
+            OptaxTrainingConfig(steps=2, phases=(TrainingPhase(3),))
 
-    @pytest.mark.parametrize(
-        "field,value",
-        [
-            ("lr", (1e-2, 1e-3)),
-            ("optimizer", ("adamw", "adamw")),
-            ("reset_optimiser_state", (False, False)),
-            ("length_schedule", (1.0, 1.0)),
-        ],
-    )
-    def test_phase_keyed_length_mismatch_raises(self, field, value):
-        # These four do not broadcast: a length that disagrees with steps
-        # would silently truncate or index out of range at a phase boundary.
-        with pytest.raises(ValueError, match="phase-keyed field"):
-            OptaxTrainingConfig(**self._kwargs(**{field: value}))
+    @pytest.mark.parametrize("steps", [0, -1])
+    def test_nonpositive_phase_steps_raise(self, steps):
+        with pytest.raises(ValueError, match="steps"):
+            TrainingPhase(steps)
 
     @pytest.mark.parametrize(
         "points",
@@ -729,18 +619,18 @@ class TestConfigValidation:
         # Penalty-only points are [G, n_inputs] physical input vectors; a
         # different rank cannot align with any leaf's input_keys.
         with pytest.raises(ValueError, match="penalty_points"):
-            OptaxTrainingConfig(**self._kwargs(penalty_points=points))
+            OptaxTrainingConfig(steps=2, penalty_points=points)
 
     @pytest.mark.parametrize("fraction", [0.0, -0.1, 1.5])
-    def test_length_schedule_outside_the_unit_interval_raises(self, fraction):
+    def test_horizon_outside_the_unit_interval_raises(self, fraction):
         # The fraction indexes a prefix of the observation times. Zero would
         # score nothing and above one would claim more timestamps than exist.
-        with pytest.raises(ValueError, match="length_schedule"):
-            OptaxTrainingConfig(**self._kwargs(length_schedule=(fraction,)))
+        with pytest.raises(ValueError, match="horizon"):
+            TrainingPhase(2, horizon=fraction)
 
-    def test_length_schedule_of_exactly_one_is_allowed(self):
+    def test_horizon_of_exactly_one_is_allowed(self):
         # The interval is (0, 1], so the default has to pass.
-        assert OptaxTrainingConfig(**self._kwargs(length_schedule=(1.0,))).length_schedule == (1.0,)
+        assert TrainingPhase(2, horizon=1.0).horizon == 1.0
 
 
 class TestBestSnapshotIsPreUpdate:
@@ -760,13 +650,7 @@ class TestBestSnapshotIsPreUpdate:
             OmegaPredictor(0.55),
             dataset,
             OptaxTrainingConfig(
-                steps=(self.STEPS,),
-                lr=(self.LR,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                length_schedule=(1.0,),
-                restore_best=restore_best,
-                verbose=False,
+                steps=self.STEPS, lr=self.LR, restore_best=restore_best, verbose=False
             ),
             simulate_fn=make_oscillator_simulate_fn(),
             state_to_output=oscillator_state_to_output,
@@ -816,7 +700,7 @@ class TestBestSnapshotIsPreUpdate:
 class TestRestoreBestAcrossHorizons:
     """``restore_best`` must not compare losses measured over different horizons.
 
-    ``length_schedule`` masks the loss to a prefix of each trajectory, so
+    ``TrainingPhase.horizon`` masks the loss to a prefix of each trajectory, so
     a phase at 0.2 and a phase at 1.0 are scoring different quantities.
     Run one running minimum across both and it lands in the short phase
     whenever the model cannot fit the long horizon as tightly, which is
@@ -870,16 +754,16 @@ class TestRestoreBestAcrossHorizons:
         )
         return total / len(dataset.bucket_payloads)
 
-    def _run(self, dataset: Dataset, *, steps, length_schedule, restore_best, lr=3e-2):
+    def _run(self, dataset: Dataset, *, steps, horizons, restore_best, lr=3e-2):
+        rates = (lr,) * len(steps) if isinstance(lr, float) else lr
         history, trained = train_with_optax(
             OmegaPredictor(0.55),
             dataset,
             OptaxTrainingConfig(
-                steps=steps,
-                lr=(lr,) * len(steps) if isinstance(lr, float) else lr,
-                optimizer=("adamw",) * len(steps),
-                reset_optimiser_state=(False,) * len(steps),
-                length_schedule=length_schedule,
+                phases=tuple(
+                    TrainingPhase(n, lr=rate, horizon=horizon)
+                    for n, rate, horizon in zip(steps, rates, horizons, strict=True)
+                ),
                 restore_best=restore_best,
                 verbose=False,
             ),
@@ -897,7 +781,7 @@ class TestRestoreBestAcrossHorizons:
         history, _ = self._run(
             self._dataset(),
             steps=(self.PHASE_1_STEPS, self.PHASE_2_STEPS),
-            length_schedule=(self.SHORT_HORIZON, 1.0),
+            horizons=(self.SHORT_HORIZON, 1.0),
             restore_best=True,
         )
         argmin = min(range(len(history)), key=history.__getitem__)
@@ -909,14 +793,14 @@ class TestRestoreBestAcrossHorizons:
         _, two_phase = self._run(
             dataset,
             steps=(self.PHASE_1_STEPS, self.PHASE_2_STEPS),
-            length_schedule=(self.SHORT_HORIZON, 1.0),
+            horizons=(self.SHORT_HORIZON, 1.0),
             restore_best=True,
         )
         # What the pre-fix code handed back: the best point of the short phase.
         _, short_only = self._run(
             dataset,
             steps=(self.PHASE_1_STEPS,),
-            length_schedule=(self.SHORT_HORIZON,),
+            horizons=(self.SHORT_HORIZON,),
             restore_best=True,
         )
         assert self._full_length_loss(dataset, two_phase) < self._full_length_loss(
@@ -924,7 +808,7 @@ class TestRestoreBestAcrossHorizons:
         )
 
     def test_a_constant_horizon_still_compares_across_phases(self):
-        # The reset is keyed on a *change* in length_schedule. Held flat,
+        # The reset is keyed on a *change* in horizon. Held flat,
         # the two phases measure the same thing and the running minimum has
         # to survive the boundary.
         #
@@ -938,14 +822,14 @@ class TestRestoreBestAcrossHorizons:
         history, restored = self._run(
             dataset,
             steps=(self.PHASE_1_STEPS, 3),
-            length_schedule=(1.0, 1.0),
+            horizons=(1.0, 1.0),
             restore_best=True,
             lr=(0.4, 0.0),
         )
         _, endpoint = self._run(
             dataset,
             steps=(self.PHASE_1_STEPS, 3),
-            length_schedule=(1.0, 1.0),
+            horizons=(1.0, 1.0),
             restore_best=False,
             lr=(0.4, 0.0),
         )
@@ -984,11 +868,8 @@ class TestTournamentSelection:
         return OptaxTrainingConfig(
             # One main-loop step at zero learning rate, so what comes back
             # is the tournament's choice and nothing else.
-            steps=(1,),
-            lr=(0.0,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            length_schedule=(1.0,),
+            steps=1,
+            lr=0.0,
             tournament_attempts=attempts,
             tournament_steps=15,
             tournament_lr=1e-2,

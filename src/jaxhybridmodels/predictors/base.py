@@ -39,6 +39,7 @@ siblings get different fresh weights when the tournament restarts a run.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from numbers import Real
 from typing import Any, cast
 
@@ -47,6 +48,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaxhybridmodels.penalties import soft_inverse
@@ -57,7 +59,8 @@ __all__ = (
     "Predictor",
     "BoundScaler",
     "BoundedPredictor",
-    "ConstantPredictor",
+    "Constant",
+    "Parameter",
     "reinitialize_with_key",
     "reinitialize_pytree_with_key",
 )
@@ -90,12 +93,41 @@ class Predictor(eqx.Module):
         raise NotImplementedError("Predictor is abstract; concrete subclasses implement __call__")
 
 
-class ConstantPredictor(eqx.Module):
+def _float_array(value: Any) -> Array:
+    """``jnp.asarray`` that promotes integer input to the default float dtype."""
+    return jnp.asarray(value, dtype=jnp.result_type(jnp.asarray(value).dtype, float))
+
+
+def _is_pair(spec: Any) -> bool:
+    """True for one ``(low, high)`` pair, as opposed to a sequence of pairs."""
+    return len(spec) == 2 and all(v is None or isinstance(v, Real) for v in spec)
+
+
+def _bound_pairs(spec: Any, size: int) -> tuple[tuple[Any, Any], ...]:
+    """Expand None, one shared pair, or one pair per component to ``size`` pairs."""
+    if spec is None:
+        return ((None, None),) * size
+    if _is_pair(spec):
+        return (tuple(spec),) * size
+    pairs = tuple(tuple(pair) for pair in spec)
+    if len(pairs) != size:
+        raise ValueError(f"Expected {size} bound pairs, got {len(pairs)}")
+    return pairs
+
+
+class Constant(eqx.Module):
     """Fixed physical values, read through ``.value``.
 
-    Lists become arrays; tuples retain their structure and numeric leaves
-    become JAX arrays. Default training masks and tournament restarts leave
-    constants unchanged. No bounds or dummy inputs are needed.
+    Lists become arrays; tuples keep their structure and numeric leaves
+    become JAX arrays. The default training mask and tournament restarts
+    leave constants unchanged.
+
+    Examples
+    --------
+    ::
+
+        damping = Constant(0.0)
+        damping.value  # Array(0.)
     """
 
     value: Any
@@ -104,23 +136,13 @@ class ConstantPredictor(eqx.Module):
         def convert(item: Any) -> Any:
             if isinstance(item, tuple):
                 return tuple(convert(child) for child in item)
-            return jnp.asarray(item, dtype=jnp.result_type(jnp.asarray(item).dtype, float))
+            return _float_array(item)
 
         self.value = convert(value)
 
-    def initialized_with_key(self, key: Array) -> ConstantPredictor:
+    def initialized_with_key(self, key: Array) -> Constant:
         """Keep fixed values unchanged when restarting a model."""
         return self
-
-
-class _ValuePredictor(Predictor):
-    """Internal latent storage for a scalar or array parameter."""
-
-    latent: Array
-    shape: tuple[int, ...] = eqx.field(static=True)
-
-    def __call__(self, x: Array) -> Array:
-        return self.latent
 
 
 class BoundScaler(eqx.Module):
@@ -313,17 +335,62 @@ class BoundScaler(eqx.Module):
         if not math.isfinite(self.z_knee) or self.z_knee < 0.0:
             raise ValueError("BoundScaler z_knee must be finite and non-negative")
 
-    def _lows_highs(self) -> tuple[Array, Array]:
-        """Box edges in *physical* units, as two ``[len(bounds)]`` arrays."""
-        lows = jnp.asarray([b[0] for b in self.bounds])
-        highs = jnp.asarray([b[1] for b in self.bounds])
-        return lows, highs
+    def _component(self, v: Array, i: int, *, inverse: bool, guard: bool = True) -> Array:
+        """Map component ``i`` between physical and latent units.
 
-    def _warped_edges(self) -> tuple[Array, Array]:
-        """Box edges in *warped* coordinates, as two ``[len(bounds)]`` arrays."""
-        lows = jnp.asarray([b[0] for b in self.warped_bounds])
-        highs = jnp.asarray([b[1] for b in self.warped_bounds])
-        return lows, highs
+        The bound kind is static, so only the branch for this component is
+        traced and no infinite endpoint ever enters the arithmetic. A finite
+        interval uses the warp and squash. One finite endpoint uses softplus
+        distance from it. No endpoints is the identity. ``guard=False``
+        gives the exact inverse, used to initialise a ``Parameter`` close to
+        an endpoint.
+        """
+        low, high = self.bounds[i]
+        temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
+        if math.isfinite(low) and math.isfinite(high):
+            wl, wh = self.warped_bounds[i]
+            warp = WARPS[self.warp]
+            squash = BOUND_TRANSFORMS[self.transform]
+            if not inverse:
+                return warp.inverse(wl + (wh - wl) * squash.forward(v / temperature))
+            normalized = (warp.forward(v) - wl) / (wh - wl)
+            if not guard:
+                return squash.inverse(normalized) * temperature
+            return (
+                soft_inverse(normalized, squash.inverse, squash.inverse_slope, self.logit_eps)
+                * temperature
+            )
+        if not (math.isfinite(low) or math.isfinite(high)):
+            return v
+        edge, sign = (low, 1.0) if math.isfinite(low) else (high, -1.0)
+        if not inverse:
+            return edge + sign * jax.nn.softplus(v / temperature)
+        distance = sign * (v - edge)
+        if not guard:
+            # Stable softplus inverse: log(expm1(d)) = d + log(1 - exp(-d)).
+            return (distance + jnp.log(-jnp.expm1(-distance))) * temperature
+        # Below logit_eps the inverse continues linearly, as in soft_inverse,
+        # so an input at or past the endpoint keeps a finite sensitivity.
+        safe = jnp.maximum(distance, self.logit_eps)
+        latent = safe + jnp.log(-jnp.expm1(-safe))
+        slope = 1.0 / (-jnp.expm1(-self.logit_eps))
+        return (latent + jnp.minimum(distance - self.logit_eps, 0.0) * slope) * temperature
+
+    def _map(self, x: Array, *, inverse: bool, guard: bool = True) -> Array:
+        """Apply :meth:`_component` along the last axis; a scalar broadcasts.
+
+        A one-component scaler acts elementwise on any shape, so a batch of
+        values against a single box needs no reshaping.
+        """
+        x = jnp.atleast_1d(x)
+        if len(self.bounds) == 1:
+            return self._component(x, 0, inverse=inverse, guard=guard)
+        x = jnp.broadcast_to(x, (*x.shape[:-1], len(self.bounds)))
+        parts = [
+            self._component(x[..., i], i, inverse=inverse, guard=guard)
+            for i in range(len(self.bounds))
+        ]
+        return jnp.stack(parts, axis=-1)
 
     def to_latent(self, x: Array) -> Array:
         """Map a physical value to its latent representative.
@@ -350,8 +417,6 @@ class BoundScaler(eqx.Module):
         The continuation reports direction, not magnitude. Pair it with
         :meth:`input_violation` when an input can leave its box.
         """
-        if any(not all(map(math.isfinite, pair)) for pair in self.bounds):
-            return self._open_map(x, inverse=True)
         warp = WARPS[self.warp]
         if warp.requires_positive:
             nonpositive = jnp.any(x <= 0.0)
@@ -366,12 +431,7 @@ class BoundScaler(eqx.Module):
                     nonpositive,
                     f"BoundScaler warp={self.warp!r} requires strictly positive runtime inputs",
                 )
-        lows, highs = self._warped_edges()
-        normalized = (warp.forward(x) - lows) / (highs - lows)
-        t = BOUND_TRANSFORMS[self.transform]
-        return soft_inverse(normalized, t.inverse, t.inverse_slope, self.logit_eps) * (
-            self.temperature
-        )
+        return self._map(x, inverse=True)
 
     def input_violation(self, x: Array) -> Array:
         """Scalar squared hinge on how far ``x`` fell outside ``bounds``.
@@ -430,88 +490,156 @@ class BoundScaler(eqx.Module):
         warped box, then unwarp. The result is finite and inside the box for
         any finite ``z``, so this direction needs no guard.
         """
-        if any(not all(map(math.isfinite, pair)) for pair in self.bounds):
-            return self._open_map(z, inverse=False)
-        warp = WARPS[self.warp]
-        lows, highs = self._warped_edges()
-        squashed = BOUND_TRANSFORMS[self.transform].forward(z / self.temperature)
-        return warp.inverse(lows + (highs - lows) * squashed)
-
-    def _open_map(self, x: Array, *, inverse: bool) -> Array:
-        """Dispatch by static bound kind; avoid evaluating invalid infinite branches."""
-        if x.ndim == 0:
-            x = jnp.broadcast_to(x, (len(self.bounds),))
-        parts = []
-        for i, (low, high) in enumerate(self.bounds):
-            v = x[..., i]
-            temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
-            if math.isfinite(low) and math.isfinite(high):
-                wl, wh = self.warped_bounds[i]
-                transform = BOUND_TRANSFORMS[self.transform]
-                warp = WARPS[self.warp]
-                if inverse:
-                    normalized = (warp.forward(v) - wl) / (wh - wl)
-                    parts.append(
-                        soft_inverse(
-                            normalized, transform.inverse, transform.inverse_slope, self.logit_eps
-                        )
-                        * temperature
-                    )
-                else:
-                    parts.append(warp.inverse(wl + (wh - wl) * transform.forward(v / temperature)))
-            elif math.isfinite(low) or math.isfinite(high):
-                if inverse:
-                    distance = v - low if math.isfinite(low) else high - v
-                    # Linear continuation below eps keeps input sensitivities finite.
-                    safe = jnp.maximum(distance, self.logit_eps)
-                    latent = safe + jnp.log(-jnp.expm1(-safe))
-                    slope = 1.0 / (-jnp.expm1(-self.logit_eps))
-                    parts.append(
-                        (latent + jnp.minimum(distance - self.logit_eps, 0.0) * slope) * temperature
-                    )
-                else:
-                    distance = jax.nn.softplus(v / temperature)
-                    parts.append(low + distance if math.isfinite(low) else high - distance)
-            else:
-                parts.append(v)
-        return jnp.stack(parts, axis=-1)
+        return self._map(z, inverse=False)
 
     def scale_inputs(self, x: Array) -> Array:
-        """Scale finite input intervals; leave open input dimensions unchanged."""
+        """Normalise network inputs: finite intervals map to latent, open ones pass through.
+
+        A one-sided input bound says where the input may go, not what scale
+        it has, so the network sees such an input unchanged.
+        """
         if all(all(map(math.isfinite, pair)) for pair in self.bounds):
             return self.to_latent(x)
-        mapped = self.to_latent(x)
-        finite = jnp.asarray([all(map(math.isfinite, pair)) for pair in self.bounds])
-        return jnp.where(finite, mapped, x)
+        x = jnp.atleast_1d(x)
+        parts = [
+            self._component(x[..., i], i, inverse=True)
+            if all(map(math.isfinite, pair))
+            else x[..., i]
+            for i, pair in enumerate(self.bounds)
+        ]
+        return jnp.stack(parts, axis=-1)
 
 
-class BoundedPredictor(Predictor):
-    """A trainable physical value or a network with optional physical bounds.
+class Parameter(eqx.Module):
+    """A trainable physical scalar or array, read through ``.value``.
 
-    Supply ``value=`` to initialize a scalar or array in physical units and
-    read its current value through ``.value``. The value must be finite and
-    strictly inside finite endpoints. No inputs or inner class are needed.
+    The optimiser updates ``latent``. ``.value`` maps it through ``scaler``
+    into physical units, so the value respects ``bounds`` at every step
+    without clipping.
 
-    Supply ``inner=`` for a network and call it with named inputs or a rank-1
-    array. The constructor infers dimensions from the network when possible.
-    ``input_bounds`` / ``output_bounds`` are convenient alternatives to
-    explicit ``in_scaler`` / ``out_scaler`` instances. ``bounds`` aliases
-    ``output_bounds``. A single pair broadcasts to every component.
-
-    Finite output intervals use the configured squash. A single endpoint
-    uses softplus distance from that endpoint; missing endpoints (None or
-    signed infinity) on both sides give identity. Open input dimensions are
-    passed unchanged to the network. Scaler temperatures are fixed by the
-    default training mask.
+    Parameters
+    ----------
+    value
+        Initial physical value: a scalar or an array of any shape. Must be
+        finite and strictly inside its bounds.
+    bounds
+        One ``(low, high)`` pair shared by every element, or one pair per
+        element in flattened order. None for a missing endpoint. Omit for
+        an unbounded value. Two finite endpoints use the ``transform``
+        squash. One endpoint uses softplus distance from it.
+    transform, warp
+        Passed to :class:`BoundScaler`. ``warp="log10"`` suits rate
+        constants that span decades and needs finite positive bounds.
 
     Examples
     --------
-    Train a scalar with a lower bound::
+    ::
 
-        rate = BoundedPredictor(value=0.1, bounds=(0.0, None))
-        physical_rate = rate.value
+        rate = Parameter(0.1, bounds=(0.0, None))
+        rate.value  # Array(0.1)
+    """
 
-    Store fixed values with ``ConstantPredictor`` instead.
+    latent: Array
+    scaler: BoundScaler
+    shape: tuple[int, ...] = eqx.field(static=True)
+
+    def __init__(
+        self,
+        value: Any,
+        bounds: Any = None,
+        *,
+        transform: str = "sigmoid",
+        warp: str = "linear",
+    ) -> None:
+        physical = _float_array(value)
+        if physical.size == 0 or not bool(jnp.all(jnp.isfinite(physical))):
+            raise ValueError("Parameter value must be nonempty and finite")
+        flat = physical.reshape(-1)
+        scaler = BoundScaler(_bound_pairs(bounds, flat.size), transform=transform, warp=warp)
+        for (low, high), v in zip(scaler.bounds, flat.tolist(), strict=True):
+            if not low < v < high:
+                raise ValueError(f"Parameter value {v} must lie strictly inside ({low}, {high})")
+        # The exact inverse, not to_latent's guarded one, so a value close to
+        # an endpoint still round-trips through .value.
+        self.latent = scaler._map(flat, inverse=True, guard=False)
+        self.scaler = scaler
+        self.shape = tuple(physical.shape)
+
+    @property
+    def value(self) -> Array:
+        """Current value in physical units, with the shape given at construction."""
+        return self.scaler.from_latent(self.latent).reshape(self.shape)
+
+    def initialized_with_key(self, key: Array) -> Parameter:
+        """Draw a fresh standard-normal latent; the scaler is left untouched."""
+        fresh = jr.normal(key, self.latent.shape, dtype=self.latent.dtype)
+        return eqx.tree_at(lambda p: p.latent, self, fresh)
+
+
+class BoundedPredictor(Predictor):
+    """A network in physical units, built from an inner network that never sees a bound.
+
+    This is the thing a user's vector field calls. It takes named inputs
+    in physical units, returns an output in physical units, and keeps
+    the output inside its declared range.
+
+    Three stages
+    ------------
+    1. **Normalise the input.** ``in_scaler.scale_inputs`` maps each input
+       from its physical range onto an unbounded latent, so the network
+       receives numbers of comparable size whether the input was a
+       temperature in the tens or a concentration in the thousandths.
+       Inputs with an open bound pass through unchanged.
+    2. **Run the network.** The trainable ``inner`` ``Predictor`` maps
+       latent to latent. It is handed no bound information at all.
+    3. **Squash the output.** ``out_scaler.from_latent`` maps the
+       network's unbounded output into the physical output range.
+
+    The network is better off never seeing a bound. Given one it would
+    have to enforce the range itself, with either a clip (zero gradient
+    outside, so a parameter that leaves cannot come back) or a final
+    squash it would have to learn to aim. Moving the squash into
+    ``out_scaler`` makes an out-of-range output unrepresentable, leaves
+    ``inner`` free to be any ``Array -> Array`` function, and lets the
+    same network be reused under different bounds.
+
+    For a single trainable number or array with no inputs, use
+    :class:`Parameter`. For a fixed value, use :class:`Constant`.
+
+    Calling it
+    ----------
+    The user builds predictor inputs in the vector field by mixing
+    constant covariates with state-derived or exogenous time-dependent
+    values (CONTEXT.md, "Predictor inputs"). ``__call__`` accepts:
+
+    - A mapping from name to value. Extra keys are allowed; only the subset named
+      in ``self.input_keys`` is pulled, in declared order. A missing key
+      raises ``KeyError``.
+    - An array, rank-1 of length ``len(input_keys)``, shape-checked.
+
+    Construction
+    ------------
+    Give the scalers either as ``in_scaler`` / ``out_scaler`` instances or
+    as ``input_bounds`` / ``output_bounds`` pairs (None for a missing
+    endpoint; one pair broadcasts to every component). Sizes not fixed by
+    the bounds come from ``input_keys`` or ``inner.in_size`` /
+    ``inner.out_size``. At least one input is required: a zero-input
+    network has no training signal, and that case is a ``Parameter``.
+    Omitting ``input_keys`` auto-fills ``("x1", ..., "xN")``, so a saved
+    predictor always describes its own input contract.
+
+    Attributes
+    ----------
+    input_keys : tuple[str, ...]
+        Static. Declared order of the physical-units inputs; one entry per
+        ``in_scaler.bounds`` row. Drives subset extraction when ``__call__``
+        receives a dict.
+    in_scaler : BoundScaler
+        Maps physical-space inputs into the inner network's latent space.
+    inner : Predictor
+        Trainable Array -> Array module operating in latent space.
+    out_scaler : BoundScaler
+        Maps the inner network's latent output back to physical units.
     """
 
     input_keys: tuple[str, ...] = eqx.field(static=True)
@@ -522,97 +650,45 @@ class BoundedPredictor(Predictor):
     def __init__(
         self,
         *,
+        inner: Predictor,
         in_scaler: BoundScaler | None = None,
-        inner: Predictor | None = None,
         out_scaler: BoundScaler | None = None,
         input_keys: tuple[str, ...] | None = None,
-        value: Any = None,
-        bounds: Any = None,
         input_bounds: Any = None,
         output_bounds: Any = None,
     ) -> None:
-        if (value is None) == (inner is None):
-            raise ValueError("Pass exactly one of value= or inner= to BoundedPredictor")
-        if bounds is not None and output_bounds is not None:
-            raise ValueError("Use bounds= or output_bounds=, not both")
-        output_bounds = bounds if bounds is not None else output_bounds
-        if out_scaler is not None and output_bounds is not None:
-            raise ValueError("Use out_scaler= or output_bounds=, not both")
         if in_scaler is not None and input_bounds is not None:
             raise ValueError("Use in_scaler= or input_bounds=, not both")
+        if out_scaler is not None and output_bounds is not None:
+            raise ValueError("Use out_scaler= or output_bounds=, not both")
 
-        def pairs(spec: Any, size: int) -> tuple:
-            if spec is None:
-                return ((None, None),) * size
-            if len(spec) == 2 and all(v is None or isinstance(v, Real) for v in spec):
-                return (tuple(spec),) * size
-            result = tuple(tuple(pair) for pair in spec)
-            if len(result) != size:
-                raise ValueError(f"Expected {size} bound pairs, got {len(result)}")
-            return result
+        def size_of(bounds: Any, *fallbacks: int | None) -> int | None:
+            # A sequence of pairs fixes the size; one shared pair does not.
+            if bounds is not None and not _is_pair(bounds):
+                return len(bounds)
+            known = next((s for s in fallbacks if s is not None), None)
+            return 1 if known is None and bounds is not None else known
 
-        if value is not None:
-            if in_scaler is not None or input_bounds is not None or input_keys:
-                raise ValueError("A value predictor has no inputs")
-            physical = jnp.asarray(value, dtype=jnp.result_type(jnp.asarray(value).dtype, float))
-            if physical.size == 0 or not bool(jnp.all(jnp.isfinite(physical))):
-                raise ValueError("Initial value must be nonempty and finite")
-            out_scaler = out_scaler or BoundScaler(pairs(output_bounds, physical.size))
-            if len(out_scaler.bounds) != physical.size:
-                raise ValueError("Output bounds must match the number of value components")
-            flat = physical.reshape(-1)
-            for i, (low, high) in enumerate(out_scaler.bounds):
-                if not low < float(flat[i]) < high:
-                    raise ValueError("Initial value must lie strictly inside its bounds")
-            latent = out_scaler.to_latent(flat)
-            # Parameter initialization uses the exact inverse, including near endpoints.
-            for i, (low, high) in enumerate(out_scaler.bounds):
-                temperature = (
-                    out_scaler.temperature
-                    if out_scaler.temperature.ndim == 0
-                    else out_scaler.temperature[i]
-                )
-                if math.isfinite(low) and math.isfinite(high):
-                    wl, wh = out_scaler.warped_bounds[i]
-                    normalized = (WARPS[out_scaler.warp].forward(flat[i]) - wl) / (wh - wl)
-                    z = BOUND_TRANSFORMS[out_scaler.transform].inverse(normalized) * temperature
-                elif math.isfinite(low) or math.isfinite(high):
-                    distance = flat[i] - low if math.isfinite(low) else high - flat[i]
-                    z = (distance + jnp.log(-jnp.expm1(-distance))) * temperature
-                else:
-                    z = flat[i]
-                latent = latent.at[i].set(z)
-            inner = _ValuePredictor(latent=latent, shape=physical.shape)
-            in_scaler = BoundScaler(())
-        else:
-            assert inner is not None
-            if in_scaler is None:
-                n = len(input_keys) if input_keys is not None else getattr(inner, "in_size", None)
-                if n is None and input_bounds is not None:
-                    n = (
-                        1
-                        if len(input_bounds) == 2
-                        and all(v is None or isinstance(v, Real) for v in input_bounds)
-                        else len(input_bounds)
-                    )
-                if n is None:
-                    raise ValueError("Supply input_keys, input_bounds, or inner.in_size")
-                in_scaler = BoundScaler(pairs(input_bounds, int(n)))
-            if out_scaler is None:
-                size = getattr(inner, "out_size", None)
-                if size is None and output_bounds is not None:
-                    size = (
-                        1
-                        if len(output_bounds) == 2
-                        and all(v is None or isinstance(v, Real) for v in output_bounds)
-                        else len(output_bounds)
-                    )
-                if size is None:
-                    raise ValueError("Supply output_bounds, out_scaler, or inner.out_size")
-                out_scaler = BoundScaler(pairs(output_bounds, int(size)))
+        if in_scaler is None:
+            n_in = size_of(
+                input_bounds,
+                None if input_keys is None else len(input_keys),
+                getattr(inner, "in_size", None),
+            )
+            if n_in is None:
+                raise ValueError("Supply in_scaler, input_bounds, input_keys, or inner.in_size")
+            in_scaler = BoundScaler(_bound_pairs(input_bounds, int(n_in)))
+        if out_scaler is None:
+            n_out = size_of(output_bounds, getattr(inner, "out_size", None))
+            if n_out is None:
+                raise ValueError("Supply out_scaler, output_bounds, or inner.out_size")
+            out_scaler = BoundScaler(_bound_pairs(output_bounds, int(n_out)))
         n = len(in_scaler.bounds)
-        if n == 0 and not isinstance(inner, _ValuePredictor):
-            raise ValueError("Network predictors require inputs; use value= for a scalar or array")
+        if n < 1:
+            raise ValueError(
+                "BoundedPredictor requires at least one input; "
+                "use Parameter for a trainable value with no inputs."
+            )
         if input_keys is None:
             resolved_keys: tuple[str, ...] = tuple(f"x{i + 1}" for i in range(n))
         else:
@@ -640,22 +716,14 @@ class BoundedPredictor(Predictor):
         self.inner = inner
         self.out_scaler = out_scaler
 
-    @property
-    def value(self) -> Array:
-        """Current physical scalar/array value; available only for value predictors."""
-        if not isinstance(self.inner, _ValuePredictor):
-            raise AttributeError("Network predictors depend on inputs; call the predictor instead")
-        return self.out_scaler.from_latent(self.inner.latent).reshape(self.inner.shape)
-
-    def __call__(self, inputs: dict[str, Array] | Array) -> Array:
-        if isinstance(self.inner, _ValuePredictor):
-            raise TypeError("Read a value predictor through .value")
+    def __call__(self, inputs: Mapping[str, ArrayLike] | ArrayLike) -> Array:
         n = len(self.input_keys)
-        if isinstance(inputs, dict):
+        if isinstance(inputs, Mapping):
             # A missing key raises KeyError from the dict access itself.
             # eqx.error_if does not fit here: it needs an array to attach the
             # check to, and the failure happens before any array exists.
-            x = jnp.stack([jnp.asarray(inputs[k]) for k in self.input_keys])
+            named = cast(Mapping[str, ArrayLike], inputs)  # ty narrows to bare Mapping
+            x = jnp.stack([jnp.asarray(named[k]) for k in self.input_keys])
         else:
             x = jnp.asarray(inputs)
             # Array path contract: rank-1 with length matching input_keys. The

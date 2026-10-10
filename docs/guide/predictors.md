@@ -6,34 +6,34 @@ you can define another predictor by subclassing `Predictor`.
 
 ## Fixed values and trainable quantities
 
-Use `.value` for stored quantities. A constant stays fixed under the default
-training mask and tournament restarts:
+`Constant` stores a fixed value and `Parameter` a trainable one. Read both
+through `.value`. A constant stays fixed under the default training mask and
+tournament restarts:
 
 ```python
-omega = hm.ConstantPredictor(value=1.0)
+omega = hm.Constant(1.0)
 frequency = omega.value
-constants = hm.ConstantPredictor(value=(1.0, [0.1, 0.2]))
+constants = hm.Constant((1.0, [0.1, 0.2]))
 scalar, vector = constants.value
 ```
 
-Lists become arrays; tuples preserve their nested structure with array
-leaves. Constants have no bounds or `trainable=True` option.
+Lists become arrays; tuples keep their nested structure with array leaves.
 
-Use `BoundedPredictor(value=...)` for a trainable scalar or array:
+`Parameter` holds a trainable scalar or array:
 
 ```python
-rate = hm.BoundedPredictor(value=0.1, bounds=(0.0, None))
-offset = hm.BoundedPredictor(value=0.0)
-kinetics = hm.BoundedPredictor(
-    value=[0.1, 0.02], bounds=[(0.0, None), (0.0, 1.0)],
-)
+rate = hm.Parameter(0.1, bounds=(0.0, None))
+offset = hm.Parameter(0.0)
+kinetics = hm.Parameter([0.1, 0.02], bounds=[(0.0, None), (0.0, 1.0)])
+k_ref = hm.Parameter(1e-3, bounds=(1e-6, 1e2), warp="log10")
 current_rate = rate.value
 ```
 
-The initial value is in physical units and must lie strictly inside supplied
-bounds. Scalars stay scalars; array parameters retain their shape. A single
-bound pair broadcasts to all components; per-component pairs follow flattened
-array order. Supply either `value=` or `inner=`, never both.
+The initial value is in physical units and must lie strictly inside its
+bounds. Scalars stay scalars; arrays keep their shape. One bound pair applies
+to every element; per-element pairs follow flattened array order. The
+optimiser updates an unbounded latent, and `.value` maps it back, so the
+value never leaves its bounds. Tournament restarts draw a fresh latent.
 
 ## Optional bounds
 
@@ -51,9 +51,10 @@ one-sided outputs incur a penalty only toward their finite endpoint.
 `box_grid` requires finite input intervals; supply explicit penalty points
 for networks with open input bounds.
 
-## A bounded predictor
+## A bounded network
 
-`BoundedPredictor` composes three parts:
+`BoundedPredictor` wraps a network that takes inputs. It composes three
+parts:
 
 1. `in_scaler` maps physical inputs to latent inputs.
 2. `inner` evaluates the predictor in latent space.
@@ -87,6 +88,22 @@ rate = predictor({
 ```
 
 The array call accepts a rank-1 array in the same order as `input_keys`.
+Mapping values may be Python floats or JAX arrays.
+
+`input_bounds` and `output_bounds` build the scalers from bound pairs. Sizes
+come from the bounds, `input_keys`, or the network's `in_size`/`out_size`:
+
+```python
+predictor = hm.BoundedPredictor(
+    inner=hm.MLPPredictor(in_size=2, out_size=1, width_size=16, depth=2, key=key),
+    input_keys=("temperature_C", "supersaturation"),
+    input_bounds=((0.0, 100.0), (0.0, 5.0)),
+    output_bounds=(0.0, None),
+)
+```
+
+A network needs at least one input. For a trainable value with no inputs,
+use `Parameter`.
 
 ## Choosing bounds
 
@@ -102,7 +119,7 @@ requires strictly positive state-derived values.
 The output squash keeps physical values inside its declared box. Its gradient
 gets small near the edges. The optional `penalty_weight` in an Optax or Evosax
 config charges saturation at the *measured points* — the input vectors the
-loss actually sees at observed cells — plus any user-supplied penalty-only
+loss actually sees at observed cells, plus any user-supplied penalty-only
 points (`penalty_points`, one array per leaf; `box_grid` builds a warp-uniform
 box sweep if you want one).
 
@@ -112,14 +129,14 @@ where optimization becomes slow.
 
 ## Initialization and freezing
 
-Construct networks with an explicit JAX key. Value predictors need no random
-key. The default trainability mask selects floating-point parameter leaves and
-freezes `ConstantPredictor` and `BoundScaler` subtrees. Additional fixed
-arrays in custom predictors still need a mask:
+Construct networks with an explicit JAX key. `Parameter` and `Constant` need
+no key. The default trainability mask selects floating-point parameter leaves
+and freezes `Constant` and `BoundScaler` subtrees. Pass `train_scalers=True`
+to train scaler temperatures. Other fixed arrays need an explicit freeze:
 
 ```python
 mask = hm.trainable_mask(predictors)
-mask = hm.freeze_modules_of_type(mask, predictors, hm.BoundScaler)
+mask = hm.freeze_modules_of_type(mask, predictors, hm.MLPPredictor)
 ```
 
 Every predictor must round-trip through Equinox serialization. A custom

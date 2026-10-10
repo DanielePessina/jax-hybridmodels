@@ -254,19 +254,11 @@ def main() -> None:
 
     def fit(predictors, kind, key):
         """Train one activity model with optax, freezing the scalers."""
-        mask = ex.frozen_default_mask(predictors, ex.BoundScaler)
+        mask = ex.trainable_mask(predictors)
         return train_with_optax(
             predictors,
             train_dataset,
-            OptaxTrainingConfig(
-                steps=(600,),
-                lr=(3e-3,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                length_schedule=(1.0,),
-                loss="mse",
-                verbose=False,
-            ),
+            OptaxTrainingConfig(steps=600, lr=3e-3, loss="mse", verbose=False),
             simulate_fn=ex.make_simulate_fn(trunk, kind=kind),
             state_to_output=ex.state_to_output,
             solver=solver,

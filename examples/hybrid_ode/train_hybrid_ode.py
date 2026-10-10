@@ -58,6 +58,7 @@ from pathlib import Path
 import diffrax
 import jax.numpy as jnp
 import jax.random as jr
+from jax.typing import ArrayLike
 from jaxtyping import Array, Float
 
 from jaxhybridmodels import (
@@ -65,16 +66,15 @@ from jaxhybridmodels import (
     BoundScaler,
     MLPPredictor,
     SolverConfig,
-    Warp,
     compute_metrics,
     evaluate_predictor,
     predict_dataset,
     print_metrics,
-    register_warp,
 )
 from jaxhybridmodels.penalties import bound_penalty, box_grid
 from jaxhybridmodels.predictors.base import Predictor
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, TrainingPhase, train_with_optax
+from jaxhybridmodels.transforms import Warp, register_warp
 
 # ``_data`` sits alongside this file, ``_shared`` one level up.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -173,7 +173,7 @@ def simulate_fn(
     k = rate_net(covariates).reshape(())
     rotation = jnp.array([[-k, OMEGA_TRUE], [-OMEGA_TRUE, -k]])
 
-    def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
         mechanistic = rotation @ y
         if residual_net is None:
             return mechanistic
@@ -261,14 +261,14 @@ def main() -> None:
     print(f"\n[model] {len(predictors)} predictor(s), inner architecture {args.inner!r}")
 
     config = OptaxTrainingConfig(
-        steps=(args.steps // 2, args.steps),
-        lr=(5e-3, 1e-3),
-        optimizer=("adamw", "adamw"),
-        reset_optimiser_state=(False, False),
-        length_schedule=(0.4, 1.0),
-        # Length-1 tuple, so the weight broadcasts across both phases. A
-        # two-element tuple would set it per phase.
-        penalty_weight=(args.penalty_weight,),
+        # Fit the first 40% of each trajectory, then all of it. The
+        # saturation penalty applies in both phases.
+        phases=(
+            TrainingPhase(
+                steps=args.steps // 2, lr=5e-3, horizon=0.4, penalty_weight=args.penalty_weight
+            ),
+            TrainingPhase(steps=args.steps, lr=1e-3, penalty_weight=args.penalty_weight),
+        ),
         # The residual network reads the ODE state ("y1", "y2"), so the
         # dataset can resolve no measured points for it; cover both leaves
         # with a box sweep in warped space instead -- the

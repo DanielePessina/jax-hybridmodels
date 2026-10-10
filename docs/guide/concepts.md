@@ -6,7 +6,8 @@ details and examples.
 
 ## A model is a set of functions and data
 
-The framework does not define a `Model` wrapper class. A working setup has:
+A working setup has these pieces. `HybridModel` binds the first four and
+takes the dataset per call:
 
 | Object | What it contains |
 | --- | --- |
@@ -16,8 +17,9 @@ The framework does not define a `Model` wrapper class. A working setup has:
 | `SolverConfig` | Diffrax solver settings. |
 | `Dataset` | Experiments converted into rectangular bucket payloads. |
 
-Training and prediction receive these objects as separate arguments. This
-keeps the data independent from the model's state layout and observation map.
+The functional training and prediction calls take these objects as separate
+arguments. Either way the data stays independent from the model's state
+layout and observation map.
 
 See [Model interface](/guide/model-interface).
 
@@ -95,8 +97,8 @@ An Optax **step** visits every bucket, averages the bucket losses and
 gradients, and applies one optimizer update. A bucket is not a step.
 
 A **phase** is a contiguous group of steps with one learning rate, optimizer,
-and loss horizon. The phase fields are tuples of equal length. Evosax uses a
-flat generation loop instead of phases.
+and loss horizon, written as a `TrainingPhase`. Evosax uses a flat generation
+loop instead of phases.
 
 See [Training](/guide/training).
 

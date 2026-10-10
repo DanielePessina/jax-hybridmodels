@@ -267,13 +267,7 @@ def test_training_converges_with_every_adjoint(args_threaded_simulate_fn, datase
         final = train_with_optax(
             (OmegaPredictor(omega=1.2),),
             dataset,
-            OptaxTrainingConfig(
-                steps=(12,),
-                lr=(5e-2,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                restore_best=False,
-            ),
+            OptaxTrainingConfig(steps=12, lr=5e-2, restore_best=False),
             simulate_fn=args_threaded_simulate_fn,
             state_to_output=oscillator_state_to_output,
             solver=make_solver(name),

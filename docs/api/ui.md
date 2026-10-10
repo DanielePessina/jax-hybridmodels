@@ -16,7 +16,7 @@ Training UIs are protocols implemented by `RichTrainingUI` / `RichEvosaxUI` (liv
 
 ### `TrainingUI`
 
-<small>`from jaxhybridmodels.ui import TrainingUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.TrainingUI`</small>
+<small>`from jaxhybridmodels.ui import TrainingUI`</small>
 
 ```python
 TrainingUI(*args, **kwargs)
@@ -178,7 +178,7 @@ signature still satisfies this protocol.
 
 ### `EvosaxUI`
 
-<small>`from jaxhybridmodels.ui import EvosaxUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.EvosaxUI`</small>
+<small>`from jaxhybridmodels.ui import EvosaxUI`</small>
 
 ```python
 EvosaxUI(*args, **kwargs)
@@ -294,7 +294,7 @@ Fires once before the first generation.
 
 ### `SilentUI`
 
-<small>`from jaxhybridmodels.ui import SilentUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.SilentUI`</small>
+<small>`from jaxhybridmodels.ui import SilentUI`</small>
 
 ```python
 SilentUI()
@@ -314,7 +314,7 @@ event argument never breaks it.
 
 ### `RichTrainingUI`
 
-<small>`from jaxhybridmodels.ui import RichTrainingUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.RichTrainingUI`</small>
+<small>`from jaxhybridmodels.ui import RichTrainingUI`</small>
 
 ```python
 RichTrainingUI(
@@ -348,7 +348,7 @@ sequential runs (used in tests).
 
 ### `RichEvosaxUI`
 
-<small>`from jaxhybridmodels.ui import RichEvosaxUI` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.RichEvosaxUI`</small>
+<small>`from jaxhybridmodels.ui import RichEvosaxUI`</small>
 
 ```python
 RichEvosaxUI(

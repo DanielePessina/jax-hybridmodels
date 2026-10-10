@@ -249,9 +249,9 @@ def main() -> None:
         denom = max(total_weight, 1e-30)
         avg_data = total_loss / denom
         avg_grads = jax.tree.map(lambda g, denom=denom: g / denom, acc_grads)
-        # The custom regulariser, charged once per step outside the loop. The
-        # default penalty_points=() suits a hook that ignores points.
-        penalty_value, penalty_grads = penalty_step(predictors, jnp.asarray(0.1))
+        # The custom regulariser, charged once per step outside the loop. It
+        # ignores penalty points, so an empty tuple is passed.
+        penalty_value, penalty_grads = penalty_step(predictors, jnp.asarray(0.1), ())
         avg_grads = jax.tree.map(jnp.add, avg_grads, penalty_grads)
 
         predictors, opt_state = apply_update(predictors, avg_grads, opt_state)

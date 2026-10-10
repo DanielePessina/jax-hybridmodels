@@ -85,14 +85,13 @@ from jaxhybridmodels import (
     ChannelObs,
     MLPPredictor,
     SolverConfig,
-    Warp,
     make_dataset,
     make_experiment,
     predict_dataset,
-    register_warp,
 )
 from jaxhybridmodels.penalties import bound_penalty, box_grid
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, TrainingPhase, train_with_optax
+from jaxhybridmodels.transforms import Warp, register_warp
 
 
 def main() -> None:
@@ -555,7 +554,7 @@ def main() -> None:
     # -----------------------------------------------------------
     #
     # A two-phase curriculum: fit the first part of every trajectory, then
-    # all of it (`length_schedule`), with a lower learning rate in phase
+    # all of it (`TrainingPhase.horizon`), with a lower learning rate in phase
     # two and a fresh minimum for `restore_best` at the phase boundary.
     #
     # The saturation penalty is charged on the latent, not the physical
@@ -564,8 +563,7 @@ def main() -> None:
     # network reads the ODE state, so the dataset resolves no measured
     # points for it; both leaves are covered with a warp-uniform box sweep
     # (`box_grid`) -- the collocation-as-extension recipe.
-    # `penalty_weight` is a length-1 tuple and broadcasts across both
-    # phases.
+    # `penalty_weight` is set on both phases.
     #
     # In the original interactive version these two values were UI controls
     # (a slider and a dropdown); a script fixes them at the defaults.
@@ -573,12 +571,10 @@ def main() -> None:
     penalty_weight = 1e-3
 
     config = OptaxTrainingConfig(
-        steps=(steps // 2, steps),
-        lr=(5e-3, 1e-3),
-        optimizer=("adamw", "adamw"),
-        reset_optimiser_state=(False, False),
-        length_schedule=(0.4, 1.0),
-        penalty_weight=(penalty_weight,),
+        phases=(
+            TrainingPhase(steps=steps // 2, lr=5e-3, horizon=0.4, penalty_weight=penalty_weight),
+            TrainingPhase(steps=steps, lr=1e-3, penalty_weight=penalty_weight),
+        ),
         penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors),
         loss="mse",
         verbose=False,

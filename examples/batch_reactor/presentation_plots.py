@@ -595,15 +595,7 @@ def main():
     _hist, predictors_p2 = train_with_optax(
         predictors_p1,
         dataset,
-        OptaxTrainingConfig(
-            steps=(200,),
-            lr=(3e-3,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            length_schedule=(1.0,),
-            loss="mse",
-            verbose=False,
-        ),
+        OptaxTrainingConfig(steps=200, lr=3e-3, loss="mse", verbose=False),
         simulate_fn=simulate_fn,
         state_to_output=_state_to_output,
         solver=solver,

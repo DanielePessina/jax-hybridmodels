@@ -20,6 +20,8 @@ validation.
 
 from __future__ import annotations
 
+from typing import Any
+
 import diffrax
 import jax
 import jax.numpy as jnp
@@ -178,7 +180,7 @@ def bucket_step_loss(predictors, ds: Dataset, cfg: OptaxTrainingConfig):
         simulate_fn=make_physics_simulate_fn(predictors[0]),
         state_to_output=embedded_state_to_output,
         solver=solver(),
-        loss_fn=hm.masked_mse,
+        loss_fn=hm.losses.masked_mse,
         trainable=trainable_mask(predictors),
         trajectory_penalty_fn=cfg.trajectory_penalty_fn,
         trajectory_penalty_weight=cfg.trajectory_penalty_weight,
@@ -220,11 +222,11 @@ class TestEmbeddedTrajectoryPenalty:
         ds = build_embedded_dataset(make_predictor(c=3.0))
         predictors = (make_predictor(c=3.0),)
         bp = ds.bucket_payloads[0]
-        kwargs = dict(
+        kwargs: dict[str, Any] = dict(
             simulate_fn=make_physics_simulate_fn(predictors[0]),
             state_to_output=embedded_state_to_output,
             solver=solver(),
-            loss_fn=hm.masked_mse,
+            loss_fn=hm.losses.masked_mse,
         )
         data_only = build_score_bucket(**kwargs)
         with_penalty = build_score_bucket(
@@ -241,10 +243,8 @@ class TestEmbeddedTrajectoryPenalty:
         ds_sat = build_embedded_dataset(make_predictor(c=5.0))  # deep saturation
         ds_mild = build_embedded_dataset(make_predictor(c=0.1))
         cfg = OptaxTrainingConfig(
-            steps=(1,),
-            lr=(1e-3,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=1,
+            lr=1e-3,
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=1.0,
         )
@@ -258,10 +258,8 @@ class TestEmbeddedTrajectoryPenalty:
         # the direction that reduces saturation (negative for c > 0).
         ds = build_embedded_dataset(make_predictor(c=3.0))
         cfg = OptaxTrainingConfig(
-            steps=(1,),
-            lr=(1e-3,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=1,
+            lr=1e-3,
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=1.0,
         )
@@ -275,10 +273,8 @@ class TestEmbeddedTrajectoryPenalty:
     def test_training_reduces_the_penalty(self):
         ds = build_embedded_dataset(make_predictor(c=4.0))
         cfg = OptaxTrainingConfig(
-            steps=(15,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=15,
+            lr=1e-2,
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=0.5,
             restore_best=False,
@@ -331,7 +327,7 @@ class TestParallelTrajectoryPenalty:
             simulate_fn=parallel_simulate_fn,
             state_to_output=parallel_state_to_output,
             solver=solver(),
-            loss_fn=hm.masked_mse,
+            loss_fn=hm.losses.masked_mse,
             trainable=trainable_mask(sat_pred),
             trajectory_penalty_fn=sat_penalty,
             trajectory_penalty_weight=1.0,
@@ -369,10 +365,8 @@ class TestParallelTrajectoryPenalty:
 
         start = (make_predictor(c=6.0),)
         cfg = OptaxTrainingConfig(
-            steps=(15,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=15,
+            lr=1e-2,
             trajectory_penalty_fn=sat_penalty,
             trajectory_penalty_weight=1.0,
             restore_best=False,
@@ -402,20 +396,13 @@ class TestProbeExperiments:
     def test_probe_scores_zero_data_loss_but_fires_penalty(self):
         ds = build_probe_dataset(make_predictor(c=5.0))
         cfg = OptaxTrainingConfig(
-            steps=(1,),
-            lr=(1e-3,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=1,
+            lr=1e-3,
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=1.0,
         )
         # Data-only loss on the probe is exactly zero (all-False mask)...
-        no_pen_cfg = OptaxTrainingConfig(
-            steps=(1,),
-            lr=(1e-3,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-        )
+        no_pen_cfg = OptaxTrainingConfig(steps=1, lr=1e-3)
         data_loss, _ = bucket_step_loss((make_predictor(c=5.0),), ds, no_pen_cfg)
         assert data_loss == pytest.approx(0.0, abs=1e-6)
         # ...and the trajectory penalty still fires on the probe grid.
@@ -429,10 +416,8 @@ class TestProbeExperiments:
         ds = build_probe_dataset(make_predictor(c=5.0))
         start = (make_predictor(c=5.0),)
         cfg = OptaxTrainingConfig(
-            steps=(20,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=20,
+            lr=1e-2,
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=1.0,
             restore_best=False,
@@ -452,34 +437,20 @@ class TestProbeExperiments:
 class TestConfigValidation:
     def test_negative_weight_raises(self):
         with pytest.raises(ValueError, match="non-negative"):
-            OptaxTrainingConfig(
-                steps=(1,),
-                lr=(1e-3,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                trajectory_penalty_weight=-1.0,
-            )
+            OptaxTrainingConfig(steps=1, lr=1e-3, trajectory_penalty_weight=-1.0)
         with pytest.raises(ValueError, match="non-negative"):
             hm.EvosaxTrainingConfig(trajectory_penalty_weight=-1.0)
 
     def test_weight_without_fn_raises(self):
         with pytest.raises(ValueError, match="trajectory_penalty_fn is None"):
-            OptaxTrainingConfig(
-                steps=(1,),
-                lr=(1e-3,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                trajectory_penalty_weight=1.0,
-            )
+            OptaxTrainingConfig(steps=1, lr=1e-3, trajectory_penalty_weight=1.0)
         with pytest.raises(ValueError, match="trajectory_penalty_fn is None"):
             hm.EvosaxTrainingConfig(trajectory_penalty_weight=1.0)
 
     def test_zero_weight_with_fn_is_a_noop(self):
         cfg = OptaxTrainingConfig(
-            steps=(1,),
-            lr=(1e-3,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=1,
+            lr=1e-3,
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=0.0,
         )
@@ -524,10 +495,8 @@ class TestTrajectoryPenaltyEndToEnd:
         ds = build_embedded_dataset(make_predictor(c=4.0))
         start = (make_predictor(c=4.0),)
         cfg = OptaxTrainingConfig(
-            steps=(10,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
+            steps=10,
+            lr=1e-2,
             trajectory_penalty_fn=trajectory_penalty_fn,
             trajectory_penalty_weight=0.5,
             restore_best=False,

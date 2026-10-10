@@ -8,10 +8,10 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from jaxhybridmodels import (
+from jaxhybridmodels import SolverConfig
+from jaxhybridmodels.solver import (
     ADJOINT_REGISTRY,
     SOLVER_REGISTRY,
-    SolverConfig,
     register_adjoint,
     register_solver,
 )
@@ -277,8 +277,8 @@ class TestPublicAPI:
         import jaxhybridmodels
 
         assert jaxhybridmodels.SolverConfig is SolverConfig
-        assert jaxhybridmodels.SOLVER_REGISTRY is SOLVER_REGISTRY
-        assert jaxhybridmodels.register_solver is register_solver
+        assert jaxhybridmodels.solver.SOLVER_REGISTRY is SOLVER_REGISTRY
+        assert jaxhybridmodels.solver.register_solver is register_solver
 
 
 class TestAdjointRegistry:

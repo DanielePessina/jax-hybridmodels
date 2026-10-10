@@ -6,7 +6,7 @@ Covers the four fold-in candidates from the examples:
 - ``SolverConfig.diffeqsolve`` — the invocation boilerplate, forwarding
   ``solver.adjoint`` (the field most hand-written examples ignored).
 - ``describe_buckets`` / ``count_trainable_params`` / ``evaluate_predictor``
-  / ``frozen_default_mask`` — the small conveniences.
+  — the small conveniences.
 
 The metrics tests build a real dataset and predictions through the public
 ``predict_bucket`` path, asserting the numbers match hand-computed values
@@ -33,7 +33,6 @@ from jaxhybridmodels.solver import ADJOINT_REGISTRY, SolverConfig
 from jaxhybridmodels.trainable import (
     count_trainable_params,
     freeze_modules_of_type,
-    frozen_default_mask,
     trainable_mask,
 )
 
@@ -223,11 +222,9 @@ def test_count_trainable_params_counts_mask_selected_leaves():
     preds = (OmegaPredictor(1.0), OmegaPredictor(1.0))
     full = trainable_mask(preds)
     assert count_trainable_params(preds, full) == 2
-    frozen = frozen_default_mask(preds)  # nothing to freeze here, so 2 remain
-    assert count_trainable_params(preds, frozen) == 2
 
 
-def test_frozen_default_mask_freezes_module_types():
+def test_default_mask_freezes_scalers_like_the_explicit_freezer():
     from jaxhybridmodels.predictors.base import BoundedPredictor, BoundScaler
     from jaxhybridmodels.predictors.mlp import MLPPredictor
 
@@ -238,10 +235,9 @@ def test_frozen_default_mask_freezes_module_types():
         inner=inner,
         out_scaler=BoundScaler(bounds=((0.0, 1.0),)),
     )
-    mask = frozen_default_mask(bp, BoundScaler)
-    # Everything in the BoundScalers (their temperature) is frozen.
-    frozen_mask = freeze_modules_of_type(mask, bp, BoundScaler)
-    assert count_trainable_params(bp, mask) == count_trainable_params(bp, frozen_mask)
+    mask = trainable_mask(bp)
+    explicit = freeze_modules_of_type(trainable_mask(bp, train_scalers=True), bp, BoundScaler)
+    assert count_trainable_params(bp, mask) == count_trainable_params(bp, explicit)
     # And at least something is still trainable (the MLP weights).
     assert count_trainable_params(bp, mask) > 0
 

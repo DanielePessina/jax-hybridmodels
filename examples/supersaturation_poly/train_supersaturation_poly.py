@@ -178,12 +178,7 @@ def main() -> None:
     history, trained = hm.train_with_optax(
         predictors,
         ds,
-        hm.OptaxTrainingConfig(
-            steps=(400,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-        ),
+        hm.OptaxTrainingConfig(steps=400, lr=1e-2),
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         solver=solver,

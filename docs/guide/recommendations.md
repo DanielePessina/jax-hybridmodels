@@ -205,10 +205,10 @@ inputs = {
 
 ### Start with one phase
 
-`steps=(1000,), lr=(1e-3,), optimizer=("adamw",)` is the right default.
+`OptaxTrainingConfig(steps=1000, lr=1e-3)` is the right default.
 Add a second phase when the loss plateaus and you want a lower rate, or
-when you want a `length_schedule` warm-up that fits the first half of
-each trajectory before unmasking the rest.
+when you want a `horizon` warm-up that fits the first half of each
+trajectory before unmasking the rest.
 
 ### When to turn on the tournament
 
@@ -232,14 +232,14 @@ it first, then refine with `train_with_optax`. Both take the same
 
 ### Freeze BoundScaler.temperature
 
-The default training mask now freezes all `BoundScaler` leaves. Explicit
-freezing remains supported for existing code:
+The default training mask freezes every `BoundScaler` leaf, so nothing is
+needed:
 
 ```python
-from jaxhybridmodels import BoundScaler, freeze_modules_of_type, trainable_mask
+from jaxhybridmodels import trainable_mask
 
-mask = trainable_mask(predictors)
-mask = freeze_modules_of_type(mask, predictors, BoundScaler)
+mask = trainable_mask(predictors)                      # scalers fixed
+mask = trainable_mask(predictors, train_scalers=True)  # opt in to training them
 ```
 
 `temperature` is technically a trainable leaf. Training it moves signal

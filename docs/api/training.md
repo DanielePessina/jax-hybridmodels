@@ -23,12 +23,11 @@ Choose [`train_with_optax`](#train_with_optax) for gradient-based fitting or [`t
 
 ```python
 OptaxTrainingConfig(
-    steps: 'tuple[int, ...] | int | None' = None,
-    lr: 'tuple[float, ...] | float' = 0.001,
-    optimizer: 'tuple[OptimizerSpec, ...] | OptimizerSpec' = 'adamw',
-    reset_optimiser_state: 'tuple[bool, ...] | bool' = False,
-    length_schedule: 'tuple[float, ...] | float' = 1.0,
-    penalty_weight: 'tuple[float, ...] | float' = 0.0,
+    steps: 'InitVar[int | None]' = None,
+    lr: 'InitVar[float | None]' = None,
+    optimizer: 'InitVar[OptimizerSpec | None]' = None,
+    penalty_weight: 'InitVar[float | None]' = None,
+    phases: 'tuple[TrainingPhase, ...]' = (),
     penalty_points: 'tuple[Array, ...] | None' = None,
     penalty_fn: 'Callable[..., Array] | None' = None,
     trajectory_penalty_fn: 'Callable[..., Array] | None' = None,
@@ -42,28 +41,29 @@ OptaxTrainingConfig(
     patience: 'int' = 0,
     restore_best: 'bool' = True,
     verbose: 'bool' = True,
-    phases: 'Sequence[TrainingPhase] | None' = None,
 ) -> None
 ```
 
-Configuration for [`train_with_optax`](/api/training#train_with_optax).
+Configuration for [`train_with_optax`](/api/training#train_with_optax) and Optax ``HybridModel.fit``.
 
-Use scalar fields for a single phase, ``phases=`` with TrainingPhase
-objects for a schedule, or the original parallel tuples. Scalars
-broadcast across phases; explicit tuples must match ``steps`` (except
-the length-one penalty weight). Stored fields normalize to tuples.
-Do not combine ``phases=`` with ``steps=``.
+A single phase is spelled with ``steps=`` (plus optional ``lr=``,
+``optimizer=``, ``penalty_weight=``). A schedule is spelled with
+``phases=``, a tuple of [`TrainingPhase`](/api/training#trainingphase). The two forms do not
+mix; either way the config stores ``phases``::
+
+    OptaxTrainingConfig(steps=500, lr=1e-3)
+    OptaxTrainingConfig(
+        phases=(
+            TrainingPhase(steps=200, lr=3e-2, horizon=0.5),
+            TrainingPhase(steps=200, lr=5e-3, reset_optimizer=True),
+        )
+    )
 
 **Attributes**
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `steps` | `tuple[int, ...]` | Step budget per phase. Its length is the number of phases. |
-| `lr` | `tuple[float, ...]` | Learning rate per phase. Applied to the live optimiser state unless that phase also resets it. |
-| `optimizer` | `tuple[OptimizerSpec, ...]` | Optimiser per phase: a registered name (``"adamw"``, ``"adabelief"``), a factory taking ``learning_rate`` and returning an ``optax.GradientTransformation`` (e.g. ``optax.adamw``, or ``lambda learning_rate: optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(learning_rate))``), or a ready-made transformation instance. Names and factories are wrapped in ``optax.inject_hyperparams``, so a phase boundary can move the learning rate without a rebuild; a raw instance cannot be re-hyperparametrised, so a phase that changes ``lr`` with a raw instance must also set ``reset_optimiser_state``. A phase that changes the optimiser must set ``reset_optimiser_state``, because optimiser state belongs to the optimiser that built it. |
-| `reset_optimiser_state` | `tuple[bool, ...]` | Per phase, rebuild the optimiser and discard its state at that boundary. Set it when switching optimiser, and when a length-schedule change has made the accumulated momentum wrong. |
-| `length_schedule` | `tuple[float, ...]` | Fraction of each experiment's timeline the loss looks at, per phase, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only the first ``fraction`` of the observation times is scored, which stops a long-horizon divergence from drowning the gradient. Being a runtime mask rather than a shape change, a phase boundary costs no recompile. Default ``(1.0,)`` scores everything. |
-| `penalty_weight` | `tuple[float, ...]` | Weight on the bound-saturation penalty. Length 1 broadcasts to every phase; any other length must match ``steps``. Entries must be non-negative. ``0.0`` disables the penalty. The weight is relative to the per-bucket-averaged data term: the penalty is a mean over its points, charged once per step onto the averaged data gradient, so the same weight means the same thing whatever the dataset or point-count size. |
+| `phases` | `tuple[TrainingPhase, ...]` | The schedule, run in order. See [`TrainingPhase`](/api/training#trainingphase) for the per-phase settings. |
 | `penalty_points` | `tuple[Array, ...] | None` | User-supplied penalty-only points for the bound penalty: one ``[G, n_inputs]`` array of physical input vectors per ``BoundedPredictor`` leaf, in traversal order, matching each leaf's ``input_keys`` column order. No measurements are needed there; saturation is charged at these points regardless of the data. When ``None`` the penalty uses only the measured points gathered from the dataset (leaves whose inputs do not all resolve to dataset covariates must be covered by an entry here, or the run raises). ``jaxhybridmodels.penalties.box_grid`` builds a warp-uniform box sweep for the "police the whole box" recipe. |
 | `penalty_fn` | `Callable | None` | The regulariser added to the data objective, defaulting to [`bound_penalty`](/api/penalties#bound_penalty) when ``None``. A custom callable ``(predictors, points) -> scalar`` replaces the bound penalty with e.g. weight decay on inner weights or a monotonicity term; one that ignores points simply does not use them. |
 | `trajectory_penalty_fn` | `Callable | None` | Trajectory-aware penalty for **embedded** hybrid models (the predictor runs inside the vector field). Called as ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]`` *including* any penalty accumulators carried in the ODE state; add it to the data loss inside the same forward pass. ``None`` (the default) disables it. See the helpers in ``jaxhybridmodels.penalties`` (``attach_penalty_state`` / ``penalty_vector_field`` / ``strip_penalty_state`` / ``penalty_integral``). |
@@ -71,24 +71,12 @@ Do not combine ``phases=`` with ``steps=``.
 | `loss` | `Callable | str` | A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``, ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``. |
 | `channel_idx, channel_weights` | `tuple | None` | Forwarded into the resolved loss. See ``jaxhybridmodels.losses``. |
 | `tournament_attempts, tournament_steps` | `int` | The tournament runs only when ``tournament_steps > 0`` and ``tournament_attempts > 1``. Each attempt re-initialises the predictors, trains for ``tournament_steps`` steps, and is scored on the data term plus any configured trajectory penalty by a forward-only pass; the bound penalty remains excluded. The lowest score wins. An attempt that raises a diffrax error or a non-finite loss is dropped and the next key tried. If all fail, the original predictors are used and a ``RuntimeWarning`` is raised. |
-| `tournament_lr` | `float` | Learning rate for the tournament's short bursts, independent of ``lr``. |
+| `tournament_lr` | `float` | Learning rate for the tournament's short bursts, independent of the phase learning rates. |
 | `patience` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
-| `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever ``length_schedule`` changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
+| `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever the horizon changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 | `verbose` | `bool` | Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L98)</small>
-
-<a id="optaxtrainingconfigpenalty_weight_for_phase"></a>
-
-#### `OptaxTrainingConfig.penalty_weight_for_phase()`
-
-```python
-penalty_weight_for_phase(self, phase_idx: 'int') -> 'float'
-```
-
-Penalty weight for ``phase_idx``, honouring the length-1 broadcast.
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L279)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L144)</small>
 
 ---
 
@@ -109,9 +97,20 @@ TrainingPhase(
 ) -> None
 ```
 
-One contiguous Optax phase, configured without parallel tuples.
+One contiguous block of Optax steps with its own schedule settings.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L86)</small>
+**Attributes**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `steps` | `int` | Step budget for the phase. At least 1. |
+| `lr` | `float` | Learning rate. Applied to the live optimiser state unless the phase also sets ``reset_optimizer``. |
+| `optimizer` | `OptimizerSpec` | A registered name (``"adamw"``, ``"adabelief"``), a factory taking ``learning_rate`` and returning an ``optax.GradientTransformation`` (e.g. ``optax.adamw``, or ``lambda learning_rate: optax.chain( optax.clip_by_global_norm(1.0), optax.adamw(learning_rate))``), or a ready-made transformation instance. Names and factories are wrapped in ``optax.inject_hyperparams``, so a phase boundary can move the learning rate without a rebuild. A raw instance cannot be re-hyperparametrised, so a phase that changes ``lr`` with a raw instance must set ``reset_optimizer``. A phase that changes the optimiser must set it too, because optimiser state belongs to the optimiser that built it. |
+| `horizon` | `float` | Fraction of each experiment's timeline the loss looks at, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only the first ``horizon`` of the observation times is scored, which stops a long-horizon divergence from drowning the gradient. Being a runtime mask rather than a shape change, a phase boundary costs no recompile. |
+| `reset_optimizer` | `bool` | Rebuild the optimiser and discard its state at the start of this phase. Set it when switching optimiser, and when a horizon change has made the accumulated momentum wrong. |
+| `penalty_weight` | `float` | Weight on the bound-saturation penalty. ``0.0`` disables it. The weight is relative to the per-bucket-averaged data term: the penalty is a mean over its points, charged once per step onto the averaged data gradient, so the same weight means the same thing whatever the dataset or point-count size. |
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L80)</small>
 
 ---
 
@@ -159,9 +158,9 @@ Pass a custom mask to hold additional leaves fixed.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step loss**, one entry per step, concatenated across phases. It can go up. It is the data term plus any configured trajectory penalty (charged inside the bucket forward pass); the bound penalty is excluded, so a ramping bound-penalty weight cannot move the series and runs with different bound weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from [`train_with_evosax`](/api/training#train_with_evosax), whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever ``length_schedule`` changes, so the returned model always comes from the last horizon trained on. |
+| `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step loss**, one entry per step, concatenated across phases. It can go up. It is the data term plus any configured trajectory penalty (charged inside the bucket forward pass); the bound penalty is excluded, so a ramping bound-penalty weight cannot move the series and runs with different bound weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from [`train_with_evosax`](/api/training#train_with_evosax), whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever the phase horizon changes, so the returned model always comes from the last horizon trained on. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L951)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L863)</small>
 
 ---
 
@@ -215,7 +214,7 @@ land inside the first member's bracket, and ``on_run_start`` /
 ``on_run_end`` are fired once per member, so a live dashboard shows
 each member's phases rather than freezing after the first.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1350)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1290)</small>
 
 ---
 
@@ -265,7 +264,7 @@ Every resample and every training run is folded off the one ``key``, so
 the whole ensemble is deterministic given it. Each member is its own
 UI run, bracketed by ``on_run_start`` / ``on_run_end``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1484)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1424)</small>
 
 ---
 
@@ -299,7 +298,7 @@ EvosaxTrainingConfig(
 Configuration for [`train_with_evosax`](/api/training#train_with_evosax).
 
 Unlike [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig) there
-are no phase-keyed tuples: the run is a flat loop, so every field is a
+there are no phases: the run is a flat loop, so every field is a
 scalar.
 
 **Attributes**
@@ -367,7 +366,7 @@ least one scalar.
 | `history` | `list[float]` | **Best loss so far** at the end of each generation, so the series is monotone non-increasing. Length ``config.num_generations``.<br><br>It differs from [`train_with_optax`](/api/training#train_with_optax), whose history is the raw per-step loss and can go up. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>When ``config.penalty_weight > 0`` the recorded value is the combined objective, since evosax ranks by one scalar. The optax history excludes its penalty. |
 | `best_predictors` | `Any` | Predictors rebuilt from the lowest-loss flat vector seen in any generation, the warm-up evaluation of the input predictors included. Same container shape as the input. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L402)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L398)</small>
 
 ---
 
@@ -375,7 +374,7 @@ least one scalar.
 
 ### `register_algorithm()`
 
-<small>`from jaxhybridmodels.training.evosax import register_algorithm` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_algorithm`</small>
+<small>`from jaxhybridmodels.training.evosax import register_algorithm`</small>
 
 ```python
 register_algorithm(name: 'str', cls: 'type') -> 'None'

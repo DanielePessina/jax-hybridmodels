@@ -138,12 +138,7 @@ def main():
 
     # ---- production kernel build (warm-up + settle cycle) ----
     trainable = trainable_mask(predictor)
-    config = OptaxTrainingConfig(
-        steps=(N_STEPS_BENCH,),
-        lr=(1e-3,),
-        optimizer=(optax.adamw,),
-        reset_optimiser_state=(False,),
-    )
+    config = OptaxTrainingConfig(steps=N_STEPS_BENCH, lr=1e-3, optimizer=optax.adamw)
     ui = SilentUI()
     ui.on_run_start(total_steps=N_STEPS_BENCH, num_phases=1)
     t0 = time.perf_counter()
@@ -199,12 +194,11 @@ def main():
     # full _run_phases loop timing (host overhead incl.) — caches pre-settled
     ui2 = SilentUI()
     t0 = time.perf_counter()
-    hist, final, fl = _run_phases(
+    _run_phases(
         predictor,
         dataset,
         config,
         optimizer=optimizer,
-        apply_update=apply_update,
         step_update=step_update,
         bucket_step=bucket_step,
         penalty_step=penalty_step,

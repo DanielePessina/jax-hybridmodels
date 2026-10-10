@@ -41,20 +41,13 @@ The default point set is the **measured points**: the input vectors the loss
 actually sees at observed cells, gathered from the dataset by
 `data_penalty_points`. Each leaf resolves its `input_keys` against the dataset
 covariates and collects one input vector per observed cell. When a phase's
-`length_schedule` masks the loss to a prefix of each trajectory, the penalty
+`horizon` masks the loss to a prefix of each trajectory, the penalty
 follows the same prefix, so both objectives always look at the same points.
 
 For a leaf whose inputs are covariates, this needs nothing from you:
 
 ```python
-config = hm.OptaxTrainingConfig(
-    steps=(400,),
-    lr=(1e-2,),
-    optimizer=("adamw",),
-    reset_optimiser_state=(False,),
-    loss="mse",
-    penalty_weight=(1e-3,),   # length-1 tuple broadcasts across phases
-)
+config = hm.OptaxTrainingConfig(steps=400, lr=1e-2, loss="mse", penalty_weight=1e-3)
 ```
 
 ### Penalty-only points
@@ -75,7 +68,7 @@ nucleation_pts = jnp.asarray([[20.0, 1.5], [20.0, 2.0], [25.0, 1.5], [25.0, 2.0]
 
 config = hm.OptaxTrainingConfig(
     ...,
-    penalty_weight=(1e-4,),
+    penalty_weight=1e-4,
     # Leaf order: growth_bp first, nucleation_bp second.
     penalty_points=(growth_pts, nucleation_pts),
 )
@@ -90,7 +83,7 @@ If you want to police the entire declared box — the "collocation" idea — bui
 the sweep yourself with `box_grid`, and pass it as penalty-only points:
 
 ```python
-sweep = hm.box_grid(in_scaler, n_per_dim=7)   # [49, 2] for a 2-D box
+sweep = hm.penalties.box_grid(in_scaler, n_per_dim=7)   # [49, 2] for a 2-D box
 config = hm.OptaxTrainingConfig(..., penalty_points=(sweep,))
 ```
 
@@ -165,5 +158,5 @@ points ignores them:
 def weight_decay(predictors, points):
     return predictors[0].scale**2
 
-config = hm.OptaxTrainingConfig(..., penalty_fn=weight_decay, penalty_weight=(0.1,))
+config = hm.OptaxTrainingConfig(..., penalty_fn=weight_decay, penalty_weight=0.1)
 ```

@@ -80,7 +80,7 @@ A training config's `optimizer` field accepts three kinds of value:
 Names and factories are wrapped in `optax.inject_hyperparams`, so a phase
 boundary can move the learning rate without a rebuild. A raw instance
 cannot be re-hyperparametrised: a phase that changes `lr` on one must also
-set `reset_optimiser_state`.
+set `reset_optimizer=True`.
 
 ## Custom regularisers
 
@@ -194,7 +194,7 @@ ramps in — multiplies a schedule into the value each step. The library's
 length baked in (one step is one epoch):
 
 ```python
-from jaxhybridmodels import annealing_schedule
+from jaxhybridmodels.schedules import annealing_schedule
 
 lr_sched = annealing_schedule("warmup_cosine", total_epochs=n_steps, warmup_epochs=5)
 w_sched = annealing_schedule("linear", total_epochs=n_steps, end_value=0.5)
@@ -202,7 +202,7 @@ w_sched = annealing_schedule("linear", total_epochs=n_steps, end_value=0.5)
 for step in range(n_steps):
     lr = base_lr * lr_sched(step)          # warm up, then cosine down
     weight = w0 * w_sched(step)            # ramp the penalty weight in
-    ...   # build the optimiser at `lr`, call penalty_step(predictors, weight)
+    ...   # build the optimiser at `lr`, call penalty_step(predictors, weight, points)
 ```
 
 The stock trainers do not take schedules: they express strategy changes

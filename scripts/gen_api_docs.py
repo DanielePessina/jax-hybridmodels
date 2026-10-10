@@ -1,7 +1,8 @@
 """Generate VitePress API reference markdown from jaxhybridmodels docstrings.
 
-Walks ``jaxhybridmodels.__all__``, groups public symbols by their declaring
-submodule, and emits one markdown page per module under ``docs/api/``.
+Walks the symbols listed in ``PAGES`` (every top-level export plus the
+lower-level names in ``SUBMODULE_SYMBOLS``), and emits one markdown page per
+group under ``docs/api/``.
 
 Each entry contains:
 
@@ -22,6 +23,7 @@ for CI.
 from __future__ import annotations
 
 import argparse
+import importlib
 import inspect
 import re
 import sys
@@ -50,8 +52,6 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "FitHistory",
             "PredictionResult",
             "ExperimentPrediction",
-            "fit",
-            "predict",
         ),
     ),
     (
@@ -76,7 +76,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "Predictor",
             "BoundScaler",
             "BoundedPredictor",
-            "ConstantPredictor",
+            "Parameter",
+            "Constant",
             "MLPPredictor",
             "KANPredictor",
             "NeuralNPolynomial",
@@ -177,7 +178,6 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "freeze_paths",
             "freeze_modules_of_type",
             "freeze_where",
-            "frozen_default_mask",
             "count_trainable_params",
         ),
     ),
@@ -243,6 +243,68 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ("fold",),
     ),
 )
+
+# Documented names that are not top-level exports, with the module to import
+# them from. Top-level names resolve through ``jaxhybridmodels._EXPORTS``.
+SUBMODULE_SYMBOLS: dict[str, str] = {
+    "LOSS_REGISTRY": "jaxhybridmodels.losses",
+    "bal_mle": "jaxhybridmodels.losses",
+    "bal_mse": "jaxhybridmodels.losses",
+    "masked_mle": "jaxhybridmodels.losses",
+    "masked_mse": "jaxhybridmodels.losses",
+    "resolve_loss_fn": "jaxhybridmodels.losses",
+    "PenaltyPointSource": "jaxhybridmodels.penalties",
+    "attach_penalty_state": "jaxhybridmodels.penalties",
+    "bound_penalty": "jaxhybridmodels.penalties",
+    "box_grid": "jaxhybridmodels.penalties",
+    "box_violation": "jaxhybridmodels.penalties",
+    "clip_ste": "jaxhybridmodels.penalties",
+    "data_penalty_points": "jaxhybridmodels.penalties",
+    "length_mask_keep": "jaxhybridmodels.penalties",
+    "penalty_integral": "jaxhybridmodels.penalties",
+    "penalty_vector_field": "jaxhybridmodels.penalties",
+    "select_penalty_points": "jaxhybridmodels.penalties",
+    "soft_inverse": "jaxhybridmodels.penalties",
+    "soft_logit": "jaxhybridmodels.penalties",
+    "softclip": "jaxhybridmodels.penalties",
+    "strip_penalty_state": "jaxhybridmodels.penalties",
+    "trajectory_saturation_penalty": "jaxhybridmodels.penalties",
+    "validate_penalty_points": "jaxhybridmodels.penalties",
+    "predict_bucket": "jaxhybridmodels.prediction",
+    "reinitialize_pytree_with_key": "jaxhybridmodels.predictors",
+    "reinitialize_with_key": "jaxhybridmodels.predictors",
+    "fold": "jaxhybridmodels.rng",
+    "annealing_schedule": "jaxhybridmodels.schedules",
+    "ADJOINT_REGISTRY": "jaxhybridmodels.solver",
+    "SOLVER_REGISTRY": "jaxhybridmodels.solver",
+    "register_adjoint": "jaxhybridmodels.solver",
+    "register_solver": "jaxhybridmodels.solver",
+    "default_trainable": "jaxhybridmodels.trainable",
+    "register_algorithm": "jaxhybridmodels.training.evosax",
+    "apply_length_mask": "jaxhybridmodels.training.kernels",
+    "build_apply_update": "jaxhybridmodels.training.kernels",
+    "build_bucket_step": "jaxhybridmodels.training.kernels",
+    "build_penalty_step": "jaxhybridmodels.training.kernels",
+    "build_score_bucket": "jaxhybridmodels.training.kernels",
+    "predict_bucket_obs": "jaxhybridmodels.training.kernels",
+    "BOUND_TRANSFORMS": "jaxhybridmodels.transforms",
+    "BoundTransform": "jaxhybridmodels.transforms",
+    "WARPS": "jaxhybridmodels.transforms",
+    "Warp": "jaxhybridmodels.transforms",
+    "register_bound_transform": "jaxhybridmodels.transforms",
+    "register_warp": "jaxhybridmodels.transforms",
+    "EvosaxUI": "jaxhybridmodels.ui",
+    "RichEvosaxUI": "jaxhybridmodels.ui",
+    "RichTrainingUI": "jaxhybridmodels.ui",
+    "SilentUI": "jaxhybridmodels.ui",
+    "TrainingUI": "jaxhybridmodels.ui",
+}
+
+
+def _module_of(name: str) -> str:
+    """Module a documented symbol is imported from."""
+    return jaxhybridmodels._EXPORTS.get(name) or SUBMODULE_SYMBOLS[name]
+
 
 # Repository GitHub URL prefix for source-code links.
 GITHUB_BLOB = "https://github.com/DanielePessina/jax-hybridmodels/blob/main"
@@ -509,7 +571,7 @@ def get_source_link(obj: Any) -> str | None:
 
 def render_entry(name: str, module_name: str) -> str:
     """Render a single API entry — heading, signature, parsed docstring, link."""
-    obj = getattr(jaxhybridmodels, name)
+    obj = getattr(importlib.import_module(module_name), name)
     parsed = parse_docstring(inspect.getdoc(obj))
 
     parts: list[str] = []
@@ -523,10 +585,13 @@ def render_entry(name: str, module_name: str) -> str:
         parts.append(f"### `{name}`")
 
     # Module line (so users know the canonical import path).
-    parts.append(
-        f"<small>`from {module_name} import {name}` &nbsp;·&nbsp; "
-        f"also re-exported as `jaxhybridmodels.{name}`</small>"
-    )
+    if name in jaxhybridmodels._EXPORTS:
+        parts.append(
+            f"<small>`from {module_name} import {name}` &nbsp;·&nbsp; "
+            f"also re-exported as `jaxhybridmodels.{name}`</small>"
+        )
+    else:
+        parts.append(f"<small>`from {module_name} import {name}`</small>")
 
     # Signature or value block.
     sig = render_signature(name, obj)
@@ -776,10 +841,8 @@ def render_page(slug: str, title: str, symbols: tuple[str, ...]) -> str:
     parts.append("")
 
     # Resolve module path per symbol — used for the import line in each entry.
-    exports = jaxhybridmodels._EXPORTS
     for name in symbols:
-        module_name = exports.get(name, "jaxhybridmodels")
-        parts.append(render_entry(name, module_name))
+        parts.append(render_entry(name, _module_of(name)))
         parts.append("")
         parts.append("---")
         parts.append("")
@@ -795,9 +858,11 @@ def render_index() -> str:
         "# API Reference",
         "",
         "The public surface is split across the pages below, grouped by concern. "
-        "Every symbol below is also re-exported at the top level — "
-        "`from jaxhybridmodels import MLPPredictor` works exactly like "
-        "`from jaxhybridmodels.predictors import MLPPredictor`.",
+        "The modelling workflow is re-exported at the top level, so "
+        "`from jaxhybridmodels import MLPPredictor` works like "
+        "`from jaxhybridmodels.predictors import MLPPredictor`. Lower-level "
+        "pieces (kernels, penalties, losses, transforms, registries, UI) are "
+        "imported from their submodule; each entry shows its import line.",
         "",
     ]
     for slug, title, symbols in PAGES:

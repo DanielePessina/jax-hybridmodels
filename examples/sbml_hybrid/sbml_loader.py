@@ -24,7 +24,9 @@ call, so the reduced dynamics are exactly equivalent to the full system.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import diffrax
 import jax
@@ -32,13 +34,14 @@ import jax.numpy as jnp
 import libsbml
 import sympy as sp
 from jax import Array
+from jax.typing import ArrayLike
 
 # ---------------------------------------------------------------------------
 # MathML AST -> sympy
 # ---------------------------------------------------------------------------
 
 
-def _ast_to_sympy(node: libsbml.ASTNode) -> sp.Expr:
+def _ast_to_sympy(node: libsbml.ASTNode) -> Any:
     """Recursively convert a libsbml MathML ASTNode into a sympy expression."""
     t = node.getType()
     if t == libsbml.AST_NAME or t == libsbml.AST_NAME_AVOGADRO:
@@ -58,6 +61,8 @@ def _ast_to_sympy(node: libsbml.ASTNode) -> sp.Expr:
     if t == libsbml.AST_CONSTANT_FALSE:
         return sp.false
 
+    # Any: SBML math mixes numeric expressions and boolean conditions, and
+    # sympy types them as unrelated classes.
     children = [_ast_to_sympy(node.getChild(i)) for i in range(node.getNumChildren())]
 
     unary = {
@@ -166,7 +171,7 @@ class SBMLKineticModel:
     outputs: dict[str, sp.Expr] = field(default_factory=dict)
     _fluxes: dict[str, sp.Expr] = field(default_factory=dict)
     _flux_extras: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    _output_fn: callable | None = field(default=None, init=False)
+    _output_fn: Callable[..., Any] | None = field(default=None, init=False)
     _flux_fns: list = field(default_factory=list, init=False)
 
     # -- construction ------------------------------------------------------
@@ -268,7 +273,7 @@ class SBMLKineticModel:
         km.params["Cell"] = float(compartments.get("Cell", 1.0))
         return km
 
-    def make_flux(self, expr: sp.Expr, extra_params: tuple[str, ...] = ()) -> callable:
+    def make_flux(self, expr: sp.Expr, extra_params: tuple[str, ...] = ()) -> Callable[..., Array]:
         """Lambdify a sympy rate law against the model's state/param layout.
 
         The returned callable has signature ``(t, y, params) -> Array`` with
@@ -298,7 +303,7 @@ class SBMLKineticModel:
         self._flux_extras[reaction_id] = extra_params
         self._flux_fns = []
 
-    def _all_fluxes(self) -> list[callable]:
+    def _all_fluxes(self) -> list[Callable[..., Array]]:
         if not self._flux_fns:
             self._flux_fns = [
                 self.make_flux(expr, self._flux_extras.get(rid, ()))
@@ -308,7 +313,7 @@ class SBMLKineticModel:
 
     # -- simulation --------------------------------------------------------
 
-    def vector_field(self, t: Array, y: Array, args) -> Array:
+    def vector_field(self, t: ArrayLike, y: Array, args) -> Array:
         """``(t, y, args) -> dy/dt``; ``args = (params, None, None)``."""
         params, _boundary, _assignments = args
         v = jnp.stack([f(t, y, params) for f in self._all_fluxes()])
@@ -432,7 +437,7 @@ class ReducedSBMLKineticModel:
         full = full.at[jnp.asarray(self.indep)].set(y)
         return full
 
-    def vector_field(self, t: Array, y: Array, args) -> Array:
+    def vector_field(self, t: ArrayLike, y: Array, args) -> Array:
         return self.base.vector_field(t, self.full_state(y), args)[jnp.asarray(self.indep)]
 
     def integrate(self, solver, ts: Array, y0: Array, params: dict) -> Array:

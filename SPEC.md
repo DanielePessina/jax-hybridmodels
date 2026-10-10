@@ -8,15 +8,21 @@ This spec is the architectural source of truth. It pairs with [`CONTEXT.md`](./C
 ### Model API amendment (2026-10-07)
 
 The user-approved model workflow supersedes the earlier no-wrapper and
-finite-bounds-only restrictions below. `HybridModel` is an optional container
-with fit, predict, and simulate methods; functional APIs remain supported.
-`ConstantPredictor.value` stores fixed scalar/array/tuple values, while
-`BoundedPredictor(value=...).value` stores trainable scalars or arrays without
-an inner class or dummy inputs. Bounds may be finite, one-sided, or absent.
-Scalers and constants are fixed by the default mask. Scalar Optax configs
-and explicit TrainingPhase schedules normalize to the existing tuple fields.
-Named prediction and fit results expose experiment identity and loss semantics.
-Explicit experiment t0 is inserted as an unobserved integration point.
+finite-bounds-only restrictions below. `HybridModel` binds predictors,
+`simulate_fn`, `state_to_output`, `output_channel_names` and solver, with
+`fit`, `predict` and `simulate` methods; the functional APIs remain the
+lower layer. `Constant(value).value` stores fixed scalar/array/tuple values
+and `Parameter(value, bounds).value` stores trainable scalars or arrays.
+`BoundedPredictor` is network-only. Bounds may be finite, one-sided, or
+absent. Scalers and constants are fixed by the default mask
+(`train_scalers=True` opts scalers in). `OptaxTrainingConfig` stores a tuple
+of `TrainingPhase`; `steps=`/`lr=`/`optimizer=`/`penalty_weight=` build a
+single phase, which supersedes the parallel tuples in R-T2..R-T4 and §5.7.
+Named prediction and fit results expose experiment identity and loss
+semantics. Explicit experiment t0 is inserted as an unobserved integration
+point. The top-level namespace holds the user workflow; kernels, penalty
+helpers, losses, transforms, registries and UI classes are imported from
+their submodules.
 
 ---
 
@@ -58,15 +64,15 @@ This section is the contract. Implementation is judged against these line by lin
 #### Training (Optax)
 
 - **R-T1**: Training step = full pass over all buckets → accumulate gradients → one `optimizer.update`. Bucket ≠ step.
-- **R-T2**: The phase-keyed config fields (`steps, lr, optimizer, reset_optimiser_state, length_schedule`) are tuples of equal length (no scalar broadcast). `steps`, `lr`, `optimizer`, and `reset_optimiser_state` are required with no default; `length_schedule` defaults to `(1.0,)` for a single phase (scoring everything).
-- **R-T3**: `length_schedule` (per-phase fraction in `(0, 1]`) is implemented as a runtime mask cutoff to avoid JIT recompile across phase boundaries.
-- **R-T4**: `reset_optimiser_state` per phase rebuilds the optimiser at that phase boundary. It is a required per-phase tuple with no default: every phase states explicitly whether it resets, so a phase switch cannot silently keep a stale optimiser.
+- **R-T2**: A schedule is `OptaxTrainingConfig(phases=(TrainingPhase(...), ...))`. Each `TrainingPhase` holds `steps, lr, optimizer, horizon, reset_optimizer, penalty_weight`. A single phase may be written `OptaxTrainingConfig(steps=..., lr=..., optimizer=..., penalty_weight=...)`; the two forms do not mix.
+- **R-T3**: `TrainingPhase.horizon` (fraction in `(0, 1]`, default `1.0`) is implemented as a runtime mask cutoff to avoid JIT recompile across phase boundaries.
+- **R-T4**: `TrainingPhase.reset_optimizer` rebuilds the optimiser at the start of that phase. A phase that changes optimiser without a reset raises, so a phase switch cannot silently keep a stale optimiser.
 - **R-T5**: `bucket_step(predictors, bucket_payload, length_mask_fraction)` is `eqx.filter_jit`-compiled per bucket shape and returns `(loss, grads)`. It takes no `opt_state`: the optimiser update lives in a separate jitted `apply_update`, which is what the rest of this requirement already says. The bound penalty is *not* computed here; it is charged once per step by `build_penalty_step` (public in `jaxhybridmodels.training.kernels`), outside the bucket loop.
 - **R-T6**: Shared tournament only. Implicitly enabled when `tournament_steps > 0 AND tournament_attempts > 1`. Reuses the main loop's compiled `bucket_step` and `apply_update`. Every surviving candidate is scored on the data term with a forward-only pass and the **lowest-scoring** one is returned; ties keep the earlier attempt, so the result is a deterministic function of `key`.
 - **R-T7**: Tournament failure handling: on per-attempt failure (diffrax error, non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original `predictors` pytree with a `RuntimeWarning`.
 - **R-T8**: `Predictor.initialized_with_key(key)` is a documented per-leaf protocol used by the tournament; default free-function implementation is `reinitialize_with_key(predictor, key)` for one Module. Across the `predictors` pytree, the tournament splits the per-attempt key by traversal order (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently. Identical-shape sibling predictors get *different* re-init weights.
-- **R-T9**: Per-phase state resets. `patience` and the `restore_best` running minimum are both scoped to a horizon, not to the run. `patience` resets at every phase boundary, so a plateau at the end of one phase cannot stop the next before its new learning rate acts. `best_loss`/`best_predictors` reset at a boundary where `length_schedule` changes, because losses measured over a prefix and losses measured over the full window are not comparable and one running minimum across both lands in the shortest phase. The restored model therefore always comes from the final horizon.
-- **R-T10**: `annealing_schedule` (in `jaxhybridmodels.schedules`) provides epoch-scaled schedule multipliers for custom loops: `schedule(step) -> float` in `[end_value, init_value]` with the run length baked in, built on optax schedule helpers, with kinds `"cosine"`, `"linear"`, `"warmup_cosine"`, `"exponential"`. The stock trainers do not take it (they express strategy changes as phases, R-T2); it composes as `lr = base_lr * schedule(step)`. Named `annealing_schedule` — never "temperature" — to stay distinct from chemistry and `BoundScaler.temperature`.
+- **R-T9**: Per-phase state resets. `patience` and the `restore_best` running minimum are both scoped to a horizon, not to the run. `patience` resets at every phase boundary, so a plateau at the end of one phase cannot stop the next before its new learning rate acts. `best_loss`/`best_predictors` reset at a boundary where the horizon changes, because losses measured over a prefix and losses measured over the full window are not comparable and one running minimum across both lands in the shortest phase. The restored model therefore always comes from the final horizon.
+- **R-T10**: `annealing_schedule` (in `jaxhybridmodels.schedules`) provides epoch-scaled schedule multipliers for custom loops: `schedule(step) -> Array` in `[end_value, init_value]` with the run length baked in, built on optax schedule helpers, with kinds `"cosine"`, `"linear"`, `"warmup_cosine"`, `"exponential"`. The stock trainers do not take it (they express strategy changes as phases, R-T2); it composes as `lr = base_lr * schedule(step)`. Named `annealing_schedule`, never "temperature", to stay distinct from chemistry and `BoundScaler.temperature`.
 
 #### Training (Evosax)
 
@@ -302,7 +308,8 @@ Inside the function, the user typically unpacks the tuple (`growth, nucleation =
 ### 4.3 Solver
 
 ```python
-from jaxhybridmodels import SolverConfig, SOLVER_REGISTRY, register_solver
+from jaxhybridmodels import SolverConfig
+from jaxhybridmodels.solver import SOLVER_REGISTRY, register_solver
 
 solver = SolverConfig(
     solver=diffrax.Tsit5(),
@@ -391,7 +398,8 @@ def train_with_evosax(
 ### 4.8 Prediction
 
 ```python
-from jaxhybridmodels import predict_bucket, predict_dataset
+from jaxhybridmodels import predict_dataset
+from jaxhybridmodels.prediction import predict_bucket
 ```
 
 ### 4.9 UI
@@ -606,13 +614,21 @@ def fold(root_key: Array, name: str) -> Array:
 
 ```python
 @dataclass(frozen=True)
+class TrainingPhase:
+    steps: int
+    lr: float = 1e-3
+    optimizer: OptimizerSpec = "adamw"               # name | factory(lr) | optax.GradientTransformation
+    horizon: float = 1.0                             # scored fraction of each trajectory
+    reset_optimizer: bool = False
+    penalty_weight: float = 0.0
+
+@dataclass(frozen=True)
 class OptaxTrainingConfig:
-    steps: tuple[int, ...]
-    lr: tuple[float, ...]
-    optimizer: tuple[OptimizerSpec, ...]             # name | factory(lr) | optax.GradientTransformation per phase
-    reset_optimiser_state: tuple[bool, ...]
-    length_schedule: tuple[float, ...] = (1.0,)
-    penalty_weight: tuple[float, ...] = (0.0,)        # length-1 broadcasts across phases
+    steps: InitVar[int | None] = None                # single-phase shorthand
+    lr: InitVar[float | None] = None
+    optimizer: InitVar[OptimizerSpec | None] = None
+    penalty_weight: InitVar[float | None] = None
+    phases: tuple[TrainingPhase, ...] = ()           # the stored schedule
     penalty_points: tuple[Array, ...] | None = None   # per-leaf penalty-only points
     penalty_fn: Callable | None = None                # replaces the bound penalty
     trajectory_penalty_fn: Callable | None = None     # R-P8: (full_state, bp) -> scalar
@@ -691,10 +707,10 @@ Tests are the executable spec. Each module gets a test file written before the i
 |---|---|
 | `test_data_buckets.py` | bucketing groups by `len(union_ts)`; mask True iff channel observed at that timestamp; `make_dataset` is idempotent; `split_dataset` produces non-overlapping splits with valid buckets in each |
 | `test_predictors_serialise.py` | **R-A5 enforcement.** Every concrete predictor round-trips through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` with bit-exact recovery |
-| `test_trainable_filters.py` | default mask trains all float arrays; `freeze_modules_of_type(mask, predictors, BoundScaler)` zeros the right leaves; mask shape matches the `predictors` pytree structure (tuple/dict/Module) |
+| `test_trainable_filters.py` | default mask trains float arrays and freezes `BoundScaler`/`Constant` subtrees; `freeze_modules_of_type(mask, predictors, BoundScaler)` zeros the right leaves; mask shape matches the `predictors` pytree structure (tuple/dict/Module) |
 | `test_solver.py` | `SolverConfig.to_dict`/`from_dict` round-trip via `SOLVER_REGISTRY` |
 | `test_loss_functions.py` | masked losses respect mask; channel_weights apply correctly; balanced variants normalise per-experiment |
-| `test_train_optax.py` | trains a synthetic harmonic-oscillator ODE to known parameters within tolerance; multi-phase config with `reset_optimiser_state=(False, True)` doesn't crash; tournament reduces variance across seeds |
+| `test_train_optax.py` | trains a synthetic harmonic-oscillator ODE to known parameters within tolerance; multi-phase config with `reset_optimizer=True` on the second phase doesn't crash; tournament reduces variance across seeds |
 | `test_train_evosax.py` | trains a 4-D synthetic kinetic problem to known minimum; `init="lhs_box"` gives wider population spread than `"warm"` |
 | `test_ui_callbacks.py` | `SilentUI` produces no stdout; `RichTrainingUI` calls each lifecycle event the right number of times (recorded via a spy) |
 | `test_rng.py` | `fold(root, "name")` is stable across reorderings; missing root key raises |

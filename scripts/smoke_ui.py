@@ -11,7 +11,7 @@ import io
 import sys
 from typing import Any
 
-from jaxhybridmodels import EvosaxUI, SilentUI, TrainingUI
+from jaxhybridmodels.ui import EvosaxUI, SilentUI, TrainingUI
 from jaxhybridmodels.ui.testing import RecordingUI
 
 

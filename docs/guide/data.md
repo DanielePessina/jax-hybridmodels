@@ -102,7 +102,7 @@ Set `t0=` when the initial state is defined before the first measurement:
 
 ```python
 experiment = hm.make_experiment(
-    exp_id="run_A", covariates={}, y0=[1.0], t0=0.0,
+    exp_id="run_A", y0=[1.0], t0=0.0,
     channels={"concentration": hm.ChannelObs(ts=[1.0, 2.0], values=[0.8, 0.6])},
 )
 ```

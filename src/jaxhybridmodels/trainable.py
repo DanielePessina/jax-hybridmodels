@@ -10,12 +10,13 @@ via ``eqx.filter_value_and_grad``; Evosax partitions to derive the flat
 parameter vector via ``eqx.partition(predictors, mask)``. Either way the
 mask's pytree shape is what the partitioner walks.
 
-The default mask trains inexact parameter arrays and freezes ConstantPredictor
-and BoundScaler subtrees. The freezers here are free functions ``(mask, predictors) ->
-mask`` that never mutate their input, so masks compose by chaining:
+The default mask trains inexact parameter arrays and freezes ``Constant``
+and ``BoundScaler`` subtrees. The freezers here are free functions
+``(mask, predictors) -> mask`` that never mutate their input, so masks
+compose by chaining:
 
     mask = trainable_mask(predictors)
-    mask = freeze_modules_of_type(mask, predictors, BoundScaler)
+    mask = freeze_modules_of_type(mask, predictors, MLPPredictor)
     mask = freeze_paths(mask, ("inner.bias",))
 
 Each step returns a fresh mask of the same pytree shape.
@@ -45,20 +46,23 @@ def default_trainable(leaf: Any) -> bool:
 def trainable_mask(
     predictors: Any,
     predicate: Callable[[Any], bool] = default_trainable,
+    *,
+    train_scalers: bool = False,
 ) -> Any:
     """Build a boolean mask matching the structure of ``predictors``.
 
     Applies ``predicate`` to parameter leaves, returning a tree of the same
-    shape whose leaves are ``bool``. Constants stay fixed. The default
-    predicate also freezes scaler temperatures; a custom predicate can opt
-    into training scalers. Both optimisers take the result unchanged.
+    shape whose leaves are ``bool``. ``Constant`` subtrees are always
+    fixed. ``BoundScaler`` subtrees are fixed unless ``train_scalers`` is
+    set: a trainable temperature moves gradient between the scaler and the
+    inner network and tends to slow convergence. Both optimisers take the
+    result unchanged.
     """
-    from jaxhybridmodels.predictors.base import BoundScaler, ConstantPredictor
+    from jaxhybridmodels.predictors.base import BoundScaler, Constant
 
-    fixed = lambda node: (  # noqa: E731
-        isinstance(node, ConstantPredictor)
-        or (predicate is default_trainable and isinstance(node, BoundScaler))
-    )
+    def fixed(node: Any) -> bool:
+        return isinstance(node, Constant) or (not train_scalers and isinstance(node, BoundScaler))
+
     return jtu.tree_map(
         lambda node: jtu.tree_map(lambda _: False, node) if fixed(node) else predicate(node),
         predictors,
@@ -161,24 +165,6 @@ def freeze_where(mask: Any, predictors: Any, fn: Callable[[eqx.Module], bool]) -
         return submask
 
     return jtu.tree_map(_f, mask, predictors, is_leaf=_is_target)
-
-
-def frozen_default_mask(predictors: Any, *classes: type) -> Any:
-    """The default mask with every leaf of ``classes`` frozen.
-
-    Shortcut for the composition every example writes by hand::
-
-        mask = trainable_mask(predictors)
-        mask = freeze_modules_of_type(mask, predictors, BoundScaler)
-
-    Freezing ``BoundScaler`` leaves (their ``temperature``) is the common
-    case, so ``frozen_default_mask(predictors, BoundScaler)`` is the
-    conventional starting mask for a hybrid ODE fit.
-    """
-    mask = trainable_mask(predictors)
-    for cls in classes:
-        mask = freeze_modules_of_type(mask, predictors, cls)
-    return mask
 
 
 def count_trainable_params(predictors: Any, mask: Any) -> int:

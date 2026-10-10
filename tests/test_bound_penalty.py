@@ -200,7 +200,8 @@ class TestLengthMaskKeep:
     def test_full_fraction_keeps_every_observed_cell(self):
         ds = _observed_dataset()
         (source,) = data_penalty_points((_bp(key=jr.PRNGKey(0)),), ds)
-        keep = length_mask_keep(source, jnp.asarray(1.0))
+        assert source is not None
+        keep = length_mask_keep(source, 1.0)
         assert jnp.all(keep)
 
     def test_half_fraction_matches_apply_length_mask(self):
@@ -209,7 +210,8 @@ class TestLengthMaskKeep:
         (bp,) = ds.bucket_payloads
         masked = apply_length_mask(bp, jnp.asarray(0.5))
         expected = masked.mask.any(axis=-1).reshape(-1)  # same cell order
-        keep = length_mask_keep(source, jnp.asarray(0.5))
+        assert source is not None
+        keep = length_mask_keep(source, 0.5)
         assert jnp.array_equal(keep, expected)
 
     def test_tiny_fraction_keeps_at_least_the_first_timestep(self):
@@ -217,7 +219,8 @@ class TestLengthMaskKeep:
         # nothing; the penalty must not disagree with it.
         ds = _observed_dataset(t=5)
         (source,) = data_penalty_points((_bp(key=jr.PRNGKey(0)),), ds)
-        keep = length_mask_keep(source, jnp.asarray(0.05))
+        assert source is not None
+        keep = length_mask_keep(source, 0.05)
         assert jnp.all(source.cell_ts[keep] == 0)
 
 

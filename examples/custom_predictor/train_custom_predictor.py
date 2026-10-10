@@ -61,6 +61,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
+from jax.typing import ArrayLike
 from jaxtyping import Float
 
 from jaxhybridmodels import (
@@ -267,7 +268,7 @@ def _simulate_fn(
     (rate,) = predictors
     k = rate(covariates).reshape(())
 
-    def vector_field(t: Array, y: Float[Array, " 1"], args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Float[Array, " 1"], args: object) -> Array:
         return -k * y
 
     return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
@@ -380,11 +381,8 @@ def main() -> None:
 
     print("\n[train] optax, 3-attempt tournament then one phase")
     config = OptaxTrainingConfig(
-        steps=(args.steps,),
-        lr=(args.lr,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
+        steps=args.steps,
+        lr=args.lr,
         loss="mse",
         tournament_attempts=3,
         tournament_steps=40,

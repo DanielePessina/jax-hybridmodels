@@ -254,8 +254,8 @@ class Dataset(eqx.Module):
 
 def make_experiment(
     *,
-    covariates: dict[str, float | Array],
     channels: dict[str, ChannelObs],
+    covariates: dict[str, float | Array] | None = None,
     y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
     exp_id: str = "",
     t0: float | None = None,
@@ -272,12 +272,12 @@ def make_experiment(
 
     Parameters
     ----------
+    channels
+        Sparse observations keyed by channel name.
     covariates
         Scalar or rank-1 vector run conditions, constant in time. Values are
         converted to JAX arrays; a given key must have one consistent shape
-        across a dataset.
-    channels
-        Sparse observations keyed by channel name.
+        across a dataset. Omit when the model takes no run conditions.
     y0_fn
         Hook ``(covariates, channels) -> [S]`` building the full initial
         state, where ``S`` is the state dimension the user's ``simulate_fn``
@@ -292,7 +292,7 @@ def make_experiment(
         Direct initial state, as an alternative to y0_fn. Supply exactly one.
     """
     cov_arr: dict[str, Array] = {}
-    for key, value in covariates.items():
+    for key, value in (covariates or {}).items():
         array = jnp.asarray(value)
         if array.ndim not in (0, 1):
             raise ValueError(

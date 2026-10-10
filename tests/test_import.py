@@ -22,11 +22,14 @@ def test_core_entry_points_resolve_and_are_callable() -> None:
         "train_seed_ensemble",
         "train_bootstrap_ensemble",
         "train_with_evosax",
-        "predict_bucket",
         "predict_dataset",
         "predict_dense",
         "ensemble_predictions",
+        # model workflow
+        "HybridModel",
         # predictors + bounds
+        "Parameter",
+        "Constant",
         "BoundScaler",
         "BoundedPredictor",
         "MLPPredictor",
@@ -38,12 +41,10 @@ def test_core_entry_points_resolve_and_are_callable() -> None:
         "make_bootstrap_dataset",
         "ChannelObs",
         "Experiment",
-        # solver + kernels (composed by custom loops)
+        # solver + training configs
         "SolverConfig",
-        "build_bucket_step",
-        "build_penalty_step",
-        "build_score_bucket",
-        "build_apply_update",
+        "OptaxTrainingConfig",
+        "TrainingPhase",
         # metrics + helpers
         "compute_metrics",
         "evaluate_predictor",
@@ -53,3 +54,14 @@ def test_core_entry_points_resolve_and_are_callable() -> None:
     ]
     missing = [name for name in core if not callable(getattr(jaxhybridmodels, name, None))]
     assert not missing, f"public entry points missing or not callable: {missing}"
+
+
+def test_all_matches_lazy_exports() -> None:
+    # __all__ is spelled out for linters; the lazy loader reads _EXPORTS.
+    assert set(jaxhybridmodels.__all__) == set(jaxhybridmodels._EXPORTS)
+
+
+def test_submodules_resolve_as_attributes() -> None:
+    # Lower-level pieces left the top level; they stay one attribute away.
+    assert callable(jaxhybridmodels.penalties.box_grid)
+    assert callable(jaxhybridmodels.losses.masked_mse)

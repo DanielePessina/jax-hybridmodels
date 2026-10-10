@@ -26,37 +26,32 @@ which cannot. Do not plot them on one axis.
 ```python
 config = hm.OptaxTrainingConfig(steps=1000, lr=1e-3)
 result = model.fit(dataset, config, key=key)
-# Or: result = model.fit(dataset, steps=1000, lr=1e-3, key=key)
 
-result.model
-result.history.data_loss       # Data alone, before each update
-result.history.tracked_loss    # Data + weighted trajectory penalty
-result.history.objective       # All terms used for optimization
-result.best_step                # Zero-based pre-update checkpoint; None for final update
-result.stop_reason              # budget_exhausted / training_patience / validation_patience
+result.model                    # New model with the fitted predictors
+result.history.loss             # Data + weighted trajectory penalty, per step
+result.history.penalty          # Weighted bound penalty, per step
+result.history.phase            # Phase index of each step
+result.best_step                # Index of the returned step; None with restore_best=False
+result.stop_reason              # "budget_exhausted" or "patience"
 ```
+
+`loss + penalty` is the objective the optimiser minimised. Each entry is
+measured at the parameters before that step's update.
 
 For validation-based model selection:
 
 ```python
-result = model.fit(
-    train_data, config, validation=validation_data,
-    select_best="validation_loss", key=key,
-)
+result = model.fit(train_data, config, validation=validation_data, key=key)
+result.history.validation_loss
 ```
 
-Supplying validation defaults to validation selection. It scores the full
-validation horizon with data loss only, performing an additional forward
-pass each step. Patience applies to that score, and the best validation
-checkpoint is returned even when `restore_best=False`. Use
-`select_best="training_loss"` to monitor validation but keep training-based
-selection. Without validation, selection follows the existing tracked loss
-and resets when the training horizon changes. Histories describe pre-update
-parameters; the final update is not a scored checkpoint.
+With `validation=`, the validation data loss over the full horizon picks the
+returned step and drives `patience`, in place of the training loss. It costs
+one extra forward pass over the validation set per step. Validation is
+supported for Optax only.
 
 Pass an `EvosaxTrainingConfig` to `model.fit` for population search. Its result
-fills `history.best_fitness`, rather than the Optax loss series. Per-generation
-validation selection is currently supported only for Optax.
+fills `history.best_fitness` instead of the Optax series.
 
 ## Optax: gradient-based, multi-phase
 
@@ -69,77 +64,64 @@ A step is not one bucket.
 
 ### Phases
 
-A **phase** is a contiguous block of steps sharing hyperparameters. Use
-scalar fields for a simple run, or explicit phase objects:
+A **phase** is a contiguous block of steps sharing hyperparameters. A single
+phase uses `steps=`, `lr=`, `optimizer=` and `penalty_weight=` directly. A
+schedule uses `phases=`, a tuple of `TrainingPhase`:
 
 ```python
-config = hm.OptaxTrainingConfig(phases=[
-    hm.TrainingPhase(steps=200, lr=1e-2, horizon=0.5),
-    hm.TrainingPhase(steps=800, lr=1e-3, reset_optimizer=True),
-])
-```
-
-The original parallel tuples remain supported. Scalar fields broadcast to
-every phase; explicit tuples must match the length of `steps`. Do not combine
-`phases=` with `steps=`. Configurations normalize to tuples for the training
-loop and saved metadata.
-
-```python
-from jaxhybridmodels import OptaxTrainingConfig
+from jaxhybridmodels import OptaxTrainingConfig, TrainingPhase
 
 config = OptaxTrainingConfig(
-    steps=(200, 800),
-    lr=(1e-2, 1e-3),
-    optimizer=("adamw", "adamw"),
-    reset_optimiser_state=(False, True),
-    length_schedule=(0.5, 1.0),
+    phases=(
+        TrainingPhase(steps=200, lr=1e-2, horizon=0.5),
+        TrainingPhase(steps=800, lr=1e-3, reset_optimizer=True),
+    ),
     loss="mse",
-    verbose=True,
 )
 ```
 
 That is 200 warm-up steps at `lr=1e-2` seeing the first half of every
 trajectory, then 800 fine-tuning steps at `lr=1e-3` seeing all of it.
+The two forms do not mix: with `phases=`, set `lr`, `optimizer` and
+`penalty_weight` on each `TrainingPhase`. Either way the config stores
+`config.phases`, and `config.total_steps` sums their steps.
 
-**`length_schedule`** is the fraction of each trajectory the loss looks
-at, per phase, in the interval `(0, 1]`. It masks the loss, never the
-integration. The solver still runs the full trajectory; only the first
-`int(T * length_schedule[phase])` observation times are scored. Use it
-to get the early dynamics right before asking the model to fit the tail,
-which stops a long-horizon divergence from drowning the gradient.
-Because it is a runtime mask rather than a shape change, crossing a
-phase boundary costs no recompile. The default `(1.0,)` scores
-everything.
+**`horizon`** is the fraction of each trajectory the loss looks at, in the
+interval `(0, 1]`. It masks the loss, never the integration. The solver
+still runs the full trajectory; only the first `int(T * horizon)`
+observation times are scored. Use it to get the early dynamics right before
+asking the model to fit the tail, which stops a long-horizon divergence from
+drowning the gradient. Because it is a runtime mask rather than a shape
+change, crossing a phase boundary costs no recompile. The default `1.0`
+scores everything.
 
-**`reset_optimiser_state=True`** rebuilds the optimiser at that phase
-boundary, discarding its momentum. Set it when you switch optimiser
-type. Switching type without a reset raises, because optimiser state
-belongs to the optimiser that built it. Set it also when a
-`length_schedule` jump makes the accumulated momentum meaningless.
+**`reset_optimizer=True`** rebuilds the optimiser at the start of that
+phase, discarding its momentum. Set it when you switch optimiser type.
+Switching type without a reset raises, because optimiser state belongs to
+the optimiser that built it. Set it also when a horizon jump makes the
+accumulated momentum meaningless.
 
 Two counters reset at every phase boundary. `patience` (the early-stop
 budget) resets because a new phase is a new regime. The running minimum
-behind `restore_best` resets whenever `length_schedule` changes, because
-a phase that changes `length_schedule` changes what the loss measures.
-Without that reset the minimum would land in the shortest-horizon phase
-and the returned model would be the least-trained one in the run.
+behind `restore_best` resets whenever the horizon changes, because a phase
+with a different horizon measures a different loss. Without that reset the
+minimum would land in the shortest-horizon phase and the returned model
+would be the least-trained one in the run.
 
 ### The saturation penalty
 
 `penalty_weight` charges the objective for predictors pinned against
 their bounds, evaluated at the measured points plus any penalty-only
-points.
+points. It is set per phase.
 
 ```python
 config = OptaxTrainingConfig(
-    ...,
-    penalty_weight=(1e-3,),   # length 1 broadcasts across every phase
+    steps=1000,
+    lr=1e-3,
+    penalty_weight=1e-3,
     penalty_points=(sweep,),  # optional per-leaf penalty-only points
 )
 ```
-
-`penalty_weight` also broadcasts from a length-one tuple. Other explicit
-tuples must match `steps` exactly.
 
 `loss_history`, `restore_best`, early stopping, and the tournament score
 track the data term plus any configured trajectory penalty. The fixed-point
@@ -164,14 +146,7 @@ non-finite score it is dropped and the next key is tried, up to
 so the result is a deterministic function of the seed.
 
 ```python
-config = OptaxTrainingConfig(
-    steps=(1000,), lr=(1e-3,), optimizer=("adamw",),
-    reset_optimiser_state=(False,), length_schedule=(1.0,),
-    loss="mse",
-    tournament_attempts=8,
-    tournament_steps=20,
-    tournament_lr=1e-2,
-)
+config = OptaxTrainingConfig(steps=1000, lr=1e-3, loss="mse", tournament_attempts=8, tournament_steps=20, tournament_lr=1e-2)
 ```
 
 It turns on implicitly when `tournament_steps > 0` and
@@ -284,14 +259,13 @@ two-phase fit in exactly this shape.
 ## Freezing leaves
 
 `trainable=` takes a boolean pytree matching your predictors, one
-boolean per array. Omit it and floating-point parameter arrays train; constants and scaler
-temperatures stay fixed. Pass
-one to hold parts of the model fixed.
+boolean per array. Omit it and floating-point parameter arrays train;
+`Constant` values and scaler temperatures stay fixed. Pass one to hold more
+of the model fixed, or build it with `trainable_mask(predictors,
+train_scalers=True)` to train scaler temperatures.
 
 ```python
-from jaxhybridmodels import (
-    BoundScaler, freeze_modules_of_type, freeze_paths, trainable_mask,
-)
+from jaxhybridmodels import freeze_paths, trainable_mask
 
 mask = trainable_mask(predictors)  # Constants and scalers already fixed
 mask = freeze_paths(mask, ("0.inner.mlp.layers.0.weight",))           # one specific array
@@ -338,5 +312,6 @@ to hang.
 
 - Seed the root key explicitly: `key = jr.PRNGKey(seed)`.
 - Pass `key=` at every `train_with_*` call site.
-- Use [`fold`](/api/rng#fold) instead of `jr.split` for named subkeys in
+- Use [`fold`](/api/rng#fold) (`from jaxhybridmodels.rng import fold`)
+  instead of `jr.split` for named subkeys in
   your own code, so inserting a consumer does not shift the others.

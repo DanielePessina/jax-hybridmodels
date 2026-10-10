@@ -109,14 +109,7 @@ def test_out_of_order_events_do_not_crash() -> None:
 
 
 def _trivial_config(verbose: bool) -> OptaxTrainingConfig:
-    return OptaxTrainingConfig(
-        steps=(2,),
-        lr=(1e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        verbose=verbose,
-    )
+    return OptaxTrainingConfig(steps=2, lr=1e-2, verbose=verbose)
 
 
 def test_train_with_optax_verbose_true_runs_with_rich_ui_default(monkeypatch) -> None:

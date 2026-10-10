@@ -20,8 +20,10 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import jax
+from jax.typing import ArrayLike
 
 # Before any other JAX-touching import. The moments span ~18 decades during
 # integration, and a float32 mass balance drifts visibly within one run.
@@ -60,7 +62,7 @@ from _shared import (  # noqa: E402
 # Values rounded from the thesis sheet. Each experiment carries one terminal
 # d43 measurement, so that channel's ``ts`` axis is far sparser than conc's,
 # which is exactly the irregular layout ``make_dataset`` buckets.
-EXPERIMENTS_DATA: tuple[dict[str, object], ...] = (
+EXPERIMENTS_DATA: tuple[dict[str, Any], ...] = (
     {
         "exp_id": "LowData4_3",
         "temperature_C": 17.0,
@@ -170,7 +172,7 @@ def simulate_fn(
         + 17.97e-5 * temperature_C**3
     )
 
-    def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
+    def vector_field(t: ArrayLike, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
         mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
         S = conc / conc_sat
         meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
@@ -258,7 +260,7 @@ def main() -> None:
 
         experiments.append(
             make_experiment(
-                covariates={"temperature_C": float(data["temperature_C"])},  # type: ignore[arg-type]
+                covariates={"temperature_C": float(data["temperature_C"])},
                 channels={
                     "conc": ChannelObs(
                         ts=time_min,
@@ -389,15 +391,7 @@ def main() -> None:
         "supersaturation": jnp.asarray(1.5),
     }
 
-    config = OptaxTrainingConfig(
-        steps=(args.steps,),
-        lr=(args.lr,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=True,
-    )
+    config = OptaxTrainingConfig(steps=args.steps, lr=args.lr, loss="mse", verbose=True)
 
     def run_family(label: str, predictors_init):
         """Train one predictor family end-to-end and write its plots.

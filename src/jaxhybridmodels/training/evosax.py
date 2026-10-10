@@ -118,7 +118,7 @@ class EvosaxTrainingConfig:
     """Configuration for :func:`train_with_evosax`.
 
     Unlike :class:`~jaxhybridmodels.training.optax.OptaxTrainingConfig` there
-    are no phase-keyed tuples: the run is a flat loop, so every field is a
+    there are no phases: the run is a flat loop, so every field is a
     scalar.
 
     Attributes

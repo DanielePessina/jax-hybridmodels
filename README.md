@@ -67,11 +67,15 @@ For the library only, use `uv sync`.
 Run the verification checks before pushing:
 
 ```bash
-uv run ruff check .        # lint
-uv run ty check src        # typecheck
-uv run pytest -q           # test suite
-npm --prefix docs run docs:check   # API sync + site build
+uv run ruff check .                            # lint
+uv run ruff format --check .                   # formatting
+uv run ty check src tests examples scripts     # typecheck (needs --extra examples)
+uv run pytest -q                               # test suite
+npm --prefix docs run docs:check               # API sync + site build
 ```
+
+The first three also run as pre-commit hooks. Install them once with
+`uvx pre-commit install`.
 
 See [`docs/README.md`](./docs/README.md) for local preview, API generation,
 and Pages deployment details.

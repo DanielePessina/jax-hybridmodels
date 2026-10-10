@@ -49,20 +49,20 @@ from scipy.stats import qmc
 
 from jaxhybridmodels import (
     BoundedPredictor,
-    BoundScaler,
     ChannelObs,
     Experiment,
     SolverConfig,
     compute_metrics,
     count_trainable_params,
     evaluate_predictor,
-    frozen_default_mask,
+    freeze_modules_of_type,
     make_dataset,
     make_experiment,
     predict_dataset,
     print_metrics,
     ramp_profile,
     save_predictors,
+    trainable_mask,
 )
 from jaxhybridmodels.training import (
     EvosaxTrainingConfig,
@@ -155,7 +155,7 @@ def _true_ca_trajectory(
     """
     T_profile = ramp_profile(t0=ramp_t0, t1=ramp_t1, v0=T_lo, v1=T_hi)
 
-    def field(t: Array, y: Array, args: object) -> Array:
+    def field(t: ArrayLike, y: Array, args: object) -> Array:
         return -_k_true(T_profile(t), pH) * y
 
     sol = diffrax.diffeqsolve(
@@ -565,7 +565,7 @@ def main() -> None:
     residual_weights_pre_p1 = _residual_weights_signature(predictors[1])
 
     print("\n[phase 1] evosax — parametric trunk only (residual MLP frozen)")
-    mask_p1 = frozen_default_mask(predictors, BoundedPredictor, BoundScaler)
+    mask_p1 = freeze_modules_of_type(trainable_mask(predictors), predictors, BoundedPredictor)
 
     n_trainable_p1 = count_trainable_params(predictors, mask_p1)
     print(f"  trainable scalars (Phase 1): {n_trainable_p1} (expect 2)")
@@ -659,7 +659,9 @@ def main() -> None:
         )
 
     print("\n[phase 2] optax — residual MLP only (parametric frozen)")
-    mask_p2 = frozen_default_mask(predictors_p1, ArrheniusKinetics, BoundScaler)
+    mask_p2 = freeze_modules_of_type(
+        trainable_mask(predictors_p1), predictors_p1, ArrheniusKinetics
+    )
 
     n_trainable_p2 = count_trainable_params(predictors_p1, mask_p2)
     print(f"  trainable scalars (Phase 2): {n_trainable_p2} (16-neuron MLP weights+biases)")
@@ -670,15 +672,7 @@ def main() -> None:
 
     parametric_latent_pre_p2 = predictors_p1[0].latent
 
-    config_p2 = OptaxTrainingConfig(
-        steps=(args.steps,),
-        lr=(args.lr,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=True,
-    )
+    config_p2 = OptaxTrainingConfig(steps=args.steps, lr=args.lr, loss="mse", verbose=True)
     history_p2, predictors_p2 = train_with_optax(
         predictors_p1,
         train_dataset,

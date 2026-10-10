@@ -312,15 +312,7 @@ mask_p2 = trainable_mask(predictors_p1)
 mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, ArrheniusKinetics)
 mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, BoundScaler)
 
-config_p2 = OptaxTrainingConfig(
-    steps=(800,),
-    lr=(3e-3,),
-    optimizer=("adamw",),
-    reset_optimiser_state=(False,),
-    length_schedule=(1.0,),
-    loss="mse",
-    verbose=True,
-)
+config_p2 = OptaxTrainingConfig(steps=800, lr=3e-3, loss="mse", verbose=True)
 history_p2, predictors_p2 = train_with_optax(
     predictors_p1, dataset_train, config_p2,
     simulate_fn=simulate_fn, solver=solver,

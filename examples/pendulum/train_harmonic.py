@@ -24,6 +24,7 @@ import diffrax
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
+from jax.typing import ArrayLike
 from jaxtyping import Float
 
 from jaxhybridmodels import (
@@ -114,7 +115,7 @@ def _simulate_fn(
     omega = predictor(covariates).reshape(())
     omega_sq = omega * omega
 
-    def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
         return jnp.stack([y[1], -omega_sq * y[0]])
 
     term = diffrax.ODETerm(vector_field)
@@ -208,15 +209,7 @@ def main() -> None:
     print(f"  initial omega = {_read_omega(predictor):.4f} (target {OMEGA_TRUE})")
 
     print("\n[train] optax (single phase, mse loss)")
-    config = OptaxTrainingConfig(
-        steps=(args.steps,),
-        lr=(args.lr,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=False,
-    )
+    config = OptaxTrainingConfig(steps=args.steps, lr=args.lr, loss="mse", verbose=False)
     history, trained = train_with_optax(
         predictor,
         dataset,

@@ -8,10 +8,10 @@ model = hm.HybridModel(
     predictors=predictors,
     simulate_fn=simulate_fn,
     state_to_output=state_to_output,
-    output_channels=("concentration",),
+    output_channel_names=("concentration",),
     solver=solver,
 )
-result = model.fit(dataset, steps=1000, lr=1e-3, key=key)
+result = model.fit(dataset, hm.OptaxTrainingConfig(steps=1000, lr=1e-3), key=key)
 fitted = result.model
 predictions = fitted.predict(dataset)
 experiment = predictions["experiment_A"]
@@ -32,7 +32,7 @@ trajectory = fitted.simulate(
     ts=jnp.linspace(1.0, 10.0, 100), t0=0.0,
     y0=jnp.array([1.0]), covariates={"temperature": 300.0},
 )
-concentration = trajectory["concentration"]
+concentration = trajectory.outputs["concentration"]
 full_state = trajectory.state
 ```
 
@@ -40,9 +40,9 @@ The initial state belongs to `t0`, which defaults to the first requested time.
 The simulator must integrate from the first timestamp it receives; the
 method prepends t0 when needed and removes that point from its result.
 
-`hm.fit(model, ...)` and `hm.predict(model, dataset)` are functional
-equivalents. Existing `train_with_*` and `predict_dataset` calls remain
-available without constructing a model wrapper.
+`output_channel_names` must match the dataset's `output_channel_names`, in
+order. `train_with_optax`, `train_with_evosax` and `predict_dataset` work
+without a model wrapper; pass the pieces below as separate arguments.
 
 ## The model pieces
 

@@ -1,7 +1,9 @@
-"""Model methods and results organized around experiments and physical quantities.
+"""``HybridModel``: the predictors, simulator, observation map and solver held together.
 
-The functional training and bucket APIs remain available. This module holds
-those pieces together for fitting, inspecting, and simulating a model.
+The functional layer (``train_with_optax``, ``predict_dataset`` and so on)
+takes these four pieces as separate arguments on every call. This module
+binds them once and returns results keyed by experiment ID and channel
+name instead of bucket arrays.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
 
 import jax.numpy as jnp
 import numpy as np
@@ -24,14 +26,18 @@ from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evo
 from jaxhybridmodels.training.kernels import build_score_bucket
 from jaxhybridmodels.training.optax import OptaxTrainingConfig, _train_with_optax
 
+StopReason = Literal["budget_exhausted", "patience"]
+
 
 @dataclass(frozen=True)
 class ExperimentPrediction:
     """One experiment's times, named outputs, and optional observed values.
 
-    Unobserved entries in ``observed`` are NaN. ``observation_mask`` states
-    which cells are real measurements. ``state`` is present for simulations
-    made directly with :meth:`HybridModel.simulate`.
+    ``outputs`` maps each channel name to its ``[T]`` prediction.
+    ``observed`` holds the measurements on the same grid, NaN where a cell
+    was not measured, and ``observation_mask`` says which cells were.
+    Both are empty for :meth:`HybridModel.simulate`, which instead fills
+    ``state`` with the full ``[T, S]`` simulator state.
     """
 
     times: Array
@@ -40,18 +46,14 @@ class ExperimentPrediction:
     observation_mask: dict[str, Array] = field(default_factory=dict)
     state: Array | None = None
 
-    def __getitem__(self, channel: str) -> Array:
-        return self.outputs[channel]
-
 
 @dataclass(frozen=True)
 class PredictionResult(Mapping[str, ExperimentPrediction]):
-    """Predictions keyed by experiment ID, retaining input experiment order.
+    """Predictions keyed by experiment ID, in the order the experiments were given.
 
-    ``buckets`` exposes the original arrays for use with ``compute_metrics``
-    or custom JAX analysis. ``to_dataframe`` requires optional pandas.
-    Missing experiment IDs receive ``experiment_<index>`` names; collisions
-    raise rather than overwrite experiments.
+    ``buckets`` keeps the raw ``[N, T, D]`` arrays from ``predict_dataset``
+    for ``compute_metrics`` or custom JAX analysis. Experiments without an
+    ID are named ``experiment_<index>``.
     """
 
     experiments: dict[str, ExperimentPrediction]
@@ -67,161 +69,236 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
         return len(self.experiments)
 
     def to_dataframe(self) -> Any:
-        """Export a long table with experiment, time, channel, and prediction.
+        """Long table: one row per experiment, time and channel.
 
-        Columns also include ``observed`` and ``is_observed``. Install
-        pandas separately, or use the package's ``examples`` extra.
+        Columns are ``experiment_id``, ``time``, ``channel``,
+        ``prediction``, ``observed`` and ``is_observed``. Needs pandas,
+        which the ``examples`` extra installs.
         """
-        import pandas as pd  # ty: ignore[unresolved-import]
+        import pandas as pd
 
-        frames = []
-        for exp_id, experiment in self.items():
-            for channel, values in experiment.outputs.items():
-                frames.append(
-                    pd.DataFrame(
-                        {
-                            "experiment_id": exp_id,
-                            "time": np.asarray(experiment.times),
-                            "channel": channel,
-                            "prediction": np.asarray(values),
-                            "observed": np.asarray(
-                                experiment.observed.get(channel, jnp.full_like(values, jnp.nan))
-                            ),
-                            "is_observed": np.asarray(
-                                experiment.observation_mask.get(
-                                    channel, jnp.zeros(values.shape, dtype=bool)
-                                )
-                            ),
-                        }
-                    )
-                )
-        if not frames:
-            return pd.DataFrame(
-                columns=[
-                    "experiment_id",
-                    "time",
-                    "channel",
-                    "prediction",
-                    "observed",
-                    "is_observed",
-                ]
+        columns = ["experiment_id", "time", "channel", "prediction", "observed", "is_observed"]
+        frames = [
+            pd.DataFrame(
+                {
+                    "experiment_id": exp_id,
+                    "time": np.asarray(experiment.times),
+                    "channel": channel,
+                    "prediction": np.asarray(values),
+                    "observed": np.asarray(
+                        experiment.observed.get(channel, np.full(values.shape, np.nan))
+                    ),
+                    "is_observed": np.asarray(
+                        experiment.observation_mask.get(channel, np.zeros(values.shape, bool))
+                    ),
+                },
+                columns=columns,
             )
-        return pd.concat(frames, ignore_index=True)
+            for exp_id, experiment in self.items()
+            for channel, values in experiment.outputs.items()
+        ]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
 
 
 @dataclass(frozen=True)
 class FitHistory:
-    """Optax pre-update losses, or Evosax best-so-far fitness.
+    """Per-step records from a fit.
 
-    ``data_loss`` excludes all penalties. ``tracked_loss`` includes the
-    trajectory penalty, while ``objective`` includes both trajectory and
-    fixed-point penalties. Validation uses full-horizon data loss. Evosax
-    fills only ``best_fitness``: its generation history has different
-    semantics from Optax steps.
+    Optax fills ``loss``, ``penalty`` and ``phase``, one entry per step,
+    measured at the parameters before that step's update. ``loss`` is the
+    data term plus any trajectory penalty; ``penalty`` is the weighted
+    bound penalty, so ``loss + penalty`` is the objective the optimiser
+    minimised. ``validation_loss`` is the full-horizon data loss on the
+    validation set, present when one was given.
+
+    Evosax fills only ``best_fitness``, the best-so-far fitness per
+    generation. It is monotone and not comparable to ``loss``.
     """
 
-    data_loss: tuple[float, ...] = ()
-    tracked_loss: tuple[float, ...] = ()
-    objective: tuple[float, ...] = ()
-    validation_loss: tuple[float, ...] = ()
+    loss: tuple[float, ...] = ()
+    penalty: tuple[float, ...] = ()
     phase: tuple[int, ...] = ()
+    validation_loss: tuple[float, ...] = ()
     best_fitness: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
 class FitResult:
-    """A fitted model, loss histories, and the reason fitting stopped.
+    """The fitted model, its history, and how the run ended.
 
-    ``best_step`` is zero-based, referring to Optax's pre-update parameters
-    or the first Evosax generation reporting the best fitness (which may
-    include the input seed). It is None
-    when Optax returns the final update instead of a selected checkpoint.
+    ``best_step`` indexes the history at the returned parameters. It is
+    None when ``restore_best=False`` returned the final update instead.
+    ``stop_reason`` is ``"patience"`` when early stopping cut the final
+    phase short, else ``"budget_exhausted"``.
     """
 
     model: HybridModel
     history: FitHistory
     best_step: int | None
-    stop_reason: str
-    selected_by: str
+    stop_reason: StopReason
 
 
 @dataclass(frozen=True)
 class HybridModel:
-    """Hold the predictors, simulator, observation map, and solver together.
+    """The four pieces of a hybrid model, bound together.
 
     Parameters
     ----------
     predictors
-        Any predictor PyTree, including named dictionaries.
+        Any predictor pytree, usually a dict of ``Parameter``, ``Constant``
+        and ``BoundedPredictor`` leaves.
     simulate_fn
-        Pure ``(predictors, ts, covariates, y0, solver) -> [T, S]`` callback.
+        Pure ``(predictors, ts, covariates, y0, solver) -> [T, S]``.
     state_to_output
-        Pure ``[T, S] -> [T, D]`` callback.
-    output_channels
-        Ordered names matching the columns returned by state_to_output.
+        Pure ``[T, S] -> [T, D]``.
+    output_channel_names
+        Names of the ``D`` output columns, in order. Must match the
+        ``output_channel_names`` of every dataset passed in.
     solver
         Integration settings.
 
-    Notes
-    -----
-    Fitting returns a new model; the original remains unchanged. The
-    functional APIs accept these same pieces separately.
+    Fitting returns a new model; the original is unchanged.
     """
 
     predictors: Any
     simulate_fn: Callable[..., Array]
     state_to_output: Callable[[Array], Array]
-    output_channels: tuple[str, ...]
+    output_channel_names: tuple[str, ...]
     solver: SolverConfig
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "output_channels", tuple(self.output_channels))
-        if not self.output_channels or len(set(self.output_channels)) != len(self.output_channels):
-            raise ValueError("output_channels must be nonempty and unique")
+        names = tuple(self.output_channel_names)
+        if not names or len(set(names)) != len(names):
+            raise ValueError("output_channel_names must be nonempty and unique")
+        object.__setattr__(self, "output_channel_names", names)
 
     def _check_dataset(self, dataset: Dataset) -> None:
-        if dataset.output_channel_names != self.output_channels:
-            raise ValueError("Dataset output channels must match model output_channels in order")
-        if not dataset.bucket_payloads:
-            raise ValueError("Dataset must contain at least one experiment")
+        if dataset.output_channel_names != self.output_channel_names:
+            raise ValueError(
+                f"Dataset channels {dataset.output_channel_names} do not match the model's "
+                f"{self.output_channel_names}"
+            )
+        if not dataset._experiments:
+            raise ValueError("Dataset must contain at least one experiment from make_dataset")
 
     def fit(
         self,
         dataset: Dataset,
-        config: OptaxTrainingConfig | EvosaxTrainingConfig | None = None,
+        config: OptaxTrainingConfig | EvosaxTrainingConfig,
         *,
         key: Array,
-        steps: int | None = None,
-        lr: float | None = None,
         trainable: Any = None,
         ui: Any = None,
         validation: Dataset | None = None,
-        select_best: str | None = None,
     ) -> FitResult:
-        """Fit with Optax by default, or with an Evosax config.
+        """Train the predictors and return a new model with the result.
 
-        Supply a config, or use ``steps=`` and ``lr=`` for a simple Optax
-        run. ``select_best`` is ``training_loss`` or ``validation_loss``;
-        it defaults to validation when supplied, otherwise training.
-        Validation scoring is an additional forward pass at every step.
-        Validation selection and patience are supported for Optax only.
+        ``config`` picks the optimiser: Optax for gradient training, Evosax
+        for an evolutionary search. ``trainable`` defaults to
+        :func:`~jaxhybridmodels.trainable.trainable_mask`.
+
+        With ``validation`` (Optax only), the validation data loss replaces
+        the training loss for choosing the returned step and for
+        ``patience``. It costs one extra forward pass over the validation
+        set per step.
         """
-        return fit(
-            self,
-            dataset,
-            config,
+        self._check_dataset(dataset)
+        mask = trainable_mask(self.predictors) if trainable is None else trainable
+        if count_trainable_params(self.predictors, mask) == 0:
+            raise ValueError("Model has no trainable parameters")
+        if validation is not None:
+            self._check_dataset(validation)
+        common: dict[str, Any] = dict(
+            simulate_fn=self.simulate_fn,
+            state_to_output=self.state_to_output,
+            solver=self.solver,
             key=key,
-            steps=steps,
-            lr=lr,
-            trainable=trainable,
+            trainable=mask,
             ui=ui,
-            validation=validation,
-            select_best=select_best,
+        )
+
+        if isinstance(config, EvosaxTrainingConfig):
+            if validation is not None:
+                raise ValueError("validation= is supported for Optax fits only")
+            fitness, predictors = train_with_evosax(self.predictors, dataset, config, **common)
+            return FitResult(
+                model=replace(self, predictors=predictors),
+                history=FitHistory(best_fitness=tuple(fitness)),
+                best_step=int(np.argmin(fitness)) if fitness else None,
+                stop_reason="budget_exhausted",
+            )
+
+        select_score: Callable[[Any], float] | None = None
+        if validation is not None:
+            score = build_score_bucket(
+                simulate_fn=self.simulate_fn,
+                state_to_output=self.state_to_output,
+                solver=self.solver,
+                loss_fn=resolve_loss_fn(config.loss, config.channel_idx, config.channel_weights),
+            )
+            full_horizon = jnp.asarray(1.0)
+            buckets = validation.bucket_payloads
+
+            def validation_score(predictors: Any) -> float:
+                total = sum(float(score(predictors, bp, full_horizon)) for bp in buckets)
+                value = total / len(buckets)
+                if not math.isfinite(value):
+                    raise FloatingPointError("Validation loss is not finite")
+                return value
+
+            select_score = validation_score
+
+        run = _train_with_optax(
+            self.predictors, dataset, config, select_score=select_score, **common
+        )
+        return FitResult(
+            model=replace(self, predictors=run.predictors),
+            history=FitHistory(
+                loss=tuple(run.loss),
+                penalty=tuple(run.penalty),
+                phase=tuple(run.phase),
+                validation_loss=tuple(run.selection),
+            ),
+            best_step=run.best_step,
+            stop_reason="patience" if run.stopped_early else "budget_exhausted",
         )
 
     def predict(self, dataset: Dataset) -> PredictionResult:
-        """Predict measured union grids, with named experiment/channel access."""
-        return predict(self, dataset)
+        """Predict every experiment on its measured time grid, keyed by experiment ID."""
+        self._check_dataset(dataset)
+        buckets = predict_dataset(
+            self.predictors,
+            dataset,
+            simulate_fn=self.simulate_fn,
+            state_to_output=self.state_to_output,
+            solver=self.solver,
+        )
+        # make_dataset groups experiments by union-grid length, keeping input
+        # order inside each group. Walking the experiments in input order and
+        # counting rows per length recovers each one's bucket row.
+        bucket_of_length = {bp.ts.shape[1]: i for i, bp in enumerate(dataset.bucket_payloads)}
+        next_row: dict[int, int] = {}
+        names = self.output_channel_names
+        experiments: dict[str, ExperimentPrediction] = {}
+        for i, exp in enumerate(dataset._experiments):
+            exp_id = exp.exp_id or f"experiment_{i}"
+            if exp_id in experiments:
+                raise ValueError(f"Duplicate experiment ID {exp_id!r}; assign unique exp_id values")
+            arrays = _per_experiment_arrays(exp, names)
+            length = arrays.ts.shape[0]
+            row = next_row.get(length, 0)
+            next_row[length] = row + 1
+            values = buckets[bucket_of_length[length]][row]
+            if values.shape != arrays.y_observed.shape:
+                raise ValueError("state_to_output must return [T, D] matching output_channel_names")
+            observed = jnp.where(arrays.mask, arrays.y_observed, jnp.nan)
+            experiments[exp_id] = ExperimentPrediction(
+                times=arrays.ts,
+                outputs=dict(zip(names, values.T, strict=True)),
+                observed=dict(zip(names, observed.T, strict=True)),
+                observation_mask=dict(zip(names, arrays.mask.T, strict=True)),
+            )
+        return PredictionResult(experiments, buckets)
 
     def simulate(
         self,
@@ -231,11 +308,11 @@ class HybridModel:
         covariates: Mapping[str, Any] | None = None,
         t0: float | None = None,
     ) -> ExperimentPrediction:
-        """Simulate new conditions without an observation dataset.
+        """Simulate new conditions without a dataset.
 
-        ``y0`` is the state at ``t0`` (default: the first requested time).
-        Times must be finite, strictly increasing, and at or after t0.
-        A leading integration point is added when needed and omitted from
+        ``y0`` is the state at ``t0``, which defaults to ``ts[0]``. ``ts``
+        must be finite, strictly increasing, and not before ``t0``. When
+        ``t0`` precedes ``ts[0]`` it is integrated from but left out of
         the returned times and outputs.
         """
         times = jnp.asarray(ts, dtype=jnp.result_type(jnp.asarray(ts).dtype, float))
@@ -251,213 +328,17 @@ class HybridModel:
         if initial.ndim != 1 or not bool(jnp.all(jnp.isfinite(initial))):
             raise ValueError("y0 must be a finite rank-1 array")
         offset = int(start < float(values[0]))
-        grid = (
-            jnp.concatenate((jnp.asarray([start], dtype=times.dtype), times)) if offset else times
-        )
-        state = jnp.asarray(
-            self.simulate_fn(
-                self.predictors,
-                grid,
-                {name: jnp.asarray(value) for name, value in (covariates or {}).items()},
-                initial,
-                self.solver,
-            )
-        )
+        grid = jnp.concatenate((jnp.asarray([start], times.dtype), times)) if offset else times
+        cov = {name: jnp.asarray(value) for name, value in (covariates or {}).items()}
+        state = jnp.asarray(self.simulate_fn(self.predictors, grid, cov, initial, self.solver))
         if state.ndim != 2 or state.shape[0] != grid.shape[0]:
             raise ValueError("simulate_fn must return [T, S] for the requested time grid")
         state = state[offset:]
         output = jnp.asarray(self.state_to_output(state))
-        if output.shape != (times.shape[0], len(self.output_channels)):
-            raise ValueError("state_to_output must return [T, D] matching output_channels")
+        if output.shape != (times.shape[0], len(self.output_channel_names)):
+            raise ValueError("state_to_output must return [T, D] matching output_channel_names")
         return ExperimentPrediction(
-            times, dict(zip(self.output_channels, output.T, strict=True)), state=state
+            times=times,
+            outputs=dict(zip(self.output_channel_names, output.T, strict=True)),
+            state=state,
         )
-
-
-def predict(model: HybridModel, dataset: Dataset) -> PredictionResult:
-    """Functional equivalent of ``model.predict(dataset)``."""
-    model._check_dataset(dataset)
-    if not dataset._experiments:
-        raise ValueError("Named predictions require a dataset built with make_dataset")
-    buckets = predict_dataset(
-        model.predictors,
-        dataset,
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-    )
-    # Bucket grouping preserves input order within each length, while the
-    # public result restores the original experiment order across lengths.
-    rows: dict[int, int] = {}
-    bucket_indices = {bp.ts.shape[1]: i for i, bp in enumerate(dataset.bucket_payloads)}
-    experiments = {}
-    for i, exp in enumerate(dataset._experiments):
-        exp_id = exp.exp_id or f"experiment_{i}"
-        if exp_id in experiments:
-            raise ValueError(f"Duplicate experiment ID {exp_id!r}; assign unique exp_id values")
-        arrays = _per_experiment_arrays(exp, model.output_channels)
-        length = arrays.ts.shape[0]
-        row = rows.get(length, 0)
-        bucket = buckets[bucket_indices[length]]
-        values = bucket[row]
-        if values.shape != arrays.y_observed.shape:
-            raise ValueError("state_to_output must return [T, D] matching output_channels")
-        rows[length] = row + 1
-        experiments[exp_id] = ExperimentPrediction(
-            times=arrays.ts,
-            outputs={name: values[:, d] for d, name in enumerate(model.output_channels)},
-            observed={
-                name: jnp.where(arrays.mask[:, d], arrays.y_observed[:, d], jnp.nan)
-                for d, name in enumerate(model.output_channels)
-            },
-            observation_mask={
-                name: arrays.mask[:, d] for d, name in enumerate(model.output_channels)
-            },
-        )
-    return PredictionResult(experiments, buckets)
-
-
-def fit(
-    model: HybridModel,
-    dataset: Dataset,
-    config: OptaxTrainingConfig | EvosaxTrainingConfig | None = None,
-    *,
-    key: Array,
-    steps: int | None = None,
-    lr: float | None = None,
-    trainable: Any = None,
-    ui: Any = None,
-    validation: Dataset | None = None,
-    select_best: str | None = None,
-) -> FitResult:
-    """Functional equivalent of ``model.fit``; return a new fitted model."""
-    model._check_dataset(dataset)
-    mask = trainable_mask(model.predictors) if trainable is None else trainable
-    if count_trainable_params(model.predictors, mask) == 0:
-        raise ValueError("Model has no trainable parameters; ConstantPredictor values stay fixed")
-    if config is not None and (steps is not None or lr is not None):
-        raise ValueError("Supply config= or steps=/lr=, not both")
-    if config is None:
-        config = OptaxTrainingConfig(
-            steps=1000 if steps is None else steps, lr=1e-3 if lr is None else lr
-        )
-    selection = select_best or ("validation_loss" if validation is not None else "training_loss")
-    if selection not in ("training_loss", "validation_loss"):
-        raise ValueError("select_best must be training_loss or validation_loss")
-    if selection == "validation_loss" and validation is None:
-        raise ValueError("validation_loss selection requires validation data")
-    if validation is not None:
-        model._check_dataset(validation)
-    kwargs: dict[str, Any] = dict(
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-        key=key,
-        trainable=trainable,
-        ui=ui,
-    )
-    if isinstance(config, EvosaxTrainingConfig):
-        if validation is not None:
-            raise ValueError("Per-generation validation selection is supported for Optax only")
-        history, predictors = train_with_evosax(model.predictors, dataset, config, **kwargs)
-        return FitResult(
-            replace(model, predictors=predictors),
-            FitHistory(best_fitness=tuple(history)),
-            int(np.argmin(history)) if history else None,
-            "budget_exhausted",
-            "best_fitness",
-        )
-    if not isinstance(config, OptaxTrainingConfig):
-        raise TypeError("config must be OptaxTrainingConfig or EvosaxTrainingConfig")
-
-    loss_fn = resolve_loss_fn(config.loss, config.channel_idx, config.channel_weights)
-    score = build_score_bucket(
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-        loss_fn=loss_fn,
-    )
-    data_losses: list[float] = []
-    tracked: list[float] = []
-    objectives: list[float] = []
-    validation_losses: list[float] = []
-    phases: list[int] = []
-    selected_predictors = model.predictors
-    best_step = None
-    best_loss = math.inf
-    stale = 0
-    stopped_for_validation = False
-
-    def score_dataset(predictors: Any, data: Dataset, fraction: float) -> float:
-        return sum(
-            float(score(predictors, bp, jnp.asarray(fraction))) for bp in data.bucket_payloads
-        ) / len(data.bucket_payloads)
-
-    def record(predictors: Any, phase: int, step: int, loss: float, penalty: float) -> bool:
-        nonlocal selected_predictors, best_step, best_loss, stale, stopped_for_validation
-        # The legacy trainer already computed this term unless a trajectory
-        # regularizer is present. Only that case needs another training solve.
-        data_loss = (
-            score_dataset(predictors, dataset, config.length_schedule[phase])
-            if config.trajectory_penalty_fn is not None
-            else loss
-        )
-        data_losses.append(data_loss)
-        tracked.append(loss)
-        objectives.append(loss + config.penalty_weight_for_phase(phase) * penalty)
-        phases.append(phase)
-        if not math.isfinite(objectives[-1]):
-            raise FloatingPointError("Training produced a non-finite objective")
-        if validation is not None:
-            validation_losses.append(score_dataset(predictors, validation, 1.0))
-        selected_loss = validation_losses[-1] if selection == "validation_loss" else loss
-        if not math.isfinite(selected_loss):
-            raise FloatingPointError("Model selection produced a non-finite loss")
-        # Match the legacy horizon reset for training selection. Full-horizon
-        # validation scores remain comparable across training phases.
-        if step == 0:
-            stale = 0
-            if (
-                selection == "training_loss"
-                and phase > 0
-                and config.length_schedule[phase] != config.length_schedule[phase - 1]
-            ):
-                best_loss = math.inf
-        if selected_loss < best_loss:
-            best_loss = selected_loss
-            best_step = len(tracked) - 1
-            selected_predictors = predictors
-            stale = 0
-        else:
-            stale += 1
-        if selection == "validation_loss" and config.patience > 0 and stale >= config.patience:
-            stopped_for_validation = True
-            return True
-        return False
-
-    run_config = replace(config, patience=0) if selection == "validation_loss" else config
-    _, trained = _train_with_optax(
-        model.predictors, dataset, run_config, _step_callback=record, **kwargs
-    )
-    restore = selection == "validation_loss" or config.restore_best
-    predictors = selected_predictors if restore else trained
-    reason = (
-        "validation_patience"
-        if stopped_for_validation
-        else "training_patience"
-        if len(tracked) < sum(config.steps)
-        else "budget_exhausted"
-    )
-    return FitResult(
-        replace(model, predictors=predictors),
-        FitHistory(
-            tuple(data_losses),
-            tuple(tracked),
-            tuple(objectives),
-            tuple(validation_losses),
-            tuple(phases),
-        ),
-        best_step if restore else None,
-        reason,
-        selection if restore else "final_update",
-    )

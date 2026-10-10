@@ -193,15 +193,7 @@ def _solver() -> SolverConfig:
 
 
 def _optax_config(loss: Callable[..., Array] | str = "mse") -> OptaxTrainingConfig:
-    return OptaxTrainingConfig(
-        steps=(5,),
-        lr=(1e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss=loss,
-        verbose=False,
-    )
+    return OptaxTrainingConfig(steps=5, lr=1e-3, loss=loss, verbose=False)
 
 
 def _evosax_config() -> EvosaxTrainingConfig:
@@ -448,7 +440,7 @@ def test_load_run_returns_raw_dict_when_classes_missing(tmp_path: Path) -> None:
 
     assert isinstance(loaded["optax_config"], dict)
     assert isinstance(loaded["evosax_config"], dict)
-    assert loaded["optax_config"]["steps"] == list(optax_cfg.steps)
+    assert loaded["optax_config"]["phases"][0]["steps"] == optax_cfg.phases[0].steps
     assert loaded["evosax_config"]["population_size"] == evosax_cfg.population_size
 
 
@@ -505,12 +497,7 @@ def test_save_run_describes_callable_training_fields(tmp_path: Path) -> None:
         return jnp.asarray(0.0)
 
     config = OptaxTrainingConfig(
-        steps=(1,),
-        lr=(1e-3,),
-        optimizer=(optimizer_factory,),
-        reset_optimiser_state=(False,),
-        penalty_fn=penalty_fn,
-        verbose=False,
+        steps=1, lr=1e-3, optimizer=optimizer_factory, penalty_fn=penalty_fn, verbose=False
     )
     run_dir = tmp_path / "run_callable_fields"
     save_run(run_dir, predictors=_one_tuple(), solver=_solver(), optax_config=config)
@@ -518,15 +505,17 @@ def test_save_run_describes_callable_training_fields(tmp_path: Path) -> None:
     with (run_dir / "metadata.json").open() as f:
         metadata = json.load(f)
     saved = metadata["optax_config"]
-    assert "__callable__" in saved["optimizer"][0]
+    assert "__callable__" in saved["phases"][0]["optimizer"]
     assert "__callable__" in saved["penalty_fn"]
 
     raw_run_dir = tmp_path / "run_raw_optimizer"
-    raw_config = dataclasses.replace(config, optimizer=(optax.adam(1e-3),))
+    raw_config = OptaxTrainingConfig(
+        steps=1, optimizer=optax.adam(1e-3), penalty_fn=penalty_fn, verbose=False
+    )
     save_run(raw_run_dir, predictors=_one_tuple(), solver=_solver(), optax_config=raw_config)
     with (raw_run_dir / "metadata.json").open() as f:
         raw_metadata = json.load(f)
-    assert "__opaque__" in raw_metadata["optax_config"]["optimizer"][0]
+    assert "__opaque__" in raw_metadata["optax_config"]["phases"][0]["optimizer"]
     with pytest.raises(ValueError, match="callable"):
         load_run(
             run_dir,

@@ -7,8 +7,6 @@
 - [`FitHistory`](#fithistory)
 - [`PredictionResult`](#predictionresult)
 - [`ExperimentPrediction`](#experimentprediction)
-- [`fit`](#fit)
-- [`predict`](#predict)
 
 ---
 
@@ -23,29 +21,25 @@ HybridModel(
     predictors: 'Any',
     simulate_fn: 'Callable[..., Array]',
     state_to_output: 'Callable[[Array], Array]',
-    output_channels: 'tuple[str, ...]',
+    output_channel_names: 'tuple[str, ...]',
     solver: 'SolverConfig',
 ) -> None
 ```
 
-Hold the predictors, simulator, observation map, and solver together.
+The four pieces of a hybrid model, bound together.
 
 **Parameters**
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `predictors` |  | Any predictor PyTree, including named dictionaries. |
-| `simulate_fn` |  | Pure ``(predictors, ts, covariates, y0, solver) -> [T, S]`` callback. |
-| `state_to_output` |  | Pure ``[T, S] -> [T, D]`` callback. |
-| `output_channels` |  | Ordered names matching the columns returned by state_to_output. |
+| `predictors` |  | Any predictor pytree, usually a dict of ``Parameter``, ``Constant`` and ``BoundedPredictor`` leaves. |
+| `simulate_fn` |  | Pure ``(predictors, ts, covariates, y0, solver) -> [T, S]``. |
+| `state_to_output` |  | Pure ``[T, S] -> [T, D]``. |
+| `output_channel_names` |  | Names of the ``D`` output columns, in order. Must match the ``output_channel_names`` of every dataset passed in. |
 | `solver` |  | Integration settings. |
+| `Fitting returns a new model; the original is unchanged.` |  |  |
 
-**Notes**
-
-Fitting returns a new model; the original remains unchanged. The
-functional APIs accept these same pieces separately.
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L148)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L141)</small>
 
 <a id="hybridmodelfit"></a>
 
@@ -55,26 +49,26 @@ functional APIs accept these same pieces separately.
 fit(
     self,
     dataset: 'Dataset',
-    config: 'OptaxTrainingConfig | EvosaxTrainingConfig | None' = None,
+    config: 'OptaxTrainingConfig | EvosaxTrainingConfig',
     key: 'Array',
-    steps: 'int | None' = None,
-    lr: 'float | None' = None,
     trainable: 'Any' = None,
     ui: 'Any' = None,
     validation: 'Dataset | None' = None,
-    select_best: 'str | None' = None,
 ) -> FitResult
 ```
 
-Fit with Optax by default, or with an Evosax config.
+Train the predictors and return a new model with the result.
 
-Supply a config, or use ``steps=`` and ``lr=`` for a simple Optax
-run. ``select_best`` is ``training_loss`` or ``validation_loss``;
-it defaults to validation when supplied, otherwise training.
-Validation scoring is an additional forward pass at every step.
-Validation selection and patience are supported for Optax only.
+``config`` picks the optimiser: Optax for gradient training, Evosax
+for an evolutionary search. ``trainable`` defaults to
+[`trainable_mask`](/api/trainable#trainable_mask).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L188)</small>
+With ``validation`` (Optax only), the validation data loss replaces
+the training loss for choosing the returned step and for
+``patience``. It costs one extra forward pass over the validation
+set per step.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L184)</small>
 
 <a id="hybridmodelpredict"></a>
 
@@ -84,9 +78,9 @@ Validation selection and patience are supported for Optax only.
 predict(self, dataset: 'Dataset') -> 'PredictionResult'
 ```
 
-Predict measured union grids, with named experiment/channel access.
+Predict every experiment on its measured time grid, keyed by experiment ID.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L222)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L266)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -102,14 +96,14 @@ simulate(
 ) -> ExperimentPrediction
 ```
 
-Simulate new conditions without an observation dataset.
+Simulate new conditions without a dataset.
 
-``y0`` is the state at ``t0`` (default: the first requested time).
-Times must be finite, strictly increasing, and at or after t0.
-A leading integration point is added when needed and omitted from
+``y0`` is the state at ``t0``, which defaults to ``ts[0]``. ``ts``
+must be finite, strictly increasing, and not before ``t0``. When
+``t0`` precedes ``ts[0]`` it is integrated from but left out of
 the returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L226)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L303)</small>
 
 ---
 
@@ -124,19 +118,18 @@ FitResult(
     model: 'HybridModel',
     history: 'FitHistory',
     best_step: 'int | None',
-    stop_reason: 'str',
-    selected_by: 'str',
+    stop_reason: 'StopReason',
 ) -> None
 ```
 
-A fitted model, loss histories, and the reason fitting stopped.
+The fitted model, its history, and how the run ended.
 
-``best_step`` is zero-based, referring to Optax's pre-update parameters
-or the first Evosax generation reporting the best fitness (which may
-include the input seed). It is None
-when Optax returns the final update instead of a selected checkpoint.
+``best_step`` indexes the history at the returned parameters. It is
+None when ``restore_best=False`` returned the final update instead.
+``stop_reason`` is ``"patience"`` when early stopping cut the final
+phase short, else ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L131)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L125)</small>
 
 ---
 
@@ -148,24 +141,27 @@ when Optax returns the final update instead of a selected checkpoint.
 
 ```python
 FitHistory(
-    data_loss: 'tuple[float, ...]' = (),
-    tracked_loss: 'tuple[float, ...]' = (),
-    objective: 'tuple[float, ...]' = (),
-    validation_loss: 'tuple[float, ...]' = (),
+    loss: 'tuple[float, ...]' = (),
+    penalty: 'tuple[float, ...]' = (),
     phase: 'tuple[int, ...]' = (),
+    validation_loss: 'tuple[float, ...]' = (),
     best_fitness: 'tuple[float, ...]' = (),
 ) -> None
 ```
 
-Optax pre-update losses, or Evosax best-so-far fitness.
+Per-step records from a fit.
 
-``data_loss`` excludes all penalties. ``tracked_loss`` includes the
-trajectory penalty, while ``objective`` includes both trajectory and
-fixed-point penalties. Validation uses full-horizon data loss. Evosax
-fills only ``best_fitness``: its generation history has different
-semantics from Optax steps.
+Optax fills ``loss``, ``penalty`` and ``phase``, one entry per step,
+measured at the parameters before that step's update. ``loss`` is the
+data term plus any trajectory penalty; ``penalty`` is the weighted
+bound penalty, so ``loss + penalty`` is the objective the optimiser
+minimised. ``validation_loss`` is the full-horizon data loss on the
+validation set, present when one was given.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L112)</small>
+Evosax fills only ``best_fitness``, the best-so-far fitness per
+generation. It is monotone and not comparable to ``loss``.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L103)</small>
 
 ---
 
@@ -182,14 +178,13 @@ PredictionResult(
 ) -> None
 ```
 
-Predictions keyed by experiment ID, retaining input experiment order.
+Predictions keyed by experiment ID, in the order the experiments were given.
 
-``buckets`` exposes the original arrays for use with ``compute_metrics``
-or custom JAX analysis. ``to_dataframe`` requires optional pandas.
-Missing experiment IDs receive ``experiment_<index>`` names; collisions
-raise rather than overwrite experiments.
+``buckets`` keeps the raw ``[N, T, D]`` arrays from ``predict_dataset``
+for ``compute_metrics`` or custom JAX analysis. Experiments without an
+ID are named ``experiment_<index>``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L47)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L50)</small>
 
 <a id="predictionresultto_dataframe"></a>
 
@@ -199,12 +194,13 @@ raise rather than overwrite experiments.
 to_dataframe(self) -> 'Any'
 ```
 
-Export a long table with experiment, time, channel, and prediction.
+Long table: one row per experiment, time and channel.
 
-Columns also include ``observed`` and ``is_observed``. Install
-pandas separately, or use the package's ``examples`` extra.
+Columns are ``experiment_id``, ``time``, ``channel``,
+``prediction``, ``observed`` and ``is_observed``. Needs pandas,
+which the ``examples`` extra installs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L69)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L71)</small>
 
 ---
 
@@ -226,51 +222,10 @@ ExperimentPrediction(
 
 One experiment's times, named outputs, and optional observed values.
 
-Unobserved entries in ``observed`` are NaN. ``observation_mask`` states
-which cells are real measurements. ``state`` is present for simulations
-made directly with [`HybridModel.simulate`](/api/model#hybridmodelsimulate).
+``outputs`` maps each channel name to its ``[T]`` prediction.
+``observed`` holds the measurements on the same grid, NaN where a cell
+was not measured, and ``observation_mask`` says which cells were.
+Both are empty for [`HybridModel.simulate`](/api/model#hybridmodelsimulate), which instead fills
+``state`` with the full ``[T, S]`` simulator state.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L28)</small>
-
----
-
-<a id="fit"></a>
-
-### `fit()`
-
-<small>`from jaxhybridmodels.model import fit` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.fit`</small>
-
-```python
-fit(
-    model: 'HybridModel',
-    dataset: 'Dataset',
-    config: 'OptaxTrainingConfig | EvosaxTrainingConfig | None' = None,
-    key: 'Array',
-    steps: 'int | None' = None,
-    lr: 'float | None' = None,
-    trainable: 'Any' = None,
-    ui: 'Any' = None,
-    validation: 'Dataset | None' = None,
-    select_best: 'str | None' = None,
-) -> FitResult
-```
-
-Functional equivalent of ``model.fit``; return a new fitted model.
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L320)</small>
-
----
-
-<a id="predict"></a>
-
-### `predict()`
-
-<small>`from jaxhybridmodels.model import predict` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict`</small>
-
-```python
-predict(model: 'HybridModel', dataset: 'Dataset') -> 'PredictionResult'
-```
-
-Functional equivalent of ``model.predict(dataset)``.
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L277)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L32)</small>

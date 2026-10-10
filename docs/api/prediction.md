@@ -16,7 +16,7 @@ Forward-simulate trained predictors against a dataset. [`predict_bucket`](#predi
 
 ### `predict_bucket()`
 
-<small>`from jaxhybridmodels.prediction import predict_bucket` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_bucket`</small>
+<small>`from jaxhybridmodels.prediction import predict_bucket`</small>
 
 ```python
 predict_bucket(

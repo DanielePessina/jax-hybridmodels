@@ -115,20 +115,13 @@ class TestBootstrapDataset:
 
 class TestSeedEnsemble:
     def _config(self):
-        return OptaxTrainingConfig(
-            steps=(6,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            tournament_steps=2,
-            restore_best=False,
-        )
+        return OptaxTrainingConfig(steps=6, lr=1e-2, tournament_steps=2, restore_best=False)
 
     def _data_loss(self, predictor, dataset) -> float:
         from jaxhybridmodels.losses import masked_mse
 
         bp = dataset.bucket_payloads[0]
-        pred = hm.predict_bucket(
+        pred = hm.prediction.predict_bucket(
             predictor,
             bp,
             simulate_fn=make_oscillator_simulate_fn(),
@@ -143,7 +136,7 @@ class TestSeedEnsemble:
 
         total = 0.0
         for bp in dataset.bucket_payloads:
-            pred = hm.predict_bucket(
+            pred = hm.prediction.predict_bucket(
                 predictor,
                 bp,
                 simulate_fn=make_oscillator_simulate_fn(),
@@ -215,14 +208,7 @@ class TestSeedEnsemble:
         # so the reported ``final_loss`` must be the loss measured at those
         # parameters — not the last step's loss, which describes a different
         # model. Re-measuring the returned member's data loss must agree.
-        cfg = OptaxTrainingConfig(
-            steps=(6,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            tournament_steps=2,
-            restore_best=True,
-        )
+        cfg = OptaxTrainingConfig(steps=6, lr=1e-2, tournament_steps=2, restore_best=True)
         ranked = train_seed_ensemble(
             OmegaPredictor(1.5),
             dataset,
@@ -307,13 +293,7 @@ def test_each_member_is_its_own_ui_run(dataset):
     ranked = train_seed_ensemble(
         OmegaPredictor(1.5),
         dataset,
-        OptaxTrainingConfig(
-            steps=(6,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            tournament_steps=2,
-        ),
+        OptaxTrainingConfig(steps=6, lr=1e-2, tournament_steps=2),
         simulate_fn=make_oscillator_simulate_fn(),
         state_to_output=oscillator_state_to_output,
         solver=solver(),
@@ -336,13 +316,7 @@ def test_bootstrap_members_are_ui_bracketed(dataset):
     train_bootstrap_ensemble(
         OmegaPredictor(1.5),
         dataset,
-        OptaxTrainingConfig(
-            steps=(4,),
-            lr=(1e-2,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            tournament_steps=2,
-        ),
+        OptaxTrainingConfig(steps=4, lr=1e-2, tournament_steps=2),
         simulate_fn=make_oscillator_simulate_fn(),
         state_to_output=oscillator_state_to_output,
         solver=solver(),
@@ -370,13 +344,7 @@ def test_all_seeds_failed_fallback_closes_the_ui_bracket(dataset):
         members = train_seed_ensemble(
             OmegaPredictor(1.5),
             dataset,
-            OptaxTrainingConfig(
-                steps=(2,),
-                lr=(1e-2,),
-                optimizer=("adamw",),
-                reset_optimiser_state=(False,),
-                tournament_steps=2,
-            ),
+            OptaxTrainingConfig(steps=2, lr=1e-2, tournament_steps=2),
             simulate_fn=nan_simulate_fn,
             state_to_output=oscillator_state_to_output,
             solver=solver(),
@@ -403,7 +371,7 @@ class TestEnsemblePredictions:
         assert len(ensemble) == len(dataset.bucket_payloads)
         per_bucket = [
             [
-                hm.predict_bucket(
+                hm.prediction.predict_bucket(
                     m,
                     bp,
                     simulate_fn=make_oscillator_simulate_fn(),
@@ -462,14 +430,7 @@ def test_ensemble_flow_end_to_end(dataset):
     A compact end-to-end of the whole ensemble story, so a regression in
     any piece shows up here.
     """
-    cfg = OptaxTrainingConfig(
-        steps=(4,),
-        lr=(1e-2,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        tournament_steps=2,
-        restore_best=False,
-    )
+    cfg = OptaxTrainingConfig(steps=4, lr=1e-2, tournament_steps=2, restore_best=False)
     all_members = []
     for s in range(2):
         boot = make_bootstrap_dataset(dataset, key=jax.random.PRNGKey(s))

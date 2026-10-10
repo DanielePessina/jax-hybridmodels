@@ -144,8 +144,10 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
     import-style string representation. See ``_json_safe``.
     """
     raw_unprocessed = dataclasses.asdict(config)
-    if hasattr(config, "optimizer"):
-        raw_unprocessed["optimizer"] = [_json_safe_optimizer(spec) for spec in config.optimizer]
+    for phase_raw, phase in zip(
+        raw_unprocessed.get("phases", ()), getattr(config, "phases", ()), strict=True
+    ):
+        phase_raw["optimizer"] = _json_safe_optimizer(phase.optimizer)
     raw = _json_safe(raw_unprocessed)
     if "loss" in raw:
         # Read ``loss`` from the live config, not the asdict'd copy, so the
@@ -381,6 +383,10 @@ def _build_training_config(cls: type | None, raw: dict[str, Any] | None) -> Any:
         )
     kwargs = _filter_dataclass_kwargs(cls, raw)
     kwargs = _coerce_tuple_fields(cls, kwargs)
+    if "phases" in kwargs:
+        from jaxhybridmodels.training.optax import TrainingPhase
+
+        kwargs["phases"] = tuple(TrainingPhase(**phase) for phase in kwargs["phases"])
     return cls(**kwargs)
 
 

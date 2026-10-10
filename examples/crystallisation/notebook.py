@@ -54,8 +54,10 @@ the end of each experiment.
 # ruff: noqa: F722
 
 from pathlib import Path
+from typing import Any
 
 import jax
+from jax.typing import ArrayLike
 
 # x64 must be enabled before any other JAX-touching import. The
 # population-balance moments span ~18 decades during integration;
@@ -121,7 +123,7 @@ def main() -> None:
     # pair at 17 °C and the pair at 21 °C.
 
     # -- 1. Data -------------------------------------------------------
-    EXPERIMENTS_DATA = (
+    EXPERIMENTS_DATA: tuple[dict[str, Any], ...] = (
         {
             "exp_id": "E1",
             "temperature_C": 17.0,
@@ -430,7 +432,7 @@ def main() -> None:
             + 17.97e-5 * temperature_C**3
         )
 
-        def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
+        def vector_field(t: ArrayLike, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
             mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
             S = conc / conc_sat
             meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
@@ -486,15 +488,7 @@ def main() -> None:
     # a one-time just-in-time compilation cost per bucket shape;
     # subsequent iterations run at the full speed of compiled JAX code.
     MLP_STEPS = 300
-    config_mlp = OptaxTrainingConfig(
-        steps=(MLP_STEPS,),
-        lr=(1e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=False,
-    )
+    config_mlp = OptaxTrainingConfig(steps=MLP_STEPS, lr=1e-3, loss="mse", verbose=False)
     history_mlp, trained_mlp = train_with_optax(
         mlp_predictors,
         dataset,
@@ -639,7 +633,7 @@ def main() -> None:
             + 17.97e-5 * temperature_C**3
         )
 
-        def vector_field(t: Array, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
+        def vector_field(t: ArrayLike, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
             mu0, mu1, mu2, mu3, _mu4, conc = y[0], y[1], y[2], y[3], y[4], y[5]
             S = conc / conc_sat
             meta_mask = (S > 1.0 + META_EPS_M).astype(y.dtype)

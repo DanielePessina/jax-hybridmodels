@@ -43,6 +43,7 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 from jax import Array
+from jax.typing import ArrayLike
 from jaxtyping import Float
 from scipy.stats import qmc
 
@@ -429,7 +430,7 @@ def main() -> None:
         log10_k = log10_k_param + delta_log10_k
         k = jnp.power(10.0, log10_k)
 
-        def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+        def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
             Ca = jnp.maximum(y[0], 0.0)
             rate = k * Ca
             return jnp.stack([-rate, rate])
@@ -442,7 +443,9 @@ def main() -> None:
             dt0=solver.dt0 if solver.dt0 is not None else 0.05,
             y0=y0,
             saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+            stepsize_controller=diffrax.PIDController(
+                rtol=solver.rtol, atol=jnp.asarray(solver.atol)
+            ),
             max_steps=solver.max_steps,
             adjoint=diffrax.DirectAdjoint(),
         )
@@ -471,7 +474,7 @@ def main() -> None:
         log10_k = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
         k = jnp.power(10.0, log10_k)
 
-        def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+        def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
             Ca = jnp.maximum(y[0], 0.0)
             rate = k * Ca
             return jnp.stack([-rate, rate])
@@ -484,7 +487,9 @@ def main() -> None:
             dt0=solver.dt0 if solver.dt0 is not None else 0.05,
             y0=y0,
             saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+            stepsize_controller=diffrax.PIDController(
+                rtol=solver.rtol, atol=jnp.asarray(solver.atol)
+            ),
             max_steps=solver.max_steps,
             adjoint=diffrax.DirectAdjoint(),
         )
@@ -1025,15 +1030,7 @@ def main() -> None:
     n_p2 = count_trainable_params(predictors_p1, mask_p2)
     print(f"Phase 2 trainable scalars: {n_p2}  (the 16-neuron MLP weights and biases)")
 
-    config_p2 = OptaxTrainingConfig(
-        steps=(200,),
-        lr=(3e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=False,
-    )
+    config_p2 = OptaxTrainingConfig(steps=200, lr=3e-3, loss="mse", verbose=False)
     history_p2, predictors_p2 = train_with_optax(
         predictors_p1,
         dataset,
@@ -1143,15 +1140,7 @@ def main() -> None:
         loss="mse",
         verbose=False,
     )
-    _cfg_p2 = OptaxTrainingConfig(
-        steps=(200,),
-        lr=(3e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=False,
-    )
+    _cfg_p2 = OptaxTrainingConfig(steps=200, lr=3e-3, loss="mse", verbose=False)
 
     _n_folds = len(experiments)
     fold_records: list[dict] = []
@@ -1327,15 +1316,7 @@ def main() -> None:
         loss="mse",
         verbose=False,
     )
-    _cfg_p2 = OptaxTrainingConfig(
-        steps=(200,),
-        lr=(3e-3,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=False,
-    )
+    _cfg_p2 = OptaxTrainingConfig(steps=200, lr=3e-3, loss="mse", verbose=False)
 
     _hist_lopo_p1, predictors_lopo_p1 = train_with_evosax(
         predictors_init,

@@ -120,7 +120,7 @@ caller freezes it:
 ```python
 from jaxhybridmodels import freeze_paths, trainable_mask
 
-mask = trainable_mask(predictors)                    # every float array: True
+mask = trainable_mask(predictors)                    # float arrays True, scalers False
 mask = freeze_paths(mask, ("0.inner.frequencies",))  # that one: False
 
 history, trained = train_with_optax(

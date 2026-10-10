@@ -14,6 +14,7 @@ from __future__ import annotations
 import diffrax
 import jax.numpy as jnp
 import jax.random as jr
+from jax.typing import ArrayLike
 
 from jaxhybridmodels import (
     BoundedPredictor,
@@ -23,9 +24,9 @@ from jaxhybridmodels import (
     SolverConfig,
     make_dataset,
     make_experiment,
-    masked_mse,
     predict_dataset,
 )
+from jaxhybridmodels.losses import masked_mse
 
 
 def _y0_fn(covariates: dict[str, jnp.ndarray], channels: dict[str, ChannelObs]) -> jnp.ndarray:
@@ -47,7 +48,7 @@ def _simulate_fn(
     omega = predictor(covariates).reshape(())
     omega_sq = omega * omega
 
-    def vector_field(t: jnp.ndarray, y: jnp.ndarray, args: object) -> jnp.ndarray:
+    def vector_field(t: ArrayLike, y: jnp.ndarray, args: object) -> jnp.ndarray:
         return jnp.stack([y[1], -omega_sq * y[0]])
 
     term = diffrax.ODETerm(vector_field)
@@ -59,7 +60,7 @@ def _simulate_fn(
         dt0=solver.dt0,
         y0=y0,
         saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=jnp.asarray(solver.atol)),
         max_steps=solver.max_steps,
     )
     return sol.ys

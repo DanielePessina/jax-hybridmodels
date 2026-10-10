@@ -97,8 +97,8 @@ after a permutation.
 
 ```python
 make_experiment(
-    covariates: 'dict[str, float | Array]',
     channels: 'dict[str, ChannelObs]',
+    covariates: 'dict[str, float | Array] | None' = None,
     y0_fn: 'Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None' = None,
     exp_id: 'str' = '',
     t0: 'float | None' = None,
@@ -119,8 +119,8 @@ moment initialised to zero being the common case.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `covariates` |  | Scalar or rank-1 vector run conditions, constant in time. Values are converted to JAX arrays; a given key must have one consistent shape across a dataset. |
 | `channels` |  | Sparse observations keyed by channel name. |
+| `covariates` |  | Scalar or rank-1 vector run conditions, constant in time. Values are converted to JAX arrays; a given key must have one consistent shape across a dataset. Omit when the model takes no run conditions. |
 | `y0_fn` |  | Hook ``(covariates, channels) -> [S]`` building the full initial state, where ``S`` is the state dimension the user's ``simulate_fn`` integrates. |
 | `exp_id` |  | Optional human-readable id copied to ``Experiment.exp_id``. |
 | `t0` |  | Initial state time, at or before the first observation. Added as an unobserved integration point. None preserves the first-observation convention. |

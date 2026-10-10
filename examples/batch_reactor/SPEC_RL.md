@@ -346,7 +346,7 @@ no amount of PPO tuning will fix it.
 - **PPO does not converge.** Most likely cause is credit assignment over 11
   steps with a free-running rollout, where an early bad action poisons the
   episode. Mitigation, in order: raise `N_ROLLOUTS`, then shorten the horizon
-  by training on a prefix first (the framework's `length_schedule` idea,
+  by training on a prefix first (the framework's `TrainingPhase.horizon` idea,
   applied by hand), then fall back to teacher forcing as a warm start.
 - **`tfp-nightly` breaks the lockfile.** Mitigation is the vendoring fallback
   in step 3. `rlax` imports `distrax` only in `distributions.py` and

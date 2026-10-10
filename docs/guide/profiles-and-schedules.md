@@ -54,7 +54,7 @@ The stock trainers express changes as Optax phases. A custom loop can use
 curve is more appropriate:
 
 ```python
-schedule = hm.annealing_schedule(
+schedule = hm.schedules.annealing_schedule(
     "warmup_cosine",
     total_epochs=n_steps,
     init_value=1.0,

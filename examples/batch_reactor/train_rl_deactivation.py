@@ -73,12 +73,12 @@ from jaxhybridmodels import (
     MLPPredictor,
     SolverConfig,
     compute_metrics,
-    frozen_default_mask,
     load_predictors,
     make_dataset,
     make_experiment,
     predict_dataset,
     print_metrics,
+    trainable_mask,
 )
 from jaxhybridmodels.training import OptaxTrainingConfig, train_with_optax
 
@@ -216,7 +216,7 @@ def _activity_interval_mean(t0: ArrayLike, t1: ArrayLike, pH: ArrayLike, n: int 
     piecewise-constant activity that best represents each interval.
     """
     grid = jnp.linspace(t0, t1, n)
-    return jnp.trapezoid(_activity_true(grid, pH), grid) / (t1 - t0)
+    return jnp.trapezoid(_activity_true(grid, pH), grid) / (jnp.asarray(t1) - jnp.asarray(t0))
 
 
 def _lhs_design(seed: int, n: int = N_TRAIN_EXPERIMENTS) -> list[tuple[float, float]]:
@@ -253,7 +253,7 @@ def _make_aged_experiment(
     ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
     k = float(_k_true(temperature_C, pH))
 
-    def vector_field(t: Array, y: Array, args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Array, args: object) -> Array:
         rate = k * _activity_true(t, pH) * jnp.maximum(y[0], 0.0)
         return jnp.stack([-rate, rate])
 
@@ -356,7 +356,7 @@ def _integrate_interval(
     closes over a scalar.
     """
 
-    def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
         # Clipping at zero is numerical hygiene near the asymptote; mass
         # conservation is exact analytically.
         rate = k_eff * jnp.maximum(y[0], 0.0)
@@ -689,7 +689,7 @@ def _ppo_loss(agent: Agent, batch: Batch) -> tuple[Array, tuple[Array, Array, Ar
     mean = jax.vmap(_policy_mean, in_axes=(None, 0))(agent, batch.obs)
     log_prob = jax.vmap(_gaussian_log_prob, in_axes=(0, 0, None))(batch.latent, mean, agent.log_std)
     ratio = jnp.exp(log_prob - batch.log_prob)
-    pg_loss = rlax.clipped_surrogate_pg_loss(ratio, batch.advantage, CLIP_EPS)
+    pg_loss = jnp.asarray(rlax.clipped_surrogate_pg_loss(ratio, batch.advantage, CLIP_EPS))
 
     value = jax.vmap(_value, in_axes=(None, 0))(agent, batch.obs)
     value_loss = jnp.mean((value - batch.target) ** 2)
@@ -783,9 +783,8 @@ def train_ppo(
     """
     # Trainability mask: everything except the scalers' internal arrays.
     # ``BoundScaler`` carries ``temperature`` as an array leaf. It is
-    # configuration, not a parameter, and freezing it is the same
-    # ``frozen_default_mask`` idiom that ``train_hybrid.py`` uses.
-    trainable = frozen_default_mask(agent, BoundScaler)
+    # configuration, not a parameter, and the default mask holds it fixed.
+    trainable = trainable_mask(agent)
     optimiser = optax.chain(
         optax.clip_by_global_norm(MAX_GRAD_NORM),
         optax.adamw(lr),
@@ -1251,18 +1250,12 @@ def main() -> None:
     # ---- Baseline 2: fitted exponential decay ------------------------------ #
     print("\n[baseline] trunk + fitted exponential decay scalar (optax)")
     exponential = ExponentialDecay(key=k_exp)
-    mask_exp = frozen_default_mask(exponential, BoundScaler)
+    mask_exp = trainable_mask(exponential)
     history_exp, exponential = train_with_optax(
         exponential,
         train_dataset,
         OptaxTrainingConfig(
-            steps=(args.baseline_steps,),
-            lr=(args.baseline_lr,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            length_schedule=(1.0,),
-            loss="mse",
-            verbose=False,
+            steps=args.baseline_steps, lr=args.baseline_lr, loss="mse", verbose=False
         ),
         simulate_fn=make_simulate_fn(trunk, kind="exponential"),
         state_to_output=state_to_output,
@@ -1275,18 +1268,12 @@ def main() -> None:
     # ---- Baseline 3: the same policy, trained by backprop ------------------ #
     print("\n[baseline] trunk + the activity BoundedPredictor (optax backprop through the solve)")
     gradient_policy = build_policy(key=k_grad)
-    mask_grad = frozen_default_mask(gradient_policy, BoundScaler)
+    mask_grad = trainable_mask(gradient_policy)
     history_grad, gradient_policy = train_with_optax(
         gradient_policy,
         train_dataset,
         OptaxTrainingConfig(
-            steps=(args.baseline_steps,),
-            lr=(args.baseline_lr,),
-            optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-            length_schedule=(1.0,),
-            loss="mse",
-            verbose=False,
+            steps=args.baseline_steps, lr=args.baseline_lr, loss="mse", verbose=False
         ),
         simulate_fn=make_simulate_fn(trunk, kind="policy"),
         state_to_output=state_to_output,
