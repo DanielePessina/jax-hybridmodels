@@ -1,10 +1,8 @@
-"""Compatibility shim: the per-channel diagnostics now live in ``jaxhybridmodels``.
+"""Old names for the library's per-channel metrics.
 
-The example train scripts migrated to ``jaxhybridmodels.compute_metrics`` /
-``jaxhybridmodels.print_metrics``, so the real implementation lives in the
-library. This module keeps the old ``compute_diagnostics`` /
-``print_diagnostics`` / ``ChannelDiagnostics`` names importable for
-remaining example code; it is a thin re-export and adds nothing.
+``compute_diagnostics``, ``print_diagnostics`` and ``ChannelDiagnostics``
+are ``jaxhybridmodels.compute_metrics``, ``print_metrics`` and
+``ChannelMetrics``. New code should import those directly.
 """
 
 from __future__ import annotations

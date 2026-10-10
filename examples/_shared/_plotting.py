@@ -81,7 +81,7 @@ def parity_plot(
     if channels is None:
         channels = list(diagnostics.keys())
     n = len(channels)
-    fig, axes_arr = plt.subplots(1, n, figsize=(4 * n, 4), squeeze=False)
+    fig, axes_arr = plt.subplots(1, n, figsize=(4 * n, 4), squeeze=False, layout="constrained")
     axes = axes_arr.flatten()
 
     for ax, name in zip(axes, channels, strict=True):
@@ -108,7 +108,6 @@ def parity_plot(
 
     if title:
         fig.suptitle(title)
-    fig.tight_layout()
     if save_path is not None:
         fig.savefig(str(save_path))
     return fig
@@ -223,6 +222,7 @@ def trajectory_plot(
         ncols,
         figsize=(4 * ncols, 2.5 * max(nrows, 1)),
         squeeze=False,
+        layout="constrained",
     )
 
     for r, row in enumerate(rows):
@@ -255,7 +255,6 @@ def trajectory_plot(
 
     if title:
         fig.suptitle(title)
-    fig.tight_layout()
     if save_path is not None:
         fig.savefig(str(save_path))
     return fig

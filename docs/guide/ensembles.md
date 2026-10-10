@@ -1,69 +1,60 @@
-# Ensembles of hybrid models
+# Ensembles
 
-An ensemble contains several trained predictor PyTrees. Average their
-predictions to reduce sensitivity to initialization or to measure sensitivity
-to the training data.
+An ensemble is several trained predictor pytrees whose predictions you
+average. Seed ensembles vary the initialisation; bootstrap ensembles vary
+the data. Both helpers return `(final_loss, predictors)` pairs sorted best
+first.
 
-The library provides seed and bootstrap ensembles. Both return a list of
-`(final_loss, trained_predictors)` pairs, ranked by loss. Pass the predictor
-PyTrees to `ensemble_predictions` to average their per-bucket forecasts.
+The helpers use the functional calling convention. From a `HybridModel`,
+pass its parts:
 
-## Seed ensembles: same data, different starts
+```python
+parts = dict(
+    simulate_fn=model.simulate_fn,
+    state_to_output=model.state_to_output,
+    solver=model.solver,
+)
+```
 
-A single `train_with_optax` run starts from one initialisation. The
-**tournament** already ranks several fresh initialisations cheaply (a few
-warm-up steps each, scored forward-only). `train_seed_ensemble` reuses
-that ranking to decide which seeds deserve a *full* training run — so you
-get the benefit of many restarts without fully training every one.
+## Seed ensembles
+
+`train_seed_ensemble` scores `n_seeds` fresh initialisations with the
+[tournament](/guide/training#the-tournament), then fully trains the best
+`k_best`:
 
 ```python
 ranked = hm.train_seed_ensemble(
-    predictors, dataset, config,
-    simulate_fn=simulate_fn, state_to_output=state_to_output,
-    solver=solver, n_seeds=16, k_best=4, key=key,
+    model.predictors, dataset, config, **parts, n_seeds=16, k_best=4, key=key
 )
-# ranked: [(loss, predictors), ...] best-first; 4 fully-trained members
 ```
 
-`config.tournament_steps` controls how much warm-up each seed gets before
-ranking (default `0` ranks by the initialisation score alone).
+`config.tournament_steps` sets how many warm-up steps each seed gets before
+it is scored. The default `0` scores the initialisation as it stands.
 
-## Bootstrap ensembles: resampled data, one model per sample
+## Bootstrap ensembles
 
-Bagging means fitting the same model on different **bootstrap resamples**
-of the experiments — draws with replacement, so each member sees a
-slightly different dataset. `make_bootstrap_dataset` produces one
-resample; `train_bootstrap_ensemble` runs the whole recipe:
+Each member trains on a resample of the experiments, drawn with
+replacement:
 
 ```python
-# The data half, if you want it explicitly:
-boot = hm.make_bootstrap_dataset(dataset, key=key, n_experiments=20)
-
-# Or train the whole ensemble in one call:
 ranked = hm.train_bootstrap_ensemble(
-    predictors, dataset, config,
-    simulate_fn=simulate_fn, state_to_output=state_to_output,
-    solver=solver, n_bootstraps=10, n_seeds=1, k_best=None, key=key,
+    model.predictors, dataset, config, **parts, n_bootstraps=10, key=key
 )
 ```
 
-`n_seeds > 1` combines the two: each bootstrap sample gets its own
-seed-selected members. Every member sees different data and starts from a
-selected initialization. Irregular per-channel timestamps are handled
-automatically because resampling re-buckets the experiments.
+With `n_seeds > 1`, each resample's member is itself chosen by a seed
+ensemble. `make_bootstrap_dataset(dataset, key=key)` gives a single
+resample if you want to train on it yourself.
 
 ## Averaging predictions
 
-`ensemble_predictions` runs every member forward and averages the
-per-bucket predictions, so the result is the same shape as a single
-`predict_dataset` call:
-
 ```python
-mean_pred = hm.ensemble_predictions(
-    tuple(p for _, p in ranked), dataset,
-    simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver,
-)
+mean = hm.ensemble_predictions([p for _, p in ranked], dataset, **parts)
 ```
 
-For dense trajectory plots, evaluate on a fine grid first with
-`predict_dense`, then average.
+The result has the shape of one `predict_dataset` call: a tuple with one
+`[N, T, D]` array per bucket. For a smooth curve, call `predict_dense` per
+member and average those.
+
+To use a member as a model again: `model_k = dataclasses.replace(model,
+predictors=ranked[k][1])`.

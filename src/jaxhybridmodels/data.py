@@ -226,8 +226,8 @@ class Dataset(eqx.Module):
 
     ``bucket_payloads`` is the dispatch list, one compiled kernel per bucket
     shape. The ``Dataset`` carries no model-shaped callables: it never sees
-    full simulator states, and ``state_to_output`` — a property of the model,
-    not the data — is passed to prediction and training as a parameter.
+    full simulator states, and ``state_to_output`` belongs to the model, so
+    prediction and training take it as a separate argument.
 
     Attributes
     ----------

@@ -1,303 +1,180 @@
-# Extending jaxhybridmodels
+# Extending
 
-The library is assembled from small public pieces. A predictor, loss,
-optimizer, regulariser, or training loop is a callable or PyTree that you can
-replace. Subclass `Predictor` only when you are defining a new predictor
-family.
+Each piece the trainers use is a callable or pytree you can replace. This
+page lists the extension points and the interface each one expects.
 
-This page lists each extension point and its expected interface.
+## Predictors
 
-## Custom predictors
-
-A predictor is an `eqx.Module` whose `__call__` maps an input to an
-output. Subclass `Predictor` and implement `__call__`:
-
-```python
-class MyPredictor(Predictor):
-    weight: Array
-
-    def __call__(self, x):
-        return self.weight * x
-```
-
-Trainable arrays are ordinary fields; hyperparameters are
-`eqx.field(static=True)` so the module round-trips through
-`eqx.tree_serialise_leaves`. Add `initialized_with_key(self, key)` to
-control how the tournament re-initialises it. See
+Subclass `Predictor` and implement `__call__`. See
 [Custom predictors](/guide/custom-predictors) and the
 [worked example](/examples/custom-predictor).
 
-## Custom `simulate_fn`
+## `simulate_fn` and `state_to_output`
 
-`simulate_fn` is the one you write yourself, with a fixed signature. It
-integrates one experiment and returns the full state trajectory. The
-library calls it inside vmap and jit, so it must be tracible (pure
-JAX/diffrax). You own the physics; the framework owns batching,
-compilation, and gradients. See [Concepts](/guide/concepts).
-
-To keep the diffrax call thin, use `SolverConfig.diffeqsolve`:
+`simulate_fn(predictors, ts, covariates, y0, solver) -> [T, S]` integrates
+one experiment. It runs under `vmap` and `jit`, so it must be pure JAX.
+`SolverConfig.diffeqsolve` keeps it short and forwards `solver.adjoint`:
 
 ```python
 def simulate_fn(predictors, ts, covariates, y0, solver):
-    term = diffrax.ODETerm(my_vector_field(predictors, covariates))
-    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
+    def vector_field(t, y, args):
+        return -predictors["rate"].value * y
+
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
 ```
 
-The helper forwards `solver.adjoint`, so your gradient method is honoured
-wherever you run.
+`state_to_output` maps `[T, S]` to the observed channels `[T, D]`. See
+[Model interface](/guide/model-interface).
 
-## Custom `state_to_output`
+## Losses
 
-`state_to_output` maps the full state `[T, S]` to the observed channels
-`[T, D]`. It is a plain callable, and it belongs to the model, not the
-data: pass it to `predict_*` and `train_with_*`. Swap it to change what a run
-measures.
-
-## Custom losses
-
-A loss is a pure function `loss(pred_obs, bp) -> scalar`. Pass any
-callable to a training config's `loss` field:
+A loss is `loss(pred_obs, bp) -> scalar`, passed as the config's `loss`:
 
 ```python
-config = OptaxTrainingConfig(..., loss=my_huber_loss)
+config = hm.OptaxTrainingConfig(steps=500, loss=my_huber_loss)
 ```
 
-Channel selection composes automatically: a loss that accepts
-`channel_idx`/`channel_weights` gets them as keywords; a plain
-`(pred_obs, bp)` loss is handed the selected channels pre-sliced. See
-`jaxhybridmodels.losses.resolve_loss_fn`.
+With `channel_idx`, a loss whose signature accepts `channel_idx` and
+`channel_weights` receives them as keywords. A plain `(pred_obs, bp)` loss
+receives only the selected channels, already sliced; combining it with
+`channel_weights` raises, since the weights have to be applied inside the
+loss. See `jaxhybridmodels.losses.resolve_loss_fn`.
 
-## Custom optimisers
+## Optimisers
 
-A training config's `optimizer` field accepts three kinds of value:
+`optimizer` on a config or `TrainingPhase` accepts:
 
-- a name: `"adamw"` or `"adabelief"`;
-- a factory taking `learning_rate` and returning an
-  `optax.GradientTransformation`, e.g.
-  `lambda lr: optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(lr))`;
-- a ready-made transformation instance.
+- a name, `"adamw"` or `"adabelief"`;
+- a factory taking `learning_rate`, such as `optax.adamw` or
+  `lambda learning_rate: optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(learning_rate))`;
+- a ready-made `optax.GradientTransformation`.
 
-Names and factories are wrapped in `optax.inject_hyperparams`, so a phase
-boundary can move the learning rate without a rebuild. A raw instance
-cannot be re-hyperparametrised: a phase that changes `lr` on one must also
-set `reset_optimizer=True`.
+Names and factories are wrapped in `optax.inject_hyperparams`, so a later
+phase can change `lr` in place. A ready-made instance cannot, so a phase
+that changes `lr` on one needs `reset_optimizer=True`.
 
-## Custom regularisers
+## Regularisers
 
-A training config's `penalty_fn` replaces the default bound-saturation
-penalty. It is called as `penalty_fn(predictors, points) -> scalar`,
-once per step, outside the bucket loop, with the per-leaf point arrays the
-default penalty would evaluate at. Use it for weight decay, a
-monotonicity term, or anything else the bound penalty does not express.
-Both `OptaxTrainingConfig` and `EvosaxTrainingConfig` take it.
+`penalty_fn(predictors, points) -> scalar` replaces the bound penalty on
+both config types. It is charged once per step with weight
+`penalty_weight`. See [Penalties](/guide/penalties#replacing-it).
 
-## Trajectory-aware penalties (embedded hybrid models)
+## Trajectory-aware penalties
 
-`penalty_fn` operates on the predictors alone — it cannot see where the
-model actually ran. An **embedded** hybrid model — the predictor inside
-the vector field, its output feeding the dynamics (a kinetic parameter, a
-shape factor) — sometimes needs a penalty that fires along the
-trajectories it actually simulates. The training configs' other penalty
-hook does exactly that:
-
-```python
-config = OptaxTrainingConfig(
-    ...,
-    trajectory_penalty_fn=my_trajectory_penalty,   # (full_state, bp) -> scalar
-    trajectory_penalty_weight=1e-1,
-)
-```
-
-`trajectory_penalty_fn` receives the **full state** `[N, T, S]` —
-including any extra ODE components — and is added to the data loss inside
-the same forward pass. No second simulation, no `simulate_fn` or
-`state_to_output` signature change.
-
-For an embedded predictor, the penalty rides in the ODE state as extra
-accumulators (their time-integrals are what you charge). The helpers in
-`jaxhybridmodels.penalties` are the user-side recipe:
+For a predictor inside the vector field, carry its saturation as extra ODE
+state and charge the integral. The helpers in `jaxhybridmodels.penalties`
+add, wrap and remove that state. A sketch for one embedded `BoundedPredictor`
+whose input is state 0:
 
 ```python
 from jaxhybridmodels.penalties import (
-    attach_penalty_state, penalty_vector_field,
-    strip_penalty_state, penalty_integral,
+    attach_penalty_state, penalty_integral, penalty_vector_field, strip_penalty_state,
 )
 
-# y0_fn: widen the state with two zero accumulators.
-def y0_fn(cov, ch):
-    return attach_penalty_state(jnp.array([x0, v0]), n=2)
+def simulate_fn(predictors, ts, covariates, y0, solver):
+    rate = predictors["rate"]
 
-# simulate_fn: wrap the physics vector field with penalty rates.
-def pen_rates(t, y, args):
-    z = predictor.inner(predictor.in_scaler.to_latent(y[0]))   # the latent
-    return jnp.stack([predictor.out_scaler.saturation(z),     # output saturation
-                      predictor.in_scaler.input_violation(y[0])])  # input excursion
-term = diffrax.ODETerm(penalty_vector_field(physics, pen_rates))
+    def physics(t, y, args):
+        return -rate(y[:1]) * y
 
-# state_to_output: drop the accumulators before the loss.
+    def penalty_rates(t, y, args):
+        z = rate.inner(rate.in_scaler.to_latent(y[:1]))
+        return jnp.stack([
+            jnp.sum(rate.out_scaler.saturation(z)),       # output pinned at a bound
+            jnp.sum(rate.in_scaler.input_violation(y[:1])),  # input outside its box
+        ])
+
+    term = diffrax.ODETerm(penalty_vector_field(physics, penalty_rates))
+    return solver.diffeqsolve(term, ts, attach_penalty_state(y0, n=2)).ys
+
 def state_to_output(state):
-    return strip_penalty_state(state, n=2)
+    return strip_penalty_state(state, n=2)          # the loss never sees the accumulators
 
-# trajectory_penalty_fn: charge the time-integrals.
-def my_trajectory_penalty(full_state, bp):
+def trajectory_penalty(full_state, bp):
     return jnp.sum(penalty_integral(full_state, n=2))
+
+config = hm.OptaxTrainingConfig(
+    steps=500, trajectory_penalty_fn=trajectory_penalty, trajectory_penalty_weight=0.1
+)
 ```
 
-For a **parallel** hybrid model — the predictor's output *is* a predicted
-channel — the hook is simpler: `trajectory_saturation_penalty(full_state,
-out_scaler)` inverts the outputs back to latents and charges saturation
-over time.
+`trajectory_penalty_fn` gets the full state, accumulators included, and is
+added to the data loss in the same forward pass. For a predictor whose
+output is itself a channel, `trajectory_saturation_penalty(state,
+out_scaler)` does the job without extra state.
 
-**Probe conditions.** "Conditions I will deploy at, but have no `y_true`
-for" are just experiments with no observations: give each channel
-`values=jnp.array([])` (its `ts` still defines the integration grid, and
-the mask is all-False, so the data loss is zero and only the trajectory
-penalty fires).
+## Training loops
 
-## Custom training loops
-
-The kernels a trainer is built from are public, in
-`jaxhybridmodels.training.kernels`: `build_bucket_step` (the jitted
-per-bucket `(loss, grads)` kernel), `build_score_bucket` (forward-only),
-`build_penalty_step` (the per-step regulariser), and `build_apply_update`
-(the single optimiser update). The following is the bucket/step skeleton;
-optimizer construction and UI bookkeeping are omitted:
+The trainers are built from kernels in `jaxhybridmodels.training.kernels`:
+`build_bucket_step` returns jitted `(loss, grads)` for one bucket,
+`build_score_bucket` a forward-only loss, `build_penalty_step` the
+per-step regulariser, and `build_apply_update` one optimiser update. One
+step of the stock loop, without the optimiser setup and UI:
 
 ```python
-import jax
-
 step = build_bucket_step(
     simulate_fn=simulate_fn, state_to_output=state_to_output,
-    solver=solver, loss_fn=my_loss, trainable=mask,
+    solver=solver, loss_fn=loss_fn, trainable=mask,
 )
-acc_grads = None
-for bp in dataset.bucket_payloads:      # accumulate over every bucket
-    loss, grads = step(predictors, bp, fraction)
-    acc_grads = grads if acc_grads is None else jax.tree.map(
-        lambda total, current: total + current, acc_grads, grads
-    )
+apply_update = build_apply_update(optimizer, mask)
 
-# Average the bucket gradients, then call the update kernel once.
-acc_grads = jax.tree.map(
-    lambda gradient: gradient / len(dataset.bucket_payloads), acc_grads
-)
-predictors, opt_state = apply_update(predictors, acc_grads, opt_state)
+buckets = dataset.bucket_payloads
+grads = [step(predictors, bp, horizon)[1] for bp in buckets]
+mean_grads = jax.tree.map(lambda *g: sum(g) / len(g), *grads)
+predictors, opt_state = apply_update(predictors, mean_grads, opt_state)
 ```
 
-See the [custom training loop example](/examples/custom-loop) for the
-full pattern, including per-bucket weighting and a custom regulariser.
+The [custom loop example](/examples/custom-loop) is the full version, with
+per-bucket weights and a custom regulariser.
 
-**Annealing a hyperparameter.** A custom loop that wants a smooth curve
-instead of phases — a cosine-decayed learning rate, a penalty weight that
-ramps in — multiplies a schedule into the value each step. The library's
-`annealing_schedule` returns an optax-style multiplier with the run
-length baked in (one step is one epoch):
+The stock trainers change hyperparameters only at phase boundaries. For a
+smooth schedule in your own loop, `annealing_schedule` returns a multiplier
+over a fixed run length:
 
 ```python
 from jaxhybridmodels.schedules import annealing_schedule
 
-lr_sched = annealing_schedule("warmup_cosine", total_epochs=n_steps, warmup_epochs=5)
-w_sched = annealing_schedule("linear", total_epochs=n_steps, end_value=0.5)
-
-for step in range(n_steps):
-    lr = base_lr * lr_sched(step)          # warm up, then cosine down
-    weight = w0 * w_sched(step)            # ramp the penalty weight in
-    ...   # build the optimiser at `lr`, call penalty_step(predictors, weight, points)
+lr_scale = annealing_schedule("cosine", total_epochs=n_steps)
+lr = base_lr * lr_scale(step)
 ```
 
-The stock trainers do not take schedules: they express strategy changes
-as phases, and a smooth schedule is what a custom loop is for.
+## Several related systems
 
-## Conditioning on related systems
-
-When one model serves several related systems, keep the system condition as
-an ordinary covariate and add a small trainable embedding as another
-predictor leaf. This is a user-space composition pattern, not a special
-framework class.
-
-The idea is that one hybrid model serves several related systems — a
-catalyst family, a batch of reactors, a set of plant conditions. Give
-each system a **condition vector** that rides as ordinary covariates, and
-add a small trainable embedding as an extra predictor leaf. The vector
-field mixes the embedding's output into the predictor input dict, exactly
-like a state-derived or time-varying input:
+To share one model across related systems (a catalyst family, a set of
+reactors), keep the system identity as a covariate and add a small
+trainable embedding as another predictor leaf. The vector field feeds the
+embedding's output to the rate network like any other input:
 
 ```python
-embedding = eqx.nn.Linear(2, 4, key=k1)          # system_id -> 4-dim condition
-rate = BoundedPredictor(input_keys=("T", "pH", "z0", "z1"), ...)
+predictors = {
+    "embed": eqx.nn.Linear(2, 2, key=k1),
+    "rate": hm.BoundedPredictor(inner=..., input_keys=("T", "z0", "z1"), ...),
+}
 
 def vector_field(t, y, args):
-    z = embedding(jnp.stack([cov["system_id"], cov["batch"]]))
-    inputs = {"T": T_profile(t), "pH": cov["pH"], "z0": z[0], "z1": z[1]}
-    k = rate(inputs)
+    z = predictors["embed"](covariates["system"])   # system: a 2-vector covariate
+    k = predictors["rate"]({"T": covariates["T"], "z0": z[0], "z1": z[1]})[0]
     ...
 ```
 
-`predictors = (embedding, rate)`. Everything the framework does — the
-trainability mask, the tournament re-init, serialisation, the trajectory
-penalty — walks the pytree and treats both leaves uniformly. The same
-pattern covers a per-system *bias* (freeze the embedding, train only the
-rate), or a shared trunk with per-system heads: it is just more leaves in
-the tuple.
+Masks, the tournament and saving all walk the pytree, so the embedding
+needs no special handling.
 
-## Grouping the five pieces
+## Registries
 
-`Getting Started` lists the five things that go into a working model:
-the experiments (dataset), `simulate_fn`, `state_to_output`, the
-predictors, and the solver. The library keeps them apart on purpose —
-Nothing stops you from
-bunching them up in your own container and passing that around:
+Solvers, adjoints, transforms, warps and evosax strategies are looked up by
+name, which is what lets configs round-trip through JSON:
 
-```python
-from dataclasses import dataclass
+| Register | Module |
+| --- | --- |
+| `register_solver`, `register_adjoint` | `jaxhybridmodels.solver` |
+| `register_bound_transform`, `register_warp` | `jaxhybridmodels.transforms` |
+| `register_algorithm` | `jaxhybridmodels.training.evosax` |
 
-@dataclass(frozen=True)
-class HybridModel:
-    predictors: Any
-    simulate_fn: Callable
-    state_to_output: Callable
-    solver: SolverConfig
-    dataset: Dataset
+Register before loading a saved run that uses a custom entry.
 
-def fit(model: HybridModel, config, key):
-    return train_with_optax(
-        model.predictors, model.dataset, config,
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-        key=key,
-    )
-```
+## Progress UIs
 
-This grouping remains in user code. Each field is still passed directly to the
-library functions, so the public interfaces do not change. Serialization
-continues to operate on the predictor PyTree, and prediction and ensembles
-continue to use the same callables.
-
-## Custom solvers, adjoints, transforms, warps
-
-These are name-keyed registries. Register a class, then reference it by
-name in a config:
-
-- `register_solver(name, cls)` / `register_adjoint(name, cls)` —
-  diffrax solvers and gradient methods.
-- `register_bound_transform(name, transform)` /
-  `register_warp(name, warp)` — squash shapes and axis warps.
-- `register_algorithm(name, cls)` — evosax strategies.
-
-Registration happens at import time; the config round-trips the name
-through JSON, so a custom class must be registered before loading a saved
-config that references it.
-
-## Custom UIs
-
-The training loops take a `ui=` object implementing `TrainingUI` (optax)
-or `EvosaxUI` (evosax). Implement the protocol to pipe metrics into your
-own logger — a TensorBoard writer, a file, a queue. An explicit `ui=`
-always wins over the config's `verbose` flag.
-
-## Summary
-
-The stock trainers are built from the same public pieces available to user
-code. Replace one piece at a time, or assemble a complete custom loop from
-the training kernels.
+`ui=` takes any object implementing `TrainingUI` (Optax) or `EvosaxUI`
+(Evosax) from `jaxhybridmodels.ui`, for example to send metrics to a
+logger. It overrides `verbose`.

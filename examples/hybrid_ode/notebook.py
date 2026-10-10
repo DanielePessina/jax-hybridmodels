@@ -526,19 +526,9 @@ def main() -> None:
             # Inside the solve. One evaluation per solver step.
             return mechanistic + residual_net_(y)
 
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(vector_field),
-            solver.solver,
-            t0=ts[0],
-            t1=ts[-1],
-            dt0=solver.dt0,
-            y0=y0,
-            saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=solver.stepsize_controller(),
-            max_steps=solver.max_steps,
-            adjoint=solver.adjoint,
-        )
-        return jnp.asarray(sol.ys)
+        # SaveAt, step-size controller, max_steps and adjoint all come from
+        # the SolverConfig below.
+        return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
 
     solver = SolverConfig(
         solver=diffrax.Tsit5(),
@@ -561,8 +551,8 @@ def main() -> None:
     # output, and evaluated at the measured points (plus any user-supplied
     # penalty-only points) rather than along the trajectories. The residual
     # network reads the ODE state, so the dataset resolves no measured
-    # points for it; both leaves are covered with a warp-uniform box sweep
-    # (`box_grid`) -- the collocation-as-extension recipe.
+    # points for it; both leaves get a warp-uniform grid over their input
+    # box instead (`box_grid`).
     # `penalty_weight` is set on both phases.
     #
     # In the original interactive version these two values were UI controls
@@ -611,13 +601,12 @@ def main() -> None:
     for _name, _leaf in zip(("rate_net", "residual_net"), trained, strict=True):
         print(f"  {_name:13s} {float(bound_penalty((_leaf,), (box_grid(_leaf.in_scaler),))):.4e}")
 
-    # With the default settings the residual network reads exactly zero and
-    # the rate network reads a small non-zero value. That split is the
-    # penalty working rather than a problem: `rate_net` is declared valid
-    # over 270 to 350 K, the data only reaches 340 K, and the fitted
-    # network extrapolates hard enough at the warm end to press against the
-    # top of its k box. Set the weight to zero to see what the term held
-    # back.
+    # The grid covers each network's whole declared input box, including
+    # inputs no experiment reached: `rate_net` is declared over 270 to 350 K
+    # and the data spans 280 to 340 K. A non-zero value says a network is
+    # pressed against an output bound somewhere in that box, which the
+    # training loss cannot see. Set the weight to zero to see what the term
+    # held back.
 
     # 6. Did it recover the physics?
     # ---------------------------------------------------

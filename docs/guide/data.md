@@ -1,8 +1,7 @@
 # Data and buckets
 
-The data interface accepts experiments with sparse, irregular observations.
-Each measured channel has its own timestamps. Regular data is the special case
-where all channels share the same timestamps.
+Each measured channel has its own timestamps, so experiments may be sparse
+and irregular. Regular data is the case where every channel shares one grid.
 
 ## Build an experiment
 
@@ -30,14 +29,15 @@ experiment = hm.make_experiment(
 )
 ```
 
-`y0_fn` returns the complete initial state. The state may contain components
-that are not observed.
+`y0_fn(covariates, channels)` returns the full initial state, which may
+include unobserved components. Pass `y0=` instead when the state is known
+directly; give one or the other.
 
 ## Union timestamps and masks
 
-`make_dataset` computes the union of all channel timestamps for each
-experiment. It scatters each channel onto that axis and creates a boolean mask.
-The mask is `True` only where a value was measured.
+`make_dataset` merges each experiment's channel timestamps into one union
+axis, places every channel on it, and builds a mask that is `True` only where
+a value was measured.
 
 ```python
 dataset = hm.make_dataset(
@@ -46,13 +46,16 @@ dataset = hm.make_dataset(
 )
 ```
 
-No interpolation or padding is performed. A channel with no values may still
-provide timestamps for a probe experiment; its mask is all `False`.
+Nothing is interpolated. A probe channel gives `ts` with empty `values`: its
+timestamps join the union axis and its mask is all `False`, so the experiment
+is simulated but never scored.
 
 ## Buckets
 
-A bucket contains experiments with the same union-axis length. The timestamp
-values and masks may still differ within a bucket.
+A bucket holds the experiments whose union axes have the same length. Their
+timestamp values and masks may differ. `dataset.bucket_payloads` holds one
+`BucketPayload` per bucket, and `hm.describe_buckets(dataset)` summarises
+them.
 
 | Quantity | Shape |
 | --- | --- |
@@ -64,13 +67,13 @@ values and masks may still differ within a bucket.
 | vector covariate | `[N, K]` |
 | `bp.y0` | `[N, S]` |
 
-The training and prediction functions dispatch over buckets in Python. Each
-bucket shape gets its own compiled kernel.
+Training loops over buckets in Python, and each bucket shape compiles once.
+Fewer distinct lengths means less compile time.
 
 ## Validation
 
-The data boundary checks the conditions that would otherwise fail inside a
-compiled solve:
+`make_experiment` and `make_dataset` reject inputs that would otherwise fail
+inside a compiled solve:
 
 - channel timestamps must be finite and must not repeat;
 - observed `ts` and `values` must have matching lengths;
@@ -89,15 +92,14 @@ train, validation, test = hm.split_dataset(
     train=0.8,
     val=0.1,
     test=0.1,
-    key=jr.PRNGKey(0),
+    key=jr.key(0),
 )
 ```
 
-Use `make_bootstrap_dataset` for sampling experiments with replacement.
+`make_bootstrap_dataset` samples experiments with replacement.
 
 ## Initial time and initial state
 
-`make_experiment` accepts either `y0=` or a `y0_fn=` callback, never both.
 Set `t0=` when the initial state is defined before the first measurement:
 
 ```python
@@ -107,8 +109,7 @@ experiment = hm.make_experiment(
 )
 ```
 
-The dataset inserts t0 as an unobserved timestamp when needed. The simulator
-receives that point as `ts[0]`, and losses continue to score only observed
-cells. A t0 later than any observation raises. When t0 is omitted, y0 belongs
-to the first union timestamp, preserving existing workflows. An inserted
-point contributes to timestamp counts used by horizon schedules.
+The dataset inserts `t0` as an unobserved timestamp, so the simulator
+receives it as `ts[0]` and losses ignore it. A `t0` after the first
+observation raises. Without `t0`, `y0` belongs to the first union timestamp.
+The inserted point counts towards the length that a phase `horizon` cuts.

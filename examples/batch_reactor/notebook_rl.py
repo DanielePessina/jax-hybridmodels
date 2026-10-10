@@ -5,9 +5,10 @@ catalyst calibrated on the first batch reactor page fouls as the batch runs, and
 a reinforcement learning policy recovers the missing activity without ever
 differentiating the ODE.
 
-The plumbing (aged data generation, the rollout, the PPO update) is imported
-from that script so this file stays readable. Everything that carries the
-argument is defined and run in cells here.
+The plumbing (aged data generation, the rollout, the PPO update, the plots)
+is imported from that script, so this file holds only the argument and the
+checks that support it. Writes four figures to ``figures_rl/`` and prints
+markdown tables.
 
 Run: ``uv run python examples/batch_reactor/notebook_rl.py``
 
@@ -64,18 +65,17 @@ import sys
 from pathlib import Path
 
 import diffrax
-import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 
-from jaxhybridmodels import SolverConfig, make_dataset, predict_dataset
+from jaxhybridmodels import SolverConfig, compute_metrics, make_dataset, predict_dataset
+from jaxhybridmodels.training import OptaxTrainingConfig, train_with_optax
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import train_rl_deactivation as ex  # noqa: E402
-from _shared import compute_diagnostics  # noqa: E402
 
 
 def main() -> None:
@@ -143,7 +143,7 @@ def main() -> None:
     val_dataset = make_dataset(val_experiments, output_channel_names=ex.OUTPUT_CHANNELS)
 
     trunk = ex.load_trunk(
-        ex.Path(ex.__file__).parent / "artefacts" / "trunk_fresh.eqx", key=k_template
+        Path(ex.__file__).parent / "artefacts" / "trunk_fresh.eqx", key=k_template
     )
     solver = SolverConfig(solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=10_000, dt0=0.05)
     episodes = ex.episodes_from_experiments(train_experiments, trunk)
@@ -250,11 +250,8 @@ def main() -> None:
     # identical BoundedPredictor trained by ordinary backpropagation through
     # the solve. Both use the same zero-order-hold simulator, so the
     # discretisation is not a handicap applied only to the policy.
-    from jaxhybridmodels.training import OptaxTrainingConfig, train_with_optax
-
     def fit(predictors, kind, key):
-        """Train one activity model with optax, freezing the scalers."""
-        mask = ex.trainable_mask(predictors)
+        """Train one activity model with optax under the default mask."""
         return train_with_optax(
             predictors,
             train_dataset,
@@ -262,7 +259,6 @@ def main() -> None:
             simulate_fn=ex.make_simulate_fn(trunk, kind=kind),
             state_to_output=ex.state_to_output,
             solver=solver,
-            trainable=mask,
             key=key,
         )
 
@@ -281,7 +277,7 @@ def main() -> None:
     # past what the true law scores on the same data. Both agents are kept
     # below, one selected on training return (the only signal an honest RL loop
     # has) and one selected on validation return.
-    updates = 600  # the notebook's default slider position
+    updates = 600
     agent, val_agent, returns, val_returns, losses = ex.train_ppo(
         agent0,
         episodes,
@@ -341,8 +337,8 @@ def main() -> None:
             state_to_output=ex.state_to_output,
             solver=solver,
         )
-        _dv = compute_diagnostics(_vp, val_dataset)["Ca"]
-        _dt = compute_diagnostics(_tp, train_dataset)["Ca"]
+        _dv = compute_metrics(_vp, val_dataset)["Ca"]
+        _dt = compute_metrics(_tp, train_dataset)["Ca"]
         rows.append(
             f"| {_name} | {_dt.r2:.4f} | {_dv.r2:.4f} | {_dv.rmse:.4f} | {_dt.r2 - _dv.r2:+.4f} |"
         )
@@ -351,81 +347,27 @@ def main() -> None:
     print("|---|---|---|---|---|")
     print("\n".join(rows))
 
-    fig, axes = plt.subplots(1, len(val_experiments), figsize=(5.4 * len(val_experiments), 3.8))
-    colours = {
-        "frozen trunk": "tab:grey",
-        "exp decay": "tab:green",
-        "optax policy": "tab:blue",
-        "PPO train-sel": "tab:orange",
-        "PPO val-sel": "tab:red",
-    }
-    for _i, (_ax, _exp) in enumerate(zip(axes, val_experiments, strict=True)):
-        _ts = np.asarray(_exp.channels["Ca"].ts)
-        _ax.plot(
-            _ts, np.asarray(_exp.channels["Ca"].values), "o", ms=4, color="black", label="data"
-        )
-        for _name, _series in val_predictions.items():
-            _ax.plot(_ts, _series[_i], lw=1.6, color=colours[_name], label=_name)
-        _ax.set_title(
-            f"T = {float(_exp.covariates['temperature_C']):.1f} \u00b0C, "
-            f"pH = {float(_exp.covariates['pH']):.2f}",
-            fontsize=10,
-        )
-        _ax.set_xlabel("time")
-        _ax.set_ylabel("Ca")
-        if _i == 0:
-            _ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(fig_dir / "val_trajectories.png", dpi=150)
-    plt.close(fig)
+    ex._trajectory_plot(
+        val_experiments,
+        val_predictions,
+        save_path=fig_dir / "val_trajectories.png",
+        title="Aged validation runs: Ca against every model",
+    )
 
     # ## Did it recover the physics
     #
     # The step function against the hidden truth, and against the exact hold
     # target from earlier. This is the plot that says whether the policy
     # learned the deactivation or merely learned to fit C_A.
-    fig, axes = plt.subplots(1, len(val_experiments), figsize=(5.4 * len(val_experiments), 3.8))
-    dense = jnp.linspace(0.0, ex.T_MAX, 300)
-    for _j, (_ax, _exp) in enumerate(zip(axes, val_experiments, strict=True)):
-        _ph = float(_exp.covariates["pH"])
-        _ts = np.asarray(_exp.channels["Ca"].ts)
-        _ax.plot(dense, ex._activity_true(dense, _ph), color="black", lw=2, label="truth")
-        _ax.step(
-            _ts[:-1],
-            [float(ex._activity_interval_mean(_ts[i], _ts[i + 1], _ph)) for i in range(ex.HORIZON)],
-            where="post",
-            color="black",
-            ls="--",
-            lw=1.2,
-            label="exact hold target",
-        )
-        _episode = jax.tree.map(lambda x, _j=_j: x[_j][None], val_episodes)
-        _roll = ex.rollout_batch(
-            val_agent,
-            _episode,
-            jr.PRNGKey(0),
-            solver=solver,
-            penalty_weight=0.0,
-            n_samples=1,
-            deterministic=True,
-        )
-        _ax.step(
-            _ts[:-1],
-            np.asarray(_roll.activity[0]),
-            where="post",
-            color="tab:red",
-            lw=1.8,
-            label="PPO policy",
-        )
-        _ax.set_title(f"pH = {_ph:.2f}", fontsize=10)
-        _ax.set_xlabel("time")
-        _ax.set_ylabel("catalyst activity")
-        _ax.set_ylim(-0.05, 1.15)
-        if _j == 0:
-            _ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(fig_dir / "activity_recovery.png", dpi=150)
-    plt.close(fig)
+    ex._activity_recovery_plot(
+        val_agent,
+        val_episodes,
+        val_experiments,
+        exponential,
+        gradient_policy,
+        solver=solver,
+        save_path=fig_dir / "activity_recovery.png",
+    )
 
     # ## What the structure bought
     #
@@ -433,8 +375,8 @@ def main() -> None:
     # library knows nothing about, and it still comes back as a predictor that
     # predict_dataset accepts. Bounds came from BoundScaler rather than a tanh
     # bolted onto an actor, removing the log-determinant correction and making
-    # the box a property of the model. And the gradient-trained baseline wins
-    # on validation fit -- it should, on a problem this smooth. The result
+    # the box a property of the model. The gradient-trained baseline wins on
+    # validation fit, as it should on a problem this smooth. The result
     # worth keeping is that PPO reached essentially the same model without ever
     # differentiating the solver.
 

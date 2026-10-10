@@ -3,10 +3,15 @@
 The [batch reactor page](/examples/batch-reactor) fitted a rate constant $k(T, \text{pH})$ on fresh catalyst. This page takes that model, freezes it, and runs it on a reactor whose catalyst fouls as the batch proceeds. A policy learns the missing activity, trained by PPO, without ever differentiating the ODE.
 
 ```bash
-uv run python examples/batch_reactor/train_hybrid.py --no-plot \
-    --save-predictors examples/batch_reactor/artefacts/trunk_fresh.eqx
 uv run python examples/batch_reactor/train_rl_deactivation.py
 ```
+
+The frozen model is loaded from the committed `artefacts/trunk_fresh.eqx`.
+To rebuild it after changing part one, run
+`train_hybrid.py --no-plot --save-predictors examples/batch_reactor/artefacts/trunk_fresh.eqx`
+first. `--updates 0` skips PPO and runs only the baselines.
+`notebook_rl.py` walks through the same argument step by step, importing
+the machinery from the script.
 
 
 ## Parameters as control actions
@@ -35,9 +40,9 @@ $$
 
 with $\tau$ shortening at low pH, so acid attacks the catalyst sooner. The cubic exponent gives a plateau followed by a sharp fall.
 
-That shape is chosen deliberately. First-order deactivation, $a(t) = e^{-k_d t}$, would make $\mathrm{d}C_A/\mathrm{d}t = -k e^{-k_d t} C_A$ solvable in closed form, and one extra trainable scalar would fit it exactly. A time-varying policy would be decorative. A cubic Hill curve has no such shortcut.
+The shape is deliberate. First-order deactivation, $a(t) = e^{-k_d t}$, would make $\mathrm{d}C_A/\mathrm{d}t = -k e^{-k_d t} C_A$ solvable in closed form, and one extra trainable scalar would fit it exactly. A time-varying policy would be decorative. A cubic Hill curve has no such shortcut.
 
-The fouling is severe: the batch stalls at roughly 55% conversion where the fresh-catalyst model predicts it runs nearly to completion. That is the point. A starting model that is already good makes the exercise pointless.
+The fouling is severe on purpose: the batch stalls at roughly 55% conversion where the fresh-catalyst model predicts it runs nearly to completion, so the starting model is badly wrong.
 
 ## Bounds without a tanh squash
 
@@ -70,9 +75,10 @@ The upper bound is 1.05, not 1.0. A fresh catalyst has activity exactly 1 and a 
 PPO differentiates the policy's log-probability and the value head. The rollout produces rewards and is never differentiated.
 
 ```python
-rollout = rollout_batch(agent, episodes, key, ...)   # no gradient anywhere
-advantages, targets = _advantages_and_returns(rollout)
-agent, opt_state, loss = ppo_update(agent, opt_state, batch, ...)  # no ODE
+# Inside train_ppo, once per update:
+rollout = rollout_batch(agent, episodes, key, ...)  # solves the ODE, no gradient
+batch = Batch(...)  # GAE advantages from rollout.reward and rollout.value, via rlax
+agent, opt_state, loss = ppo_update(agent, opt_state, batch, ...)  # gradient, no ODE
 ```
 
 The update recomputes log-probabilities from stored observations and latents. It never re-enters `diffeqsolve`. Consequently `SolverConfig.adjoint` does not matter to this training loop at all, and the solver could be stiff, nonsmooth, or a black box without changing anything.
@@ -117,7 +123,7 @@ The static hybrid model scores worse than predicting the mean. A one-scalar deac
 
 Reference returns: the true deactivation law scores 5.73 against its own noisy data, no deactivation scores 0.78, the pure-noise optimum is 6.35.
 
-**The gradient fit edges out PPO.** On a problem this smooth that was the expected outcome, and it is the accurate conclusion: PPO reaches essentially the same model while never touching the adjoint. If the claim were that RL fits better, this page would be an advert rather than a result.
+**The gradient fit edges out PPO.** On a problem this smooth that was expected. The result is that PPO reaches essentially the same model without touching the adjoint.
 
 The 600-update default run in pictures:
 
@@ -127,8 +133,8 @@ The 600-update default run in pictures:
 
 The activity figure is the honest summary: the truth is a cubic-Hill
 plateau, the fitted exponential is a curve that cannot bend twice, and
-both policies track the plateau — while staying inside their structural
-activity box, no clipping anywhere. The trajectory figure shows why the
+both policies track the plateau while staying inside their activity
+box, with no clipping anywhere. The trajectory figure shows why the
 frozen trunk (grey) is worse than predicting the mean on aged runs: it
 runs the batch nearly to completion when fouling has already stalled it.
 
@@ -154,4 +160,4 @@ PPO rather than the paper's SAC: the MDP is deterministic, the horizon is 11 ste
 
 85 seconds end to end on CPU, including both optax baselines and 600 PPO updates over 576 episodes each.
 
-Design decisions, and the five things the implementation corrected in the original design, are recorded in `examples/batch_reactor/SPEC_RL.md`.
+Design decisions and their reasons are recorded in `examples/batch_reactor/SPEC_RL.md`.

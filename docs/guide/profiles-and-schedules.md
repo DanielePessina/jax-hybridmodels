@@ -1,14 +1,14 @@
 # Profiles and schedules
 
-Use a profile when a physical quantity changes during one ODE solve. Use an
-annealing schedule when a custom training loop needs a smooth change in a
-hyperparameter. Both are pure callables and compose with JAX transformations.
+A profile is a physical input that changes during one ODE solve. An
+annealing schedule is a hyperparameter that changes smoothly over a custom
+training loop. Both are pure JAX callables.
 
 ## Time-varying inputs
 
-Dataset covariates are constant during an experiment. Store the parameters of
-a changing quantity as ordinary covariates, build a profile inside
-`simulate_fn`, and evaluate it at the solver's continuous time.
+Covariates are constant during an experiment. Store a changing quantity's
+parameters as covariates, build the profile inside `simulate_fn`, and
+evaluate it at the solver's time `t`.
 
 ```python
 import diffrax
@@ -28,7 +28,7 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
             "temperature": temperature(t),
             "concentration": y[0],
         }
-        rate = predictors[0](inputs)
+        rate = predictors["rate"](inputs)
         return physics_rhs(t, y, rate)
 
     return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
@@ -44,14 +44,15 @@ The built-in factories are:
 | [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile) | Interpolates knots and extends the first and last values outward. |
 
 `ramp_profile` requires `t1 > t0`; `piecewise_linear_profile` requires at
-least two strictly increasing knots. Host-side parameters are validated when
-possible, while traced covariate parameters remain JIT-safe.
+least two strictly increasing knots. Concrete arguments are checked when the
+profile is built; traced covariates skip the check and stay JIT-safe.
 
 ## Smooth training schedules
 
-The stock trainers express changes as Optax phases. A custom loop can use
-[`annealing_schedule`](/api/schedules#annealing_schedule) when a continuous
-curve is more appropriate:
+The stock trainers change hyperparameters between `TrainingPhase`s. A custom
+loop that wants a continuous curve can use
+[`annealing_schedule`](/api/schedules#annealing_schedule), which lives in the
+`jaxhybridmodels.schedules` submodule:
 
 ```python
 schedule = hm.schedules.annealing_schedule(
@@ -67,11 +68,11 @@ for step in range(n_steps):
     # Build or update the custom loop using this lr.
 ```
 
-The example assumes `n_steps` is the custom loop's budget and `base_lr` is
-its initial learning rate. The schedule is an epoch-scaled multiplier. Here
-one library step is one full pass over all buckets, so `total_epochs` is
-normally the custom loop's step budget. The stock phase configuration does
-not consume this helper.
+`n_steps` is the loop's step budget and `base_lr` its peak learning rate. The
+schedule returns a multiplier. One step is one pass over all buckets, so
+`total_epochs` is the step budget. `"warmup_cosine"` rises from 0 to
+`init_value` over `warmup_epochs`, then decays to `end_value`; the other
+kinds start at `init_value`.
 
 ## Which boundary owns what?
 
@@ -79,5 +80,5 @@ not consume this helper.
 | --- | --- | --- |
 | Constant per-experiment condition | `Experiment.covariates` | `simulate_fn` |
 | Changing physical quantity | Profile parameters in covariates plus a profile factory | The vector field at time `t` |
-| Piecewise training strategy | Optax phase tuples | `train_with_optax` |
+| Piecewise training strategy | `OptaxTrainingConfig(phases=...)` | `fit` or `train_with_optax` |
 | Smooth training strategy | `annealing_schedule` | A custom loop |

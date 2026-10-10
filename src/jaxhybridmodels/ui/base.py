@@ -83,7 +83,7 @@ class TrainingUI(Protocol):
         """Fires after each training step. ``step_idx`` counts within the phase.
 
         ``loss`` is the data term (plus any configured trajectory penalty,
-        which is charged inside the bucket forward pass) — the series
+        which is charged inside the bucket forward pass). This is the series
         ``restore_best`` and early stopping act on; a bound-penalty weight
         that ramps between phases would make successive values
         incomparable. ``penalty`` reports the unweighted bound penalty next

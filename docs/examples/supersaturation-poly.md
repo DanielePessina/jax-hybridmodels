@@ -1,62 +1,47 @@
 # Neural polynomial kinetics
 
-The third predictor family alongside MLP and KAN: `NeuralNPolynomial`,
-a per-channel scalar *polynomial* in the (latented) input whose
-coefficients are produced by an inner trainable network. For
-crystallisation-style kinetics this is a physics-flavoured prior — a rate
-written as a power law in supersaturation `S - 1` — instead of a
-black-box MLP.
+`NeuralNPolynomial` writes each output as a polynomial whose coefficients
+come from an inner network. For nucleation kinetics that is a power-law
+prior in supersaturation `S - 1`, in place of a black-box MLP.
 
-The model is a two-moment crystallisation ODE
+The model tracks two moments of the crystal size distribution:
 
 ```
-d mu0/dt =  J          (nucleation)
-d mu1/dt =  G * mu0    (growth)
+d mu0/dt = J          (nucleation)
+d mu1/dt = G * mu0    (growth)
 ```
 
-with growth `G` a known constant and nucleation `J` the unknown rate law.
-`J` is a `NeuralNPolynomial`: polynomial in supersaturation (exponents
-`2, 3, 4` — nucleation is strongly supersaturation driven) whose
-coefficients `c_i(S)` come from an inner `MLPPredictor`. The polynomial
-is wrapped in a `BoundedPredictor` so `J` stays in a physical range.
-
-The dataset is synthetic: `J_true(S) = a * (S - 1)^4 + b`, and the fit
-must recover the rate law from noisy `mu0` time-series across several
-supersaturations.
+Growth `G` is known. The nucleation rate `J(S)` is a polynomial with
+exponents 2, 3 and 4 whose coefficients come from a small MLP, wrapped in a
+`BoundedPredictor` so it stays inside `(0.01, 2.0)`. Only `mu0` is
+measured. The data is synthetic, `J_true = 0.02 + 0.15 (S - 1)^4` plus
+noise, at five supersaturations.
 
 ```bash
 uv run python examples/supersaturation_poly/train_supersaturation_poly.py
 ```
 
-## A design fact this example surfaces
+## The polynomial basis is latent
 
-The polynomial basis is `sum(inner_input)` — the *latented* input — so
-`NeuralNPolynomial` cannot separate "coefficients from condition A" from
-"basis in condition B" in a single predictor. The physics-clean
-crystallisation form (`sum_i c_i(T) * (S-1)^p_i`) therefore enters either
-as one polynomial in `S-1` with `S`-conditioned coefficients (shown here),
-or by composing two predictors. If the basis and coefficient conditions are
-different physical variables, write that composition explicitly at the
-vector-field boundary.
+`NeuralNPolynomial` evaluates its polynomial at `sum(x)`, where `x` is the
+input after the `BoundedPredictor`'s input scaler. The basis is therefore a
+latent coordinate of `S - 1`, not `S - 1` itself. If you want a polynomial
+in one variable with coefficients conditioned on another, for example
+`sum_i c_i(T) * (S - 1)^p_i`, compose two predictors in the vector field.
 
-## The script, in full
-
-The example is a single file with no hidden parts — what you see is what
-runs:
+## The script
 
 <<< ../../examples/supersaturation_poly/train_supersaturation_poly.py
 
 ## Results
 
-Default settings, seed 0, 400 steps. The `mu0` time-series fit to the
-noise floor (`R^2 = 0.999`), and the rate law comes out close to the truth
-`J(S) = 0.02 + 0.15 (S-1)^4`.
+Seed 0, 400 steps. The `mu0` series fit to the noise floor
+(`R^2 = 0.998`).
 
 ![Predicted against observed nucleation moment](assets/supersaturation-poly/parity.png)
 
 ![Learned nucleation rate against the truth](assets/supersaturation-poly/recovered_rate.png)
 
-The recovered curve is a *polynomial in the latented input* wrapped in a
-`BoundedPredictor`'s output scaler, so the shape is the network's and the
-range is structural. The fit is best at high supersaturation, where
-nucleation actually drives the observable dynamics.
+The learned rate matches the truth at the five training supersaturations
+and wanders between them, because the data says nothing about `J` there.
+More conditions, or fewer free coefficients, would tighten the curve.

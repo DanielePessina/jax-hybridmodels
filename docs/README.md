@@ -38,7 +38,7 @@ docs/
 │   └── assets/                   # Committed figures the example pages embed
 ├── api/                          # AUTO-GENERATED, do not edit by hand
 │   ├── index.md
-│   └── {data,predictors,penalties,profiles,schedules,transforms,solver,training,kernels,losses,metrics,trainable,prediction,serialise,ui,rng}.md
+│   └── {model,data,predictors,penalties,transforms,solver,training,kernels,losses,trainable,prediction,metrics,profiles,schedules,serialise,ui,rng}.md
 ├── .vitepress/config.ts
 └── package.json
 ```
@@ -79,9 +79,11 @@ committed locally; CI checks that they are synchronized before deploying.
 
 ## How API generation works
 
-`scripts/gen_api_docs.py` introspects `jaxhybridmodels.__all__`, groups symbols
-by output page (one per concern: data, predictors, training, ...), parses
-each docstring as numpy-style, and emits markdown with:
+`scripts/gen_api_docs.py` walks the symbols listed in its `PAGES` table, one
+group per output page. Top-level names resolve through
+`jaxhybridmodels._EXPORTS`; lower-level names (losses, penalty helpers,
+kernels, ...) through its `SUBMODULE_SYMBOLS` table. It parses each
+docstring as numpy-style and emits markdown with:
 
 - An anchor heading (`### `name()``)
 - The runtime signature (callable defaults are stabilised so output is
@@ -95,10 +97,11 @@ To document a new public symbol:
 
 1. Write its docstring in numpy style (Parameters / Returns / Attributes /
    Notes / Examples sections).
-2. Add it to `jaxhybridmodels.__all__` and `jaxhybridmodels._EXPORTS`.
+2. For a top-level name, add it to `jaxhybridmodels.__all__` and
+   `jaxhybridmodels._EXPORTS`. For a submodule name, add it to
+   `SUBMODULE_SYMBOLS` in `scripts/gen_api_docs.py`.
 3. Add it to the appropriate `PAGES` group in `scripts/gen_api_docs.py`.
 4. Run `npm --prefix docs run docs:gen` and commit the regenerated markdown.
 
-The `--check` mode used by CI fails if any generated file would change,
-catching either a docstring update that wasn't reflected in the docs or a
-symbol that wasn't added to `PAGES`.
+The `--check` mode used by CI fails if any generated file would change, or if
+a name in `__all__` is missing from `PAGES`.

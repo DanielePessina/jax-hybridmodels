@@ -32,16 +32,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float
 
-from jaxhybridmodels import (
-    ChannelObs,
-    Dataset,
-    Experiment,
-    # Re-exported for ``train_hybrid_ode.py``; ``describe_buckets`` lives in
-    # the library now.
-    describe_buckets,  # noqa: F401
-    make_dataset,
-    make_experiment,
-)
+from jaxhybridmodels import ChannelObs, Dataset, Experiment, make_dataset, make_experiment
 
 OMEGA_TRUE: float = 1.0  # rotation frequency, known to the model
 COUPLING: Float[Array, "2 2"] = jnp.array([[0.0, 0.6], [-0.6, 0.0]])  # learnt, not given

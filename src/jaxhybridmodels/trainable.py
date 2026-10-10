@@ -130,10 +130,8 @@ def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
     ``predictors`` is an instance of ``cls``, the matching sub-mask is
     replaced wholesale by an all-``False`` subtree.
 
-    The common use is
-    ``freeze_modules_of_type(mask, predictors, BoundScaler)``, which freezes
-    every scaler's ``temperature``. The temperature sets how sharply the
-    squash saturates and is not meant to drift while the model trains.
+    For example, ``freeze_modules_of_type(mask, predictors, MLPPredictor)``
+    freezes every MLP and leaves the rest of the mask as it was.
     """
 
     def _is_target(node: Any) -> bool:
@@ -150,10 +148,11 @@ def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
 def freeze_where(mask: Any, predictors: Any, fn: Callable[[eqx.Module], bool]) -> Any:
     """Return a new mask with every leaf inside any submodule satisfying ``fn`` set to ``False``.
 
-    ``fn`` must be a structural test, such as an ``isinstance`` check or a
-    look at a static field. It must not compare leaf values. The walk pairs
-    a mask node, whose leaves are booleans, with a predictors node, whose
-    leaves are arrays, so a value comparison has no defined meaning here.
+    ``fn`` is called on the mask's copy of each module, whose array leaves
+    have been replaced by booleans. Use a structural test, such as an
+    ``isinstance`` check or a look at a static field. Identity tests
+    (``m is predictors["rate"]``) and value comparisons never match; select
+    by path with ``freeze_paths`` instead.
     """
 
     def _is_target(node: Any) -> bool:

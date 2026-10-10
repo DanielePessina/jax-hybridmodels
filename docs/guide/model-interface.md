@@ -1,7 +1,7 @@
 # Model interface
 
-`HybridModel` holds the model pieces together. Its methods call the same
-functional training and prediction machinery used by custom loops.
+`HybridModel` binds the four model pieces. Its methods call the same
+functions a custom workflow would call directly.
 
 ```python
 model = hm.HybridModel(
@@ -18,12 +18,17 @@ experiment = predictions["experiment_A"]
 concentration = experiment.outputs["concentration"]
 ```
 
-`experiment.times`, `experiment.observed`, and `experiment.observation_mask`
-keep predictions aligned with measurements. Unobserved values are NaN.
-The result preserves input experiment order across different buckets. Empty
-IDs receive `experiment_<index>` names; duplicate names raise an error.
-Use `predictions.buckets` with existing metrics or JAX code, and
-`predictions.to_dataframe()` for a long table (requires optional pandas).
+`fit` returns a `FitResult`: the fitted `model`, its `history`, the
+`best_step` that `restore_best` returned, and a `stop_reason` of
+`"budget_exhausted"` or `"patience"`. The original model is unchanged.
+
+`predict` returns a `PredictionResult` keyed by experiment ID, in dataset
+order. Each entry has `times`, `outputs`, `observed` and `observation_mask`,
+all aligned on the experiment's own time axis; `observed` is NaN where a
+channel was not measured. Experiments without an ID are named
+`experiment_<index>`, and duplicate IDs raise. `predictions.buckets` holds
+the raw `[N, T, D]` arrays for metrics code, and `predictions.to_dataframe()`
+returns a long table (needs pandas).
 
 Simulate new conditions without constructing observations:
 
@@ -36,25 +41,25 @@ concentration = trajectory.outputs["concentration"]
 full_state = trajectory.state
 ```
 
-The initial state belongs to `t0`, which defaults to the first requested time.
-The simulator must integrate from the first timestamp it receives; the
-method prepends t0 when needed and removes that point from its result.
+`y0` is the state at `t0`, which defaults to the first requested time. When
+`t0` is earlier, `simulate` integrates from it and drops that point from the
+result. `trajectory.state` is the full `[T, S]` state.
 
-`output_channel_names` must match the dataset's `output_channel_names`, in
-order. `train_with_optax`, `train_with_evosax` and `predict_dataset` work
-without a model wrapper; pass the pieces below as separate arguments.
+`output_channel_names` must match the dataset's, in order.
+`train_with_optax`, `train_with_evosax` and `predict_dataset` take the pieces
+below as separate arguments instead of a model.
 
 ## The model pieces
 
 | Piece | Type | Role |
 | --- | --- | --- |
-| `predictors` | Equinox PyTree | Trainable functions used by the ODE. |
+| `predictors` | Equinox PyTree | Values and networks the ODE reads. |
 | `simulate_fn` | Callable | Integrates one experiment. |
 | `state_to_output` | Callable | Maps the full state to observed channels. |
 | `solver` | `SolverConfig` | Diffrax solver settings. |
 
-The dataset is separate from the model. It contains observations, masks,
-initial states, and covariates. It does not contain `state_to_output`.
+The dataset holds observations, masks, initial states and covariates, and
+nothing model-shaped.
 
 ## `simulate_fn`
 
@@ -65,33 +70,28 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
     ...
 ```
 
-The arguments are:
+| Argument | Meaning |
+| --- | --- |
+| `predictors` | The predictors PyTree. |
+| `ts` | This experiment's time axis, shape `[T]`. `ts[0]` is where `y0` applies. |
+| `covariates` | This experiment's constant conditions, a dict of scalars or vectors. |
+| `y0` | The full initial state, shape `[S]`. |
+| `solver` | The model's `SolverConfig`. |
 
-- `predictors`: one predictor or any PyTree of predictors;
-- `ts`: the observation times for one experiment, with shape `[T]`;
-- `covariates`: that experiment's time-constant scalar or vector values;
-- `y0`: the full initial state, with shape `[S]`;
-- `solver`: the `SolverConfig` supplied to the training or prediction call.
-
-Return the full state trajectory with shape `[T, S]`. Construct the Diffrax
-term and call the solver inside the function. The library applies `vmap`,
-JIT compilation, and differentiation around this single-experiment function.
+Return the full state at every `ts`, shape `[T, S]`. The library vmaps,
+compiles and differentiates this single-experiment function.
 
 ```python
 def simulate_fn(predictors, ts, covariates, y0, solver):
-    rate = predictors[0]({"temperature": covariates["temperature"]})
+    rate = predictors["rate"]({"temperature": covariates["temperature"]})
 
     def vector_field(t, y, args):
-        del t, args
-        return rate * y
+        return -rate * y
 
-    return solver.diffeqsolve(
-        diffrax.ODETerm(vector_field), ts, y0
-    ).ys
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
 ```
 
-The function must be pure and compatible with JAX transformations. Do not
-branch on traced array values with Python `if` statements.
+The function must be pure and traceable: no Python `if` on array values.
 
 ## `state_to_output`
 
@@ -103,43 +103,34 @@ def state_to_output(state):
     return state[..., :2]
 ```
 
-The framework vmaps this function over a bucket, so your callback receives one
-trajectory at a time with shape `[T, S]`. Return `[T, D]`; the leading bucket
-dimension is added by the framework. Keep this function separate from the
-dataset so the same data can be used with different observation maps.
+It receives one trajectory, `[T, S]`, and returns `[T, D]` with columns in
+`output_channel_names` order. The bucket dimension is added by vmap.
 
 ## Predictor containers
 
-The conventional container is a tuple:
+A dict keyed by role reads best inside `simulate_fn`:
 
 ```python
-predictors = (growth_predictor, nucleation_predictor)
-```
-
-Dictionaries, lists, `NamedTuple`s, and a single predictor also work. The
-framework walks the PyTree leaves; it does not inspect the container type.
-
-## Covariates
-
-Covariates are constant during one experiment. A value may be a scalar or a
-rank-1 vector:
-
-```python
-covariates = {
-    "temperature_C": 25.0,
-    "feed_composition": jnp.array([0.2, 0.5, 0.3]),
+predictors = {
+    "growth": growth_network,
+    "k_nucleation": hm.Parameter(1e-3, bounds=(1e-6, 1.0), warp="log10"),
+    "density": hm.Constant(2.66),
 }
 ```
 
-For a dataset, every experiment must use the same shape for a given key. The
-vector is passed to `simulate_fn` unchanged. Use its components in the vector
-field or pass the vector to an array-based custom predictor.
+Tuples, lists, `NamedTuple`s and a single module also work. The library walks
+the PyTree leaves and never inspects the container type.
+
+## Covariates
+
+Covariates are constant during one experiment, scalars or rank-1 vectors,
+and passed to `simulate_fn` unchanged. Every experiment in a dataset must use
+the same keys and shapes. See [Data and buckets](/guide/data).
 
 ## Time-varying inputs
 
-Covariates stay constant during an experiment. For a quantity that changes
-continuously or in a step, create a pure-JAX profile and evaluate it inside
-the vector field. The profile parameters still travel as ordinary covariates.
+For a quantity that changes during an experiment, store its profile
+parameters as covariates and evaluate a profile inside the vector field.
 
 ```python
 temperature = hm.ramp_profile(
@@ -151,9 +142,9 @@ temperature = hm.ramp_profile(
 
 def vector_field(t, y, args):
     inputs = {"temperature": temperature(t)}
-    rate = predictors[0](inputs)
+    rate = predictors["rate"](inputs)
     return physics_rhs(t, y, rate)
 ```
 
 See [Profiles and schedules](/guide/profiles-and-schedules) for the built-in
-profile factories and the custom-loop schedule helper.
+profiles.

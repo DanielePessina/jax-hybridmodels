@@ -2,29 +2,28 @@
 
 The stock trainers (:func:`jaxhybridmodels.training.optax.train_with_optax`,
 :func:`jaxhybridmodels.training.evosax.train_with_evosax`) are assembled from
-these pieces. They are public so that a user who wants a custom loop —
-different accumulation, a custom regulariser, per-bucket weighting, a
-custom schedule — can compose the same kernels the framework uses, instead
-of forking the trainer.
+these pieces. They are public so that a custom loop (different accumulation, a custom
+regulariser, per-bucket weighting, a custom schedule) can compose the same
+kernels the framework uses instead of forking the trainer.
 
 A training *step* in this library is one full pass over every bucket,
 accumulating per-bucket gradients, then a single optimiser update. The
 kernels here are the compiled pieces that step makes:
 
-- :func:`build_bucket_step` — one jitted ``bucket_step(predictors, bp,
+- :func:`build_bucket_step`: one jitted ``bucket_step(predictors, bp,
   fraction) -> (loss, grads)`` per bucket shape. The **bound** penalty is
   *not* here; a configured **trajectory** penalty is, added to the loss
   inside the same forward pass (one charge per bucket, since each bucket's
   trajectories differ).
-- :func:`build_score_bucket` — a forward-only scorer (no backward pass),
+- :func:`build_score_bucket`: a forward-only scorer (no backward pass),
   for sweeps like the tournament where gradients would be wasted.
-- :func:`build_penalty_step` — one jitted ``penalty_step(predictors,
+- :func:`build_penalty_step`: one jitted ``penalty_step(predictors,
   weight, points=()) -> (penalty, weighted_grads)`` per step, evaluated
   outside the bucket loop because it reads only the predictors tree and
   its point arrays. This is the bound penalty's slot: once per step, not
   once per bucket, at the per-leaf point arrays selected host-side by
   :func:`jaxhybridmodels.penalties.select_penalty_points`.
-- :func:`build_apply_update` — one jitted ``apply_update(predictors,
+- :func:`build_apply_update`: one jitted ``apply_update(predictors,
   grads, opt_state)``; the single optimiser update per step.
 
 ``bucket_step`` is ``eqx.filter_jit``-decorated and closed over the
@@ -87,7 +86,7 @@ def simulate_bucket(
 ) -> Array:
     """Simulate every experiment in the bucket, returning the **full state**.
 
-    ``[N, T, S]`` — the state *before* ``state_to_output``. Needed by
+    ``[N, T, S]``, the state *before* ``state_to_output``. Needed by
     trajectory-aware penalties, which read extra ODE components (see
     :mod:`jaxhybridmodels.penalties`). Uncompiled, like :func:`predict_bucket_obs`;
     each caller traces it into its own kernel.
@@ -134,18 +133,17 @@ def build_bucket_step(
     One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
     update lives in a separate jitted ``apply_update``, and the **bound**
     penalty is charged once per step by
-    :func:`build_penalty_step`, outside the bucket loop — this kernel
+    :func:`build_penalty_step`, outside the bucket loop. This kernel
     charges the data loss (plus any configured trajectory penalty, below).
 
     ``trajectory_penalty_fn`` is the trajectory-aware counterpart, and the
     exception to that: it reads the **full state** ``[N, T, S]`` (penalty
     accumulators included) and the bucket payload, and returns a scalar
     added to the data loss inside the same forward pass. Because it reads
-    per-bucket trajectories, it is charged **per bucket** — every bucket
-    in a step contributes its own trajectory penalty — unlike the bound
-    penalty's once-per-step charge. When it is ``None`` (the default) this
-    kernel is byte-for-byte what it was before — no extra simulate, no
-    behaviour change.
+    per-bucket trajectories, it is charged **per bucket**: every bucket
+    in a step contributes its own trajectory penalty, unlike the bound
+    penalty's once-per-step charge. When it is ``None`` (the default) the loss
+    is the data term alone.
     """
 
     def loss_eval(
@@ -225,8 +223,8 @@ def build_penalty_step(
     inside ``bucket_step`` would repeat one identical evaluation per
     bucket.
 
-    ``points`` are the per-leaf point arrays the penalty is evaluated at —
-    the output of :func:`jaxhybridmodels.penalties.select_penalty_points` —
+    ``points`` are the per-leaf point arrays the penalty is evaluated at
+    (the output of :func:`jaxhybridmodels.penalties.select_penalty_points`),
     passed as traced arrays, so a shape change (a phase boundary) retraces
     this small kernel and nothing else. The default ``()`` suits a custom
     ``penalty_fn`` that ignores points.

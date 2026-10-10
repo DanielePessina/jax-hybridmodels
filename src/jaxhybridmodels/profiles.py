@@ -1,7 +1,7 @@
 """Ready-made time profiles for exogenous, time-varying quantities.
 
 A hybrid model's vector field often needs a quantity that changes over
-time — a reactor temperature profile, a feed flow that steps on at some
+time: a reactor temperature profile, a feed flow that steps on at some
 moment, a ramp between two set-points. ``simulate_fn`` already receives
 per-experiment covariates, so the *parameters* of the profile (a set
 point, a ramp rate, a step time) travel as ordinary covariates and the
@@ -12,8 +12,8 @@ vector field:
         T = ramp_profile(t0, t1, 25.0, 60.0)(t)   # flat 25, ramp, flat 60
         ...
 
-Everything here is a **pure JAX function** — ``jit``, ``vmap`` and
-``grad`` safe — so a profile composes with the framework exactly like
+Everything here is a pure JAX function, safe under ``jit``, ``vmap``
+and ``grad``, so a profile composes with the framework exactly like
 any other term in the vector field. The functions are factories: they
 close over their parameters and return the ``t -> Array`` callable.
 """

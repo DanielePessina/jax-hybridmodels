@@ -1,73 +1,52 @@
 # Saving and loading
 
-Use `save_predictors` for predictor weights. Use `save_run` when you also
-want solver settings, training configuration, loss history, and application
-metadata.
+Only the predictors and the solver settings are saved. `simulate_fn`,
+`state_to_output`, datasets and trainable masks are code; keep them
+importable and rebuild them when you load.
 
-## Save predictor weights
-
-```python
-hm.save_predictors("predictors.eqx", trained_predictors)
-```
-
-Equinox writes the array leaves of the predictor PyTree. Static fields such as
-dimensions, bounds, and activation names are supplied again through a
-template when loading.
+## Predictor weights
 
 ```python
-template = build_predictors(key=jr.PRNGKey(0))
-restored = hm.load_predictors("predictors.eqx", template)
+hm.save_predictors("predictors.eqx", result.model.predictors)
+
+template = build_predictors()           # same code that built the trained model
+predictors = hm.load_predictors("predictors.eqx", template)
+model = dataclasses.replace(result.model, predictors=predictors)
 ```
 
-The template must have the same container shape, predictor classes, and static
-fields as the saved PyTree. `load_predictors` does not import user code or
-construct a predictor from a class name.
+The file holds array leaves only. Static fields (sizes, bounds, warps,
+activation names) come from the template, so it must have the same
+container, the same predictor classes and the same static values as the
+saved pytree. Its array values do not matter. The library never imports
+your code or builds a predictor from a class name.
 
-## Save a complete run
+## A complete run
+
+`save_run` writes the weights plus a `metadata.json` with the package
+version, the solver, a description of the predictor pytree, an optional
+training config and loss history, and anything you put in `extras`:
 
 ```python
 hm.save_run(
     "runs/oscillator",
-    predictors=trained_predictors,
-    solver=solver,
+    predictors=result.model.predictors,
+    solver=result.model.solver,
     optax_config=config,
-    loss_history=history,
+    loss_history=list(result.history.loss),
     extras={"dataset": "synthetic-oscillator"},
 )
+
+loaded = hm.load_run("runs/oscillator", predictors_template=build_predictors())
+loaded["predictors"], loaded["solver"], loaded["loss_history"], loaded["extras"]
 ```
 
-The directory contains:
+`load_run` checks the template against the saved description and raises
+with the mismatching part named, instead of Equinox's generic shape error.
+It also raises if the run was saved by a different package version.
 
-```text
-runs/oscillator/
-├── predictors.eqx
-└── metadata.json
-```
-
-The metadata records the package version, solver settings, predictor
-structure, static predictor fields, optional training configuration, loss
-history, and `extras`.
-
-## Load a complete run
-
-```python
-loaded = hm.load_run(
-    "runs/oscillator",
-    predictors_template=build_predictors(key=jr.PRNGKey(0)),
-)
-
-trained_predictors = loaded["predictors"]
-solver = loaded["solver"]
-history = loaded["loss_history"]
-```
-
-Pass `optax_cls=OptaxTrainingConfig` or `evosax_cls=EvosaxTrainingConfig` if
-the saved configuration contains only reconstructible values. Configurations
-with callable factories, losses, or regularisers must be rebound explicitly;
-loading without a class returns their metadata markers.
-
-## What is not saved
-
-The run format does not store `simulate_fn`, `state_to_output`, `Dataset`, or
-the trainability mask. Keep those in importable user code and rebuild them
-when you resume or evaluate a run.
+The training config comes back as a plain dict. Pass
+`optax_cls=hm.OptaxTrainingConfig` (or `evosax_cls=`) to rebuild the
+dataclass. A config holding callables, such as a custom loss or optimiser
+factory, cannot be rebuilt that way and raises; load it as a dict and set
+those fields yourself. A callable `loss` is stored as its
+`"module.qualname"` string.

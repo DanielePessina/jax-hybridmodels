@@ -48,6 +48,20 @@
 - Dense prediction keeps each experiment's initial time when the requested
   grid starts later.
 
+### Fixed
+
+- `annealing_schedule("warmup_cosine", ...)` reached `end_value`
+  `warmup_epochs` steps early, and raised when `total_epochs` was twice
+  `warmup_epochs`.
+- The Rich dashboards end their final frame with a newline when output is
+  piped, so the next print no longer lands on the panel border.
+
+### Documentation
+
+- Guide pages, example pages and example scripts rewritten for the new API.
+  Examples train through `HybridModel.fit` unless they teach the lower
+  layer. Quoted results come from fresh runs, except the batch reactor RL
+  page, whose numbers and figures still need regenerating.
 
 ## 0.2.0b1 — 2026-09-18
 

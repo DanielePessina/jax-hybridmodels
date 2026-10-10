@@ -210,7 +210,7 @@ the outer 5% of the physical box on each side.
 
 The argument is the latent, never the physical value it maps to.
 ``from_latent``'s derivative carries a ``sigma'(z / T)`` factor that
-underflows to 0.0 past ``|z / T| ~ 15``, so a penalty written
+underflows to 0.0 past ``|z / T| ~ 17``, so a penalty written
 against the physical output dies exactly where saturation is worst.
 Reading ``|z| / T`` gives a gradient linear in the overshoot.
 

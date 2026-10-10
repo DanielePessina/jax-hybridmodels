@@ -1,8 +1,8 @@
 # Getting started
 
-Use `jaxhybridmodels` to fit user-written ODE dynamics with trainable physical
-parameters or networks. You write a single-experiment simulator; the library
-handles differentiation, batching irregular observations, and training.
+You write the ODE solve for one experiment. `jaxhybridmodels` batches it over
+your data, differentiates through it, and fits the parameters or networks
+inside it.
 
 ## Install
 
@@ -10,14 +10,15 @@ handles differentiation, batching irregular observations, and training.
 uv add jax-hybridmodels==0.2.0b1
 ```
 
-`HybridModel`, `Parameter` and `Constant` are in the repository's development
-version. From a checkout, run `uv sync` to use them.
+The 0.2.0b1 release predates `HybridModel`, `Parameter` and `Constant`, which
+this page uses. Until the next release, run `uv sync` in a checkout.
 
 ## Fit a physical parameter
 
-This example learns an oscillator's frequency from positions. Velocity is an
-unobserved state. `Parameter` holds a trainable physical quantity and
-`Constant` a fixed one; both are read through `.value`.
+This example learns an oscillator's frequency from its position, `cos(t)`, so
+the true frequency is 1.0. Velocity is an unobserved state. `Parameter` holds
+a trainable physical quantity and `Constant` a fixed one; both are read
+through `.value`.
 
 ```python
 import diffrax
@@ -66,13 +67,15 @@ trajectory = result.model.simulate(
 )
 ```
 
-`1.3` is the initial physical frequency, not a latent network weight.
-Fitting returns a new model; the original model keeps its initial frequency.
-The recovered frequency should be close to 1.0.
+`1.3` is the starting guess in physical units, and `bounds=(0.5, 2.0)` keeps
+every iterate inside that range. `fit` returns a new model in
+`result.model`; `model` still holds 1.3. The fitted frequency prints as
+1.0, and `stop_reason` is `"budget_exhausted"` because all 200 steps ran.
 
-`t0=0.0` says where the initial state is defined even though the first
-measurement is at 0.2. The dataset adds an unobserved integration point at t0.
-When omitted, the initial state belongs to the first observation time.
+`t0=0.0` places the initial state before the first measurement at 0.2. The
+dataset adds an unobserved point at t0, so `predictions["oscillator"].times`
+has 21 entries for 20 measurements. Without `t0`, the initial state belongs to
+the first observation time.
 
 Run the complete example from a checkout:
 
@@ -82,12 +85,13 @@ uv run python examples/pendulum/train_model_api.py
 
 ## Next steps
 
-- [Model interface](/guide/model-interface): methods, simulation, and named predictions.
-- [Predictors and bounds](/guide/predictors): fixed values, trainable values, and networks.
-- [Training](/guide/training): phase configurations, validation, and loss histories.
-- [Data and buckets](/guide/data): observations sampled at different times.
+- [Model interface](/guide/model-interface): `fit`, `predict`, `simulate` and their results.
+- [Predictors and bounds](/guide/predictors): fixed values, trainable values and networks.
+- [Training](/guide/training): multi-phase schedules, validation and loss histories.
+- [Data and buckets](/guide/data): channels sampled at different times.
 
-The functional layer underneath takes the predictors, simulator, observation
-map and solver as separate arguments. Use `train_with_optax`,
-`train_with_evosax` or `predict_dataset` directly when writing a custom
-workflow.
+`HybridModel` is a thin layer over functions that take the predictors,
+simulator, observation map and solver as separate arguments:
+`train_with_optax`, `train_with_evosax` and `predict_dataset`. Call them
+directly when you need something the methods do not cover, such as ensembles
+or a custom training loop.

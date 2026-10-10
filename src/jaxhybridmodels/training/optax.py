@@ -424,12 +424,11 @@ def _build_step_update(
     """Fused per-step tail: average, merge the bound penalty, and optimise.
 
     One jitted ``step_update(predictors, acc_grads, penalty_grads,
-    n_buckets, opt_state) -> (predictors, opt_state)`` replacing what used
-    to be two Python tree walks (normalise by bucket count, add the
-    penalty grads) plus a separate ``apply_update`` launch every step.
+    n_buckets, opt_state) -> (predictors, opt_state)`` that normalises by
+    bucket count, adds the penalty grads and applies the optimiser update.
     Each eager per-leaf tree operation dispatches one compiled kernel per
-    parameter leaf — on CPU that measured ~2 ms per tree walk for a small
-    MLP, several times the ODE solve itself — so folding them into the
+    parameter leaf. On CPU that measured ~2 ms per tree walk for a small
+    MLP, several times the ODE solve itself, so folding them into the
     optimiser kernel removes most of the Python-side step cost without
     changing the math: the averaging and the penalty merge run in the
     same order, so the optimiser sees bit-identical gradients.
@@ -464,13 +463,13 @@ def _training_step(
 ) -> tuple[Array, Any, int]:
     """One training step: every bucket, gradients accumulated, raw sums back.
 
-    Returns ``(total_loss, acc_grads, n_buckets)`` — the **raw** sum of
+    Returns ``(total_loss, acc_grads, n_buckets)``, the **raw** sum of
     per-bucket losses and gradients, not yet divided. The caller merges
     the bound-penalty gradients and normalises inside the fused
     ``step_update`` kernel (:func:`_build_step_update`), so the per-step
     Python side never walks the parameter tree. The first bucket's
     gradients seed the accumulator directly instead of adding to a
-    ``zeros_like`` tree — one fewer pointless per-leaf pass per step.
+    ``zeros_like`` tree, which saves one per-leaf pass per step.
 
     ``total_loss`` is the data term plus any configured trajectory penalty
     (charged inside ``bucket_step``'s forward pass). The bound penalty is
@@ -512,8 +511,8 @@ def _shared_tournament(
 
     Each candidate is re-initialised from its own subkey, trained for
     ``tournament_steps`` steps at ``tournament_lr``, then scored with a
-    forward-only pass. The score is the data term — including any
-    configured trajectory penalty, which the phases also charge — and
+    forward-only pass. The score is the data term, including any
+    configured trajectory penalty (the phases charge it too) and
     *excluding* the bound penalty: that regulariser is charged
     once per step regardless of the data, so scoring on it too would let a
     candidate win by drifting where the penalty likes rather than by
@@ -662,13 +661,13 @@ def _warmup_compile(
     compiled cache keys 0-d array leaves by value *and* weak type, so the
     first optimiser update flips a weak-typed scalar leaf in the user's own
     tree (``jnp.asarray(1.0)``) to strong-typed and would retrace every
-    kernel once — seconds of ODE recompile mid-run. The framework's own
+    kernel once, costing seconds of ODE recompile mid-run. The framework's own
     scalars are strong-typed at construction
     (:class:`~jaxhybridmodels.predictors.BoundScaler`), so the stock trainer
     requests the settle only when :func:`_has_weak_scalar_trainable` finds
     a weak trainable scalar in the supplied tree; strong-typed or frozen
     trees keep the one-trace-per-shape contract exactly. Discovered and
-    verified empirically — see ``scripts/bench_hotpath.py``.
+    verified empirically; see ``scripts/bench_hotpath.py``.
     """
     total_buckets = len(bucket_payloads)
     last_grads: Any = None
@@ -774,11 +773,9 @@ class _BestTracker:
     would treat it as a static argument and hash it by identity, retracing
     once per instance.
 
-    It replaces three loop variables that always had to move together and
-    carried two invariants between them that previously lived only in
-    comments: the snapshot must be the parameters the loss was measured at,
-    and both the minimum and the counter are scoped to a horizon rather than
-    to the whole run.
+    Two invariants hold between the fields: the snapshot is the parameters
+    the loss was measured at, and both the minimum and the counter are
+    scoped to a horizon rather than to the whole run.
     """
 
     def __init__(self, predictors: Any) -> None:
@@ -1047,7 +1044,7 @@ def _run_phases(
     best-step-restored member is not reported at a loss it never had.
 
     ``step_update`` is the fused per-step tail built by
-    :func:`_build_step_update` — average + penalty merge + optimiser
+    :func:`_build_step_update`: average, penalty merge and optimiser
     update in one kernel. The stock callers pass the instance the
     warm-up settled; when ``None`` (or when a phase reset rebuilds the
     optimiser) it is rebuilt here from the live optimiser.
@@ -1253,7 +1250,7 @@ def _build_training_kernels(
     # custom masks may train weak-typed scalar leaves, and JAX's cache keys
     # 0-d leaves by value+weak_type, so the first update would retrace
     # every kernel once (seconds-to-minutes of ODE compile) mid-run.
-    # Strong-typed or frozen scalars never flip — skip the settle entirely
+    # Strong-typed or frozen scalars never flip, so skip the settle entirely
     # and keep the "one trace per bucket shape" contract untouched.
     settle = _has_weak_scalar_trainable(predictors, trainable)
     optimizer = _build_optimizer(config.phases[0].optimizer, config.phases[0].lr)
@@ -1310,7 +1307,7 @@ def train_seed_ensemble(
     on each.
 
     Returns the fully trained members as a list of ``(final_loss,
-    predictors)`` ranked ascending by final loss — the same container
+    predictors)`` ranked ascending by final loss, in the same container
     shape as the single ``predictors`` you passed in, so the result is an
     ensemble of model pytrees ready for :func:`ensemble_predictions`.
     ``final_loss`` labels the returned member: the best-step loss when

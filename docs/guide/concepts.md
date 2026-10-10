@@ -1,25 +1,23 @@
 # Concepts
 
-`jaxhybridmodels` combines a user-written ODE with trainable predictors. This
-page gives the short version of the interfaces. Use the linked pages for
-details and examples.
+The short version of each interface. The linked pages have details and
+examples.
 
 ## A model is a set of functions and data
 
-A working setup has these pieces. `HybridModel` binds the first four and
-takes the dataset per call:
+`HybridModel` binds the first four pieces and takes the dataset per call:
 
 | Object | What it contains |
 | --- | --- |
-| `predictors` | One predictor or a PyTree of predictors. |
+| `predictors` | A PyTree of trainable values and networks, usually a dict. |
 | `simulate_fn` | The ODE solve for one experiment. |
 | `state_to_output` | The map from full state to measured channels. |
 | `SolverConfig` | Diffrax solver settings. |
 | `Dataset` | Experiments converted into rectangular bucket payloads. |
 
-The functional training and prediction calls take these objects as separate
-arguments. Either way the data stays independent from the model's state
-layout and observation map.
+The functional training and prediction calls take the same pieces as
+separate arguments. Either way the dataset knows nothing about the state
+layout or the observation map.
 
 See [Model interface](/guide/model-interface).
 
@@ -28,9 +26,8 @@ See [Model interface](/guide/model-interface).
 An **experiment** is one run of a physical system. It contains its initial
 state, conditions, and observations.
 
-A **channel** is one measured quantity. A channel has its own timestamps,
-values, and variance. Channels in one experiment may be sampled at different
-times.
+A **channel** is one measured quantity with its own timestamps, values and
+variance. Channels in one experiment may be sampled at different times.
 
 A **covariate** is a condition that is constant during one experiment. A
 covariate may be a scalar or a rank-1 vector. For example:
@@ -59,17 +56,24 @@ bucket with an all-`True` mask.
 
 ## Predictors and bounds
 
-A **predictor** is an Equinox module that maps an input array to an output
-array. A `BoundedPredictor` composes an input scaler, an inner predictor, and
-an output scaler:
+The `predictors` PyTree holds three kinds of leaf:
+
+| Leaf | Use it for | Read it with |
+| --- | --- | --- |
+| `Constant(value)` | A fixed physical value. Never trained. | `.value` |
+| `Parameter(value, bounds=...)` | A trainable physical value. | `.value` |
+| `BoundedPredictor(inner=..., ...)` | A network of named physical inputs. | `predictor(inputs)` |
+
+`Parameter` and `BoundedPredictor` train an unbounded latent and map it into
+the declared physical range, so no iterate can leave it. A
+`BoundedPredictor` also scales its inputs before the inner network sees them:
 
 ```text
-physical input → latent input → inner predictor → latent output → physical output
+physical input → latent input → inner network → latent output → physical output
 ```
 
-The output reparameterisation keeps the physical value inside its declared
-box. The optional saturation penalty discourages the latent output from
-staying close to a bound, where its physical gradient is small.
+The optional saturation penalty discourages a network's latent output from
+sitting near a bound, where its physical gradient is small.
 
 See [Predictors and bounds](/guide/predictors).
 
@@ -80,7 +84,7 @@ output in the ODE:
 
 ```python
 def vector_field(t, y, args):
-    rate = predictors[0]({"temperature": temperature})
+    rate = predictors["rate"]({"temperature": temperature})
     return physics(t, y, rate)
 ```
 
@@ -96,9 +100,10 @@ from its predicted output.
 An Optax **step** visits every bucket, averages the bucket losses and
 gradients, and applies one optimizer update. A bucket is not a step.
 
-A **phase** is a contiguous group of steps with one learning rate, optimizer,
-and loss horizon, written as a `TrainingPhase`. Evosax uses a flat generation
-loop instead of phases.
+A **phase** is a run of steps with one learning rate, optimizer and loss
+horizon, written as a `TrainingPhase`. `OptaxTrainingConfig(steps=..., lr=...)`
+is one phase; `OptaxTrainingConfig(phases=(...))` is several. Evosax runs a
+flat generation loop instead.
 
 See [Training](/guide/training).
 
@@ -106,15 +111,16 @@ See [Training](/guide/training).
 
 A trainability mask is a boolean PyTree with the same structure as
 `predictors`. `True` selects an array for optimization. The same mask works
-with Optax and Evosax.
+with Optax and Evosax. `trainable_mask(predictors)` is the default: every
+float array except `Constant` values and bound scalers.
 
-Use `freeze_paths`, `freeze_modules_of_type`, or `freeze_where` to derive a
-new mask. The mask is data, not mutable state on a predictor.
+Use `freeze_paths`, `freeze_modules_of_type` or `freeze_where` to derive a
+new mask. The mask is data, not state on a predictor.
 
 ## JAX boundaries
 
-The library keeps the Python bucket loop outside compiled kernels. It then
-compiles one kernel per bucket shape.
+The Python loop over buckets stays outside compiled code, and each bucket
+shape compiles once.
 
 The user callbacks are called inside JAX transformations. They must return
 fixed-shape arrays and must not depend on Python side effects or traced values
@@ -122,17 +128,16 @@ in Python control flow.
 
 ## Random keys
 
-Training and network constructors require explicit JAX keys. Fixed values
-and directly initialized parameters need no constructor key. Internal
-randomness is derived from named folds of the root key. This makes a run a
-deterministic function of its supplied root key.
+Training and network constructors require an explicit JAX key; `Parameter`
+and `Constant` do not. Internal randomness comes from named folds of the root
+key, so a run is a deterministic function of that key.
 
 ## Serialization
 
-Equinox serializes the array leaves of a predictor PyTree. Loading requires a
-template with the same container shape, predictor types, and static fields.
-Simulation functions, observation maps, datasets, and trainability masks are
-not stored in a run.
+Saving writes the array leaves of the predictors PyTree. Loading needs a
+template with the same container shape, predictor types and static fields.
+Simulators, observation maps, datasets and masks are not stored; they are
+code, rebuilt by the script that loads the run.
 
 See [Troubleshooting](/guide/troubleshooting) for common shape, tracing, and
 solver failures.

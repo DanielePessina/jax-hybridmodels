@@ -1,14 +1,11 @@
-"""Model definitions shared by the two batch reactor examples.
+"""Model definitions shared by the two batch reactor scripts.
 
-The state hooks, the parametric trunk, the vector field and the predictor
-builder, which ``train_hybrid.py`` and ``train_rl_deactivation.py`` must
-agree on exactly. ``load_predictors`` rebuilds a saved pytree against a
-template and needs every leaf's static configuration to match, so a second
-definition of ``ArrheniusKinetics`` in the RL script would deserialise as a
-different type and fail.
-
-Data generation is deliberately elsewhere: the two scripts build different
-datasets, fresh catalyst and aged catalyst, and share only the physics.
+``train_hybrid.py`` fits these predictors and ``train_rl_deactivation.py``
+loads the result with ``load_predictors``. Loading needs a template whose
+leaves have the same classes and static configuration as the saved tree, so
+both scripts must build the predictors from this one definition. Data
+generation stays in each script: they build different datasets (fresh and
+aged catalyst) and share only the physics.
 
 Not an importable package module. Both scripts run as ``__main__`` with
 their own directory on ``sys.path``, which is what resolves ``from _model
@@ -72,22 +69,25 @@ def state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
 
 
 class ArrheniusKinetics(eqx.Module):
-    """Centred-Arrhenius parametric trunk: ``k_param(T) = exp(log_k_ref - Ea/R · (1/T - 1/T_ref))``.
+    """Centred-Arrhenius trunk: ``k_param(T) = exp(log_k_ref - Ea/R * (1/T - 1/T_ref))``.
 
-    The two trainable scalars live in latent space and pass through a
-    sigmoid ``BoundScaler``, so the search is unbounded while the simulator
-    only ever sees values inside ``(LOG_KREF_BOUNDS, EA_BOUNDS)``.
+    Two trainable scalars stored as a latent vector and mapped into
+    ``LOG_KREF_BOUNDS`` and ``EA_BOUNDS`` by a sigmoid ``BoundScaler``, so
+    CMA-ES searches an unbounded space while the simulator only sees values
+    inside the boxes. It takes no covariates; :func:`log10_k_trunk` combines
+    the parameters with ``T``.
 
-    Not a ``BoundedPredictor``: the trunk takes no covariates at all. It
-    returns the parameters and the vector field combines them with ``T``.
+    A ``Parameter`` per scalar would also work. This class stays because the
+    committed ``artefacts/trunk_fresh.eqx`` was saved with it, and because
+    its latent initialisation around zero is what ``init="lhs_box"`` samples
+    around.
     """
 
     latent: Float[Array, " 2"]
     out_scaler: BoundScaler
 
     def __init__(self, *, key: Array) -> None:
-        # Small Gaussian latent init starts the physical parameters near
-        # each bound's midpoint; CMA-ES expands from there.
+        # A latent near zero puts both parameters near their box midpoints.
         self.latent = jr.normal(key, (2,)) * 0.1
         self.out_scaler = BoundScaler(
             bounds=(LOG_KREF_BOUNDS, EA_BOUNDS),
@@ -99,6 +99,25 @@ class ArrheniusKinetics(eqx.Module):
         return self.out_scaler.from_latent(self.latent)
 
 
+def log10_k_trunk(parametric: ArrheniusKinetics, temperature_C: ArrayLike) -> Array:
+    """``log10 k_param(T)`` from the trunk alone, pH-blind."""
+    log_k_ref, Ea = parametric()
+    T_K = jnp.asarray(temperature_C) + 273.15
+    # Arrhenius is base e; one division converts to decades.
+    return (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
+
+
+def log10_k(
+    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
+    temperature_C: ArrayLike,
+    pH: ArrayLike,
+) -> Array:
+    """Hybrid rate in decades: ``log10 k_param(T) + delta_log10(T, pH)``."""
+    parametric, residual = predictors
+    delta = jnp.squeeze(residual({"temperature_C": temperature_C, "pH": pH}))
+    return log10_k_trunk(parametric, temperature_C) + delta
+
+
 def simulate_fn(
     predictors: tuple[ArrheniusKinetics, BoundedPredictor],
     ts: Float[Array, " T"],
@@ -106,27 +125,15 @@ def simulate_fn(
     y0: Float[Array, " 2"],
     solver: SolverConfig,
 ) -> Float[Array, "T 2"]:
-    """Integrate ``A -> B`` first-order kinetics with a hybrid rate constant.
+    """Integrate ``A -> B`` first-order kinetics under the hybrid rate :func:`log10_k`.
 
-    The rate is decomposed log-additively::
-
-        log10(k(T, pH)) = log10(k_param(T)) + Δlog10(T, pH)
-
-    where ``k_param`` is the centred-Arrhenius trunk and ``Δlog10`` a
-    bounded MLP residual.
-
-    The temperature is **not** constant in time: each experiment's
-    covariates carry the parameters of a flat-ramp-flat heating profile
-    (``ramp_t0``, ``ramp_t1``, ``T_lo``, ``T_hi``), and the profile is
-    evaluated inside the vector field at the solver's continuous ``t``.
-    That is the ``jaxhybridmodels.profiles`` pattern: profile parameters
-    ride as ordinary scalar covariates, the pure-JAX profile callable
-    produces the time-varying value, and the predictor's input dict is
-    mixed at every step (``T(t)`` overrides the ``temperature_C`` key).
+    The temperature changes during each run. The covariates carry the
+    parameters of a flat-ramp-flat heating profile (``ramp_t0``,
+    ``ramp_t1``, ``T_lo``, ``T_hi``) and ``ramp_profile`` turns them into
+    ``T(t)``, evaluated inside the vector field at the solver's ``t``. Profile
+    parameters travel as ordinary scalar covariates; the profile callable is
+    pure JAX, so it differentiates and vmaps like the rest of the model.
     """
-    parametric, residual = predictors
-    log_k_ref, Ea = parametric()  # [2] in physical units (sigmoid-bounded)
-
     pH = covariates["pH"]
     T_profile = ramp_profile(
         t0=covariates["ramp_t0"],
@@ -136,22 +143,10 @@ def simulate_fn(
     )
 
     def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
-        T_C = T_profile(t)
-        T_K = T_C + 273.15
-
-        # log10 conversion: Arrhenius is naturally base-e; one /ln(10) at
-        # the end.
-        log10_k_param = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
-
-        # The input dict is rebuilt at every solver step: T(t) changes
-        # with t, so the residual must be re-read at the current value.
-        delta_log10_k = jnp.squeeze(residual({"temperature_C": T_C, "pH": pH}))
-        k = jnp.power(10.0, log10_k_param + delta_log10_k)
-
-        # Guards the integrator's rare negative excursions near the
-        # asymptote. Mass conservation is exact analytically.
-        Ca = jnp.maximum(y[0], 0.0)
-        rate = k * Ca
+        # T(t) changes with t, so the residual is re-evaluated every step.
+        k = jnp.power(10.0, log10_k(predictors, T_profile(t), pH))
+        # Clipping guards rare negative solver excursions near the asymptote.
+        rate = k * jnp.maximum(y[0], 0.0)
         return jnp.stack([-rate, rate])
 
     term = diffrax.ODETerm(vector_field)

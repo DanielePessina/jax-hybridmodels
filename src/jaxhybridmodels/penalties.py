@@ -26,8 +26,8 @@ box sweep. The default points are the measured ones: the input vectors the
 loss actually sees at observed cells, gathered from the dataset by
 :func:`data_penalty_points` and following the same length-mask prefix as
 the loss (:func:`length_mask_keep`). User-supplied penalty-only points
-(no measurements needed) extend coverage where it matters — a deployment
-region, a future operating point — and :func:`box_grid` is the
+(no measurements needed) extend coverage where it matters, such as a
+deployment region or a future operating point. :func:`box_grid` is the
 collocation-as-extension recipe: a deterministic sweep of the input box,
 uniform in *warped* coordinates so a log warp covers decades evenly.
 
@@ -291,8 +291,8 @@ def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPoint
 
     A leaf is *resolvable* when every ``input_keys`` name is a dataset
     covariate (in every bucket). Its measured points are then the input
-    vectors at the observed cells — the cells the loss actually charges —
-    with a ``None`` entry for an unresolvable leaf. A resolvable leaf whose
+    vectors at the observed cells, the same cells the loss charges, with
+    a ``None`` entry for an unresolvable leaf. A resolvable leaf whose
     dataset holds no observed cells (all probes) yields a source with zero
     points, which contributes nothing until extras are added.
 
@@ -529,9 +529,9 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
 # Trajectory-aware penalties (embedded hybrid models).
 #
 # ``bound_penalty`` above is trajectory-blind: it evaluates saturation at
-# fixed input points, never along a solve. For an *embedded* hybrid model —
-# the predictor runs inside the user's vector field and its output feeds the
-# dynamics (a kinetic parameter, a shape factor) — what matters is whether
+# fixed input points, never along a solve. For an *embedded* hybrid model,
+# where the predictor runs inside the user's vector field and its output
+# feeds the dynamics (a kinetic parameter, a shape factor), what matters is whether
 # the model saturates along the trajectories it actually simulates. The
 # penalty then has to be collected inside the solve, as extra ODE state.
 #
@@ -586,7 +586,7 @@ def penalty_vector_field(
     along the trajectory.
 
     The rates must read the physical components (typically ``y[:-n]``) and
-    are closed over the user's predictors — only the user knows the latent
+    are closed over the user's predictors, because only the user knows the latent
     ``z`` or input ``x`` of an embedded predictor at call time.
     """
 
@@ -633,8 +633,8 @@ def penalty_integral(state: Array, n: int = 1) -> Array:
 def trajectory_saturation_penalty(state: Array, out_scaler: Any) -> Array:
     """Sum over time of output saturation for a predictor whose output *is* the state.
 
-    For a **parallel** hybrid model — the predictor is outside the solver and
-    its output is a predicted channel — the full state already holds the
+    For a **parallel** hybrid model, where the predictor is outside the
+    solver and its output is a predicted channel, the full state holds the
     physical outputs. Invert them back to latents with the predictor's
     ``out_scaler`` and charge :meth:`BoundScaler.saturation` at every time
     step, summed over time. This is the trajectory-aware counterpart of

@@ -234,7 +234,7 @@ def ensemble_predictions(
 ) -> tuple[Float[Array, "N T D"], ...]:
     """Average per-bucket predictions across an ensemble of models.
 
-    ``members`` is a sequence of predictor pytrees — each the ``predictors``
+    ``members`` is a sequence of predictor pytrees, each one the ``predictors``
     argument you would pass to :func:`predict_dataset` alone. Each member is
     run forward and the per-bucket predictions are averaged, so the result
     is the same shape as a single ``predict_dataset`` return.

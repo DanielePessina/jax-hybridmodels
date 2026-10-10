@@ -70,20 +70,17 @@ diffeqsolve(
 
 Run the solve this config describes, so ``simulate_fn`` stays thin.
 
-Wraps the invocation boilerplate every example hand-wrote —
-``SaveAt(ts=...)``, ``stepsize_controller()``, ``max_steps``, and —
-crucially — forwards ``self.adjoint``, which most hand-written
-examples forgot and hardcoded ``diffrax.DirectAdjoint()`` instead.
-Keeping the adjoint live means ``SolverConfig.adjoint`` is honoured
-everywhere, and the Backsolve caveat (it cannot differentiate
-through values closed over in the vector field) applies as
+Calls ``diffrax.diffeqsolve`` with this config's solver, ``dt0``,
+``stepsize_controller()``, ``max_steps`` and ``adjoint``, saving at
+``ts``. Forwarding ``adjoint`` matters: a hand-written call that
+hardcodes ``diffrax.DirectAdjoint()`` silently ignores
+``SolverConfig.adjoint``. The Backsolve caveat (it cannot
+differentiate through values closed over in the vector field) is
 documented in ``ADJOINT_REGISTRY``.
 
-The crystallisation example deliberately keeps its call manual: its
-config sets ``dt0=None`` with a live per-trajectory step fallback,
-and it coerces ``atol`` to the x64 state dtype, neither of which
-this helper encodes. For the common case — an explicit ``dt0`` and
-scalar/array tolerances — this is the whole invocation.
+Call ``diffrax.diffeqsolve`` yourself when you need something this
+helper does not pass, such as a per-trajectory ``dt0``. The
+crystallisation example does this.
 
 **Parameters**
 
@@ -98,7 +95,7 @@ scalar/array tolerances — this is the whole invocation.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `diffrax.Solution` |  | The diffrax solution; call ``.ys`` for the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
+| `diffrax.Solution` |  | The diffrax solution; ``.ys`` is the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L213)</small>
 
@@ -138,7 +135,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L272)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L269)</small>
 
 ---
 

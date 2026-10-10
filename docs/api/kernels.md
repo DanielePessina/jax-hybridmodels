@@ -37,7 +37,7 @@ The cutoff is clamped at 1. A fraction small enough to floor to zero
 would otherwise give an all-false mask, and every loss here divides by a
 count clamped at 1, so the step would silently score nothing.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L56)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L55)</small>
 
 ---
 
@@ -65,7 +65,7 @@ Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
 the training and prediction jit caches separate (R-J1): this body is
 traced into whichever kernel calls it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L102)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L101)</small>
 
 ---
 
@@ -92,20 +92,19 @@ Return a jitted ``bucket_step(predictors, bp, fraction) -> (loss, grads)``.
 One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
 update lives in a separate jitted ``apply_update``, and the **bound**
 penalty is charged once per step by
-[`build_penalty_step`](/api/kernels#build_penalty_step), outside the bucket loop — this kernel
+[`build_penalty_step`](/api/kernels#build_penalty_step), outside the bucket loop. This kernel
 charges the data loss (plus any configured trajectory penalty, below).
 
 ``trajectory_penalty_fn`` is the trajectory-aware counterpart, and the
 exception to that: it reads the **full state** ``[N, T, S]`` (penalty
 accumulators included) and the bucket payload, and returns a scalar
 added to the data loss inside the same forward pass. Because it reads
-per-bucket trajectories, it is charged **per bucket** — every bucket
-in a step contributes its own trajectory penalty — unlike the bound
-penalty's once-per-step charge. When it is ``None`` (the default) this
-kernel is byte-for-byte what it was before — no extra simulate, no
-behaviour change.
+per-bucket trajectories, it is charged **per bucket**: every bucket
+in a step contributes its own trajectory penalty, unlike the bound
+penalty's once-per-step charge. When it is ``None`` (the default) the loss
+is the data term alone.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L122)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L121)</small>
 
 ---
 
@@ -135,7 +134,7 @@ two attempts. The returned score includes the data loss and, when
 configured, the trajectory penalty; the bound penalty remains
 outside this per-bucket scorer.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L184)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L182)</small>
 
 ---
 
@@ -159,8 +158,8 @@ reads only the predictors tree and its point arrays, so computing it
 inside ``bucket_step`` would repeat one identical evaluation per
 bucket.
 
-``points`` are the per-leaf point arrays the penalty is evaluated at —
-the output of [`select_penalty_points`](/api/penalties#select_penalty_points) —
+``points`` are the per-leaf point arrays the penalty is evaluated at
+(the output of [`select_penalty_points`](/api/penalties#select_penalty_points)),
 passed as traced arrays, so a shape change (a phase boundary) retraces
 this small kernel and nothing else. The default ``()`` suits a custom
 ``penalty_fn`` that ignores points.
@@ -176,7 +175,7 @@ Returns the gradient of ``weight * penalty``, to add straight onto the
 averaged data gradient. ``penalty`` comes back unweighted, since that
 is what gets reported.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L216)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L214)</small>
 
 ---
 
@@ -199,4 +198,4 @@ The single optimiser update per training step. Build once per
 optimiser; reuse its returned state across steps, rebuilding only at a
 reset/phase boundary.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L265)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L263)</small>

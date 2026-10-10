@@ -45,6 +45,13 @@ Run::
     uv run python examples/hybrid_ode/train_hybrid_ode.py --data rectangular
     uv run python examples/hybrid_ode/train_hybrid_ode.py --mechanistic-only
     uv run python examples/hybrid_ode/train_hybrid_ode.py --inner kan
+
+Prints the bucket layout, the loss at each phase start, the end-of-run
+saturation penalty per network, the recovered ``k(T)`` against the
+Arrhenius truth, the residual error, and per-channel metrics. Writes
+``figures/parity_<data>_<variant>.png`` and
+``figures/trajectories_<data>_<variant>.png`` unless ``--no-plot`` is
+given.
 """
 
 # ruff: noqa: F722
@@ -61,30 +68,20 @@ import jax.random as jr
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    MLPPredictor,
-    SolverConfig,
-    compute_metrics,
-    evaluate_predictor,
-    predict_dataset,
-    print_metrics,
-)
+import jaxhybridmodels as hm
 from jaxhybridmodels.penalties import bound_penalty, box_grid
-from jaxhybridmodels.predictors.base import Predictor
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, TrainingPhase, train_with_optax
+from jaxhybridmodels.prediction import evaluate_predictor
 from jaxhybridmodels.transforms import Warp, register_warp
 
 # ``_data`` sits alongside this file, ``_shared`` one level up.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _data import (  # noqa: E402
+    CHANNELS,
     COUPLING,
     OMEGA_TRUE,
     TEMPERATURES,
     build_dataset,
-    describe_buckets,
     irregular_experiments,
     rectangular_experiments,
     state_to_output,
@@ -129,14 +126,14 @@ register_warp(
 )
 
 
-def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) -> Predictor:
+def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) -> hm.Predictor:
     """Build the trainable core of a ``BoundedPredictor``.
 
     The only place that knows which architecture is in use; everything
     downstream sees a ``Predictor``.
     """
     if kind == "mlp":
-        return MLPPredictor(
+        return hm.MLPPredictor(
             in_size=in_size,
             out_size=out_size,
             width_size=width,
@@ -145,20 +142,18 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
             key=key,
         )
     if kind == "kan":
-        from jaxhybridmodels import KANPredictor
-
-        return KANPredictor(
+        return hm.KANPredictor(
             in_size=in_size, out_size=out_size, hidden_widths=(width,), grid_size=5, key=key
         )
     raise ValueError(f"--inner must be 'mlp' or 'kan'; got {kind!r}")
 
 
 def simulate_fn(
-    predictors: tuple[BoundedPredictor, ...],
+    predictors: tuple[hm.BoundedPredictor, ...],
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
-    solver: SolverConfig,
+    solver: hm.SolverConfig,
 ) -> Float[Array, "T 2"]:
     """Integrate the hybrid field for one experiment.
 
@@ -219,9 +214,9 @@ def main() -> None:
     else:
         experiments = irregular_experiments(n_experiments=args.experiments, key=k_data)
     dataset = build_dataset(experiments)
-    print(describe_buckets(dataset))
+    print(hm.describe_buckets(dataset))
 
-    solver = SolverConfig(
+    solver = hm.SolverConfig(
         solver=diffrax.Tsit5(),
         rtol=1e-4,
         atol=1e-6,
@@ -239,56 +234,59 @@ def main() -> None:
     # the bottom 3% of the box, reachable only through large negative
     # latents. Under ``log10`` the midpoint is ``0.032`` and the true range
     # covers the middle of the box.
-    rate_net = BoundedPredictor(
+    rate_net = hm.BoundedPredictor(
         input_keys=("temperature",),
-        in_scaler=BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
+        in_scaler=hm.BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
         inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
-        out_scaler=BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
+        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
     )
-    predictors: tuple[BoundedPredictor, ...] = (rate_net,)
+    predictors: tuple[hm.BoundedPredictor, ...] = (rate_net,)
     if not args.mechanistic_only:
         # ``[y1, y2] -> correction``, evaluated once per solver step inside
         # the vector field.
         predictors = (
             *predictors,
-            BoundedPredictor(
+            hm.BoundedPredictor(
                 input_keys=("y1", "y2"),
-                in_scaler=BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
+                in_scaler=hm.BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
                 inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
-                out_scaler=BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
+                out_scaler=hm.BoundScaler(
+                    bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"
+                ),
             ),
         )
+    model = hm.HybridModel(
+        predictors=predictors,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        output_channel_names=CHANNELS,
+        solver=solver,
+    )
     print(f"\n[model] {len(predictors)} predictor(s), inner architecture {args.inner!r}")
 
-    config = OptaxTrainingConfig(
+    config = hm.OptaxTrainingConfig(
         # Fit the first 40% of each trajectory, then all of it. The
         # saturation penalty applies in both phases.
         phases=(
-            TrainingPhase(
+            hm.TrainingPhase(
                 steps=args.steps // 2, lr=5e-3, horizon=0.4, penalty_weight=args.penalty_weight
             ),
-            TrainingPhase(steps=args.steps, lr=1e-3, penalty_weight=args.penalty_weight),
+            hm.TrainingPhase(steps=args.steps, lr=1e-3, penalty_weight=args.penalty_weight),
         ),
         # The residual network reads the ODE state ("y1", "y2"), so the
-        # dataset can resolve no measured points for it; cover both leaves
-        # with a box sweep in warped space instead -- the
-        # collocation-as-extension recipe (``box_grid``).
+        # dataset can resolve no measured points for it. Both leaves get a
+        # grid over their input box in warped space instead (``box_grid``).
         penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors),
         loss="mse",
         verbose=False,
     )
     print("[train] two phases, saturation penalty on")
-    history, trained = train_with_optax(
-        predictors,
-        dataset,
-        config,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        key=k_train,
-    )
-    print(f"  loss at phase starts: {history[0]:.4f} -> {history[args.steps // 2]:.4f}")
-    print(f"  final loss: {history[-1]:.5f}")
+    result = model.fit(dataset, config, key=k_train)
+    trained = result.model.predictors
+    loss, phase = result.history.loss, result.history.phase
+    starts = [f"{loss[phase.index(p)]:.4f}" for p in sorted(set(phase))]
+    print(f"  loss at phase starts: {' -> '.join(starts)}")
+    print(f"  final loss: {loss[-1]:.5f}; returned step {result.best_step}")
 
     # Zero means no predictor is pinned against a bound anywhere in its
     # declared input box, which is what you want to ship. Non-zero says a
@@ -320,22 +318,16 @@ def main() -> None:
         print(f"  residual RMS error {rms_error:.4f} against a true RMS of {rms_truth:.4f}")
         print(f"  relative {rms_error / rms_truth:.2%}")
 
-    predictions = predict_dataset(
-        trained, dataset, simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver
-    )
-    metrics = compute_metrics(predictions, dataset)
+    predictions = result.model.predict(dataset).buckets
     print()
-    print_metrics(metrics)
+    hm.print_metrics(hm.compute_metrics(predictions, dataset))
 
     if not args.no_plot:
         variant = "mechanistic" if args.mechanistic_only else args.inner
         suffix = f"{args.data}_{variant}"
         args.plot_dir.mkdir(parents=True, exist_ok=True)
-        # ``compute_metrics`` keeps only the summary stats; the scatter needs
-        # the raw value pairs, so re-walk the mask here.
-        parity_data = parity_diagnostics(predictions, dataset)
         parity_plot(
-            parity_data,
+            parity_diagnostics(predictions, dataset),
             title=f"Hybrid ODE parity ({suffix})",
             save_path=args.plot_dir / f"parity_{suffix}.png",
         )

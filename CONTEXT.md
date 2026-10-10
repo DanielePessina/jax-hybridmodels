@@ -26,7 +26,16 @@ Two pure penalty queries hang off it: `input_violation` (how far a physical inpu
 Bounds must be finite and ordered `low < high`. Infinite bounds used to construct silently and then fail three ways: every finite input mapped to one latent, `from_latent` returned `inf`, and `input_violation` returned `nan`.
 
 **BoundedPredictor**:
-A composition wrapper: `input_keys (named-input order) → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). `input_keys` is a static `tuple[str, ...]` that names each input slot in declared order; cardinality must match `in_scaler.bounds` and be ≥ 1. Auto-fills to `("x1", ..., "xN")` when omitted, so the saved predictor is always self-describing. `__call__` accepts either `dict[str, Array]` (subset extraction in `input_keys` order, extra keys allowed, missing keys raise) or rank-1 `Array` (passed through). Penalties are opt-in and default to zero. See "Bound penalty" below.
+A composition wrapper: `input_keys (named-input order) → in_scaler → inner Predictor → out_scaler`. Returns a single `Array` (the physical-units output). `input_keys` is a static `tuple[str, ...]` that names each input slot in declared order; cardinality must match `in_scaler.bounds` and be ≥ 1. Auto-fills to `("x1", ..., "xN")` when omitted, so the saved predictor is always self-describing. `__call__` accepts either `dict[str, Array]` (subset extraction in `input_keys` order, extra keys allowed, missing keys raise) or rank-1 `Array` (passed through). Penalties are opt-in and default to zero. See "Bound penalty" below. Always at least one input: a trainable value with no inputs is a `Parameter`.
+
+**Parameter**:
+A trainable physical scalar or array, read through `.value`. Stores an unbounded `latent` and a `BoundScaler`; `.value` maps the latent into physical units, so every iterate respects `bounds`. A missing endpoint (`None`) uses softplus distance from the other; no bounds means unbounded. Initialised from a physical value, so no key is needed. Not covered by the bound penalty.
+
+**Constant**:
+A fixed physical value, read through `.value`. `trainable_mask` always freezes it and tournament restarts leave it alone. Lets a model swap a learned quantity for a known one without changing `simulate_fn`.
+
+**HybridModel**:
+A frozen dataclass binding `(predictors, simulate_fn, state_to_output, output_channel_names, solver)`. Methods `fit`, `predict` and `simulate` call the functional layer (`train_with_optax`, `train_with_evosax`, `predict_dataset`), which stays public for custom workflows. `fit` returns a `FitResult(model, history, best_step, stop_reason)` and never mutates the original. The dataset is passed per call, never stored.
 
 **simulate_fn**:
 A pure user-written function with a mandatory signature that, for one experiment, integrates the dynamics and returns the full state trajectory. The framework owns vmapping, jitting, and gradient flow; the user owns physics. Inside the user's vector field, multi-rate models compose their predictors directly (`growth, nucleation = predictors`). There is no framework wrapper for "the pair of rate predictors"; the source package's `RatePair` is dropped.
@@ -35,7 +44,7 @@ _Avoid_: "ODE function" (ambiguous, since it could mean the vector field), "solv
 Mandatory signature:
 ```python
 def simulate_fn(
-    predictors,                       # PyTree[eqx.Module], convention: tuple of BoundedPredictor leaves
+    predictors,                       # PyTree[eqx.Module], convention: dict keyed by role
     ts: Float[Array, "T"],            # observation times for this experiment
     covariates: dict[str, Array],     # named, constant-in-time scalars or vectors
     y0: Float[Array, "S"],            # full initial state
@@ -44,13 +53,13 @@ def simulate_fn(
     ...
 ```
 
-The first argument is a pytree of `eqx.Module` leaves. It is runtime-permissive (any pytree works for autodiff: tuple, list, dict, NamedTuple, custom Module), with a fixed convention: always wrap in a tuple, single-predictor case = `(BP,)`. This gives examples a uniform shape and lets `eqx.partition` / `eqx.filter_value_and_grad` / `eqx.tree_serialise_leaves` walk the leaves uniformly. Dict and NamedTuple are valid alternatives demonstrated in secondary examples; the framework never inspects the container type.
+The first argument is a pytree of `eqx.Module` leaves (tuple, list, dict, NamedTuple, custom Module, or a single module). The convention is a dict keyed by role (`{"rate": Parameter(...), "offset": Constant(...)}`), which reads clearly inside `simulate_fn`; tuples remain common in the older examples. `eqx.partition` / `eqx.filter_value_and_grad` / `eqx.tree_serialise_leaves` walk the leaves uniformly; the framework never inspects the container type.
 
 **state_to_output**:
 A pure callable mapping a full-state trajectory `[T, S]` to the observed output channels `[T, D]` (e.g. crystallisation: `[mu0..mu4, conc] → [conc, d43]`). Applied externally to `simulate_fn`'s output, before loss computation. It belongs to the **model setup**, not the data: the Dataset never sees raw states, and which states exist depends on the model. `predict_bucket`/`predict_dataset` and the training loops take it as a parameter; the Dataset carries only data (experiments, channels, masks, the union timestamp axis, y0).
 
 **y0_fn**:
-A user-supplied hook invoked at data-import time to construct the per-experiment full initial state from the raw row + covariates. Default for "state == observed": `lambda row, c: row.y[0]`. Crystallisation-style: `lambda row, c: jnp.array([0,0,0,0,0, row.y[0,0]])`.
+A hook `y0_fn(covariates, channels) -> [S]` called by `make_experiment` to build the full initial state, e.g. crystallisation's `lambda cov, ch: jnp.array([0, 0, 0, 0, 0, ch["conc"].values[0]])`. `y0=` gives the state directly instead; supply exactly one. `t0=` places the state before the first observation, and the dataset inserts it as an unobserved timestamp.
 
 **SolverConfig**:
 A frozen `eqx.Module` whose fields are all `eqx.field(static=True)`: diffrax solver instance, rtol, atol (scalar or per-state tuple), max_steps, dt0. Static so it doesn't enter the pytree leaves. JSON-serialisable via a small solver class-name registry.
@@ -74,7 +83,7 @@ def vector_field(t, y, args):
 **Predictor inputs**:
 The dict that the user's vector field actually feeds into a `BoundedPredictor` at call time. A *superset* of `covariates`. The user constructs it inside the vector field by mixing constant covariates with time-varying values:
 - state-derived values (`y[CONC_IDX]`, supersaturation `S = c / c_sat`, etc.),
-- exogenous time-dependent values from a profile factory (e.g. `hm.ramp_profile(...)(t)` — see "Time profiles").
+- exogenous time-dependent values from a profile factory (e.g. `hm.ramp_profile(...)(t)`; see "Time profiles").
 
 ```python
 def vector_field(t, y, args):
@@ -83,7 +92,7 @@ def vector_field(t, y, args):
         "temperature_C": covariates["temperature_C"],     # constant covariate
         "supersaturation": y[CONC_IDX] / covariates["c_sat"],  # state-derived, time-varying
     }
-    G = predictors[0](inputs)
+    G = predictors["growth"](inputs)
 ```
 
 Key collision is intentional: the dict can override a covariate's name with a time-varying value (e.g. `T(t)`). The `BoundedPredictor.input_keys`, the `BoundScaler.bounds`, and the dict mixing are *unaware* of provenance. Every key is treated as a named scalar regardless of whether it came from `covariates`, `y`, or `t`. This collapses "state-derived inputs to the predictor", "exogenous time-dependent inputs", and "covariate inputs" into one mechanism.
@@ -101,14 +110,14 @@ Per-channel observation triple: `(ts: [Tc], values: [Tc], variance: [Tc] | float
 One full pass over all buckets → accumulate gradients across buckets → one `optimizer.update`. Equivalently, one epoch. *Bucket ≠ step.*
 
 **phase** (training):
-A contiguous block of N steps sharing the same hyperparameters (lr, optimizer, …). A run is a tuple of phases.
+A contiguous block of N steps sharing the same hyperparameters (lr, optimizer, horizon, penalty weight), written as a `TrainingPhase`. A run is a tuple of phases.
 
 **bucket dispatch loop**:
 The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernels. Idiomatic; not a performance smell.
 
 ## Relationships
 
-- A simulate_fn consumes a predictors pytree (typically a tuple of `BoundedPredictor`s), a SolverConfig, and one Experiment's `(ts, covariates, y0)`; returns a full state trajectory.
+- A simulate_fn consumes a predictors pytree (typically a dict of `Parameter`, `Constant` and `BoundedPredictor` leaves), a SolverConfig, and one Experiment's `(ts, covariates, y0)`; returns a full state trajectory.
 - state_to_output is composed externally: `loss(state_to_output(simulate_fn(predictors, ...)), y_observed, mask)`.
 - A Bucket holds N Experiments with identical `len(ts)`; the training loop vmaps simulate_fn over the bucket.
 - The predictors pytree is the *only* component that is binary-serialised (eqx.tree_serialise_leaves walks any pytree of leaves). simulate_fn and state_to_output are code (re-imported); SolverConfig is JSON.
@@ -122,7 +131,7 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 - A phase that changes the horizon changes what the loss measures, so `restore_best`'s running minimum resets there. Without that, the minimum lands in the shortest-horizon phase and the returned model is the least-trained one in the run. `patience` resets at every phase boundary for the same kind of reason.
 - `TrainingPhase.reset_optimizer=True` rebuilds the optimiser at the start of that phase (used when switching optimiser type or when a horizon change invalidates momentum).
 - `bucket_step(predictors, bucket_payload, length_mask_fraction)` is jitted and returns `(loss, grads)`. Optimiser update happens in a separate jitted `apply_update(predictors, accumulated_grads, opt_state)` *after* the Python for-loop over buckets has accumulated.
-- Shared tournament only. Enabled implicitly when `tournament_steps > 0 AND tournament_attempts > 1`. Serial candidate evaluation that *reuses the main loop's compiled `bucket_step` and `apply_update`* (no extra JIT compile cost). Each candidate is a fresh re-init trained for `tournament_steps` at `tournament_lr`, then scored with a forward-only pass on the data term — including any configured trajectory penalty, which the phases also charge — and *excluding* the bound penalty, so a candidate cannot win by drifting where the bound penalty likes rather than by fitting. On per-attempt failure (diffrax error / non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original predictors with a `RuntimeWarning`.
+- Shared tournament only. Enabled implicitly when `tournament_steps > 0 AND tournament_attempts > 1`. Serial candidate evaluation that *reuses the main loop's compiled `bucket_step` and `apply_update`* (no extra JIT compile cost). Each candidate is a fresh re-init trained for `tournament_steps` at `tournament_lr`, then scored with a forward-only pass on the data term, including any configured trajectory penalty (which the phases also charge) and *excluding* the bound penalty, so a candidate cannot win by drifting where the bound penalty likes rather than by fitting. On per-attempt failure (diffrax error / non-finite loss), drop and try a fresh RNG; if all fail, fall back to the original predictors with a `RuntimeWarning`.
 - `Predictor.initialized_with_key(key)` is a documented per-leaf protocol used by the tournament. Default implementation is a free function `reinitialize_with_key(predictor, key)` that re-inits inexact-float leaves only. Across the predictors pytree, the tournament splits the attempt key by traversal order (`jr.split(attempt_key, n_module_leaves)`) and applies `reinitialize_with_key` to each `eqx.Module` leaf independently, so identical-shape sibling predictors get *different* re-init weights.
 
 ## Loss interface
@@ -143,8 +152,8 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 ## Serialisation
 
 - Hard design constraint (applies *now* to every Predictor we design): every `Predictor` / `BoundedPredictor` must round-trip through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` with zero JAX/Equinox conflicts. The constraint extends naturally from a single Predictor to the full `predictors` pytree, because `eqx.tree_serialise_leaves` walks any pytree of leaves. Concretely: all dynamic leaves are JAX arrays; all static fields are JSON-encodable primitives or tuples thereof; no closures in non-static positions.
-- Implementation is the last shipped feature. The save/load helpers (`save_predictor`, `load_predictor`, optional `save_run`/`load_run`) are written after the rest of the framework is verified.
-- Save format (when implemented): a directory containing `predictors.eqx` + `metadata.json` (timestamp, version, container shape hint, simulate_fn module hint, user `extras`).
+- Helpers: `save_predictors` / `load_predictors` for the pytree alone, `save_run` / `load_run` for a run directory.
+- Run format: a directory containing `predictors.eqx` + `metadata.json` (timestamp, version, predictors fingerprint, solver and training configs, loss history, user `extras`).
 - Not serialised by the framework: `simulate_fn` and `state_to_output` (pure functions, re-imported), `Dataset`, the trainable mask (rebuild from user code), training configs (user owns).
 - No builder registry in v1. Loading requires a user-supplied `template` predictors pytree (same container shape and Module types), per `eqx.tree_deserialise_leaves`. Builder registry is deferred until friction proves real.
 
@@ -162,7 +171,7 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 - Single-eval JIT boundary: `population_eval = eqx.filter_jit(jax.vmap(single_eval))`. `single_eval` closes over `static`, `dataset`, `simulate_fn`, `state_to_output`, `solver`, `loss_fn`; the bucket dispatch loop unrolls inside the trace.
 - Flatten contract: `eqx.partition(predictors, trainable_mask) → (params, static); jax.flatten_util.ravel_pytree(params) → (flat, unflatten)`. The pytree shape of `predictors` is irrelevant here, since `eqx.partition` walks leaves uniformly. `static` is closed over (callables can't pass through `vmap`).
 - Init modes: `"warm"` (mean = current params, the default, covering user-supplied kinetic init and midpoint-init via instantiating predictor at zero latent), `"uniform_box"` (latent ±extent uniform), `"lhs_box"` (Latin Hypercube via `scipy.qmc`, host-side).
-- Bounds during search: not enforced. CMA_ES wanders latent space; `BoundedPredictor`'s sigmoid keeps physical outputs in range.
+- Bounds during search: not enforced. CMA_ES wanders latent space; the output scalers of `Parameter` and `BoundedPredictor` keep physical values in range.
 - Best-ever is tracked host-side (`jnp.argmin(fitnesses)` per generation), not via strategy-specific best-member fields.
 - No graceful per-individual error handling in v1: a diffrax/non-finite individual crashes the generation. Mitigation: conservative `sigma_init` and `init_box_extent`. Per-individual NaN sentinels deferred.
 
@@ -187,7 +196,6 @@ The Python `for bp in bucket_payloads:` that drives JIT-cached per-bucket kernel
 - System embeddings (`EmbeddedMLP*`) and the `SystemConditionedRatePredictor` protocol.
 - Padded-batched-experiments interface (`UnscaledBatchedExperiments`).
 - Time-varying *covariates* at the data layer. `Experiment.covariates` stays constant in time, whether scalar or vector. Time-varying *values* are first-class via the `jaxhybridmodels.profiles` factories evaluated in the vector field (see "Time profiles" above); state-derived and exogenous time-dependent *predictor inputs* mix into the per-call dict inside the vector field.
-- A `Model` wrapper class. The "model" is the loose triple `(predictors, simulate_fn, solver_config)`; serialisation handles each piece appropriately.
 - Temperature annealing of any kind in the *bound scaler*: `cosine_temperature_annealing`, `use_temp_annealing`, `initial_temperature`, `temp_cosine_fraction`, `temp_indices`. The bound-scaler's `temperature` is just a (typically frozen) parameter. This is distinct from `annealing_schedule`, which anneals a training hyperparameter (lr/weight) and lives in `jaxhybridmodels.schedules`.
 - The `_build_filter_spec` per-class registry from the source package, replaced by composable freezer functions.
 - ~~Bound-excursion penalty machinery~~ is reinstated, properly wired this time. The source package's version was dropped because it was never plumbed through to the loss, not because the idea was wrong. See "Bound penalty".
@@ -212,14 +220,14 @@ A leaf with no point set when the penalty is enabled is a hard error (`validate_
 _Avoid_: "bound violation penalty". With sigmoid reparameterisation a physical violation is unrepresentable; what is being charged is saturation.
 
 **Trajectory penalty**:
-A scalar charged on `trajectory_penalty_fn(full_state, bp)` (configs' opt-in hook; scalar weight), added to the data loss inside the training step's single forward pass. `full_state` is `[N, T, S]` *before* `state_to_output`, so it can carry extra ODE components. For an **embedded** hybrid model (predictor inside the vector field) the penalty rides in the state as accumulators whose derivative is the per-call penalty rate — `saturation(z)` and `input_violation(x)` kept as two separate components — and the charge is their time-integral (`penalty_integral`). Recipe helpers: `attach_penalty_state`, `penalty_vector_field`, `strip_penalty_state`. For a **parallel** hybrid model (predictor output is the measured channel) `trajectory_saturation_penalty` inverts outputs to latents and charges saturation over time, no state change. Probe conditions — scenarios to steer toward with no measurements — are experiments whose channels carry `values=jnp.array([])`: the `ts` still defines the integration grid, the mask is all-False, and the data loss is exactly zero.
+A scalar charged on `trajectory_penalty_fn(full_state, bp)` (configs' opt-in hook; scalar weight), added to the data loss inside the training step's single forward pass. `full_state` is `[N, T, S]` *before* `state_to_output`, so it can carry extra ODE components. For an **embedded** hybrid model (predictor inside the vector field) the penalty rides in the state as accumulators whose derivative is the per-call penalty rate, with `saturation(z)` and `input_violation(x)` kept as two separate components. The charge is their time-integral (`penalty_integral`). Recipe helpers: `attach_penalty_state`, `penalty_vector_field`, `strip_penalty_state`. For a **parallel** hybrid model (predictor output is the measured channel) `trajectory_saturation_penalty` inverts outputs to latents and charges saturation over time, no state change. Probe conditions, scenarios to steer toward with no measurements, are experiments whose channels carry `values=jnp.array([])`: the `ts` still defines the integration grid, the mask is all-False, and the data loss is exactly zero.
 
 **Data loss vs. objective**:
-`losses_history`, `restore_best`, early stopping, and the tournament score all track the data term alone — plus any configured trajectory penalty, which rides in the per-step loss. The **bound** penalty is the one excluded: it is reported separately via `TrainingUI.on_step_end(penalty=...)`, and the combined objective (`data + weight * penalty`) is what the optimiser descends but never what "best" is measured on. Reporting the bound penalty too would let "best" move when only the penalty weight ramped, and would make runs with different weights incomparable. (Evosax is the exception: it ranks by one scalar with no aux channel, so its history folds the bound penalty in when configured.)
+`FitHistory.loss` (the trainers' returned loss list), `restore_best`, early stopping, and the tournament score all track the data term alone, plus any configured trajectory penalty, which rides in the per-step loss. The **bound** penalty is the one excluded: it is reported separately via `TrainingUI.on_step_end(penalty=...)`, and the combined objective (`data + weight * penalty`) is what the optimiser descends but never what "best" is measured on. Reporting the bound penalty too would let "best" move when only the penalty weight ramped, and would make runs with different weights incomparable. (Evosax is the exception: it ranks by one scalar with no aux channel, so its history folds the bound penalty in when configured.)
 
 ## Flagged ambiguities
 
-- "Model" was used in the source package both for the trainable Equinox module and for the simulate-able physics object. Resolved: the trainable thing is a predictors pytree (typically a tuple of `BoundedPredictor`s); the integrable physics is simulate_fn; nothing is called "Model".
+- "Model" was used in the source package both for the trainable Equinox module and for the simulate-able physics object. Resolved: the trainable thing is a predictors pytree; the integrable physics is simulate_fn; `HybridModel` is the binding of both plus the observation map and solver.
 - "Regressor" in the source was overloaded with bound-scaling. Resolved: scaling is decoupled from Predictor via `BoundedPredictor` composition (`input_keys → in_scaler → inner → out_scaler`).
 - "Covariate" vs "predictor input" was historically conflated. Resolved: a covariate is a constant-in-time per-experiment scalar or rank-1 vector at the data layer (`Experiment.covariates`); a predictor input is the per-call dict (or pre-stacked Array) the vector field hands to a predictor (covariates ∪ state-derived ∪ exogenous-time-dependent). `BoundedPredictor` named inputs remain one scalar per key; vector covariates can be indexed or passed through its array interface.
 - `CovariateSelector` was originally a separate `eqx.Module` composed inside `BoundedPredictor` to translate a named-covariates dict into a stacked Array. It held no trainable leaves and one operation, so it was folded into `BoundedPredictor` as the `input_keys` static field. The saved predictor still self-describes its input contract; `__call__` is now polymorphic (dict or Array) so users can construct inputs in either named or positional form at the vector-field boundary.

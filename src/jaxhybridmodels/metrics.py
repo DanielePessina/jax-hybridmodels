@@ -137,7 +137,7 @@ def _stats_from_sufficient_stats(
     mse = ss_res / denom
     rmse = jnp.sqrt(mse)
     mae = abs_error / denom
-    # ss_tot == 0 means constant observed values — R^2 is undefined. It is
+    # ss_tot == 0 means constant observed values, so R^2 is undefined. It is
     # also undefined for a channel with no observations.
     r2 = jnp.where(n > 0, jnp.where(ss_tot > 0.0, 1.0 - ss_res / ss_tot, jnp.nan), jnp.nan)
     return ChannelMetrics(name, n, mse, rmse, mae, r2)

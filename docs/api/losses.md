@@ -201,8 +201,8 @@ How channel selection composes depends on the loss:
 - A plain ``(pred_obs, bp)`` callable is *projected* instead: the
   selected channels are sliced out of ``pred_obs`` and ``bp`` before the
   call, so any ``(pred_obs, bp)`` loss composes with ``channel_idx``.
-  ``channel_weights`` cannot be projected this way — per-channel
-  weighting must happen inside a loss's own reduction — so a plain
+  ``channel_weights`` cannot be projected this way, because per-channel
+  weighting has to happen inside a loss's own reduction. A plain
   callable combined with ``channel_weights`` raises rather than
   silently ignoring the weights.
 

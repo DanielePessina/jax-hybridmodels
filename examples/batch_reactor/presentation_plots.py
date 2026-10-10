@@ -5,16 +5,16 @@ with four temperature curves per column. Scatter is the noisy observations,
 the line is the model on a dense time grid. No truth curve: the message is
 model against data.
 
-* ``01_per_bin_arrhenius.png`` — three independent Arrhenius fits, one per
+* ``01_per_bin_arrhenius.png``: three independent Arrhenius fits, one per
   pH bin, the classical dictionary baseline.
-* ``02_joint_arrhenius.png`` — one Arrhenius fit on all twelve experiments.
+* ``02_joint_arrhenius.png``: one Arrhenius fit on all twelve experiments.
   The trunk has no pH input, so the same curves appear in every column while
   the data they meet changes. This is what the residual MLP has to correct.
-* ``02b_linear_ph_arrhenius.png`` — a smarter parametric guess,
+* ``02b_linear_ph_arrhenius.png``: a smarter parametric guess,
   ``log_k_ref(pH) = a + b·pH`` with one shared Ea. The truth's effective Ea
   varies strongly with pH, so the best single Ea is a compromise that misses
   both edge bins, with opposite sign in each.
-* ``03_hybrid.png`` — the full hybrid, trunk plus residual MLP, on all twelve
+* ``03_hybrid.png``: the full hybrid, trunk plus residual MLP, on all twelve
   experiments. One model, tracking the data across pH.
 
 Run with::
@@ -56,7 +56,7 @@ from jaxhybridmodels.training import (
     train_with_optax,
 )
 
-# Truth and physics constants — only used for synthetic data generation.
+# Truth and physics constants, used only for synthetic data generation.
 T_REF = 298.15  # K (25 °C); centring temperature for Arrhenius
 R_GAS = 8.314e-3  # kJ/(mol·K); pair with Ea in kJ/mol
 EA_TRUE = 30.0  # kJ/mol
@@ -71,17 +71,17 @@ K_SAT_HILL = 5.0
 # motivated) to "k_sat depends on temperature in a pH-modulated way", but
 # expressed as an Arrhenius prefactor + pH-dependent Ea so that ``k(T, pH)``
 # at fixed pH is still an exact Arrhenius. This is the key design choice:
-#   * per-bin Arrhenius: each bin sees its own effective Ea — perfect fit;
+#   * per-bin Arrhenius: each bin sees its own effective Ea, so the fit is perfect;
 #     the bias from the truth's Ea is absorbed silently;
 #   * linear-pH proposal: shared Ea, can capture log(k_ref) linear in pH but
-#     CANNOT vary the slope with pH — fails noticeably at the bin extremes;
+#     cannot vary the slope with pH, so it fails noticeably at the bin extremes;
 #   * hybrid: residual MLP can see (T, pH) jointly and fix the slope drift.
 EA_PH_INTERCEPT = 5.85  # pH at which Ea_eff equals EA_TRUE
-EA_PH_SLOPE = 30.0  # kJ/mol per pH-unit — Ea_eff = EA_TRUE + slope·(pH − intercept)
+EA_PH_SLOPE = 30.0  # kJ/mol per pH unit: Ea_eff = EA_TRUE + slope·(pH − intercept)
 
 
 def _k_sat_from_ph(pH):
-    """pH-dependent prefactor — sigmoidal saturation. T-independent."""
+    """pH-dependent prefactor, a sigmoidal saturation independent of T."""
     pH_arr = jnp.asarray(pH)
     return K_SAT_BASELINE + K_SAT_AMPLITUDE / (
         1.0 + jnp.maximum(pH_arr / K_SAT_PH50, 0.0) ** K_SAT_HILL
@@ -100,7 +100,7 @@ def k_true(temperature_C, pH):
     return _k_sat_from_ph(pH) * arrhenius
 
 
-# Design of experiments — same disjoint-pH LHS as the notebook.
+# Design of experiments, the same per-pH-bin LHS as notebook.py.
 T_C_RANGE = (15.0, 35.0)
 CA0_RANGE = (0.75, 1.5)
 PH_BINS = (5.0, 5.85, 7.0)
@@ -185,7 +185,7 @@ def _build_experiments():
     return experiments, bin_of_exp
 
 
-# Predictor — Arrhenius trunk + residual MLP, identical layout to the notebook.
+# Predictors: Arrhenius trunk plus residual MLP, as in notebook.py but with a wider Ea box.
 LOG_KREF_BOUNDS = (-3.0, 2.0)
 EA_BOUNDS = (0.0, 120.0)
 
@@ -254,7 +254,7 @@ _TrunkFactory = type[ArrheniusKinetics] | type[LinearPHArrheniusKinetics]
 def _build_predictors_init(trunk_cls: _TrunkFactory = ArrheniusKinetics):
     """Build the (parametric_trunk, residual_bp) two-leaf predictors pytree.
 
-    ``trunk_cls`` selects which parametric trunk goes in the first leaf — the
+    ``trunk_cls`` selects which parametric trunk goes in the first leaf: the
     plain ``ArrheniusKinetics`` (2 params) for the per-bin and joint baselines
     plus the hybrid; ``LinearPHArrheniusKinetics`` (3 params) for the linear-pH
     parametric variant. The residual ``BoundedPredictor`` leaf is identical
@@ -285,111 +285,45 @@ def _build_predictors_init(trunk_cls: _TrunkFactory = ArrheniusKinetics):
     return (parametric_trunk, residual_bp)
 
 
-# Simulators — full hybrid (trunk + residual) and the pure-mechanistic baseline
-# (residual contribution dropped; safe to run with a freshly-initialised
-# residual MLP that is not identically zero).
-def simulate_fn(predictors, ts, covariates, y0, solver):
-    parametric, residual = predictors
-    log_k_ref, Ea = parametric()
-
-    T_C = covariates["temperature_C"]
-    pH = covariates["pH"]
-    Ca0 = covariates["Ca0"]
+# Simulators. All three share the decay; they differ in how log10 k is built.
+# The baseline and linear-pH variants ignore the residual leaf, which is in the
+# pytree only so the same masks apply.
+def _log10_arrhenius(log_k_ref, Ea, T_C):
     T_K = T_C + 273.15
+    return (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
 
-    log10_k_param = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
-    inputs = {"temperature_C": T_C, "pH": pH, "Ca0": Ca0}
-    delta_log10_k = jnp.squeeze(residual(inputs))
-    log10_k = log10_k_param + delta_log10_k
+
+def _decay(log10_k, ts, y0, solver):
+    """Integrate A -> B at the constant rate 10**log10_k."""
     k = jnp.power(10.0, log10_k)
 
     def vector_field(t, y, args):
-        Ca = jnp.maximum(y[0], 0.0)
-        rate = k * Ca
+        rate = k * jnp.maximum(y[0], 0.0)
         return jnp.stack([-rate, rate])
 
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        solver.solver,
-        t0=ts[0],
-        t1=ts[-1],
-        dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-        max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
-    )
-    return jnp.asarray(sol.ys)
+    return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
+
+
+def simulate_fn(predictors, ts, covariates, y0, solver):
+    """Hybrid: Arrhenius trunk plus the residual, log-additively."""
+    parametric, residual = predictors
+    log_k_ref, Ea = parametric()
+    delta = jnp.squeeze(residual(covariates))
+    log10_k = _log10_arrhenius(log_k_ref, Ea, covariates["temperature_C"]) + delta
+    return _decay(log10_k, ts, y0, solver)
 
 
 def simulate_fn_baseline(predictors, ts, covariates, y0, solver):
-    parametric, _residual = predictors
-    log_k_ref, Ea = parametric()
-
-    T_C = covariates["temperature_C"]
-    T_K = T_C + 273.15
-
-    log10_k = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
-    k = jnp.power(10.0, log10_k)
-
-    def vector_field(t, y, args):
-        Ca = jnp.maximum(y[0], 0.0)
-        rate = k * Ca
-        return jnp.stack([-rate, rate])
-
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        solver.solver,
-        t0=ts[0],
-        t1=ts[-1],
-        dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-        max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
-    )
-    return jnp.asarray(sol.ys)
+    """Arrhenius trunk alone."""
+    log_k_ref, Ea = predictors[0]()
+    return _decay(_log10_arrhenius(log_k_ref, Ea, covariates["temperature_C"]), ts, y0, solver)
 
 
 def simulate_fn_linear_ph(predictors, ts, covariates, y0, solver):
-    """Linear-in-pH analytic extension: ``log_k_ref(pH) = a + b·pH``.
-
-    Same Arrhenius temperature law as the baseline, but the pre-exponential
-    intercept is now a linear function of pH. Three trainable scalars in the
-    trunk; the residual MLP leaf is present for pytree-shape compatibility but
-    is not consulted (mirrors ``simulate_fn_baseline``).
-    """
-    parametric, _residual = predictors
-    a, b_ph, Ea = parametric()
-
-    T_C = covariates["temperature_C"]
-    pH = covariates["pH"]
-    T_K = T_C + 273.15
-
-    log_k_ref = a + b_ph * pH
-    log10_k = (log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
-    k = jnp.power(10.0, log10_k)
-
-    def vector_field(t, y, args):
-        Ca = jnp.maximum(y[0], 0.0)
-        rate = k * Ca
-        return jnp.stack([-rate, rate])
-
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        solver.solver,
-        t0=ts[0],
-        t1=ts[-1],
-        dt0=solver.dt0 if solver.dt0 is not None else 0.05,
-        y0=y0,
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
-        max_steps=solver.max_steps,
-        adjoint=diffrax.DirectAdjoint(),
-    )
-    return jnp.asarray(sol.ys)
+    """Arrhenius with ``log_k_ref(pH) = a + b * pH`` and one shared Ea."""
+    a, b_ph, Ea = predictors[0]()
+    log_k_ref = a + b_ph * covariates["pH"]
+    return _decay(_log10_arrhenius(log_k_ref, Ea, covariates["temperature_C"]), ts, y0, solver)
 
 
 # Training configs and fit drivers.
@@ -427,7 +361,7 @@ def _three_panel_figure(
     equation: str | None = None,
 ):
     """Render a 1×3 figure. ``predictors_for_bin[bin_idx]`` selects the model
-    used in that column — different per bin for the per-bin baseline, the same
+    used in that column: different per bin for the per-bin baseline, the same
     pytree for every bin under the joint and hybrid models. ``figsize`` defaults
     to a 4×4-per-panel layout that fits comfortably on a slide. ``equation``,
     if given, is rendered as a suptitle (LaTeX maths supported via ``$...$``)
@@ -506,12 +440,12 @@ def main():
         dt0=0.05,
     )
 
-    # Trunk-only mask: freeze the residual MLP and any BoundScaler leaves so
-    # only the two-element ArrheniusKinetics latent is trainable. Reused
-    # across the per-bin baseline and the joint phase-1 fit.
-    mask_p1 = trainable_mask(predictors_init)
-    mask_p1 = freeze_modules_of_type(mask_p1, predictors_init, BoundedPredictor)
-    mask_p1 = freeze_modules_of_type(mask_p1, predictors_init, BoundScaler)
+    # Trunk-only mask: the default mask already holds BoundScaler leaves
+    # fixed, so freezing the residual leaves the trunk's two latent scalars.
+    # Reused for the per-bin fits and the joint phase-1 fit.
+    mask_p1 = freeze_modules_of_type(
+        trainable_mask(predictors_init), predictors_init, BoundedPredictor
+    )
 
     print("Fitting per-bin Arrhenius...")
     # One Arrhenius fit per pH bin.
@@ -540,7 +474,7 @@ def main():
         )
 
     print("Fitting joint Arrhenius (hybrid phase 1)...")
-    # Single Arrhenius fit on all 12 experiments — phase 1 of the hybrid.
+    # Single Arrhenius fit on all 12 experiments, which is phase 1 of the hybrid.
     _hist, preds = train_with_evosax(
         predictors_init,
         dataset,
@@ -556,15 +490,15 @@ def main():
     predictors_p1 = preds
     joint_for_each_bin = {b: predictors_p1 for b in range(len(PH_BINS))}
 
-    # Linear-in-pH analytic variant — same trunk-only mask logic as the joint
+    # Linear-in-pH analytic variant, with the same trunk-only mask logic as the joint
     # baseline, just a different parametric family. The residual leaf is unused
     # at simulate time but is present so trainable_mask + freeze_modules_of_type
     # stay identical.
     print("Fitting linear-pH Arrhenius...")
     predictors_init_linph = _build_predictors_init(LinearPHArrheniusKinetics)
-    mask_linph = trainable_mask(predictors_init_linph)
-    mask_linph = freeze_modules_of_type(mask_linph, predictors_init_linph, BoundedPredictor)
-    mask_linph = freeze_modules_of_type(mask_linph, predictors_init_linph, BoundScaler)
+    mask_linph = freeze_modules_of_type(
+        trainable_mask(predictors_init_linph), predictors_init_linph, BoundedPredictor
+    )
     # Single linear-pH Arrhenius fit on all 12 experiments. Three params.
     _hist, preds = train_with_evosax(
         predictors_init_linph,
@@ -586,11 +520,11 @@ def main():
 
     print("Fitting hybrid (phase 2)...")
     # Residual-only mask: freeze the trunk at its phase-1 endpoint and let the
-    # MLP weights move. BoundScalers stay frozen by convention.
-    mask_p2 = trainable_mask(predictors_p1)
-    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, ArrheniusKinetics)
-    mask_p2 = freeze_modules_of_type(mask_p2, predictors_p1, BoundScaler)
-    # Phase 2 — fit the residual MLP with the trunk pinned at its phase-1
+    # MLP weights move.
+    mask_p2 = freeze_modules_of_type(
+        trainable_mask(predictors_p1), predictors_p1, ArrheniusKinetics
+    )
+    # Phase 2: fit the residual MLP with the trunk pinned at its phase-1
     # endpoint.
     _hist, predictors_p2 = train_with_optax(
         predictors_p1,
@@ -604,9 +538,8 @@ def main():
     )
     hybrid_for_each_bin = {b: predictors_p2 for b in range(len(PH_BINS))}
 
-    # Equations rendered as suptitles. LaTeX maths via $...$. Coefficients are
-    # rounded by hand from the trained models — kept inline in the strings so
-    # the captions are self-explanatory on a slide.
+    # Captions rendered as suptitles. The coefficients were rounded by hand
+    # from a default run; update them if the data or configs change.
     eq_per_bin = (
         r"$k(T) = k_\mathrm{ref}\,\exp[-E_a/R\,(1/T - 1/T_\mathrm{ref})]$"
         r"      one fit per pH bin:  $E_a \approx 3,\ 31,\ 65$ kJ/mol"
@@ -620,7 +553,8 @@ def main():
         r"      $a \approx 1.5$,  $b \approx -0.33$,  $E_a \approx 30$ kJ/mol  (all trainable)"
     )
     eq_hybrid = (
-        r"$k(T, \mathrm{pH}) = k_\mathrm{param}(T) + k_\mathrm{residual}(T, \mathrm{pH}, C_{a0})$"
+        r"$\log_{10} k(T, \mathrm{pH}) = \log_{10} k_\mathrm{param}(T)"
+        r" + \Delta(T, \mathrm{pH}, C_{a0})$"
     )
 
     print("Rendering figures...")

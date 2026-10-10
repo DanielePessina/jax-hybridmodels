@@ -104,10 +104,8 @@ Walks ``mask`` and ``predictors`` in lockstep. When a node in
 ``predictors`` is an instance of ``cls``, the matching sub-mask is
 replaced wholesale by an all-``False`` subtree.
 
-The common use is
-``freeze_modules_of_type(mask, predictors, BoundScaler)``, which freezes
-every scaler's ``temperature``. The temperature sets how sharply the
-squash saturates and is not meant to drift while the model trains.
+For example, ``freeze_modules_of_type(mask, predictors, MLPPredictor)``
+freezes every MLP and leaves the rest of the mask as it was.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L126)</small>
 
@@ -129,12 +127,13 @@ freeze_where(
 
 Return a new mask with every leaf inside any submodule satisfying ``fn`` set to ``False``.
 
-``fn`` must be a structural test, such as an ``isinstance`` check or a
-look at a static field. It must not compare leaf values. The walk pairs
-a mask node, whose leaves are booleans, with a predictors node, whose
-leaves are arrays, so a value comparison has no defined meaning here.
+``fn`` is called on the mask's copy of each module, whose array leaves
+have been replaced by booleans. Use a structural test, such as an
+``isinstance`` check or a look at a static field. Identity tests
+(``m is predictors["rate"]``) and value comparisons never match; select
+by path with ``freeze_paths`` instead.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L150)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L148)</small>
 
 ---
 
@@ -154,4 +153,4 @@ Sums the sizes of every leaf the mask marks ``True``. Useful for
 reporting the effective search dimension before a run (e.g. to sanity
 check an evosax budget or a phase-transition threshold).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L170)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L169)</small>

@@ -256,8 +256,8 @@ Gather one [`PenaltyPointSource`](/api/penalties#penaltypointsource) per ``Bound
 
 A leaf is *resolvable* when every ``input_keys`` name is a dataset
 covariate (in every bucket). Its measured points are then the input
-vectors at the observed cells — the cells the loss actually charges —
-with a ``None`` entry for an unresolvable leaf. A resolvable leaf whose
+vectors at the observed cells, the same cells the loss charges, with
+a ``None`` entry for an unresolvable leaf. A resolvable leaf whose
 dataset holds no observed cells (all probes) yields a source with zero
 points, which contributes nothing until extras are added.
 
@@ -344,7 +344,7 @@ so the trailing accumulators carry the *time-integral* of the penalty
 along the trajectory.
 
 The rates must read the physical components (typically ``y[:-n]``) and
-are closed over the user's predictors — only the user knows the latent
+are closed over the user's predictors, because only the user knows the latent
 ``z`` or input ``x`` of an embedded predictor at call time.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L575)</small>
@@ -508,8 +508,8 @@ trajectory_saturation_penalty(state: 'Array', out_scaler: 'Any') -> 'Array'
 
 Sum over time of output saturation for a predictor whose output *is* the state.
 
-For a **parallel** hybrid model — the predictor is outside the solver and
-its output is a predicted channel — the full state already holds the
+For a **parallel** hybrid model, where the predictor is outside the
+solver and its output is a predicted channel, the full state holds the
 physical outputs. Invert them back to latents with the predictor's
 ``out_scaler`` and charge [`BoundScaler.saturation`](/api/predictors#boundscalersaturation) at every time
 step, summed over time. This is the trajectory-aware counterpart of

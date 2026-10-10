@@ -160,7 +160,7 @@ Pass a custom mask to hold additional leaves fixed.
 | --- | --- | --- |
 | `tuple[list[float], PyTree[eqx.Module]]` |  | ``(loss_history, trained_predictors)``.<br><br>``loss_history`` is the **raw per-step loss**, one entry per step, concatenated across phases. It can go up. It is the data term plus any configured trajectory penalty (charged inside the bucket forward pass); the bound penalty is excluded, so a ramping bound-penalty weight cannot move the series and runs with different bound weights stay comparable, and nothing is smoothed: these are the values the optimiser saw.<br><br>It differs from [`train_with_evosax`](/api/training#train_with_evosax), whose history is best-so-far and therefore monotone. Same type, same position, different meaning: plotting both on one axis misleads.<br><br>``trained_predictors`` comes from the lowest-loss step when ``config.restore_best=True``, else the final step. That minimum resets whenever the phase horizon changes, so the returned model always comes from the last horizon trained on. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L862)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L859)</small>
 
 ---
 
@@ -196,7 +196,7 @@ every seed: with ``n_seeds`` tournament attempts it keeps the best
 on each.
 
 Returns the fully trained members as a list of ``(final_loss,
-predictors)`` ranked ascending by final loss — the same container
+predictors)`` ranked ascending by final loss, in the same container
 shape as the single ``predictors`` you passed in, so the result is an
 ensemble of model pytrees ready for [`ensemble_predictions`](/api/prediction#ensemble_predictions).
 ``final_loss`` labels the returned member: the best-step loss when
@@ -214,7 +214,7 @@ land inside the first member's bracket, and ``on_run_start`` /
 ``on_run_end`` are fired once per member, so a live dashboard shows
 each member's phases rather than freezing after the first.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1289)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1286)</small>
 
 ---
 
@@ -264,7 +264,7 @@ Every resample and every training run is folded off the one ``key``, so
 the whole ensemble is deterministic given it. Each member is its own
 UI run, bracketed by ``on_run_start`` / ``on_run_end``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1423)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1420)</small>
 
 ---
 

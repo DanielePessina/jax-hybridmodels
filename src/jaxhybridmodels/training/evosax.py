@@ -97,8 +97,8 @@ ALGORITHM_REGISTRY: dict[str, type] = {
 """Name → evosax strategy class. Extend via :func:`register_algorithm`.
 
 Each strategy must construct as ``cls(population_size=..., solution=flat)``
-and carry ``default_params`` with a ``std_init`` field (CMA-ES family) —
-the shipped set all do. ``SimpleES`` additionally accepts a default
+and carry ``default_params`` with a ``std_init`` field (CMA-ES family).
+The shipped set all do. ``SimpleES`` additionally accepts a default
 ``optimizer`` argument, which this loop leaves at evosax's default.
 """
 

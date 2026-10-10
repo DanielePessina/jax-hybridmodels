@@ -1,206 +1,126 @@
 # Custom predictors
 
-A **predictor** is a trainable module that takes an array and returns an
-array. The library includes [`MLPPredictor`](/api/predictors#mlppredictor),
-a dense feedforward network, [`KANPredictor`](/api/predictors#kanpredictor),
-a Kolmogorov-Arnold network, and `NeuralNPolynomial`. You can add another
-predictor family by subclassing `Predictor`.
-
-Write a custom predictor when a generic network does not match the function
-you want to fit: for example, a physical constant, a basis expansion, a
-monotone function, a random-features regressor, or a layer from a paper. The
-[custom-predictor example](/examples/custom-predictor) does the last of
-these end to end.
+The library ships [`MLPPredictor`](/api/predictors#mlppredictor),
+[`KANPredictor`](/api/predictors#kanpredictor) and
+[`NeuralNPolynomial`](/api/predictors#neuralnpolynomial). Write your own
+when the function you want has a known form a generic network would only
+approximate: a basis expansion, a monotone map, random features, a layer
+from a paper. The [custom-predictor example](/examples/custom-predictor)
+builds one end to end. For a trainable constant, use `Parameter` instead.
 
 ## The contract
 
-A predictor must satisfy four rules. Everything else is free.
-
-1. It **must** subclass [`Predictor`](/api/predictors#predictor), which
-   is an [`eqx.Module`](https://docs.kidger.site/equinox/) and therefore
-   a frozen dataclass and a JAX pytree.
-2. It **must** implement `__call__(self, x) -> Array`, mapping a rank-1
-   array to a rank-1 array.
-3. Trainable values **must** be plain fields holding JAX float arrays.
-   Hyperparameters **must** be `eqx.field(static=True)`.
-4. It **must not** subclass to add bounds, named inputs, or physical
-   units. [`BoundedPredictor`](/api/predictors#boundedpredictor) supplies
-   those by composition.
-
-Keep bounds, named inputs, and physical units in `BoundedPredictor`.
-Concrete predictors are composed; their methods are not overridden.
+1. Subclass [`Predictor`](/api/predictors#predictor). It is an
+   [`eqx.Module`](https://docs.kidger.site/equinox/), so instances are
+   frozen dataclasses and JAX pytrees.
+2. Implement `__call__(self, x) -> Array`, rank-1 in and rank-1 out.
+3. Trainable values are plain fields holding float arrays.
+   Hyperparameters are `eqx.field(static=True)`.
+4. Leave bounds, named inputs and physical units out. `BoundedPredictor`
+   adds them by wrapping your module.
 
 ## A minimal predictor
 
-This one holds a single trainable scalar and ignores its input, which is
-enough when every experiment shares the same unknown constant.
+An affine map:
 
 ```python
+import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
-from jaxhybridmodels import Predictor
 
-class OmegaPredictor(Predictor):
-    """One trainable scalar; ignores its input."""
+import jaxhybridmodels as hm
 
-    omega_lat: Array
 
-    def __init__(self, omega_lat: Array | float = 0.0) -> None:
-        self.omega_lat = jnp.asarray(omega_lat, dtype=jnp.float32)
+class Affine(hm.Predictor):
+    weight: Array
+    bias: Array
+    in_size: int = eqx.field(static=True)
+    out_size: int = eqx.field(static=True)
+
+    def __init__(self, in_size: int, out_size: int, *, key: Array) -> None:
+        self.weight = jr.normal(key, (out_size, in_size)) / jnp.sqrt(in_size)
+        self.bias = jnp.zeros(out_size)
+        self.in_size = in_size
+        self.out_size = out_size
 
     def __call__(self, x: Array) -> Array:
-        return self.omega_lat[None]
+        return self.weight @ x + self.bias
 ```
 
-That is a complete, trainable predictor. It works in
-`train_with_optax`, `train_with_evosax`, `predict_dataset`, and
-`save_predictors` with no registration step, because none of them
-inspect the class.
+That is complete. Training, prediction and saving all work without a
+registration step, because none of them inspect the class.
 
-## Trainable arrays versus static fields
+## Trainable and static fields
 
-Equinox splits a module's fields in two, and the split decides what the
-optimiser touches and what ends up in a checkpoint.
-
-| | Trainable field | `eqx.field(static=True)` |
+| | Array field | `eqx.field(static=True)` |
 |---|---|---|
-| Declared as | `weights: Array` | `depth: int = eqx.field(static=True)` |
-| Holds | JAX float arrays | shape and configuration metadata |
+| Example | `weight: Array` | `in_size: int = eqx.field(static=True)` |
 | Optimiser | updates it | never sees it |
-| Checkpoint | written to the binary | not written; you supply it again |
-| Good values | `jnp` arrays | ints, floats, strings, bools, tuples of those |
+| Checkpoint | written | not written; the template supplies it |
+| Good values | float arrays | ints, floats, strings, tuples of those |
 
-Two consequences follow.
+Every float array is trainable by default, including ones you meant as
+fixed data such as a grid or a random feature bank. Freeze those with a
+mask (below).
 
-**Float arrays in custom predictors are trainable by default.** Built-in
-constants and scaler temperatures are fixed. The custom-predictor rule includes
-arrays you meant to hold fixed, such as a precomputed grid or a random
-feature bank. Freezing them is a separate step, covered below.
-
-**Static fields are structure, not data.** They are not written to the
-checkpoint file. When you reload, you rebuild the module with the same
-static values and the file fills in the arrays. Keep static fields to
-plain Python scalars and tuples. Equinox warns if you put a JAX array
-there, and a mutable list is a trap for the same reason.
+Static fields are structure. They are not saved, so loading needs a
+template built with the same values. Do not put JAX arrays or lists there.
 
 ## Re-initialisation
 
-The [restart tournament](/guide/training#the-shared-tournament) runs
-several short attempts from different starting weights and keeps the
-best. To restart, it needs fresh weights for your module.
-
-By default, [`reinitialize_with_key`](/api/predictors#reinitialize_with_key)
-replaces every floating-point array with a standard normal sample of the
-same shape. That is a reasonable fallback and a bad fit for any module
-with a considered initialisation scheme: it ignores your scaling, your
-distributions, and your static hyperparameters.
-
-Define `initialized_with_key` to take control. The method takes a PRNG
-key and returns a new instance of the same class:
+The [tournament](/guide/training#the-tournament) restarts every predictor
+from a new key. By default each float array is replaced with a
+standard-normal sample of the same shape, which ignores any scaling your
+constructor applied. Define `initialized_with_key` to rebuild properly:
 
 ```python
-def initialized_with_key(self, key: Array) -> OmegaPredictor:
-    return OmegaPredictor(jr.normal(key))
+    def initialized_with_key(self, key: Array) -> "Affine":
+        return Affine(self.in_size, self.out_size, key=key)
 ```
 
-The rebuilt module **must** keep the same pytree shape. Same fields,
-same array shapes, same static values. A trainability mask built before
-training is reused after a restart, and a changed shape breaks it.
+The result must have the same pytree shape: same fields, array shapes and
+static values. The trainable mask built before the tournament is reused
+after it. The method is found with `hasattr`; nothing to register.
 
-The name is discovered by `hasattr`, so there is nothing to register.
+## Freezing fixed arrays
 
-## Freezing arrays you never want trained
-
-Trainability is a boolean pytree matching your predictors, one flag per
-array leaf, not a property of a class.
-A module therefore cannot declare one of its own arrays fixed. The
-caller freezes it:
+A module cannot mark its own arrays as fixed. The caller does, with a mask:
 
 ```python
-from jaxhybridmodels import freeze_paths, trainable_mask
-
-mask = trainable_mask(predictors)                    # float arrays True, scalers False
-mask = freeze_paths(mask, ("0.inner.frequencies",))  # that one: False
-
-history, trained = train_with_optax(
-    predictors, dataset, config,
-    simulate_fn=simulate_fn, state_to_output=state_to_output,
-    solver=solver, trainable=mask, key=key,
-)
+mask = hm.freeze_paths(hm.trainable_mask(predictors), ("rate.inner.frequencies",))
+result = model.fit(dataset, config, trainable=mask, key=key)
 ```
 
-Paths are dot-joined from the root of the predictors pytree: tuple
-indices become numbers and module fields become attribute names, so
-`"0.inner.frequencies"` reads as "element 0, its `inner`, its
-`frequencies`". A path matching no leaf raises and lists the closest
-matches. See [Freezing leaves](/guide/training#freezing-leaves) for
-`freeze_modules_of_type` and `freeze_where`, which work on whole
-subtrees.
-
-## Serialisation
-
-Every predictor **must** round-trip through
-`eqx.tree_serialise_leaves`. The library has no builder registry and
-never imports user code by name, so loading works like this:
-
-1. Rebuild a template with the same class, the same container shape, and
-   the same static fields. Any key will do; its arrays are placeholders.
-2. Call [`load_predictors`](/api/serialise#load_predictors) with the file
-   and the template.
-
-```python
-from jaxhybridmodels import load_predictors, save_predictors
-
-save_predictors("model.eqx", trained)
-
-template = (build_predictor(jr.PRNGKey(0)),)   # same code path as training
-restored = load_predictors("model.eqx", template)
-```
-
-A template whose static fields differ from the saved model raises a
-shape error. [`save_run`](/api/serialise#save_run) writes a JSON sidecar
-recording the pytree structure and each leaf's `"{module}.{qualname}"`
-class name, which turns that generic error into a readable mismatch.
+The path reads "the `rate` entry, its `inner` module, its `frequencies`
+field". See [Freezing leaves](/guide/training#freezing-leaves) for the
+other helpers.
 
 ## Bounds and named inputs
 
-Do not put either in your predictor. Wrap it:
+Wrap the module:
 
 ```python
-from jaxhybridmodels import BoundedPredictor, BoundScaler
-
-BoundedPredictor(
+rate = hm.BoundedPredictor(
+    inner=Affine(1, 1, key=jr.key(0)),
     input_keys=("temperature",),
-    in_scaler=BoundScaler(bounds=((280.0, 360.0),), transform="sigmoid"),
-    inner=YourPredictor(...),
-    out_scaler=BoundScaler(bounds=((1e-2, 3.0),), transform="sigmoid", warp="log10"),
+    input_bounds=((280.0, 360.0),),
+    output_bounds=((1e-2, 3.0),),
 )
 ```
 
-The wrapper pulls named covariates in declared order, maps them into an
-unbounded latent space, calls your module, and maps the result back into
-physical units. Your module sees latent values of roughly unit scale in
-and writes latent values out. It never handles a bound, and it cannot
-produce one that is out of range. See
-[Predictors and bounds](/guide/predictors) for what the scalers do
-and how to choose a warp.
-
-This is also why unit-scale defaults are the right choice inside a
-custom predictor. The input distribution is set by the scaler, not by
-your data.
+Your module sees latent inputs of roughly unit scale and its output is
+squashed into the output box, so unit-scale initialisation is the right
+default whatever the physical units. To pick a `transform` or `warp`, pass
+`in_scaler`/`out_scaler` instead; see
+[Predictors and bounds](/guide/predictors).
 
 ## Checklist
 
-Before you train:
-
-- [ ] Subclasses `Predictor`, implements `__call__`, overrides nothing.
-- [ ] Trainable arrays are plain fields; hyperparameters are
-      `eqx.field(static=True)`.
-- [ ] `initialized_with_key` is defined if the module has a considered
-      init scheme, and preserves the pytree shape.
-- [ ] Arrays that must stay fixed are frozen with a mask at the call site.
-- [ ] A save and reload against a freshly built template returns the same
-      outputs.
-- [ ] Bounds and named inputs live in a `BoundedPredictor`, not in the
-      class.
+- Subclasses `Predictor` and implements `__call__`.
+- Trainable arrays are plain fields; hyperparameters are static.
+- `initialized_with_key` is defined if the constructor does anything
+  smarter than standard-normal weights, and keeps the pytree shape.
+- Arrays that must stay fixed are frozen with a mask.
+- Saving and loading into a fresh template gives the same outputs; see
+  [Saving and loading](/guide/serialization).
