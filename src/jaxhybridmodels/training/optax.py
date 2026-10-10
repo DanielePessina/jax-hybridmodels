@@ -622,8 +622,7 @@ def _has_weak_scalar_trainable(predictors: Any, trainable: Any) -> bool:
     (``jnp.asarray(1.0)``, the default-constructed
     ``BoundScaler.temperature``) to strong-typed and invalidates every
     kernel that reads the predictor once. Strong-typed or frozen scalars
-    never flip and never retrace (``tests/_harness.py``'s ``OmegaPredictor``
-    documents the same rule). This is the predicate that decides whether
+    never flip and never retrace. This is the predicate that decides whether
     :func:`_warmup_compile`'s settle cycle is worth paying.
     """
     for leaf in jax.tree.leaves(eqx.filter(predictors, trainable)):

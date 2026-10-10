@@ -56,3 +56,6 @@ jobs:
 
       - name: Run the hybrid_ode notebook-script
         run: uv run python examples/hybrid_ode/notebook.py
+
+      - name: Run the slow example tests
+        run: uv run pytest -q -m slow

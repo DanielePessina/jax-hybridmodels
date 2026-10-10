@@ -201,6 +201,50 @@ jax-hybridmodels/                      (repo)
 │           ├── optax.py                (RichTrainingUI)
 │           └── evosax.py               (RichEvosaxUI)
 ├── tests/
+│   ├── _models.py                  (shared decay model, dataset and solver)
+│   ├── conftest.py                 (session datasets and one shared fit)
+│   ├── test_workflow.py            (HybridModel fit, predict, save/load, UIs)
+│   ├── test_training.py            (trainers, ensembles, evosax, adjoints, masks)
+│   ├── test_penalties.py           (bound and trajectory penalties)
+│   ├── test_bounds.py              (BoundScaler transforms, warps, Parameter)
+│   ├── test_predictors.py          (MLP, KAN, NeuralNPolynomial, BoundedPredictor)
+│   ├── test_data.py                (datasets, buckets, splits, losses)
+│   ├── test_config.py              (config validation, solver, schedules, profiles)
+│   └── test_api.py                 (public namespace)
+└── examples/                       (per-example walkthroughs)
+├── src/
+│   └── jaxhybridmodels/
+│       ├── __init__.py                 (lazy public API re-exports)
+│       ├── data.py                     (Experiment, ChannelObs, Dataset, BucketPayload, make_dataset, split_dataset)
+│       ├── transforms.py                (BOUND_TRANSFORMS, WARPS, register_bound_transform, register_warp)
+│       ├── penalties.py                (soft_logit, softclip, clip_ste, box_violation, box_grid, data_penalty_points, bound_penalty)
+│       ├── solver.py                   (SolverConfig, SOLVER_REGISTRY, register_solver)
+│       ├── losses.py                   (masked_mse, masked_mle, bal_mse, bal_mle)
+│       ├── metrics.py                  (compute_metrics, print_metrics, ChannelMetrics)
+│       ├── trainable.py                (default_trainable, trainable_mask, freeze_paths/_modules_of_type/_where)
+│       ├── rng.py                      (named-fold helper)
+│       ├── prediction.py               (predict_bucket, predict_dataset, predict_dense, ensemble_predictions)
+│       ├── profiles.py                 (constant/step/ramp/piecewise_linear time profiles, R-D9)
+│       ├── schedules.py                (annealing_schedule, R-T10)
+│       ├── serialise.py                (save/load, last-shipped)
+│       ├── penalties.py                (bound_penalty, box_grid, data_penalty_points, penalty_points, trajectory-penalty helpers, R-P8)
+│       ├── predictors/
+│       │   ├── __init__.py
+│       │   ├── base.py                 (Predictor, BoundScaler, BoundedPredictor, reinitialize_with_key, reinitialize_pytree_with_key)
+│       │   ├── mlp.py                  (MLPPredictor)
+│       │   ├── kan.py                  (KANPredictor, uses jaxkan)
+│       │   └── neural_npoly.py         (NeuralNPolynomial)
+│       ├── training/
+│       │   ├── __init__.py
+│       │   ├── kernels.py              (build_bucket_step, build_score_bucket, build_penalty_step, build_apply_update)
+│       │   ├── optax.py                (train_with_optax, OptaxTrainingConfig, _shared_tournament, ensembles)
+│       │   └── evosax.py               (train_with_evosax, EvosaxTrainingConfig, _build_strategy)
+│       └── ui/
+│           ├── __init__.py
+│           ├── base.py                 (TrainingUI, EvosaxUI protocols, SilentUI)
+│           ├── optax.py                (RichTrainingUI)
+│           └── evosax.py               (RichEvosaxUI)
+├── tests/
 │   ├── conftest.py
 │   ├── test_data_buckets.py
 │   ├── test_predictors_serialise.py    (R-A5 enforcement)
@@ -257,7 +301,7 @@ The project is uv-managed. All commands use uv:
 | Add a dependency | `uv add <pkg>` |
 | Add a dev dependency | `uv add --dev <pkg>` |
 | Install the project (editable) | `uv sync` |
-| Run a test file | `uv run pytest tests/test_data_buckets.py` |
+| Run a test file | `uv run pytest tests/test_data.py` |
 | Run an example | `uv run python examples/crystallisation/train_kinetic.py` |
 | Run a one-off Python | `uv run python -c '...'` |
 | Lint | `uv run ruff check src tests` |
@@ -699,21 +743,27 @@ def load_run(directory: str | Path, *, predictors_template, optax_cls=None, evos
 
 ---
 
-## 6. Test plan (TDD-first)
+## 6. Test plan
 
-Tests are the executable spec. Each module gets a test file written before the implementation:
+Tests are mostly end to end. They build on one small model in
+`tests/_models.py`: first-order decay `dy/dt = -k y` over four experiments in
+two buckets, with a loose solver so each fit compiles in a few seconds.
+Session fixtures in `tests/conftest.py` share one fitted model, so most tests
+assert on an existing run instead of training again. Pure numerical
+contracts (transforms, losses, penalty primitives) are compact parametrized
+property tests. `uv run pytest` takes about two minutes; the slow
+reinforcement-learning example test runs with `uv run pytest -m slow`.
 
 | Test file | What it pins |
 |---|---|
-| `test_data_buckets.py` | bucketing groups by `len(union_ts)`; mask True iff channel observed at that timestamp; `make_dataset` is idempotent; `split_dataset` produces non-overlapping splits with valid buckets in each |
-| `test_predictors_serialise.py` | **R-A5 enforcement.** Every concrete predictor round-trips through `eqx.tree_serialise_leaves` ↔ `eqx.tree_deserialise_leaves` with bit-exact recovery |
-| `test_trainable_filters.py` | default mask trains float arrays and freezes `BoundScaler`/`Constant` subtrees; `freeze_modules_of_type(mask, predictors, BoundScaler)` zeros the right leaves; mask shape matches the `predictors` pytree structure (tuple/dict/Module) |
-| `test_solver.py` | `SolverConfig.to_dict`/`from_dict` round-trip via `SOLVER_REGISTRY` |
-| `test_loss_functions.py` | masked losses respect mask; channel_weights apply correctly; balanced variants normalise per-experiment |
-| `test_train_optax.py` | trains a synthetic harmonic-oscillator ODE to known parameters within tolerance; multi-phase config with `reset_optimizer=True` on the second phase doesn't crash; tournament reduces variance across seeds |
-| `test_train_evosax.py` | trains a 4-D synthetic kinetic problem to known minimum; `init="lhs_box"` gives wider population spread than `"warm"` |
-| `test_ui_callbacks.py` | `SilentUI` produces no stdout; `RichTrainingUI` calls each lifecycle event the right number of times (recorded via a spy) |
-| `test_rng.py` | `fold(root, "name")` is stable across reorderings; missing root key raises |
+| `test_workflow.py` | `HybridModel.fit`/`predict`/`simulate` recover known parameters, keep `Constant`s fixed, restore experiment order and `t0`; validation selection and stop reasons; metrics; `save_run`/`load_run` round trips and rejections; Rich UI output |
+| `test_training.py` | multi-phase Optax with horizons, `restore_best`, patience, optimiser injection, tournament, seed and bootstrap ensembles, Evosax algorithms and init modes, adjoint gradients against the analytic derivative, trainable masks |
+| `test_penalties.py` | bound and trajectory penalties change training as configured; probe experiments; gradient-safe penalty primitives |
+| `test_bounds.py` | every transform and warp round-trips, stays in the box and keeps a gradient outside it; `Parameter` in physical units |
+| `test_predictors.py` | every predictor family jits, restarts deterministically, saves and loads bit-exact (R-A5), and works inside `BoundedPredictor` |
+| `test_data.py` | bucketing, masks, splits, bootstrap resampling, masked and balanced losses |
+| `test_config.py` | every config rejects invalid input; `SolverConfig` JSON round trip; schedules, profiles, `rng.fold` |
+| `test_api.py` | the top-level namespace exports what `__all__` lists and none of the removed names |
 
 Verification target (not unit, integration): one `examples/crystallisation/train_kinetic.py` script that loads your existing thesis Excel data, trains an MLP-rate predictor, and reports a final loss within tolerance of the source-package result.
 

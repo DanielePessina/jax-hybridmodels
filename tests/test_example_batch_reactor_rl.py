@@ -22,6 +22,10 @@ import pytest
 
 from jaxhybridmodels import SolverConfig
 
+# A PPO run takes over a minute, so this file is excluded from the default
+# run and executed by the examples workflow with ``pytest -m slow``.
+pytestmark = pytest.mark.slow
+
 _EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "batch_reactor"
 
 

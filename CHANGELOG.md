@@ -23,6 +23,8 @@
   `covariates` is optional.
 - CI lint job and pre-commit hooks running `ruff check`, `ruff format` and
   `ty check` over sources, tests, examples and scripts.
+- A rewritten test suite built on one small shared decay model. It is
+  mostly end to end and runs in about two minutes instead of twenty.
 
 ### Changed (breaking against 0.2.0b1)
 
