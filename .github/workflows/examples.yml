@@ -3,7 +3,7 @@ name: examples
 # Smoke-tests the example scripts so the converted notebooks and the
 # "write your own loop" / SBML examples do not silently rot. Fast,
 # deterministic examples run end-to-end; every example file is at least
-# compiled and linted on every push to main.
+# compiled on every push to main (ci.yml lints and typechecks them).
 
 on:
   push:
@@ -27,9 +27,6 @@ jobs:
       - name: Install
         run: uv sync --frozen --extra examples
 
-      - name: Lint examples
-        run: uv run ruff check examples/ scripts/
-
       - name: Compile every example script
         run: |
           uv run python - <<'EOF'
@@ -47,6 +44,9 @@ jobs:
 
       - name: Run the pendulum sanity example
         run: uv run python examples/pendulum/train_harmonic.py --no-plot
+
+      - name: Run the HybridModel workflow example
+        run: uv run python examples/pendulum/train_model_api.py
 
       - name: Run the SBML-style hybrid example
         run: uv run python examples/sbml_hybrid/train_sbml_hybrid.py

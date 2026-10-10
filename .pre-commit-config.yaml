@@ -1,0 +1,22 @@
+# Runs the same checks as the CI lint job, through the project's own tool
+# versions (uv.lock), so a hook never disagrees with CI.
+# Install once with: uvx pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+      - id: ty
+        name: ty check
+        entry: uv run ty check src tests examples scripts
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
