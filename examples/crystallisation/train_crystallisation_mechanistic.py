@@ -102,6 +102,7 @@ def simulate_fn(
     T_K = temperature_C + 273.15
     conc_sat = saturation_conc(temperature_C)
 
+    # region vector-field
     def vector_field(t: ArrayLike, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
         S = y[5] / conc_sat
         meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
@@ -118,6 +119,8 @@ def simulate_fn(
         # Ag is per minute, as in the thesis package; /60 gives per second.
         G = meta_mask * 10.0**Ag / 60.0 * jnp.maximum(S - 1.0, 0.0) ** g
         return moment_rhs(y, G, J)
+
+    # endregion vector-field
 
     return integrate_minutes(vector_field, ts, y0, solver)
 
@@ -151,6 +154,7 @@ def main() -> None:
     print("[data]")
     print(hm.describe_buckets(dataset))
 
+    # region model
     model = hm.HybridModel(
         predictors={
             name: hm.Parameter((low + high) / 2, bounds=(low, high))
@@ -161,6 +165,8 @@ def main() -> None:
         output_channel_names=OUTPUT_CHANNELS,
         solver=SOLVER,
     )
+    # endregion model
+    # region config
     config = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
@@ -169,6 +175,7 @@ def main() -> None:
         init_box_extent=args.init_box_extent,
         sigma_init=args.sigma_init,
     )
+    # endregion config
     print("\n[fit] CMA-ES")
     print_constants("init", model.predictors)
     result = model.fit(dataset, config, key=jr.key(args.seed))

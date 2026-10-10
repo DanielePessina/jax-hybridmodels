@@ -148,6 +148,7 @@ def main() -> None:
     # Every latent trains; scalers stay fixed. Freezing a leaf is a mask edit.
     mask = hm.trainable_mask(predictors)
 
+    # region bucket-step
     bucket_step = build_bucket_step(
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
@@ -159,6 +160,7 @@ def main() -> None:
     optimizer = optax.adamw(learning_rate=1e-2)
     apply_update = build_apply_update(optimizer, mask)
     opt_state = optimizer.init(eqx.filter(predictors, mask))
+    # endregion bucket-step
 
     # The fraction of each time series the loss sees. 1.0 scores all of it;
     # a schedule over this value is how the stock trainer's horizon works.
@@ -168,6 +170,7 @@ def main() -> None:
     for step in range(args.steps):
         # Weighted mean over buckets of the loss and its gradient. Dividing
         # by the total weight keeps the weights relative.
+        # region loss
         total_loss = jnp.asarray(0.0)
         total_weight = 0.0
         grads_sum = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, mask))
@@ -186,6 +189,7 @@ def main() -> None:
         grads = jax.tree.map(jnp.add, grads, penalty_grads)
 
         predictors, opt_state = apply_update(predictors, grads, opt_state)
+        # endregion loss
         if step % 25 == 0:
             print(
                 f"step {step:3d}  data={float(data_loss):.5f}  penalty={float(penalty):.3e}  "

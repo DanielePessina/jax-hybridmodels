@@ -92,6 +92,7 @@ RESIDUAL_BOUNDS: tuple[tuple[float, float], ...] = ((-3.0, 3.0), (-3.0, 3.0))
 # correction rather than at an arbitrary interior point. ``register_warp``
 # overwrites without warning, so prefix custom names if a collision with a
 # future package warp would matter to you.
+# region symlog-warp
 register_warp(
     "symlog",
     Warp(
@@ -100,6 +101,7 @@ register_warp(
         requires_positive=False,
     ),
 )
+# endregion symlog-warp
 
 
 def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) -> hm.Predictor:
@@ -124,6 +126,7 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
     raise ValueError(f"--inner must be 'mlp' or 'kan'; got {kind!r}")
 
 
+# region simulate-fn
 def simulate_fn(
     predictors: dict[str, hm.BoundedPredictor],
     ts: Float[Array, " T"],
@@ -152,6 +155,7 @@ def simulate_fn(
 
     term = diffrax.ODETerm(vector_field)
     return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
+    # endregion simulate-fn
 
 
 def main() -> None:
@@ -192,6 +196,7 @@ def main() -> None:
     dataset = build_dataset(experiments)
     print(hm.describe_buckets(dataset))
 
+    # region solver
     solver = hm.SolverConfig(
         solver=diffrax.Tsit5(),
         rtol=1e-4,
@@ -203,6 +208,7 @@ def main() -> None:
         # O(log n) storage; Direct, the default, keeps the lot.
         adjoint=diffrax.RecursiveCheckpointAdjoint(),
     )
+    # endregion solver
 
     # ``temperature -> k``, evaluated once per experiment above the solver.
     # ``warp="log10"`` is what makes this read well: a linear box over
@@ -210,6 +216,7 @@ def main() -> None:
     # the bottom 3% of the box, reachable only through large negative
     # latents. Under ``log10`` the midpoint is ``0.032`` and the true range
     # covers the middle of the box.
+    # region predictors
     rate_net = hm.BoundedPredictor(
         input_keys=("temperature",),
         in_scaler=hm.BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
@@ -228,6 +235,7 @@ def main() -> None:
             inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
             out_scaler=hm.BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
         )
+    # endregion predictors
     model = hm.HybridModel(
         predictors=predictors,
         simulate_fn=simulate_fn,
@@ -236,6 +244,7 @@ def main() -> None:
         solver=solver,
     )
 
+    # region fit
     config = hm.OptaxTrainingConfig(
         # Fit the first 40% of each trajectory, then all of it. The
         # saturation penalty applies in both phases.
@@ -255,6 +264,7 @@ def main() -> None:
     )
     print(f"\n[fit] {list(predictors)} with {args.inner!r} inner networks, two phases")
     result = model.fit(dataset, config, key=k_train)
+    # endregion fit
     trained = result.model.predictors
     loss, phase = result.history.loss, result.history.phase
     starts = [f"{loss[phase.index(p)]:.4f}" for p in sorted(set(phase))]

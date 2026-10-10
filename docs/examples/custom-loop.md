@@ -45,42 +45,11 @@ Three kernels:
 
 Building them:
 
-```python
-bucket_step = build_bucket_step(
-    simulate_fn=simulate_fn,
-    state_to_output=state_to_output,
-    solver=solver,
-    loss_fn=huber_loss,
-    trainable=mask,
-)
-penalty_step = build_penalty_step(penalty_fn=weight_decay, trainable=mask)
-optimizer = optax.adamw(learning_rate=1e-2)
-apply_update = build_apply_update(optimizer, mask)
-opt_state = optimizer.init(eqx.filter(predictors, mask))
-```
+<<< @/../examples/custom_loop/train_custom_loop.py#bucket-step
 
 One step of the loop:
 
-```python
-total_loss = jnp.asarray(0.0)
-total_weight = 0.0
-grads_sum = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, mask))
-for bp in ds.bucket_payloads:
-    loss, grads = bucket_step(predictors, bp, horizon)
-    w = bucket_weight(bp)
-    total_loss = total_loss + w * loss
-    total_weight += w
-    grads_sum = jax.tree.map(lambda a, g, w=w: a + w * g, grads_sum, grads)
-data_loss = total_loss / total_weight
-grads = jax.tree.map(lambda g, t=total_weight: g / t, grads_sum)
-
-# The regulariser is charged once per step, outside the bucket loop.
-# It ignores penalty points, so none are passed.
-penalty, penalty_grads = penalty_step(predictors, penalty_weight, ())
-grads = jax.tree.map(jnp.add, grads, penalty_grads)
-
-predictors, opt_state = apply_update(predictors, grads, opt_state)
-```
+<<< @/../examples/custom_loop/train_custom_loop.py#loss
 
 ## Results
 

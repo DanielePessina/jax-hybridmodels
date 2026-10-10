@@ -333,12 +333,14 @@ def main() -> None:
     assert train_dataset.bucket_payloads[0].ts.shape == (N_TRAIN_EXPERIMENTS, N_TIMESTEPS)
     assert val_dataset.bucket_payloads[0].ts.shape == (len(VALIDATION_POINTS), N_TIMESTEPS)
 
+    # region model
     model = HybridModel(
         predictors=build_predictors(key=k_init),
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
         solver=SOLVER,
+        # endregion model
     )
 
     # Before training: the residual's symmetric output box puts a fresh
@@ -360,16 +362,19 @@ def main() -> None:
     assert abs(sim_ca[0] - CA0) < 5.0 * NOISE_REL, "Ca starts near CA0"
 
     print("\n[fit] phase 1: CMA-ES on the trunk, residual frozen")
+    # region mask-p1
     # The default mask already holds BoundScaler leaves fixed; this freezes
     # the whole residual on top, leaving the trunk's two latent scalars.
     mask_p1 = freeze_modules_of_type(
         trainable_mask(model.predictors), model.predictors, BoundedPredictor
     )
+    # endregion mask-p1
     n_p1 = count_trainable_params(model.predictors, mask_p1)
     print(f"  trainable scalars: {n_p1}")
     assert n_p1 == 2, f"phase 1 should train the trunk's 2 scalars, got {n_p1}"
     residual_before = _inner_weights(residual)
 
+    # region phase-1
     config_p1 = EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
@@ -382,6 +387,7 @@ def main() -> None:
     )
     fit_p1 = model.fit(train_dataset, config_p1, key=k_p1, trainable=mask_p1)
     model_p1 = fit_p1.model
+    # endregion phase-1
     history_p1 = fit_p1.history.best_fitness
     log_k_ref, Ea = model_p1.predictors[0]()
     print(f"  {len(history_p1)} generations, best loss {history_p1[-1]:.6f}")
@@ -392,12 +398,14 @@ def main() -> None:
     )
 
     print("\n[fit] phase 2: AdamW on the residual, trunk frozen")
+    # region phase-2
     mask_p2 = freeze_modules_of_type(
         trainable_mask(model_p1.predictors), model_p1.predictors, ArrheniusKinetics
     )
     print(f"  trainable scalars: {count_trainable_params(model_p1.predictors, mask_p2)}")
     config_p2 = OptaxTrainingConfig(steps=args.steps, lr=args.lr, loss="mse", verbose=True)
     fit_p2 = model_p1.fit(train_dataset, config_p2, key=k_p2, trainable=mask_p2)
+    # endregion phase-2
     model_p2 = fit_p2.model
     history_p2 = fit_p2.history.loss
     print(f"  {len(history_p2)} steps, loss {history_p2[0]:.6f} → {history_p2[-1]:.6f}")

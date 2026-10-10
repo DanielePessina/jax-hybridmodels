@@ -70,62 +70,27 @@ where it cannot.
 
 ## Code
 
-The predictor's fields and call:
+The predictor subclasses `hm.Predictor`. Its class body declares the
+trainable arrays, the fixed feature bank and the static shape metadata,
+then implements `__call__` and the restart hook:
 
-```python
-class RandomFourierPredictor(hm.Predictor):
-    weights: Float[Array, "n_features out_size"]
-    bias: Float[Array, " out_size"]
-    frequencies: Float[Array, "in_size n_features"]
-    phases: Float[Array, " n_features"]
-    in_size: int = eqx.field(static=True)
-    out_size: int = eqx.field(static=True)
-    n_features: int = eqx.field(static=True)
-    bandwidth: float = eqx.field(static=True)
-
-    def __call__(self, x: Float[Array, " in_size"]) -> Float[Array, " out_size"]:
-        features = jnp.sqrt(2.0 / self.n_features) * jnp.cos(x @ self.frequencies + self.phases)
-        return features @ self.weights + self.bias
-
-    def initialized_with_key(self, key: Array) -> RandomFourierPredictor:
-        return RandomFourierPredictor(
-            in_size=self.in_size,
-            out_size=self.out_size,
-            n_features=self.n_features,
-            bandwidth=self.bandwidth,
-            key=key,
-        )
-```
+<<< @/../examples/custom_predictor/train_custom_predictor.py#predictor
 
 Wrapping it with bounds:
 
-```python
-rate = hm.BoundedPredictor(
-    input_keys=("temperature",),
-    in_scaler=hm.BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
-    inner=RandomFourierPredictor(
-        in_size=1, out_size=1, n_features=n_features, bandwidth=bandwidth, key=key
-    ),
-    out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
-)
-```
+<<< @/../examples/custom_predictor/train_custom_predictor.py#bounds
 
-Freezing the bank and fitting:
+The bank is frozen by path. The paths read from the root of the predictors
+dict:
 
-```python
-BANK_PATHS: tuple[str, ...] = (
-    "rate.inner.frequencies",
-    "rate.inner.phases",
-)
+<<< @/../examples/custom_predictor/train_custom_predictor.py#bank-paths
 
-mask = hm.trainable_mask(model.predictors)
-if not args.train_bank:
-    mask = hm.freeze_paths(mask, BANK_PATHS)
-result = model.fit(dataset, config, key=k_train, trainable=mask)
-```
+<<< @/../examples/custom_predictor/train_custom_predictor.py#mask
 
-The paths read from the root of the predictors dict: the `"rate"` entry,
-its `inner`, then the field.
+The fit runs a three-restart tournament, which is what exercises
+`initialized_with_key`:
+
+<<< @/../examples/custom_predictor/train_custom_predictor.py#fit
 
 ## Results
 

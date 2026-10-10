@@ -67,9 +67,27 @@ npm --prefix docs run docs:dev
 # Production build (used by CI).
 npm --prefix docs run docs:build
 
-# Verify generated docs are committed (CI).
+# Verify generated docs are committed and code includes resolve (CI).
 npm --prefix docs run docs:check
 ```
+
+## Code on example pages
+
+Example pages include code straight from the scripts, so the two cannot
+drift. Mark the block in the script:
+
+```python
+# region simulate-fn
+def simulate_fn(predictors, ts, covariates, y0, solver): ...
+# endregion simulate-fn
+```
+
+and include it on the page with
+`<<< @/../examples/pendulum/train_harmonic.py#simulate-fn`. VitePress
+renders a missing region as the whole file and a missing path as plain
+text, so `scripts/check_doc_snippets.py` (part of `docs:check`) fails on
+both, and on regions no page includes. Inline fences are for code that is
+not in a script, such as a variation to try.
 
 ## CI deployment
 

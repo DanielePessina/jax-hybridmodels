@@ -36,94 +36,34 @@ second minimum at a multiple of it.
 predictors arrive as the dict given to the model, and both kinds of value
 are read through `.value`. `state_to_output` keeps the measured column:
 
-```python
-def simulate_fn(
-    predictors: dict[str, hm.Parameter | hm.Constant],
-    ts: Float[Array, " T"],
-    covariates: dict[str, Array],
-    y0: Float[Array, " 2"],
-    solver: hm.SolverConfig,
-) -> Float[Array, "T 2"]:
-    """Integrate one oscillator and return the full state ``[x, v]``."""
-    omega = predictors["omega"].value
-    damping = predictors["damping"].value
-
-    def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
-        return jnp.stack([y[1], -(omega**2) * y[0] - damping * y[1]])
-
-    return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
-
-
-def state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
-    """Only position is observed."""
-    return state[..., :1]
-```
+<<< @/../examples/pendulum/train_harmonic.py#model-functions
 
 Each experiment gives its initial state at `t0`, before the first
 measurement. Use `y0_fn=` instead of `y0=` when the state has to be
 computed from covariates or from the first observation:
 
-```python
-hm.make_experiment(
-    channels={"position": hm.ChannelObs(ts=TS, values=noisy, variance=NOISE_STD**2)},
-    # The state is known at t0 = 0; the first measurement is at 0.2.
-    t0=0.0,
-    y0=[x0, v0],
-    exp_id=f"osc_{i}",
-)
-```
+<<< @/../examples/pendulum/train_harmonic.py#experiment
 
 The model binds the pieces together. A [`Parameter`](/api/predictors#parameter)
 trains on an unbounded latent and maps it into its bounds, so $\omega$
 stays inside $(0.5, 2)$ at every step without clipping. A
 [`Constant`](/api/predictors#constant) is never trained:
 
-```python
-model = hm.HybridModel(
-    predictors={
-        # Trained, and kept inside (0.5, 2.0) at every step.
-        "omega": hm.Parameter(OMEGA_INIT, bounds=(0.5, 2.0)),
-        # Known and fixed: the default training mask never updates it.
-        "damping": hm.Constant(0.0),
-    },
-    simulate_fn=simulate_fn,
-    state_to_output=state_to_output,
-    output_channel_names=CHANNELS,
-    solver=hm.SolverConfig(
-        solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=4096, dt0=0.05
-    ),
-)
-```
+<<< @/../examples/pendulum/train_harmonic.py#model
 
 Training runs two phases, a fast one to get close and a slower one to
 settle. `fit` returns a [`FitResult`](/api/model#fitresult);
 `result.model` is a new model with the fitted values and `model` is
 unchanged:
 
-```python
-config = hm.OptaxTrainingConfig(
-    phases=(
-        hm.TrainingPhase(steps=200, lr=0.05),
-        hm.TrainingPhase(steps=100, lr=0.01),
-    ),
-    verbose=False,
-)
-result = model.fit(dataset, config, key=k_train)
-```
+<<< @/../examples/pendulum/train_harmonic.py#fit
 
 `predict` runs the fitted model on each experiment's times and is indexed
 by experiment, then channel. Its `times` start at `t0`, where nothing was
 measured. `simulate` needs no dataset, only times, an initial state and
 any covariates the model reads:
 
-```python
-predictions = result.model.predict(dataset)
-first = predictions["osc_0"]
-first.outputs["position"]
-
-new = result.model.simulate(ts=jnp.linspace(0.5, 10.0, 50), t0=0.0, y0=[0.5, 0.0])
-new.outputs["position"]
-```
+<<< @/../examples/pendulum/train_harmonic.py#predict-simulate
 
 ## Results
 

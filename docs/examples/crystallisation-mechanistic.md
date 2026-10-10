@@ -48,56 +48,19 @@ experiment; temperature enters only through CNT and the solubility.
 
 Each constant is a `Parameter` that starts at the midpoint of its bounds:
 
-```python
-model = hm.HybridModel(
-    predictors={
-        name: hm.Parameter((low + high) / 2, bounds=(low, high))
-        for name, (low, high) in PARAMETER_BOUNDS.items()
-    },
-    simulate_fn=simulate_fn,
-    state_to_output=state_to_output,
-    output_channel_names=OUTPUT_CHANNELS,
-    solver=SOLVER,
-)
-```
+<<< @/../examples/crystallisation/train_crystallisation_mechanistic.py#model
 
 A `Parameter` stores an unbounded latent and returns its bounded physical
 value from `.value`. CMA-ES searches the latents, so every candidate maps
 inside the box and the search needs no constraint handling. The constants
 are read once per solve, outside the vector field:
 
-```python
-    def vector_field(t: ArrayLike, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
-        S = y[5] / conc_sat
-        meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
-
-        # Keep S just above 1 inside the log. The mask already zeros the
-        # rate below saturation, but ln(1) = 0 in the denominator would
-        # still put a nan into the gradient of every step.
-        S_safe = jnp.clip(S, min=1.0 + 1e-12)
-        cnt_exponent = (
-            -16.0 * jnp.pi * gamma**3 * M_V**2 / (3.0 * (K_B * T_K) ** 3 * jnp.log(S_safe) ** 2)
-        )
-        J = meta_mask * jnp.exp(logA) * S_safe * jnp.exp(cnt_exponent)
-
-        # Ag is per minute, as in the thesis package; /60 gives per second.
-        G = meta_mask * 10.0**Ag / 60.0 * jnp.maximum(S - 1.0, 0.0) ** g
-        return moment_rhs(y, G, J)
-```
+<<< @/../examples/crystallisation/train_crystallisation_mechanistic.py#vector-field
 
 Passing an `EvosaxTrainingConfig` to `fit` selects the evolutionary
 trainer:
 
-```python
-    config = hm.EvosaxTrainingConfig(
-        algorithm="CMA_ES",
-        population_size=args.population_size,
-        num_generations=args.generations,
-        init=args.init,
-        init_box_extent=args.init_box_extent,
-        sigma_init=args.sigma_init,
-    )
-```
+<<< @/../examples/crystallisation/train_crystallisation_mechanistic.py#config
 
 `init="lhs_box"` fills generation 0 with a Latin hypercube over the latent
 box, and each generation is one compiled, vmapped evaluation of the whole

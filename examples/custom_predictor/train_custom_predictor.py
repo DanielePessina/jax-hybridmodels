@@ -74,12 +74,14 @@ N_TIMESTEPS: int = 15
 NOISE_STD: float = 0.01
 OUTPUT_CHANNELS: tuple[str, ...] = ("concentration",)
 
+# region bank-paths
 # Dot-joined paths of the two fixed arrays inside the predictors dict: the
 # "rate" entry, the BoundedPredictor's ``inner``, then the field.
 BANK_PATHS: tuple[str, ...] = (
     "rate.inner.frequencies",
     "rate.inner.phases",
 )
+# endregion bank-paths
 
 
 class RandomFourierPredictor(hm.Predictor):
@@ -120,6 +122,7 @@ class RandomFourierPredictor(hm.Predictor):
         Static frequency scale.
     """
 
+    # region predictor
     weights: Float[Array, "n_features out_size"]
     bias: Float[Array, " out_size"]
     frequencies: Float[Array, "in_size n_features"]
@@ -175,6 +178,8 @@ class RandomFourierPredictor(hm.Predictor):
             key=key,
         )
 
+    # endregion predictor
+
 
 def true_k(temperature: float | Array) -> Array:
     """Ground-truth Arrhenius rate constant, in reciprocal time units."""
@@ -188,6 +193,7 @@ def build_predictors(key: Array, *, n_features: int, bandwidth: float) -> dict[s
     deliberately lacks: named inputs and physical units. The custom class
     never sees a bound.
     """
+    # region bounds
     rate = hm.BoundedPredictor(
         input_keys=("temperature",),
         in_scaler=hm.BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
@@ -197,6 +203,7 @@ def build_predictors(key: Array, *, n_features: int, bandwidth: float) -> dict[s
         out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
     )
     return {"rate": rate}
+    # endregion bounds
 
 
 def simulate_fn(
@@ -301,6 +308,7 @@ def main() -> None:
             solver=diffrax.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=10_000, dt0=0.1
         ),
     )
+    # region mask
     # ``trainable_mask`` marks every array of the custom predictor
     # trainable, the bank included. ``freeze_paths`` turns the bank off by
     # name, and raises on a path that matches nothing, so a renamed field
@@ -308,12 +316,14 @@ def main() -> None:
     mask = hm.trainable_mask(model.predictors)
     if not args.train_bank:
         mask = hm.freeze_paths(mask, BANK_PATHS)
+    # endregion mask
     frozen = "none (--train-bank)" if args.train_bank else ", ".join(BANK_PATHS)
     print("\n[fit]")
     print(f"RandomFourierPredictor: {args.n_features} features, bandwidth {args.bandwidth}")
     print(f"frozen leaves: {frozen}")
     print_rate_table(model.predictors, "rates before training:")
 
+    # region fit
     # The tournament restarts the predictor three times through
     # ``initialized_with_key`` and keeps the best start.
     config = hm.OptaxTrainingConfig(
@@ -326,6 +336,7 @@ def main() -> None:
         verbose=False,
     )
     result = model.fit(dataset, config, key=k_train, trainable=mask)
+    # endregion fit
     trained = result.model.predictors
     print("\n[results]")
     print(f"{len(result.history.loss)} steps; final loss {result.history.loss[-1]:.6e}")

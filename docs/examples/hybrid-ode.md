@@ -66,83 +66,23 @@ Polynomial decay makes recovery slow rather than impossible: escaping from $z = 
 
 `simulate_fn` shows both placements. The rate network runs once and its output becomes a constant; the residual runs inside `vector_field`:
 
-```python
-def simulate_fn(predictors, ts, covariates, y0, solver):
-    rate_net = predictors["rate"]
-    residual_net = predictors.get("residual")
-
-    k = rate_net(covariates).reshape(())
-    rotation = jnp.array([[-k, OMEGA_TRUE], [-OMEGA_TRUE, -k]])
-
-    def vector_field(t, y, args):
-        mechanistic = rotation @ y
-        if residual_net is None:
-            return mechanistic
-        return mechanistic + residual_net(y)
-
-    term = diffrax.ODETerm(vector_field)
-    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
-```
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#simulate-fn
 
 The two networks, with their warps and squashes:
 
-```python
-register_warp(
-    "symlog",
-    Warp(
-        forward=lambda x: jnp.sign(x) * jnp.log1p(jnp.abs(x) / SYMLOG_EPS),
-        inverse=lambda w: jnp.sign(w) * SYMLOG_EPS * jnp.expm1(jnp.abs(w)),
-        requires_positive=False,
-    ),
-)
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#symlog-warp
 
-rate_net = hm.BoundedPredictor(
-    input_keys=("temperature",),
-    in_scaler=hm.BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
-    inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
-    out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
-)
-predictors = {"rate": rate_net}
-if not args.mechanistic_only:
-    predictors["residual"] = hm.BoundedPredictor(
-        input_keys=("y1", "y2"),
-        in_scaler=hm.BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
-        inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
-        out_scaler=hm.BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
-    )
-```
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#predictors
 
 A scaler stores its warp by name, which keeps a saved model to a small JSON sidecar plus an array file. A custom warp therefore has to be registered before a model that uses it can be loaded. [`register_bound_transform`](/api/transforms) does the same for squashes.
 
 The solver uses a checkpointing adjoint. `DirectAdjoint`, the default, stores the whole forward trajectory, and with a network in the vector field that is usually the memory bottleneck:
 
-```python
-solver = hm.SolverConfig(
-    solver=diffrax.Tsit5(),
-    rtol=1e-4,
-    atol=1e-6,
-    max_steps=4096,
-    dt0=0.1,
-    adjoint=diffrax.RecursiveCheckpointAdjoint(),
-)
-```
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#solver
 
 Training fits the first 40% of each trajectory, then all of it, with the saturation penalty in both phases:
 
-```python
-config = hm.OptaxTrainingConfig(
-    phases=(
-        hm.TrainingPhase(
-            steps=args.steps // 2, lr=5e-3, horizon=0.4, penalty_weight=args.penalty_weight
-        ),
-        hm.TrainingPhase(steps=args.steps, lr=1e-3, penalty_weight=args.penalty_weight),
-    ),
-    penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors.values()),
-    loss="mse",
-    verbose=False,
-)
-result = model.fit(dataset, config, key=k_train)
-```
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#fit
 
 The saturation penalty is charged on the latent, not the physical output: a penalty on the physical value would carry the same $\sigma'(z/T)$ factor and die exactly where saturation is worst. By default it is evaluated at the measured input points. The residual reads the ODE state, which the dataset cannot resolve to measured points, so both networks get a `box_grid` sweep over their declared input box instead. `penalty_points` holds one array per network in pytree order, which for a dict means sorted keys.
 

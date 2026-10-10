@@ -83,34 +83,14 @@ The covariates are in the observation because only $C_A$ is measured and
 $C_{A,0}$ is fixed, so a policy on conversion alone would give a hot acidic
 batch and a cool neutral one the same action:
 
-```python
-return BoundedPredictor(
-    input_keys=OBS_KEYS,
-    in_scaler=BoundScaler(bounds=OBS_BOUNDS, transform="sigmoid"),
-    inner=MLPPredictor(
-        in_size=len(OBS_KEYS),
-        out_size=1,
-        width_size=POLICY_WIDTH,
-        depth=POLICY_DEPTH,
-        activation_name="tanh",
-        key=key,
-    ),
-    out_scaler=BoundScaler(bounds=ACTIVITY_BOUNDS, transform="sigmoid"),
-)
-```
+<<< @/../examples/batch_reactor/train_rl_deactivation.py#policy
 
 PPO splits it at `out_scaler`. The input scaler and inner network give the
 Gaussian mean over a latent $z$; the sampled $z$ is the action; and
 `out_scaler.from_latent(z)` maps it into the activity box inside the
 rollout, as part of the dynamics:
 
-```python
-mean = _policy_mean(agent, obs)
-noise = jnp.where(deterministic, 0.0, jr.normal(sub, mean.shape))
-z = mean + std * noise
-log_prob = _gaussian_log_prob(z, mean, agent.log_std)
-activity = agent.policy.out_scaler.from_latent(z)[0]
-```
+<<< @/../examples/batch_reactor/train_rl_deactivation.py#latent-action
 
 Three things follow from sampling in the latent space:
 

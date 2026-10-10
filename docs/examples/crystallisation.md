@@ -73,26 +73,7 @@ For a fit of four closed-form kinetic constants to the same data, see
 Each rate is a `BoundedPredictor` that reads both inputs by name and
 returns a log10 rate inside its output bounds:
 
-```python
-def rate_predictors(make_inner, key: Array) -> dict[str, hm.BoundedPredictor]:
-    """Wrap two inner networks as bounded log10 growth and nucleation rates."""
-    input_bounds = (TEMPERATURE_BOUNDS, SUPERSATURATION_BOUNDS)
-    k_growth, k_nucleation = jr.split(key)
-    return {
-        "growth": hm.BoundedPredictor(
-            inner=make_inner(k_growth),
-            input_keys=INPUT_KEYS,
-            input_bounds=input_bounds,
-            output_bounds=LOG10_GROWTH_BOUNDS,
-        ),
-        "nucleation": hm.BoundedPredictor(
-            inner=make_inner(k_nucleation),
-            input_keys=INPUT_KEYS,
-            input_bounds=input_bounds,
-            output_bounds=LOG10_NUCLEATION_BOUNDS,
-        ),
-    }
-```
+<<< @/../examples/crystallisation/train_kinetic.py#predictors
 
 The output bounds set the starting point. An untrained network outputs
 roughly the midpoint of its box, so `LOG10_GROWTH_BOUNDS = (-15.0, -5.0)`
@@ -105,31 +86,7 @@ decades below it and the loss never moves.
 Temperature is a covariate and supersaturation comes from the state, but
 the networks read both the same way:
 
-```python
-def simulate_fn(
-    predictors: dict[str, hm.BoundedPredictor],
-    ts: Float[Array, " T"],
-    covariates: dict[str, Array],
-    y0: Float[Array, " 6"],
-    solver: hm.SolverConfig,
-) -> Float[Array, "T 6"]:
-    """Integrate the moment ODE with growth and nucleation rates from the networks."""
-    temperature_C = covariates["temperature_C"]
-    conc_sat = saturation_conc(temperature_C)
-
-    def vector_field(t: ArrayLike, y: Float[Array, " 6"], args: object) -> Float[Array, " 6"]:
-        S = y[5] / conc_sat
-        # Both rates switch off at the metastable limit.
-        meta_mask = (S > 1.0 + META_EPS).astype(y.dtype)
-        # Temperature is a covariate and S comes from the state; the
-        # predictors read both as named inputs.
-        inputs = {"temperature_C": temperature_C, "supersaturation": S}
-        G = meta_mask * 10.0 ** predictors["growth"](inputs)[0]
-        J = meta_mask * 10.0 ** predictors["nucleation"](inputs)[0]
-        return moment_rhs(y, G, J)
-
-    return integrate_minutes(vector_field, ts, y0, solver)
-```
+<<< @/../examples/crystallisation/train_kinetic.py#simulate-fn
 
 `integrate_minutes` calls diffrax directly rather than
 `solver.diffeqsolve`, because the data are in minutes and the rates per
@@ -137,15 +94,7 @@ second. It still takes the step controller and adjoint from the
 `SolverConfig`. The moments span about 18 decades, so the config gives
 one `atol` per state:
 
-```python
-SOLVER = hm.SolverConfig(
-    solver=diffrax.Tsit5(),
-    rtol=1e-4,
-    atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),
-    max_steps=500_000,
-    dt0=None,
-)
-```
+<<< @/../examples/crystallisation/train_kinetic.py#solver
 
 `state_to_output` maps the six states to `[conc, d43]`. Its division
 replaces $\mu_3$ by a safe value before dividing, because guarding only
@@ -153,26 +102,13 @@ the result still evaluates $\mu_4 / 0$ on the discarded branch and that
 `nan` reaches the gradient (see
 [Recommendations](/guide/recommendations#guard-the-divisor-not-the-result)):
 
-```python
-    safe_mu3 = jnp.where(mu3 > D43_MU3_EPS, mu3, 1.0)
-    ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
-```
+<<< @/../examples/crystallisation/train_kinetic.py#safe-division
 
 Fitting and reading the learned rates:
 
-```python
-model = hm.HybridModel(
-    predictors=rate_predictors(make_inner, k_family),
-    simulate_fn=simulate_fn,
-    state_to_output=state_to_output,
-    output_channel_names=OUTPUT_CHANNELS,
-    solver=SOLVER,
-)
-result = model.fit(dataset, config, key=k_train)
+<<< @/../examples/crystallisation/train_kinetic.py#fit
 
-reference = {"temperature_C": 17.0, "supersaturation": 1.5}
-log10_G = hm.evaluate_predictor(result.model.predictors["growth"], reference)
-```
+<<< @/../examples/crystallisation/train_kinetic.py#read-rates
 
 `evaluate_predictor` reads a learned rate at any condition inside its
 input bounds, including conditions no experiment visited.

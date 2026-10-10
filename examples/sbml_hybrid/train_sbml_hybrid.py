@@ -58,6 +58,7 @@ SOLVER = hm.SolverConfig(
     dt0=1.0,  # the fast transient is short; the step controller shrinks dt0 if needed
 )
 
+# region simulate-fn
 # Swap v1's forward constant for a parameter named Vmax, which simulate_fn
 # fills from the network.
 sbml = SBMLKineticModel.from_file(str(SBML_PATH))
@@ -76,6 +77,9 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
     vmax = predictors["Vmax"]({"dose": dose})[0]
     params = {**sbml.params, "EGF": dose, "Vmax": vmax}
     return sbml.integrate(solver, ts, y0, params)
+
+
+# endregion simulate-fn
 
 
 def state_to_output(state: Array) -> Array:
@@ -121,6 +125,7 @@ def main() -> None:
     print("[data]")
     print(hm.describe_buckets(dataset))
 
+    # region model
     vmax = hm.BoundedPredictor(
         inner=hm.MLPPredictor(
             in_size=1, out_size=1, width_size=16, depth=2, activation_name="tanh", key=k_model
@@ -138,6 +143,7 @@ def main() -> None:
     )
     # A small bound penalty keeps the output squash away from saturation.
     config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2, penalty_weight=1e-2)
+    # endregion model
     print("\n[fit]")
     result = model.fit(dataset, config, key=k_train)
 

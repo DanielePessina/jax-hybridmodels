@@ -57,49 +57,31 @@ $T(t)$ with `ramp_profile` inside the vector field. Only $C_A$ is measured,
 
 ## Code
 
-Both phases call `fit` on the same model. A mask built with
-`freeze_modules_of_type` picks which half of the predictor tuple trains:
+Both phases call `fit` on the same model:
 
-```python
-model = HybridModel(
-    predictors=build_predictors(key=k_init),
-    simulate_fn=simulate_fn,
-    state_to_output=state_to_output,
-    output_channel_names=OUTPUT_CHANNELS,
-    solver=SOLVER,
-)
+<<< @/../examples/batch_reactor/train_hybrid.py#model
 
-mask_p1 = freeze_modules_of_type(
-    trainable_mask(model.predictors), model.predictors, BoundedPredictor
-)
-fit_p1 = model.fit(train_dataset, config_p1, key=k_p1, trainable=mask_p1)
-model_p1 = fit_p1.model
+Phase 1 freezes the residual with a mask built by `freeze_modules_of_type`,
+which leaves the trunk's two scalars:
 
-mask_p2 = freeze_modules_of_type(
-    trainable_mask(model_p1.predictors), model_p1.predictors, ArrheniusKinetics
-)
-fit_p2 = model_p1.fit(train_dataset, config_p2, key=k_p2, trainable=mask_p2)
-```
+<<< @/../examples/batch_reactor/train_hybrid.py#mask-p1
 
-`config_p1` is an `EvosaxTrainingConfig` (CMA-ES, 60 generations,
-`init="lhs_box"`) and `config_p2` an `OptaxTrainingConfig` (800 steps). The
-script asserts that phase 1 trains exactly two scalars and that the frozen
-half is bit-identical after each phase.
+and fits them with CMA-ES (32 candidates, 60 generations by default):
+
+<<< @/../examples/batch_reactor/train_hybrid.py#phase-1
+
+Phase 2 swaps the mask and refines the residual with AdamW (800 steps by default):
+
+<<< @/../examples/batch_reactor/train_hybrid.py#phase-2
+
+The script asserts that phase 1 trains exactly two scalars and that the
+frozen half is bit-identical after each phase.
 
 `compare_baselines.py` builds the classical baseline from the same
 predictor tuple. `simulate_trunk_fn` integrates the trunk alone and ignores
 the residual, so both models share every mask:
 
-```python
-hybrid = HybridModel(
-    predictors=build_predictors(key=k_init),
-    simulate_fn=simulate_fn,
-    state_to_output=state_to_output,
-    output_channel_names=OUTPUT_CHANNELS,
-    solver=SOLVER,
-)
-baseline = replace(hybrid, simulate_fn=simulate_trunk_fn)
-```
+<<< @/../examples/batch_reactor/compare_baselines.py#models
 
 ## Results
 

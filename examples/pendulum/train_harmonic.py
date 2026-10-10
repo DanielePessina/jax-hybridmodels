@@ -75,6 +75,7 @@ NOISE_STD: float = 0.02
 CHANNELS: tuple[str, ...] = ("position",)
 
 
+# region model-functions
 def simulate_fn(
     predictors: dict[str, hm.Parameter | hm.Constant],
     ts: Float[Array, " T"],
@@ -95,6 +96,7 @@ def simulate_fn(
 def state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
     """Only position is observed."""
     return state[..., :1]
+    # endregion model-functions
 
 
 def build_dataset(key: Array) -> hm.Dataset:
@@ -104,6 +106,7 @@ def build_dataset(key: Array) -> hm.Dataset:
         clean = x0 * jnp.cos(OMEGA_TRUE * TS) + (v0 / OMEGA_TRUE) * jnp.sin(OMEGA_TRUE * TS)
         noisy = clean + NOISE_STD * jr.normal(jr.fold_in(key, i), TS.shape)
         experiments.append(
+            # region experiment
             hm.make_experiment(
                 channels={"position": hm.ChannelObs(ts=TS, values=noisy, variance=NOISE_STD**2)},
                 # The state is known at t0 = 0; the first measurement is at 0.2.
@@ -111,6 +114,7 @@ def build_dataset(key: Array) -> hm.Dataset:
                 y0=[x0, v0],
                 exp_id=f"osc_{i}",
             )
+            # endregion experiment
         )
     return hm.make_dataset(experiments, output_channel_names=CHANNELS)
 
@@ -129,6 +133,7 @@ def main() -> None:
     dataset = build_dataset(k_data)
     print(hm.describe_buckets(dataset))
 
+    # region model
     model = hm.HybridModel(
         predictors={
             # Trained, and kept inside (0.5, 2.0) at every step.
@@ -143,9 +148,11 @@ def main() -> None:
             solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=4096, dt0=0.05
         ),
     )
+    # endregion model
 
     print("\n[fit]")
     # A fast phase to get close, then a slower one to settle.
+    # region fit
     config = hm.OptaxTrainingConfig(
         phases=(
             hm.TrainingPhase(steps=200, lr=0.05),
@@ -154,11 +161,13 @@ def main() -> None:
         verbose=False,
     )
     result = model.fit(dataset, config, key=k_train)
+    # endregion fit
     omega = float(result.model.predictors["omega"].value)
     print(f"omega {OMEGA_INIT} -> {omega:.4f} (true {OMEGA_TRUE})")
     print(f"best step {result.best_step}, stop reason {result.stop_reason}")
 
     print("\n[results]")
+    # region predict-simulate
     predictions = result.model.predict(dataset)
     # Indexed by experiment, then channel. ``times`` starts at t0, where
     # nothing was measured.
@@ -169,6 +178,7 @@ def main() -> None:
     # A new oscillator, run past the end of the training window.
     new = result.model.simulate(ts=jnp.linspace(0.5, 10.0, 50), t0=0.0, y0=[0.5, 0.0])
     print(f"new oscillator at t = 10: x = {float(new.outputs['position'][-1]):.4f}")
+    # endregion predict-simulate
     print()
     hm.print_metrics(hm.compute_metrics(predictions.buckets, dataset))
 

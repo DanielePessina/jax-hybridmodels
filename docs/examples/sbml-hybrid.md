@@ -52,44 +52,11 @@ Two numerical choices matter:
 `replace_flux` swaps `k1` for a symbol named `Vmax`, and `simulate_fn`
 fills it from the network before integrating the SBML vector field:
 
-```python
-sbml.replace_flux(
-    "v1_reaction_1",
-    expr=sp.Symbol("Cell")
-    * (sp.Symbol("Vmax") * egf * egfr - sp.Symbol("reaction_1_k2") * egf_egfr),
-    extra_params=("Vmax",),
-)
-
-
-def simulate_fn(predictors, ts, covariates, y0, solver):
-    dose = covariates["dose"]
-    # The dose is constant per experiment, so Vmax is evaluated once per solve.
-    vmax = predictors["Vmax"]({"dose": dose})[0]
-    params = {**sbml.params, "EGF": dose, "Vmax": vmax}
-    return sbml.integrate(solver, ts, y0, params)
-```
+<<< @/../examples/sbml_hybrid/train_sbml_hybrid.py#simulate-fn
 
 The network and the fit:
 
-```python
-vmax = hm.BoundedPredictor(
-    inner=hm.MLPPredictor(
-        in_size=1, out_size=1, width_size=16, depth=2, activation_name="tanh", key=k_model
-    ),
-    input_keys=("dose",),
-    input_bounds=(0.03, 0.5),
-    output_bounds=(0.05, 1.0),
-)
-model = hm.HybridModel(
-    predictors={"Vmax": vmax},
-    simulate_fn=simulate_fn,
-    state_to_output=state_to_output,
-    output_channel_names=CHANNELS,
-    solver=SOLVER,
-)
-# A small bound penalty keeps the output squash away from saturation.
-config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2, penalty_weight=1e-2)
-```
+<<< @/../examples/sbml_hybrid/train_sbml_hybrid.py#model
 
 ## Results
 

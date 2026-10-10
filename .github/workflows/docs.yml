@@ -52,6 +52,9 @@ jobs:
       - name: Verify generated API docs are in sync with docstrings
         run: npm --prefix docs run docs:check:api
 
+      - name: Check example code includes
+        run: npm --prefix docs run docs:check:snippets
+
       # ----- Build the static site, upload artifact for the deploy job ----- #
 
       - name: Build VitePress site

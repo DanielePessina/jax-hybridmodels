@@ -42,34 +42,11 @@ coefficients conditioned on another, for example
 `J` depends only on the constant supersaturation, so `simulate_fn`
 evaluates it once and integrates at that rate:
 
-```python
-def simulate_fn(predictors, ts, covariates, y0, solver):
-    # S is constant within an experiment, so J is evaluated once per solve
-    # instead of at every solver step.
-    j_rate = predictors["J"]({"super_sat": covariates["super_sat"]})[0]
-    return moments(j_rate, ts, y0, solver)
-```
+<<< @/../examples/supersaturation_poly/train_supersaturation_poly.py#simulate-fn
 
 The predictor:
 
-```python
-# The coefficient network outputs one coefficient per exponent.
-coeff_net = hm.MLPPredictor(
-    in_size=1,
-    out_size=len(EXPONENTS),
-    width_size=16,
-    depth=2,
-    activation_name="tanh",
-    key=k_model,
-)
-rate = hm.BoundedPredictor(
-    inner=hm.NeuralNPolynomial(coeff_net=coeff_net, exponents=EXPONENTS, in_size=1, out_size=1),
-    input_keys=("super_sat",),
-    input_bounds=(-0.2, 2.0),
-    # A log warp because J spans two decades inside its bounds.
-    out_scaler=hm.BoundScaler(bounds=(J_BOUNDS,), warp="log"),
-)
-```
+<<< @/../examples/supersaturation_poly/train_supersaturation_poly.py#predictor
 
 ## Results
 

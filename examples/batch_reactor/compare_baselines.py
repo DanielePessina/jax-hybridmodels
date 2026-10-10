@@ -266,6 +266,7 @@ def main() -> None:
 
     # One predictor tuple, two simulators. The baseline ignores the
     # residual, so both models share every mask below.
+    # region models
     hybrid = HybridModel(
         predictors=build_predictors(key=k_init),
         simulate_fn=simulate_fn,
@@ -274,6 +275,7 @@ def main() -> None:
         solver=SOLVER,
     )
     baseline = replace(hybrid, simulate_fn=simulate_trunk_fn)
+    # endregion models
     mask_trunk = freeze_modules_of_type(
         trainable_mask(hybrid.predictors), hybrid.predictors, BoundedPredictor
     )

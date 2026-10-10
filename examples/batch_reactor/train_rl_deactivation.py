@@ -363,6 +363,7 @@ def build_policy(*, key: Array) -> BoundedPredictor:
     policy on conversion alone would return the same action for a hot acidic
     batch and a cool neutral one.
     """
+    # region policy
     return BoundedPredictor(
         input_keys=OBS_KEYS,
         in_scaler=BoundScaler(bounds=OBS_BOUNDS, transform="sigmoid"),
@@ -375,6 +376,7 @@ def build_policy(*, key: Array) -> BoundedPredictor:
             key=key,
         ),
         out_scaler=BoundScaler(bounds=ACTIVITY_BOUNDS, transform="sigmoid"),
+        # endregion policy
     )
 
 
@@ -540,11 +542,13 @@ def _rollout_episode(
         y, rng = carry
         rng, sub = jr.split(rng)
         obs = jnp.stack([y[0], episode.temperature_C, episode.pH])
+        # region latent-action
         mean = _policy_mean(agent, obs)
         noise = jnp.where(deterministic, 0.0, jr.normal(sub, mean.shape))
         z = mean + std * noise
         log_prob = _gaussian_log_prob(z, mean, agent.log_std)
         activity = agent.policy.out_scaler.from_latent(z)[0]
+        # endregion latent-action
         y_next = _integrate_interval(
             activity * episode.k_fresh, episode.ts[i], episode.ts[i + 1], y, solver
         )

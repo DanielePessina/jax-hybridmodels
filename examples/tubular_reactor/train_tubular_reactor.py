@@ -97,6 +97,7 @@ def true_g(c: ArrayLike, temp: ArrayLike) -> Array:
     return k / (1.0 + 2.0 * c)
 
 
+# region pde
 def transport(c: Array, c_in: Array) -> Array:
     """Upwind advection and central dispersion, inlet held at ``c_in``, zero-gradient outlet."""
     left = jnp.concatenate([c_in[None], c[:-1]])
@@ -115,13 +116,20 @@ def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) 
     ys = solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
     assert ys is not None
     return ys
+    # endregion pde
 
 
+# region simulate
 def simulate_hybrid(predictors, ts, covariates, y0, solver):
     net = predictors["g"]
     # One network call per cell; T is shared along the tube.
     g_fn = jax.vmap(lambda c, temp: net({"c": c, "T": temp})[0], in_axes=(0, None))
     return solve_tube(g_fn, ts, covariates, y0, solver)
+
+
+def state_to_output(state: Array) -> Array:
+    return state[..., SENSOR_CELLS]
+    # endregion simulate
 
 
 def simulate_mechanistic(predictors, ts, covariates, y0, solver):
@@ -131,10 +139,6 @@ def simulate_mechanistic(predictors, ts, covariates, y0, solver):
         return k_ref * jnp.exp(-ea_over_r * (1.0 / temp - 1.0 / T_REF)) * jnp.ones_like(c)
 
     return solve_tube(g_fn, ts, covariates, y0, solver)
-
-
-def state_to_output(state: Array) -> Array:
-    return state[..., SENSOR_CELLS]
 
 
 def exp_name(temp: float, feed: float) -> str:
@@ -175,6 +179,7 @@ def make_data(key: Array) -> hm.Dataset:
 
 
 def build_models(key: Array) -> tuple[hm.HybridModel, hm.HybridModel]:
+    # region models
     net = hm.BoundedPredictor(
         inner=hm.MLPPredictor(
             in_size=2, out_size=1, width_size=16, depth=2, activation_name="tanh", key=key
@@ -200,6 +205,7 @@ def build_models(key: Array) -> tuple[hm.HybridModel, hm.HybridModel]:
         },
         simulate_fn=simulate_mechanistic,
     )
+    # endregion models
     return hybrid, mechanistic
 
 
@@ -280,6 +286,7 @@ def main() -> None:
     print(hm.describe_buckets(dataset))
 
     hybrid, mechanistic = build_models(k_model)
+    # region fit
     config = hm.OptaxTrainingConfig(
         phases=(
             # Fit the start-up front first, then the whole run with the feed drop.
@@ -288,6 +295,7 @@ def main() -> None:
         ),
         verbose=False,
     )
+    # endregion fit
     print("\n[fit]")
     fits = {}
     for name, model in (("hybrid", hybrid), ("first order", mechanistic)):

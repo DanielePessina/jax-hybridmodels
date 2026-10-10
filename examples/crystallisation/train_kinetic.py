@@ -124,6 +124,7 @@ INPUT_KEYS = ("temperature_C", "supersaturation")
 # to mu4 ~ 1e-7, conc ~ 1). A uniform atol over-resolves the small moments,
 # under-resolves the large ones, and runs out of max_steps. dt0=None lets
 # integrate_minutes pick a first step from each experiment's span.
+# region solver
 SOLVER = hm.SolverConfig(
     solver=diffrax.Tsit5(),
     rtol=1e-4,
@@ -131,6 +132,7 @@ SOLVER = hm.SolverConfig(
     max_steps=500_000,
     dt0=None,
 )
+# endregion solver
 
 
 def y0_fn(covariates: dict[str, Array], channels: dict[str, hm.ChannelObs]) -> Float[Array, " 6"]:
@@ -147,8 +149,10 @@ def state_to_output(state: Float[Array, "T 6"]) -> Float[Array, "T 2"]:
     # d43 = mu4 / mu3 in um, guarded while the moments are near zero. The
     # divisor is replaced before dividing: guarding only the result still
     # evaluates mu4 / 0, and its nan gradient flows back through where.
+    # region safe-division
     safe_mu3 = jnp.where(mu3 > D43_MU3_EPS, mu3, 1.0)
     ratio = jnp.where(mu3 > D43_MU3_EPS, (mu4 / safe_mu3) * 1e6, 0.0)
+    # endregion safe-division
     d43 = jnp.clip(jnp.where(jnp.isfinite(ratio) & (ratio > 0.0), ratio, 0.0), 0.0, D43_MAX)
     return jnp.stack([conc, d43], axis=-1)
 
@@ -206,6 +210,7 @@ def integrate_minutes(
     return jnp.asarray(sol.ys)
 
 
+# region simulate-fn
 def simulate_fn(
     predictors: dict[str, hm.BoundedPredictor],
     ts: Float[Array, " T"],
@@ -229,6 +234,7 @@ def simulate_fn(
         return moment_rhs(y, G, J)
 
     return integrate_minutes(vector_field, ts, y0, solver)
+    # endregion simulate-fn
 
 
 def make_dataset() -> hm.Dataset:
@@ -257,6 +263,7 @@ def make_dataset() -> hm.Dataset:
     return hm.make_dataset(experiments, output_channel_names=OUTPUT_CHANNELS)
 
 
+# region predictors
 def rate_predictors(make_inner, key: Array) -> dict[str, hm.BoundedPredictor]:
     """Wrap two inner networks as bounded log10 growth and nucleation rates."""
     input_bounds = (TEMPERATURE_BOUNDS, SUPERSATURATION_BOUNDS)
@@ -275,6 +282,7 @@ def rate_predictors(make_inner, key: Array) -> dict[str, hm.BoundedPredictor]:
             output_bounds=LOG10_NUCLEATION_BOUNDS,
         ),
     }
+    # endregion predictors
 
 
 def main() -> None:
@@ -322,6 +330,7 @@ def main() -> None:
 
     config = hm.OptaxTrainingConfig(steps=args.steps, lr=args.lr)
     # A reference condition for reading the learned rates.
+    # region read-rates
     reference = {"temperature_C": 17.0, "supersaturation": 1.5}
 
     def report_rates(stage: str, predictors: dict[str, hm.BoundedPredictor]) -> None:
@@ -331,7 +340,10 @@ def main() -> None:
             f"  {stage} at T=17°C, S=1.5: G={10.0**log10_G:.2e} m/s, J={10.0**log10_J:.2e} #/m³/s"
         )
 
+    # endregion read-rates
+
     final_losses = {}
+    # region fit
     for label, make_inner, k_family in (("mlp", mlp, k_mlp), ("kan", kan, k_kan)):
         model = hm.HybridModel(
             predictors=rate_predictors(make_inner, k_family),
@@ -344,6 +356,7 @@ def main() -> None:
         report_rates("init", model.predictors)
         result = model.fit(dataset, config, key=k_train)
         report_rates("trained", result.model.predictors)
+        # endregion fit
         final_losses[label] = min(result.history.loss)
 
         print(f"\n[results] {label}")
