@@ -15,7 +15,7 @@ charge stays alive where the squash gradient is dead.
 | Question | Is the predictor saturated at these input points? | Did this solve drive it into saturation? |
 | Evaluated at | Measured points plus any you add | The trajectories of each solve |
 | Your code | Nothing extra | Cooperation from `simulate_fn` for embedded predictors |
-| Switch | `penalty_weight > 0` | `trajectory_penalty_fn` and `trajectory_penalty_weight` |
+| Switch | `Objective(penalty_weight > 0)` | `Objective(trajectory_penalty_fn=..., trajectory_penalty_weight=...)` |
 
 The bound penalty covers `BoundedPredictor` leaves only. A `Parameter` is
 never charged, so a bounded `Parameter` that drifts to an edge stays there
@@ -29,10 +29,12 @@ per training step to the bucket-averaged data gradient, so a given
 `penalty_weight` means the same thing at any dataset size or point count.
 
 ```python
-config = hm.OptaxTrainingConfig(steps=400, lr=1e-2, penalty_weight=1e-3)
+objective = hm.Objective(penalty_weight=1e-3)
+result = model.fit(data, hm.OptaxTrainingConfig(steps=400, lr=1e-2), objective=objective, key=key)
 ```
 
-With phases, set `penalty_weight` on each `TrainingPhase`.
+`TrainingPhase(penalty_weight=...)` overrides the weight for one phase, for
+example `0.0` during a warm-up.
 
 ### Measured points
 
@@ -44,24 +46,23 @@ prefix.
 ### Penalty-only points
 
 `penalty_points` adds points where no measurement exists, typically a
-region the process will run at but the data does not cover. Give one
-`[G, n_inputs]` array per `BoundedPredictor` leaf, in physical units, with
-columns in `input_keys` order. The penalty uses measured and added points
-together.
+region the process will run at but the data does not cover. It maps the
+path of a `BoundedPredictor` to a `[G, n_inputs]` array in physical units,
+with columns in that predictor's `input_keys` order. The path is the dotted
+string `freeze=` uses, so in a dict of predictors it is the key. The penalty
+uses measured and added points together.
 
 ```python
 deploy = jnp.asarray([[20.0, 1.5], [20.0, 2.0], [25.0, 1.5], [25.0, 2.0]])
 
-config = hm.OptaxTrainingConfig(
-    steps=400,
-    lr=1e-2,
+objective = hm.Objective(
     penalty_weight=1e-4,
-    penalty_points=(deploy, deploy),   # growth, then nucleation
+    penalty_points={"growth": deploy, "nucleation": deploy},
 )
 ```
 
-Leaves are taken in pytree traversal order. In a dict that means sorted
-keys, so `{"nucleation": ..., "growth": ...}` still puts `growth` first.
+Predictors left out are charged at their measured points only. A path that
+names no `BoundedPredictor` raises and lists the valid ones.
 
 `box_grid` builds a sweep of a whole input box. It samples evenly in warped
 coordinates, so under `warp="log10"` five points across `(1e-6, 1e2)` land
@@ -71,20 +72,20 @@ at `1e-6, 1e-4, 1e-2, 1, 1e2`:
 from jaxhybridmodels.penalties import box_grid
 
 sweep = box_grid(rate.in_scaler, n_per_dim=7)   # [49, 2] for a 2-D box
-config = hm.OptaxTrainingConfig(steps=400, penalty_weight=1e-3, penalty_points=(sweep,))
+objective = hm.Objective(penalty_weight=1e-3, penalty_points={"rate": sweep})
 ```
 
 It needs finite input bounds.
 
 ### Every leaf needs points
 
-With `penalty_weight > 0`, a leaf with neither measured nor added points
+With `penalty_weight > 0`, a predictor with neither measured nor added points
 raises rather than training silently without its penalty:
 
 ```text
-ValueError: penalty: leaf 1 (input_keys=('temperature_C', 'supersaturation')) has
-no penalty points: its inputs do not all resolve to dataset covariates and no
-entry was given in penalty_points for it. ...
+ValueError: penalty: predictor 'nucleation' (input_keys=('temperature_C', 'supersaturation'))
+has no penalty points: its inputs do not all resolve to dataset covariates and
+Objective.penalty_points has no entry for it. ...
 ```
 
 This happens to **embedded** predictors, whose inputs come from the ODE
@@ -93,15 +94,17 @@ trajectory penalty.
 
 ### Replacing it
 
-`penalty_fn` replaces the bound penalty with any `(predictors, points) ->
-scalar`, charged the same way. Coverage is not checked for a custom
-function, and one that has no use for `points` ignores them:
+`Objective(penalty_fn=...)` replaces the bound penalty with any
+`(predictors, points) -> scalar`, charged the same way. `points` holds one
+`[G, n_inputs]` array per `BoundedPredictor`, in pytree traversal order.
+Coverage is not checked for a custom function, and one that has no use for
+`points` ignores them:
 
 ```python
 def weight_decay(predictors, points):
     return jnp.sum(predictors["rate"].inner.mlp.layers[-1].weight ** 2)
 
-config = hm.OptaxTrainingConfig(steps=400, penalty_fn=weight_decay, penalty_weight=0.1)
+objective = hm.Objective(penalty_fn=weight_decay, penalty_weight=0.1)
 ```
 
 ## The trajectory penalty

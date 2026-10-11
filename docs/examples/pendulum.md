@@ -32,9 +32,10 @@ second minimum at a multiple of it.
 
 ## Code
 
-`simulate_fn` integrates one experiment and returns the full state. The
-predictors arrive as the dict given to the model, and both kinds of value
-are read through `.value`. `state_to_output` keeps the measured column:
+The model is one ODE solve, so the script writes only the vector field.
+The predictors arrive as the dict given to the model, and both kinds of
+value are read through `.value`. `state_to_output` keeps the measured
+column:
 
 <<< @/../examples/pendulum/train_harmonic.py#model-functions
 
@@ -44,7 +45,12 @@ computed from covariates or from the first observation:
 
 <<< @/../examples/pendulum/train_harmonic.py#experiment
 
-The model binds the pieces together. A [`Parameter`](/api/predictors#parameter)
+[`HybridModel.from_vector_field`](/api/model#hybridmodel) wraps the vector
+field into a `simulate_fn` that integrates one experiment and returns the
+full state. Write `simulate_fn` yourself when a model needs more than one
+plain solve, as the [hybrid ODE](/examples/hybrid-ode) does.
+`SolverConfig()` defaults to Tsit5 with `rtol=1e-5` and `atol=1e-7`; only
+the first step size is set here. A [`Parameter`](/api/predictors#parameter)
 trains on an unbounded latent and maps it into its bounds, so $\omega$
 stays inside $(0.5, 2)$ at every step without clipping. A
 [`Constant`](/api/predictors#constant) is never trained:

@@ -544,9 +544,9 @@ def test_an_objective_without_callables_round_trips(tmp_path):
     )
     assert loaded.penalty_points is not None
     np.testing.assert_array_equal(loaded.penalty_points["rate"], [[0.5], [1.5]])
-    assert hm.load_run(tmp_path, predictors_template=parameter_predictors())["objective"][
-        "penalty_points"
-    ] == {"rate": [[0.5], [1.5]]}
+    # Without objective_cls the grids still come back as arrays of their saved shape.
+    raw = hm.load_run(tmp_path, predictors_template=parameter_predictors())["objective"]
+    np.testing.assert_array_equal(raw["penalty_points"]["rate"], [[0.5], [1.5]])
 
 
 class _Scaled(hm.Predictor):
@@ -648,7 +648,7 @@ def test_evosax_log_every_throttles_the_generation_table():
     ui.on_run_start(total_steps=5, population_size=4)
     bests = [0.7771, 0.6661, 0.5551, 0.4441, 0.3331]
     for i, best in enumerate(bests):
-        ui.on_generation_end(gen_idx=i, best_fitness=best, mean_fitness=best + 0.1)
+        ui.on_generation_end(gen_idx=i, best_loss=best, mean_loss=best + 0.1)
     ui.on_run_end(final_loss=0.2221)
     text = console.export_text()
     assert [f"{b:.4f}" in text for b in bests] == [True, False, True, False, True]
@@ -918,3 +918,62 @@ def _no_saved_state(predictors, ts, covariates, y0, solver):
 def test_model_api_rejects_bad_input(call, match):
     with pytest.raises(ValueError, match=match):
         call()
+
+
+def test_simulate_keeps_y0_at_the_experiment_start():
+    """Without ``t0``, ``y0`` belongs to the first observation, whatever ``ts`` is passed."""
+    model = parameter_model(rate=0.8)
+    experiment = hm.make_experiment(
+        channels={"conc": hm.ChannelObs(ts=jnp.array([1.0, 2.0, 3.0]), values=jnp.ones(3))},
+        covariates={"temp": 1.0},
+        y0=[1.0],
+        exp_id="late",
+    )
+    full = model.simulate(experiment=experiment)
+    later = model.simulate(experiment=experiment, ts=[2.0, 3.0])
+    np.testing.assert_allclose(later.outputs["conc"], full.outputs["conc"][1:], rtol=1e-4)
+    with pytest.raises(ValueError, match="t0 must be finite and at or before"):
+        model.simulate(experiment=experiment, ts=[0.5, 1.0])
+
+
+def test_prediction_result_from_buckets_matches_predict(fitted, decay_data):
+    """Bucket arrays from the functional layer score like ``predict``'s result."""
+    model = fitted[0].model
+    buckets = hm.predict_dataset(
+        model.predictors,
+        decay_data,
+        simulate_fn=model.simulate_fn,
+        state_to_output=model.state_to_output,
+        solver=model.solver,
+    )
+    wrapped = hm.PredictionResult.from_buckets(buckets, decay_data)
+    direct = hm.compute_metrics(model.predict(decay_data))
+    for name, metrics in hm.compute_metrics(wrapped).items():
+        np.testing.assert_allclose(metrics.mse, direct[name].mse, rtol=1e-6)
+    with pytest.raises(TypeError, match="from_buckets"):
+        hm.compute_metrics(buckets)  # ty: ignore[invalid-argument-type]
+
+
+def test_functional_entry_points_name_the_dataset_they_need(decay_data):
+    """A list of experiments gives a TypeError pointing at make_dataset."""
+    model = parameter_model()
+    with pytest.raises(TypeError, match="make_dataset"):
+        hm.predict_dataset(
+            model.predictors,
+            list(decay_data.experiments),  # ty: ignore[invalid-argument-type]
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+        )
+
+
+def test_empty_penalty_points_survive_a_save(tmp_path):
+    """An empty ``[0, n_inputs]`` grid reloads with its shape, so Objective accepts it."""
+    objective = hm.Objective(penalty_points={"rate": jnp.zeros((0, 1)), "other": jnp.ones((2, 3))})
+    hm.save_run(tmp_path, predictors=parameter_predictors(), solver=SOLVER, objective=objective)
+    loaded = hm.load_run(
+        tmp_path, predictors_template=parameter_predictors(), objective_cls=hm.Objective
+    )
+    points = loaded["objective"].penalty_points
+    assert points["rate"].shape == (0, 1)
+    np.testing.assert_array_equal(points["other"], np.ones((2, 3)))

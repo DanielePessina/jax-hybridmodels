@@ -19,27 +19,33 @@
 ```python
 HybridModel(
     predictors: 'Any',
-    simulate_fn: 'Callable[..., Array]',
+    simulate_fn: 'Callable[..., Any]',
     state_to_output: 'Callable[[Array], Array]',
-    output_channel_names: 'tuple[str, ...]',
-    solver: 'SolverConfig',
+    output_channel_names: 'Sequence[str]',
+    solver: 'SolverConfig | None' = None,
 ) -> None
 ```
 
 The four pieces of a hybrid model, bound together.
+
+An ``eqx.Module``: ``predictors`` is its only array subtree, and the
+other fields are static. Equinox tools work on it directly, for example
+``eqx.tree_at(lambda m: m.predictors["rate"], model, new_rate)`` to swap
+one predictor, or ``eqx.filter_vmap`` over a function that builds models
+from different keys.
 
 **Parameters**
 
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `predictors` |  | Any predictor pytree, usually a dict of ``Parameter``, ``Constant`` and ``BoundedPredictor`` leaves. |
-| `simulate_fn` |  | Pure ``(predictors, ts, covariates, y0, solver) -> [T, S]``. |
+| `simulate_fn` |  | Pure ``(predictors, ts, covariates, y0, solver)``, returning the ``[T, S]`` state at ``ts`` or the ``diffrax.Solution`` that holds it. `from_vector_field` writes one from a vector field. |
 | `state_to_output` |  | Pure ``[T, S] -> [T, D]``. |
 | `output_channel_names` |  | Names of the ``D`` output columns, in order. Must match the ``output_channel_names`` of every dataset passed in. |
-| `solver` |  | Integration settings. |
+| `solver` |  | Integration settings, default ``SolverConfig()``. |
 | `Fitting returns a new model; the original is unchanged.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L141)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L230)</small>
 
 <a id="hybridmodelfit"></a>
 
@@ -48,39 +54,55 @@ The four pieces of a hybrid model, bound together.
 ```python
 fit(
     self,
-    dataset: 'Dataset',
+    data: 'Data',
     config: 'OptaxTrainingConfig | EvosaxTrainingConfig',
     key: 'Array',
+    objective: 'Objective | None' = None,
+    freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'Any' = None,
-    validation: 'Dataset | None' = None,
+    validation: 'Data | None' = None,
 ) -> FitResult
 ```
 
 Train the predictors and return a new model with the result.
 
-``config`` picks the optimiser: Optax for gradient training, Evosax
-for an evolutionary search. ``trainable`` defaults to
-[`trainable_mask`](/api/trainable#trainable_mask).
+``config`` says how to search: Optax for gradient training, Evosax
+for an evolutionary search. ``objective`` says what is minimised;
+``None`` means ``Objective()``, plain MSE with no penalty.
 
-With ``validation`` (Optax only), the validation data loss replaces
-the training loss for choosing the returned step and for
-``patience``. It costs one extra forward pass over the validation
-set per step.
+``freeze`` holds fixed, on top of the default
+[`trainable_mask`](/api/trainable#trainable_mask), whatever its
+entries match: dotted paths (``"rate"``, ``"rate.inner"``),
+predictor classes (``hm.MLPPredictor``), or predicates
+``(module) -> bool``. ``trainable`` is an explicit mask for full
+control; pass one or the other.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L184)</small>
+With ``validation``, the validation data loss replaces the training
+loss for choosing the returned step (Optax) or generation (Evosax),
+and for ``patience``. It costs one extra forward pass over the
+validation set per step or generation.
+
+``data`` and ``validation`` may be a ``Dataset`` or a sequence of
+experiments. ``simulate_fn`` and ``state_to_output`` shapes are
+checked once on the first experiment before anything compiles.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L375)</small>
 
 <a id="hybridmodelpredict"></a>
 
 #### `HybridModel.predict()`
 
 ```python
-predict(self, dataset: 'Dataset') -> 'PredictionResult'
+predict(self, data: 'Data') -> 'PredictionResult'
 ```
 
 Predict every experiment on its measured time grid, keyed by experiment ID.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L266)</small>
+``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
+experiments.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L462)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -89,21 +111,30 @@ Predict every experiment on its measured time grid, keyed by experiment ID.
 ```python
 simulate(
     self,
-    ts: 'Any',
-    y0: 'Any',
+    experiment: 'Experiment | None' = None,
+    ts: 'Any' = None,
+    y0: 'Any' = None,
     covariates: 'Mapping[str, Any] | None' = None,
     t0: 'float | None' = None,
 ) -> ExperimentPrediction
 ```
 
-Simulate new conditions without a dataset.
+Simulate one set of conditions, from an experiment or given directly.
+
+With ``experiment``, its ``y0``, ``t0`` and covariates are used, and
+``ts`` defaults to its measured times (``t0`` included when set).
+``y0`` is placed at the experiment's ``t0``, or at its first
+observation time when ``t0`` is unset, whatever ``ts`` is passed; a
+``ts`` starting before that time is rejected.
+Otherwise pass ``ts`` and ``y0``, and optionally ``covariates`` and
+``t0``.
 
 ``y0`` is the state at ``t0``, which defaults to ``ts[0]``. ``ts``
 must be finite, strictly increasing, and not before ``t0``. When
-``t0`` precedes ``ts[0]`` it is integrated from but left out of
-the returned times and outputs.
+``t0`` precedes ``ts[0]`` it is integrated from but left out of the
+returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L303)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L491)</small>
 
 ---
 
@@ -129,7 +160,7 @@ None when ``restore_best=False`` returned the final update instead.
 ``stop_reason`` is ``"patience"`` when early stopping cut the final
 phase short, else ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L125)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L190)</small>
 
 ---
 
@@ -145,23 +176,27 @@ FitHistory(
     penalty: 'tuple[float, ...]' = (),
     phase: 'tuple[int, ...]' = (),
     validation_loss: 'tuple[float, ...]' = (),
-    best_fitness: 'tuple[float, ...]' = (),
 ) -> None
 ```
 
 Per-step records from a fit.
 
-Optax fills ``loss``, ``penalty`` and ``phase``, one entry per step,
-measured at the parameters before that step's update. ``loss`` is the
-data term plus any trajectory penalty; ``penalty`` is the weighted
-bound penalty, so ``loss + penalty`` is the objective the optimiser
-minimised. ``validation_loss`` is the full-horizon data loss on the
-validation set, present when one was given.
+``loss`` has one entry per step (Optax) or per generation (Evosax).
 
-Evosax fills only ``best_fitness``, the best-so-far fitness per
-generation. It is monotone and not comparable to ``loss``.
+Optax measures it at the parameters before that step's update: the data
+term plus any trajectory penalty. ``penalty`` is the weighted bound
+penalty at the same step, so ``loss + penalty`` is what the optimiser
+minimised, and ``phase`` is the step's phase index.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L103)</small>
+Evosax records the best fitness found so far, so its ``loss`` is
+monotone non-increasing; with a bound penalty on, that fitness includes
+it. ``penalty`` and ``phase`` stay empty.
+
+``validation_loss`` is the full-horizon data loss on the validation set,
+present when one was given: per step for Optax, and for each
+generation's best individual for Evosax.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L164)</small>
 
 ---
 
@@ -180,11 +215,13 @@ PredictionResult(
 
 Predictions keyed by experiment ID, in the order the experiments were given.
 
+Pass it straight to ``compute_metrics`` or ``print_metrics``.
 ``buckets`` keeps the raw ``[N, T, D]`` arrays from ``predict_dataset``
-for ``compute_metrics`` or custom JAX analysis. Experiments without an
-ID are named ``experiment_<index>``.
+for custom JAX analysis. `from_buckets` builds one from bucket
+arrays made by the functional layer (``predict_dataset``,
+``ensemble_predictions``), so those can be scored too.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L50)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L66)</small>
 
 <a id="predictionresultto_dataframe"></a>
 
@@ -200,7 +237,7 @@ Columns are ``experiment_id``, ``time``, ``channel``,
 ``prediction``, ``observed`` and ``is_observed``. Needs pandas,
 which the ``examples`` extra installs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L71)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L132)</small>
 
 ---
 
@@ -228,4 +265,4 @@ was not measured, and ``observation_mask`` says which cells were.
 Both are empty for [`HybridModel.simulate`](/api/model#hybridmodelsimulate), which instead fills
 ``state`` with the full ``[T, S]`` simulator state.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L32)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L48)</small>

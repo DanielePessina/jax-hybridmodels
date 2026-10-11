@@ -12,7 +12,8 @@ Subclass `Predictor` and implement `__call__`. See
 ## `simulate_fn` and `state_to_output`
 
 `simulate_fn(predictors, ts, covariates, y0, solver) -> [T, S]` integrates
-one experiment. It runs under `vmap` and `jit`, so it must be pure JAX.
+one experiment. It may also return the `diffrax.Solution`, whose `ys` the
+library reads. It runs under `vmap` and `jit`, so it must be pure JAX.
 `SolverConfig.diffeqsolve` keeps it short and forwards `solver.adjoint`:
 
 ```python
@@ -20,25 +21,27 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
     def vector_field(t, y, args):
         return -predictors["rate"].value * y
 
-    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
 ```
 
-`state_to_output` maps `[T, S]` to the observed channels `[T, D]`. See
+`HybridModel.from_vector_field` writes this function for you from
+`vector_field(t, y, predictors, covariates)`. `state_to_output` maps `[T, S]` to the observed channels `[T, D]`. See
 [Model interface](/guide/model-interface).
 
 ## Losses
 
-A loss is `loss(pred_obs, bp) -> scalar`, passed as the config's `loss`:
+A loss is `loss(pred_obs, bp) -> scalar`, passed as the objective's `loss`:
 
 ```python
-config = hm.OptaxTrainingConfig(steps=500, loss=my_huber_loss)
+objective = hm.Objective(loss=my_huber_loss)
 ```
 
-With `channel_idx`, a loss whose signature accepts `channel_idx` and
-`channel_weights` receives them as keywords. A plain `(pred_obs, bp)` loss
-receives only the selected channels, already sliced; combining it with
-`channel_weights` raises, since the weights have to be applied inside the
-loss. See `jaxhybridmodels.losses.resolve_loss_fn`.
+`Objective.channel_weights` resolves to a channel selection and per-channel
+weights. A loss whose signature accepts `channel_idx` and `channel_weights`
+receives them as keywords. A plain `(pred_obs, bp)` loss receives only the
+selected channels, already sliced, so `{"conc": 1.0}` works with it; weights
+other than 1 raise, since they have to be applied inside the loss. See
+`jaxhybridmodels.losses.resolve_loss_fn`.
 
 ## Optimisers
 
@@ -50,14 +53,15 @@ loss. See `jaxhybridmodels.losses.resolve_loss_fn`.
 - a ready-made `optax.GradientTransformation`.
 
 Names and factories are wrapped in `optax.inject_hyperparams`, so a later
-phase can change `lr` in place. A ready-made instance cannot, so a phase
-that changes `lr` on one needs `reset_optimizer=True`.
+phase can change `lr` in place and `lr` may be an optax schedule. A
+ready-made instance cannot: a phase that changes `lr` on one needs
+`reset_optimizer=True`, and a schedule with one raises.
 
 ## Regularisers
 
-`penalty_fn(predictors, points) -> scalar` replaces the bound penalty on
-both config types. It is charged once per step with weight
-`penalty_weight`. See [Penalties](/guide/penalties#replacing-it).
+`Objective(penalty_fn=...)`, a `(predictors, points) -> scalar`, replaces
+the bound penalty for both trainers. It is charged once per step with
+weight `penalty_weight`. See [Penalties](/guide/penalties#replacing-it).
 
 ## Trajectory-aware penalties
 
@@ -75,7 +79,7 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
     rate = predictors["rate"]
 
     def physics(t, y, args):
-        return -rate(y[:1]) * y
+        return -rate(y[:1]) * y                       # one output, so rate(...) is a scalar
 
     def penalty_rates(t, y, args):
         z = rate.inner(rate.in_scaler.to_latent(y[:1]))
@@ -93,8 +97,8 @@ def state_to_output(state):
 def trajectory_penalty(full_state, bp):
     return jnp.sum(penalty_integral(full_state, n=2))
 
-config = hm.OptaxTrainingConfig(
-    steps=500, trajectory_penalty_fn=trajectory_penalty, trajectory_penalty_weight=0.1
+objective = hm.Objective(
+    trajectory_penalty_fn=trajectory_penalty, trajectory_penalty_weight=0.1
 )
 ```
 
@@ -112,6 +116,7 @@ per-step regulariser, and `build_apply_update` one optimiser update. One
 step of the stock loop, without the optimiser setup and UI:
 
 ```python
+loss_fn = hm.Objective(loss="mse").loss_fn(dataset.output_channel_names)
 step = build_bucket_step(
     simulate_fn=simulate_fn, state_to_output=state_to_output,
     solver=solver, loss_fn=loss_fn, trainable=mask,
@@ -127,8 +132,8 @@ predictors, opt_state = apply_update(predictors, mean_grads, opt_state)
 The [custom loop example](/examples/custom-loop) is the full version, with
 per-bucket weights and a custom regulariser.
 
-The stock trainers change hyperparameters only at phase boundaries. For a
-smooth schedule in your own loop, `annealing_schedule` returns a multiplier
+The stock trainers take an optax schedule as a phase's `lr`. In your own
+loop, any schedule works, and `annealing_schedule` returns a multiplier
 over a fixed run length:
 
 ```python
@@ -153,7 +158,7 @@ predictors = {
 
 def vector_field(t, y, args):
     z = predictors["embed"](covariates["system"])   # system: a 2-vector covariate
-    k = predictors["rate"]({"T": covariates["T"], "z0": z[0], "z1": z[1]})[0]
+    k = predictors["rate"]({"T": covariates["T"], "z0": z[0], "z1": z[1]})
     ...
 ```
 

@@ -778,3 +778,33 @@ def test_resolve_loss_fn_binds_channel_arguments():
 def test_loss_configuration_errors(call, match):
     with pytest.raises(ValueError, match=match):
         call()
+
+
+def test_bootstrap_renaming_skips_ids_already_taken():
+    """A source ID shaped like ``a#2`` never clashes with a renamed repeat."""
+    source = hm.make_dataset(
+        [_exp(i, x=([0.0, 1.0], [1.0, 2.0])) for i in ("a", "a#2", "b")],
+        output_channel_names=("x",),
+    )
+    for seed in range(60):
+        resampled = hm.make_bootstrap_dataset(source, key=jr.key(seed))
+        ids = [exp.exp_id for exp in resampled.experiments]
+        assert len(set(ids)) == len(ids)
+
+
+def test_generated_ids_skip_explicit_ones():
+    """An empty ID is not named after an explicit ``experiment_<i>``."""
+    dataset = hm.make_dataset(
+        [_exp("experiment_1", x=([0.0], [1.0])), _exp("", x=([0.0], [1.0]))],
+        output_channel_names=("x",),
+    )
+    assert [exp.exp_id for exp in dataset.experiments] == ["experiment_1", "experiment_1_2"]
+
+
+def test_experiments_from_dataframe_rejects_missing_ids():
+    """A row with no experiment ID raises instead of vanishing in groupby."""
+    df = pd.DataFrame(
+        {"run": [1, 1, 2, np.nan], "time": [0.0, 1.0, 0.0, 1.0], "x": [1.0, 2.0, 3.0, 4.0]}
+    )
+    with pytest.raises(ValueError, match="missing experiment ID"):
+        hm.experiments_from_dataframe(df, time="time", experiment="run", channels=["x"], y0=[0.0])

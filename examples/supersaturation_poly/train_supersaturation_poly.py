@@ -49,7 +49,7 @@ NOISE_STD = 0.01
 J_BOUNDS = (0.01, 2.0)
 EXPONENTS = (2.0, 3.0, 4.0)
 
-SOLVER = hm.SolverConfig(solver=diffrax.Tsit5(), rtol=1e-7, atol=1e-9, max_steps=4096, dt0=0.05)
+SOLVER = hm.SolverConfig(rtol=1e-7, atol=1e-9, dt0=0.05)
 
 
 def true_rate(s_minus_one):
@@ -70,7 +70,7 @@ def moments(j_rate: Array | float, ts: Array, y0: Array, solver: hm.SolverConfig
 def simulate_fn(predictors, ts, covariates, y0, solver):
     # S is constant within an experiment, so J is evaluated once per solve
     # instead of at every solver step.
-    j_rate = predictors["J"]({"super_sat": covariates["super_sat"]})[0]
+    j_rate = predictors["J"]({"super_sat": covariates["super_sat"]})
     return moments(j_rate, ts, y0, solver)
 
 
@@ -94,7 +94,9 @@ def make_data(key: Array) -> hm.Dataset:
             hm.make_experiment(
                 covariates={"super_sat": s_minus_one},
                 channels={
-                    "mu0": hm.ChannelObs(ts, mu0 + NOISE_STD * jax.random.normal(k, ts.shape))
+                    "mu0": hm.ChannelObs(
+                        ts=ts, values=mu0 + NOISE_STD * jax.random.normal(k, ts.shape)
+                    )
                 },
                 y0=y0,
                 exp_id=f"S_{s_minus_one:g}",
@@ -134,7 +136,7 @@ def main() -> None:
         input_keys=("super_sat",),
         input_bounds=(-0.2, 2.0),
         # A log warp because J spans two decades inside its bounds.
-        out_scaler=hm.BoundScaler(bounds=(J_BOUNDS,), warp="log"),
+        out_scaler=hm.BoundScaler(bounds=J_BOUNDS, warp="log"),
     )
     # endregion predictor
     model = hm.HybridModel(
@@ -150,7 +152,7 @@ def main() -> None:
     predictions = result.model.predict(dataset)
     print("\n[results]")
     hm.print_metrics(
-        hm.compute_metrics(predictions.buckets, dataset),
+        predictions,
         header=f"fit (best loss {min(result.history.loss):.3e})",
     )
 
@@ -165,14 +167,14 @@ def main() -> None:
         return
     args.plot_dir.mkdir(parents=True, exist_ok=True)
     parity_plot(
-        parity_diagnostics(predictions.buckets, dataset),
+        parity_diagnostics(predictions),
         title="Neural polynomial kinetics parity (trained model)",
         save_path=args.plot_dir / "parity.png",
     )
 
     s = np.asarray(SUPERSATURATIONS)
     dense = np.linspace(s[0], s[-1], 200)
-    learned_dense = jax.vmap(lambda v: learned_rate({"super_sat": v})[0])(jnp.asarray(dense))
+    learned_dense = hm.evaluate_predictor(learned_rate, {"super_sat": dense})
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     ax.plot(dense, true_rate(dense), color="black", ls="--", lw=1.4, label="truth")
     ax.plot(dense, learned_dense, color="tab:red", lw=1.4, label="learned J(S)")

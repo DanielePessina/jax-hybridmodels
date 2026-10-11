@@ -57,17 +57,19 @@ channels never share a time grid and the dataset is 76% masked.
 ## Code
 
 The discretised transport operator and the solve. `step_profile` builds the
-inlet concentration from the experiment's covariates:
+inlet concentration from the experiment's covariates, and `solve_tube`
+returns the diffrax `Solution`, from which the library reads `ys`:
 
 <<< @/../examples/tubular_reactor/train_tubular_reactor.py#pde
 
-The hybrid evaluates the network once per cell with `jax.vmap`, and the
-observation map indexes the sensor cells:
+The hybrid evaluates the network once per cell with `hm.evaluate_predictor`,
+which vectorises over the 50 cell concentrations at the run's temperature.
+The observation map indexes the sensor cells:
 
 <<< @/../examples/tubular_reactor/train_tubular_reactor.py#simulate
 
-The two models share sensors and solver, so the first-order model is the
-hybrid with its predictors and simulator swapped:
+The two models share the observation map, channels and solver; only the
+predictors and the simulator differ:
 
 <<< @/../examples/tubular_reactor/train_tubular_reactor.py#models
 

@@ -1,8 +1,8 @@
 # Profiles and schedules
 
-A profile is a physical input that changes during one ODE solve. An
-annealing schedule is a hyperparameter that changes smoothly over a custom
-training loop. Both are pure JAX callables.
+A profile is a physical input that changes during one ODE solve. A
+schedule is a hyperparameter that changes smoothly over training. Both are
+pure JAX callables.
 
 ## Time-varying inputs
 
@@ -49,10 +49,14 @@ profile is built; traced covariates skip the check and stay JIT-safe.
 
 ## Smooth training schedules
 
-The stock trainers change hyperparameters between `TrainingPhase`s. A custom
-loop that wants a continuous curve can use
-[`annealing_schedule`](/api/schedules#annealing_schedule), which lives in the
-`jaxhybridmodels.schedules` submodule:
+`TrainingPhase.lr` takes an optax schedule, `step -> lr`, counted from the
+first step of the phase. Any `optax` schedule works, and several chain into
+one with `optax.join_schedules`; see
+[Learning-rate schedules](/guide/training#learning-rate-schedules).
+
+[`annealing_schedule`](/api/schedules#annealing_schedule), in the
+`jaxhybridmodels.schedules` submodule, returns a multiplier with the run
+length baked in. Scale it into a learning rate:
 
 ```python
 schedule = hm.schedules.annealing_schedule(
@@ -62,17 +66,14 @@ schedule = hm.schedules.annealing_schedule(
     end_value=0.1,
     warmup_epochs=5,
 )
-
-for step in range(n_steps):
-    lr = base_lr * schedule(step)
-    # Build or update the custom loop using this lr.
+phase = hm.TrainingPhase(steps=n_steps, lr=lambda step: base_lr * schedule(step))
 ```
 
-`n_steps` is the loop's step budget and `base_lr` its peak learning rate. The
-schedule returns a multiplier. One step is one pass over all buckets, so
-`total_epochs` is the step budget. `"warmup_cosine"` rises from 0 to
-`init_value` over `warmup_epochs`, then decays to `end_value`; the other
-kinds start at `init_value`.
+`n_steps` is the phase's step budget and `base_lr` its peak learning rate.
+One step is one pass over all buckets, so `total_epochs` is the step budget.
+`"warmup_cosine"` rises from 0 to `init_value` over `warmup_epochs`, then
+decays to `end_value`; the other kinds start at `init_value`. A custom loop
+can call the same multiplier to ramp a penalty weight.
 
 ## Which boundary owns what?
 
@@ -81,4 +82,5 @@ kinds start at `init_value`.
 | Constant per-experiment condition | `Experiment.covariates` | `simulate_fn` |
 | Changing physical quantity | Profile parameters in covariates plus a profile factory | The vector field at time `t` |
 | Piecewise training strategy | `OptaxTrainingConfig(phases=...)` | `fit` or `train_with_optax` |
-| Smooth training strategy | `annealing_schedule` | A custom loop |
+| Smooth learning rate | An optax schedule or `annealing_schedule` as `TrainingPhase.lr` | `fit` or `train_with_optax` |
+| Other smooth hyperparameters | `annealing_schedule` | A custom loop |

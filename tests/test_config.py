@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+from typing import Any
 
 import diffrax
 import equinox as eqx
@@ -438,3 +439,31 @@ def test_rng_fold_is_named_stable_and_pinned():
         np.testing.assert_array_equal(a, b)
     assert len({tuple(np.asarray(k).tolist()) for k in forward}) == len(names)
     assert not jnp.array_equal(fold(jr.PRNGKey(1), "init"), forward[0])
+
+
+def test_configs_reject_stray_positional_arguments():
+    """Only ``TrainingPhase.steps`` may be positional."""
+    assert hm.TrainingPhase(5, lr=1e-3).steps == 5
+    with pytest.raises(TypeError):
+        hm.TrainingPhase(5, 1e-3)  # ty: ignore[too-many-positional-arguments]
+    with pytest.raises(TypeError):
+        hm.OptaxTrainingConfig(5)  # ty: ignore[too-many-positional-arguments]
+    with pytest.raises(TypeError):
+        hm.EvosaxTrainingConfig("CMA_ES")  # ty: ignore[too-many-positional-arguments]
+
+
+def test_objective_names_the_mapping_form_for_old_tuple_points():
+    """The removed tuple form of ``penalty_points`` raises a TypeError saying what to pass."""
+    with pytest.raises(TypeError, match="mapping from predictor path"):
+        Objective(penalty_points=(jnp.zeros((3, 1)),))  # ty: ignore[invalid-argument-type]
+
+
+def test_python_lr_schedule_is_evaluated_on_the_host():
+    """A schedule that branches on the step still gives one lr per step."""
+    from jaxhybridmodels.training.optax import _scheduled_lrs
+
+    def stepwise(step: Any) -> float:
+        return 0.1 if step < 2 else 0.01
+
+    lrs = _scheduled_lrs(hm.TrainingPhase(4, lr=stepwise))
+    np.testing.assert_allclose(np.asarray(lrs), [0.1, 0.1, 0.01, 0.01], rtol=1e-6)

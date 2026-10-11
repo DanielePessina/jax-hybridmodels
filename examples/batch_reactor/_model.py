@@ -26,14 +26,7 @@ from jax import Array
 from jax.typing import ArrayLike
 from jaxtyping import Float
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    ChannelObs,
-    MLPPredictor,
-    SolverConfig,
-    ramp_profile,
-)
+import jaxhybridmodels as hm
 
 T_REF: float = 298.15  # K (25 °C); centring temperature for the Arrhenius form
 R_GAS: float = 8.314e-3  # kJ/(mol·K); pair with Ea in kJ/mol
@@ -54,11 +47,13 @@ RES_LOG10_BOUNDS: tuple[float, float] = (-2.0, 2.0)
 
 INPUT_KEYS: tuple[str, ...] = ("temperature_C", "pH")
 
-# Every fit and prediction in these examples integrates with this solver.
-SOLVER = SolverConfig(solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=10_000, dt0=0.05)
+# Every fit and prediction in these examples integrates with this solver:
+# the default Tsit5 at rtol 1e-5, atol 1e-7, with a larger step budget and a
+# fixed first step.
+SOLVER = hm.SolverConfig(max_steps=10_000, dt0=0.05)
 
 
-def y0_fn(covariates: dict[str, Array], channels: dict[str, ChannelObs]) -> Float[Array, " 2"]:
+def y0_fn(covariates: dict[str, Array], channels: dict[str, hm.ChannelObs]) -> Float[Array, " 2"]:
     """Initial state ``[Ca, Cb] = [Ca0_observed, 0.0]``.
 
     Reads the first ``Ca`` observation rather than the constant ``CA0``, so a
@@ -89,15 +84,12 @@ class ArrheniusKinetics(eqx.Module):
     """
 
     latent: Float[Array, " 2"]
-    out_scaler: BoundScaler
+    out_scaler: hm.BoundScaler
 
     def __init__(self, *, key: Array) -> None:
         # A latent near zero puts both parameters near their box midpoints.
         self.latent = jr.normal(key, (2,)) * 0.1
-        self.out_scaler = BoundScaler(
-            bounds=(LOG_KREF_BOUNDS, EA_BOUNDS),
-            transform="sigmoid",
-        )
+        self.out_scaler = hm.BoundScaler((LOG_KREF_BOUNDS, EA_BOUNDS), transform="sigmoid")
 
     def __call__(self) -> Float[Array, " 2"]:
         """Return ``(log_k_ref, Ea)`` in physical units."""
@@ -113,13 +105,17 @@ def log10_k_trunk(parametric: ArrheniusKinetics, temperature_C: ArrayLike) -> Ar
 
 
 def log10_k(
-    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
+    predictors: tuple[ArrheniusKinetics, hm.BoundedPredictor],
     temperature_C: ArrayLike,
     pH: ArrayLike,
 ) -> Array:
-    """Hybrid rate in decades: ``log10 k_param(T) + delta_log10(T, pH)``."""
+    """Hybrid rate in decades: ``log10 k_param(T) + delta_log10(T, pH)``.
+
+    Scalars inside the vector field; array inputs broadcast, so a plot can
+    pass a whole pH sweep at one temperature.
+    """
     parametric, residual = predictors
-    delta = jnp.squeeze(residual({"temperature_C": temperature_C, "pH": pH}))
+    delta = hm.evaluate_predictor(residual, {"temperature_C": temperature_C, "pH": pH})
     return log10_k_trunk(parametric, temperature_C) + delta
 
 
@@ -128,8 +124,8 @@ def _integrate_ramp(
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
-    solver: SolverConfig,
-) -> Float[Array, "T 2"]:
+    solver: hm.SolverConfig,
+) -> diffrax.Solution:
     """Integrate ``A -> B`` with rate ``10 ** log10_k_at(T(t))`` along the run's ramp.
 
     The covariates carry the four parameters of a flat-ramp-flat heating
@@ -138,7 +134,7 @@ def _integrate_ramp(
     field at the solver's ``t``. The profile is pure JAX, so it
     differentiates and vmaps like the rest of the model.
     """
-    T_profile = ramp_profile(
+    T_profile = hm.ramp_profile(
         t0=covariates["ramp_t0"],
         t1=covariates["ramp_t1"],
         v0=covariates["T_lo"],
@@ -151,17 +147,17 @@ def _integrate_ramp(
         rate = k * jnp.maximum(y[0], 0.0)
         return jnp.stack([-rate, rate])
 
-    term = diffrax.ODETerm(vector_field)
-    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
+    # The framework reads the state off the solution's ``ys``.
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
 
 
 def simulate_fn(
-    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
+    predictors: tuple[ArrheniusKinetics, hm.BoundedPredictor],
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
-    solver: SolverConfig,
-) -> Float[Array, "T 2"]:
+    solver: hm.SolverConfig,
+) -> diffrax.Solution:
     """The hybrid model: trunk plus residual, :func:`log10_k`.
 
     ``T(t)`` changes with ``t``, so the residual is re-evaluated every step.
@@ -171,33 +167,34 @@ def simulate_fn(
 
 
 def simulate_trunk_fn(
-    predictors: tuple[ArrheniusKinetics, BoundedPredictor],
+    predictors: tuple[ArrheniusKinetics, hm.BoundedPredictor],
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
-    solver: SolverConfig,
-) -> Float[Array, "T 2"]:
+    solver: hm.SolverConfig,
+) -> diffrax.Solution:
     """The classical baseline: the Arrhenius trunk alone, pH-blind.
 
     Takes the same predictor tuple as :func:`simulate_fn` and ignores the
-    residual, so one ``trainable`` mask serves both models. A fresh residual
+    residual, so one ``freeze`` choice serves both models. A fresh residual
     is close to zero but not exactly zero; letting it into the rate would add
     a spurious temperature dependence and blur the fitted ``Ea``.
     """
     return _integrate_ramp(lambda T: log10_k_trunk(predictors[0], T), ts, covariates, y0, solver)
 
 
-def build_predictors(*, key: Array) -> tuple[ArrheniusKinetics, BoundedPredictor]:
-    """Build the ``(parametric_trunk, residual_bp)`` predictors tuple."""
+def build_predictors(*, key: Array) -> tuple[ArrheniusKinetics, hm.BoundedPredictor]:
+    """Build the ``(parametric_trunk, residual_bp)`` predictors tuple.
+
+    The residual's scalers come from the bounds with the default sigmoid
+    squash, and its one output comes back as a scalar.
+    """
     k_param, k_residual = jr.split(key, 2)
     parametric = ArrheniusKinetics(key=k_param)
-    residual = BoundedPredictor(
+    residual = hm.BoundedPredictor(
         input_keys=INPUT_KEYS,
-        in_scaler=BoundScaler(
-            bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS),
-            transform="sigmoid",
-        ),
-        inner=MLPPredictor(
+        input_bounds=(TEMPERATURE_BOUNDS, PH_BOUNDS),
+        inner=hm.MLPPredictor(
             in_size=2,
             out_size=1,
             width_size=16,
@@ -205,9 +202,6 @@ def build_predictors(*, key: Array) -> tuple[ArrheniusKinetics, BoundedPredictor
             activation_name="relu",
             key=k_residual,
         ),
-        out_scaler=BoundScaler(
-            bounds=(RES_LOG10_BOUNDS,),
-            transform="sigmoid",
-        ),
+        output_bounds=RES_LOG10_BOUNDS,
     )
     return (parametric, residual)

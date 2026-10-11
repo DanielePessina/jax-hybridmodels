@@ -10,7 +10,7 @@ you expect a power law and want that prior in place of a black-box MLP.
 uv run python examples/supersaturation_poly/train_supersaturation_poly.py
 ```
 
-About a minute on CPU. Prints the buckets, metrics and the learned rate at
+About 10 s on CPU. Prints the buckets, metrics and the learned rate at
 each supersaturation; writes `parity.png` and `recovered_rate.png` to
 `examples/supersaturation_poly/figures/`. `--steps 5 --no-plot` is a quick
 smoke run.
@@ -57,9 +57,12 @@ Seed 0, 400 steps. The `mu0` series fit to the noise floor
 
 ![Learned nucleation rate against the truth](assets/supersaturation-poly/recovered_rate.png)
 
-The learned rate matches the truth at the five training supersaturations
-and wanders between them, because the data says nothing about `J` there.
-More conditions, or fewer free coefficients, would tighten the curve.
+The learned rate matches the truth at high supersaturation (within 0.5% at
+`S - 1` of 1.2 and 1.5) and drifts at low supersaturation: 0.0100 against
+0.0212 at 0.3, and 13 to 19% off at 0.6 and 0.9. There the rate is small,
+so it moves the fitted moment little and the loss barely constrains it.
+More conditions at low supersaturation, or fewer free coefficients, would
+tighten the curve.
 
 ## Things to try
 

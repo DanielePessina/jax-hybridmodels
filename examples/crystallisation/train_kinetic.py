@@ -47,6 +47,7 @@ jax.config.update("jax_enable_x64", True)
 import diffrax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import jax.random as jr  # noqa: E402
+import numpy as np  # noqa: E402
 from jax import Array  # noqa: E402
 from jaxtyping import Float  # noqa: E402
 
@@ -60,9 +61,12 @@ from _shared import (  # noqa: E402
     trajectory_plot,
 )
 
-# Values rounded from the thesis sheet. The single terminal d43 point makes
-# that channel's time axis much sparser than conc's, which is the irregular
-# layout make_dataset buckets.
+# Values rounded from the Unseeded_LowData4 sheet of the thesis workbook in
+# data/. They stay inline rather than read with hm.experiments_from_dataframe
+# because the rounded values are what the docs results were produced with,
+# and the data folder is not shipped with the package. The single terminal
+# d43 point makes that channel's time axis much sparser than conc's, which
+# is the irregular layout make_dataset buckets.
 EXPERIMENTS_DATA: tuple[dict[str, Any], ...] = (
     {
         "exp_id": "LowData4_3",
@@ -122,15 +126,14 @@ INPUT_KEYS = ("temperature_C", "supersaturation")
 
 # Per-state atol matched to each state's natural magnitude (mu0 ~ 1e11 down
 # to mu4 ~ 1e-7, conc ~ 1). A uniform atol over-resolves the small moments,
-# under-resolves the large ones, and runs out of max_steps. dt0=None lets
-# integrate_minutes pick a first step from each experiment's span.
+# under-resolves the large ones, and runs out of max_steps. The default
+# dt0=None lets integrate_minutes pick a first step from each experiment's
+# span; the solver is the default Tsit5.
 # region solver
 SOLVER = hm.SolverConfig(
-    solver=diffrax.Tsit5(),
     rtol=1e-4,
     atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),
     max_steps=500_000,
-    dt0=None,
 )
 # endregion solver
 
@@ -184,18 +187,19 @@ def moment_rhs(y: Float[Array, " 6"], G: Array, J: Array) -> Float[Array, " 6"]:
 
 def integrate_minutes(
     vector_field: Any, ts: Float[Array, " T"], y0: Float[Array, " 6"], solver: hm.SolverConfig
-) -> Float[Array, "T 6"]:
+) -> diffrax.Solution:
     """Solve on a time grid given in minutes, with the rates in per-second units.
 
     ``solver.diffeqsolve`` would integrate in the data's minutes, so this
     calls diffrax directly and still takes the step controller and adjoint
     from the config. With ``dt0=None`` the first step is 1/1000 of the
-    span, at least 1 s.
+    span, at least 1 s. Returns the diffrax ``Solution``; the framework
+    reads the ``[T, 6]`` state from its ``ys``.
     """
     times_sec = ts * 60.0
     span = times_sec[-1] - times_sec[0]
     dt0 = jnp.maximum(span / 1000.0, 1.0) if solver.dt0 is None else solver.dt0
-    sol = diffrax.diffeqsolve(
+    return diffrax.diffeqsolve(
         diffrax.ODETerm(vector_field),
         solver.solver,
         t0=times_sec[0],
@@ -207,7 +211,6 @@ def integrate_minutes(
         max_steps=solver.max_steps,
         adjoint=solver.adjoint,
     )
-    return jnp.asarray(sol.ys)
 
 
 # region simulate-fn
@@ -217,7 +220,7 @@ def simulate_fn(
     covariates: dict[str, Array],
     y0: Float[Array, " 6"],
     solver: hm.SolverConfig,
-) -> Float[Array, "T 6"]:
+) -> diffrax.Solution:
     """Integrate the moment ODE with growth and nucleation rates from the networks."""
     temperature_C = covariates["temperature_C"]
     conc_sat = saturation_conc(temperature_C)
@@ -229,8 +232,8 @@ def simulate_fn(
         # Temperature is a covariate and S comes from the state; the
         # predictors read both as named inputs.
         inputs = {"temperature_C": temperature_C, "supersaturation": S}
-        G = meta_mask * 10.0 ** predictors["growth"](inputs)[0]
-        J = meta_mask * 10.0 ** predictors["nucleation"](inputs)[0]
+        G = meta_mask * 10.0 ** predictors["growth"](inputs)
+        J = meta_mask * 10.0 ** predictors["nucleation"](inputs)
         return moment_rhs(y, G, J)
 
     return integrate_minutes(vector_field, ts, y0, solver)
@@ -240,22 +243,16 @@ def simulate_fn(
 def make_dataset() -> hm.Dataset:
     experiments = []
     for data in EXPERIMENTS_DATA:
-        conc = jnp.asarray(data["conc"], dtype=float)
+        times = np.asarray(data["time_min"], dtype=float)
+        # d43 is NaN, so unobserved, everywhere except its one sample time.
+        d43 = np.where(times == data["d43_time_min"], data["d43"], np.nan)
         experiments.append(
-            hm.make_experiment(
+            hm.experiment_from_array(
+                ts=times,
+                values=np.column_stack([data["conc"], d43]),
+                channel_names=OUTPUT_CHANNELS,
+                variance=(CONC_VAR, data["d43_var"]),
                 covariates={"temperature_C": data["temperature_C"]},
-                channels={
-                    "conc": hm.ChannelObs(
-                        ts=jnp.asarray(data["time_min"], dtype=float),
-                        values=conc,
-                        variance=jnp.full_like(conc, CONC_VAR),
-                    ),
-                    "d43": hm.ChannelObs(
-                        ts=jnp.asarray([data["d43_time_min"]], dtype=float),
-                        values=jnp.asarray([data["d43"]], dtype=float),
-                        variance=jnp.asarray([data["d43_var"]], dtype=float),
-                    ),
-                },
                 y0_fn=y0_fn,
                 exp_id=data["exp_id"],
             )
@@ -361,24 +358,21 @@ def main() -> None:
 
         print(f"\n[results] {label}")
         predictions = result.model.predict(dataset)
-        hm.print_metrics(hm.compute_metrics(predictions.buckets, dataset))
+        hm.print_metrics(predictions)
 
         if args.no_plot:
             continue
         family_dir = args.plot_dir / label
         family_dir.mkdir(parents=True, exist_ok=True)
         parity_plot(
-            parity_diagnostics(predictions.buckets, dataset),
+            parity_diagnostics(predictions),
             title=f"Crystallisation parity ({label})",
             save_path=family_dir / "parity.png",
         )
         trajectory_plot(
-            predictions.buckets,
+            result.model,
             dataset,
-            predictors=result.model.predictors,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=SOLVER,
+            predictions=predictions,
             title=f"Crystallisation trajectories ({label})",
             save_path=family_dir / "trajectories.png",
         )

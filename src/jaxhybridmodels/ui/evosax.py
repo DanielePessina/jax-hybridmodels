@@ -10,7 +10,7 @@ and :meth:`RichEvosaxUI.on_run_end`, rendering:
 * a compile-progress panel, replaced by a generations-completed progress
   bar once a bucket has finished compiling;
 * a table of the most recent ``recent_generations`` generations
-  (``gen | best_fitness | mean_fitness | best-so-far``), throttled by
+  (``gen | best_loss | mean_loss | best-so-far``), throttled by
   ``log_every``;
 * a message-log panel with the most recent ``recent_messages`` lines.
 
@@ -100,7 +100,7 @@ class RichEvosaxUI:
         # off for the life of this instance.
         self._auto_log_every: bool = log_every is None
         self._log_every: int = 1 if log_every is None else int(log_every)
-        # Each row is (gen_idx, best_fitness, mean_fitness, best_so_far).
+        # Each row is (gen_idx, best_loss, mean_loss, best_so_far).
         # The deque maxlen pins visible history without unbounded growth.
         self._generations: deque[tuple[int, float, float, float]] = deque(maxlen=recent_generations)
         self._messages: deque[tuple[str, str]] = deque(maxlen=recent_messages)
@@ -206,10 +206,10 @@ class RichEvosaxUI:
         self._compile_first_done = True
         self._refresh()
 
-    def on_generation_end(self, *, gen_idx: int, best_fitness: float, mean_fitness: float) -> None:
+    def on_generation_end(self, *, gen_idx: int, best_loss: float, mean_loss: float) -> None:
         idx = int(gen_idx)
-        best = float(best_fitness)
-        mean = float(mean_fitness)
+        best = float(best_loss)
+        mean = float(mean_loss)
 
         # Best-so-far is monotone non-increasing. Update it before
         # recording the row, so the table shows the post-update value.
@@ -320,8 +320,8 @@ class RichEvosaxUI:
     def _render_generation_table(self) -> Panel:
         table = Table(show_header=True, expand=True)
         table.add_column("gen", justify="right", no_wrap=True)
-        table.add_column("best_fitness", justify="right", no_wrap=True)
-        table.add_column("mean_fitness", justify="right", no_wrap=True)
+        table.add_column("best_loss", justify="right", no_wrap=True)
+        table.add_column("mean_loss", justify="right", no_wrap=True)
         table.add_column("best-so-far", justify="right", no_wrap=True)
         for gen_idx, best, mean, best_so_far in self._generations:
             table.add_row(

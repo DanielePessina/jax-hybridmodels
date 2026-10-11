@@ -10,11 +10,12 @@ predicting runs it never trained on.
 
 Shows:
 
-- two ``HybridModel`` objects sharing one predictor tuple, built with
-  ``dataclasses.replace`` and differing only in ``simulate_fn``
-- ``trainable`` masks to fit the trunk alone or the residual alone
-- repeated ``fit`` and ``predict`` calls for cross-validation, and
-  ``ExperimentPrediction.observed`` / ``observation_mask`` for scoring
+- two ``HybridModel`` objects sharing one predictor tuple and differing
+  only in ``simulate_fn``
+- ``fit(freeze=...)`` to fit the trunk alone or the residual alone
+- repeated ``fit`` and ``predict`` calls on lists of experiments for
+  cross-validation, and ``ExperimentPrediction.observed`` /
+  ``observation_mask`` for scoring
 
 Run::
 
@@ -30,10 +31,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import replace
 from pathlib import Path
 
-import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
@@ -41,17 +40,7 @@ import numpy as np
 from jax import Array
 from scipy.stats import qmc
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    Dataset,
-    Experiment,
-    HybridModel,
-    PredictionResult,
-    freeze_modules_of_type,
-    make_dataset,
-    trainable_mask,
-)
-from jaxhybridmodels.training import EvosaxTrainingConfig, OptaxTrainingConfig
+import jaxhybridmodels as hm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _data import (  # noqa: E402
@@ -68,6 +57,7 @@ from _model import (  # noqa: E402
     SOLVER,
     ArrheniusKinetics,
     build_predictors,
+    log10_k,
     log10_k_trunk,
     simulate_fn,
     simulate_trunk_fn,
@@ -84,7 +74,7 @@ HELD_OUT_BIN: int = 1  # pH 5.85, the knee, for the leave-one-pH-out test
 BIN_COLORS: tuple[str, ...] = ("C0", "C1", "C3")
 
 
-def _build_runs(noise_key: Array) -> tuple[list[Experiment], list[int]]:
+def _build_runs(noise_key: Array) -> tuple[list[hm.Experiment], list[int]]:
     """Four ramp runs per pH bin, midpoints from a per-bin Latin hypercube in T."""
     experiments, bins = [], []
     for b, pH in enumerate(PH_BINS):
@@ -103,11 +93,7 @@ def _build_runs(noise_key: Array) -> tuple[list[Experiment], list[int]]:
     return experiments, bins
 
 
-def _dataset(experiments: list[Experiment]) -> Dataset:
-    return make_dataset(experiments, output_channel_names=OUTPUT_CHANNELS)
-
-
-def _pairs(result: PredictionResult) -> tuple[np.ndarray, np.ndarray]:
+def _pairs(result: hm.PredictionResult) -> tuple[np.ndarray, np.ndarray]:
     """Observed and predicted ``Ca`` at every measured cell, as flat arrays."""
     obs, pred = [], []
     for exp_pred in result.values():
@@ -124,9 +110,9 @@ def _r2_rmse(obs: np.ndarray, pred: np.ndarray) -> tuple[float, float]:
 
 
 def _k_reveal_plot(
-    baseline: HybridModel,
-    hybrid: HybridModel,
-    experiments: list[Experiment],
+    baseline: hm.HybridModel,
+    hybrid: hm.HybridModel,
+    experiments: list[hm.Experiment],
     bins: list[int],
     path: Path,
 ) -> None:
@@ -150,12 +136,9 @@ def _k_reveal_plot(
         ax.axhline(
             trunk, color=color, lw=1.1, ls="--", label="Arrhenius, pH 5+7" if middle else None
         )
-        inputs = {"temperature_C": jnp.full_like(pH_grid, T_C), "pH": pH_grid}
-        delta = eqx.filter_vmap(hybrid.predictors[1])(inputs)[:, 0]
-        hybrid_curve = float(log10_k_trunk(hybrid.predictors[0], T_C)) + np.asarray(delta)
         ax.plot(
             pH_grid,
-            hybrid_curve,
+            log10_k(hybrid.predictors, T_C, pH_grid),
             color=color,
             lw=1.4,
             ls=":",
@@ -208,8 +191,8 @@ def _parity_plot(panels: list[tuple[str, np.ndarray, np.ndarray]], path: Path) -
 
 
 def _held_out_plot(
-    experiments: list[Experiment],
-    predictions: dict[str, PredictionResult],
+    experiments: list[hm.Experiment],
+    predictions: dict[str, hm.PredictionResult],
     path: Path,
 ) -> None:
     """The held-out pH 5.85 runs against the baseline and the hybrid."""
@@ -265,48 +248,38 @@ def main() -> None:
         print(f"  {exp.exp_id}")
 
     # One predictor tuple, two simulators. The baseline ignores the
-    # residual, so both models share every mask below.
+    # residual, so the same freeze choices serve both models below.
     # region models
-    hybrid = HybridModel(
-        predictors=build_predictors(key=k_init),
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        output_channel_names=OUTPUT_CHANNELS,
-        solver=SOLVER,
+    predictors = build_predictors(key=k_init)
+    hybrid, baseline = (
+        hm.HybridModel(
+            predictors=predictors,
+            simulate_fn=simulate,
+            state_to_output=state_to_output,
+            output_channel_names=OUTPUT_CHANNELS,
+            solver=SOLVER,
+        )
+        for simulate in (simulate_fn, simulate_trunk_fn)
     )
-    baseline = replace(hybrid, simulate_fn=simulate_trunk_fn)
     # endregion models
-    mask_trunk = freeze_modules_of_type(
-        trainable_mask(hybrid.predictors), hybrid.predictors, BoundedPredictor
-    )
-    mask_residual = freeze_modules_of_type(
-        trainable_mask(hybrid.predictors), hybrid.predictors, ArrheniusKinetics
-    )
-    cma_es = EvosaxTrainingConfig(
+    cma_es = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=32,
-        num_generations=args.generations,
+        steps=args.generations,
         init="lhs_box",
         init_box_extent=2.0,
         sigma_init=0.5,
-        loss="mse",
         verbose=False,
     )
-    adamw = OptaxTrainingConfig(steps=args.steps, lr=3e-3, loss="mse", verbose=False)
+    adamw = hm.OptaxTrainingConfig(steps=args.steps, lr=3e-3, verbose=False)
 
-    def fit_baseline(runs: list[Experiment], seed: int) -> HybridModel:
-        return baseline.fit(
-            _dataset(runs), cma_es, key=jr.PRNGKey(seed), trainable=mask_trunk
-        ).model
+    def fit_baseline(runs: list[hm.Experiment], seed: int) -> hm.HybridModel:
+        return baseline.fit(runs, cma_es, key=jr.PRNGKey(seed), freeze=hm.BoundedPredictor).model
 
-    def fit_hybrid(runs: list[Experiment], seed: int) -> HybridModel:
+    def fit_hybrid(runs: list[hm.Experiment], seed: int) -> hm.HybridModel:
         """CMA-ES on the trunk, then AdamW on the residual with the trunk frozen."""
-        data = _dataset(runs)
-        trunk = hybrid.fit(data, cma_es, key=jr.PRNGKey(seed), trainable=mask_trunk).model
-        return trunk.fit(data, adamw, key=jr.PRNGKey(seed + 1), trainable=mask_residual).model
-
-    def predict(model: HybridModel, runs: list[Experiment]) -> PredictionResult:
-        return model.predict(_dataset(runs))
+        trunk = hybrid.fit(runs, cma_es, key=jr.PRNGKey(seed), freeze=hm.BoundedPredictor).model
+        return trunk.fit(runs, adamw, key=jr.PRNGKey(seed + 1), freeze=ArrheniusKinetics).model
 
     print("\n[fit] Arrhenius, one fit per pH bin")
     # The trunk has nowhere to put pH, so each refit absorbs it into the
@@ -324,7 +297,7 @@ def main() -> None:
     for b, runs in enumerate(in_bin):
         for k, held in enumerate(runs):
             model = fit_baseline([e for e in runs if e is not held], seed=100 * b + k)
-            o, p = _pairs(predict(model, [held]))
+            o, p = _pairs(model.predict([held]))
             obs.append(o)
             pred.append(p)
     baseline_loo = (np.concatenate(obs), np.concatenate(pred))
@@ -333,7 +306,7 @@ def main() -> None:
     obs, pred = [], []
     for k, held in enumerate(experiments):
         model = fit_baseline([e for e in experiments if e is not held], seed=500 + k)
-        o, p = _pairs(predict(model, [held]))
+        o, p = _pairs(model.predict([held]))
         obs.append(o)
         pred.append(p)
     baseline_pooled_loo = (np.concatenate(obs), np.concatenate(pred))
@@ -344,24 +317,24 @@ def main() -> None:
     held_runs = in_bin[HELD_OUT_BIN]
     outer = [e for e, b in zip(experiments, bins, strict=True) if b != HELD_OUT_BIN]
     print("  Arrhenius: pH 5.0 fit (nearest bin) predicting pH 5.85")
-    baseline_nearest = _pairs(predict(per_bin[0], held_runs))
+    baseline_nearest = _pairs(per_bin[0].predict(held_runs))
     print("  Arrhenius: one fit on pH 5.0 and 7.0, predicting pH 5.85")
     baseline_joint = fit_baseline(outer, seed=7777)
-    baseline_lopo_pred = predict(baseline_joint, held_runs)
+    baseline_lopo_pred = baseline_joint.predict(held_runs)
     baseline_lopo = _pairs(baseline_lopo_pred)
 
     print("  hybrid: leave one run out over all twelve (24 fits)")
     obs, pred = [], []
     for k, held in enumerate(experiments):
         model = fit_hybrid([e for e in experiments if e is not held], seed=1000 + 2 * k)
-        o, p = _pairs(predict(model, [held]))
+        o, p = _pairs(model.predict([held]))
         obs.append(o)
         pred.append(p)
     hybrid_loo = (np.concatenate(obs), np.concatenate(pred))
 
     print("  hybrid: trained on pH 5.0 and 7.0, predicting pH 5.85")
     hybrid_lopo_model = fit_hybrid(outer, seed=8888)
-    hybrid_lopo_pred = predict(hybrid_lopo_model, held_runs)
+    hybrid_lopo_pred = hybrid_lopo_model.predict(held_runs)
     hybrid_lopo = _pairs(hybrid_lopo_pred)
 
     tests = [

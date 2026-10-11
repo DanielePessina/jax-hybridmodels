@@ -32,7 +32,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float
 
-from jaxhybridmodels import ChannelObs, Dataset, Experiment, make_dataset, make_experiment
+from jaxhybridmodels import ChannelObs, Experiment, make_experiment
 
 OMEGA_TRUE: float = 1.0  # rotation frequency, known to the model
 COUPLING: Float[Array, "2 2"] = jnp.array([[0.0, 0.6], [-0.6, 0.0]])  # learnt, not given
@@ -93,7 +93,7 @@ def _experiment(
     exp_id: str,
 ) -> Experiment:
     channels = {
-        name: ChannelObs(ts=ts, values=values, variance=jnp.full(ts.shape, noise_std**2))
+        name: ChannelObs(ts=ts, values=values, variance=noise_std**2)
         for name, ts, values in zip(CHANNELS, ts_per_channel, values_per_channel, strict=True)
     }
     return make_experiment(
@@ -190,11 +190,3 @@ def irregular_experiments(
             )
         )
     return experiments
-
-
-def build_dataset(experiments: list[Experiment]) -> Dataset:
-    """Bucket a list of experiments with this example's channels."""
-    return make_dataset(
-        experiments,
-        output_channel_names=CHANNELS,
-    )

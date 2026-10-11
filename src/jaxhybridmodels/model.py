@@ -69,11 +69,56 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
 
     Pass it straight to ``compute_metrics`` or ``print_metrics``.
     ``buckets`` keeps the raw ``[N, T, D]`` arrays from ``predict_dataset``
-    for custom JAX analysis.
+    for custom JAX analysis. :meth:`from_buckets` builds one from bucket
+    arrays made by the functional layer (``predict_dataset``,
+    ``ensemble_predictions``), so those can be scored too.
     """
 
     experiments: dict[str, ExperimentPrediction]
     buckets: tuple[Array, ...] = ()
+
+    @classmethod
+    def from_buckets(cls, buckets: Sequence[Array], dataset: Dataset) -> PredictionResult:
+        """Key per-bucket ``[N, T, D]`` predictions by experiment ID.
+
+        ``dataset`` must be the one the predictions were made on, built by
+        ``make_dataset`` so it keeps its source experiments::
+
+            mean = hm.ensemble_predictions(members, dataset, ...)
+            hm.print_metrics(hm.PredictionResult.from_buckets(mean, dataset))
+        """
+        if not dataset.experiments:
+            raise ValueError(
+                "PredictionResult.from_buckets: the dataset holds no source experiments; "
+                "build it with make_dataset"
+            )
+        buckets = tuple(buckets)
+        if len(buckets) != len(dataset.bucket_payloads):
+            raise ValueError(
+                f"PredictionResult.from_buckets: got {len(buckets)} bucket arrays for a "
+                f"dataset with {len(dataset.bucket_payloads)} buckets"
+            )
+        # make_dataset groups experiments by union-grid length, keeping input
+        # order inside each group. Walking the experiments in input order and
+        # counting rows per length recovers each one's bucket row.
+        bucket_of_length = {bp.ts.shape[1]: i for i, bp in enumerate(dataset.bucket_payloads)}
+        next_row: dict[int, int] = {}
+        names = dataset.output_channel_names
+        experiments: dict[str, ExperimentPrediction] = {}
+        for exp in dataset.experiments:
+            arrays = _per_experiment_arrays(exp, names)
+            length = arrays.ts.shape[0]
+            row = next_row.get(length, 0)
+            next_row[length] = row + 1
+            values = buckets[bucket_of_length[length]][row]
+            observed = jnp.where(arrays.mask, arrays.y_observed, jnp.nan)
+            experiments[exp.exp_id] = ExperimentPrediction(
+                times=arrays.ts,
+                outputs=dict(zip(names, values.T, strict=True)),
+                observed=dict(zip(names, observed.T, strict=True)),
+                observation_mask=dict(zip(names, arrays.mask.T, strict=True)),
+            )
+        return cls(experiments, buckets)
 
     def __getitem__(self, exp_id: str) -> ExperimentPrediction:
         return self.experiments[exp_id]
@@ -441,27 +486,7 @@ class HybridModel(eqx.Module):
                     f"predict: bucket predictions have shape {values.shape}; expected "
                     f"[N, T, D] = {bp.y_observed.shape}"
                 )
-        # make_dataset groups experiments by union-grid length, keeping input
-        # order inside each group. Walking the experiments in input order and
-        # counting rows per length recovers each one's bucket row.
-        bucket_of_length = {bp.ts.shape[1]: i for i, bp in enumerate(dataset.bucket_payloads)}
-        next_row: dict[int, int] = {}
-        names = self.output_channel_names
-        experiments: dict[str, ExperimentPrediction] = {}
-        for exp in dataset.experiments:
-            arrays = _per_experiment_arrays(exp, names)
-            length = arrays.ts.shape[0]
-            row = next_row.get(length, 0)
-            next_row[length] = row + 1
-            values = buckets[bucket_of_length[length]][row]
-            observed = jnp.where(arrays.mask, arrays.y_observed, jnp.nan)
-            experiments[exp.exp_id] = ExperimentPrediction(
-                times=arrays.ts,
-                outputs=dict(zip(names, values.T, strict=True)),
-                observed=dict(zip(names, observed.T, strict=True)),
-                observation_mask=dict(zip(names, arrays.mask.T, strict=True)),
-            )
-        return PredictionResult(experiments, buckets)
+        return PredictionResult.from_buckets(buckets, dataset)
 
     def simulate(
         self,
@@ -476,6 +501,9 @@ class HybridModel(eqx.Module):
 
         With ``experiment``, its ``y0``, ``t0`` and covariates are used, and
         ``ts`` defaults to its measured times (``t0`` included when set).
+        ``y0`` is placed at the experiment's ``t0``, or at its first
+        observation time when ``t0`` is unset, whatever ``ts`` is passed; a
+        ``ts`` starting before that time is rejected.
         Otherwise pass ``ts`` and ``y0``, and optionally ``covariates`` and
         ``t0``.
 
@@ -489,9 +517,13 @@ class HybridModel(eqx.Module):
                 raise ValueError(
                     "simulate: experiment= supplies y0, covariates and t0; do not pass them too"
                 )
+            measured = _per_experiment_arrays(experiment, tuple(experiment.channels)).ts
             if ts is None:
-                ts = _per_experiment_arrays(experiment, tuple(experiment.channels)).ts
-            y0, covariates, t0 = experiment.y0, experiment.covariates, experiment.t0
+                ts = measured
+            # y0 belongs to the experiment's own start: t0 when set, else its
+            # first observation time. Pin it so a caller's ts cannot move it.
+            start_time = experiment.t0 if experiment.t0 is not None else float(measured[0])
+            y0, covariates, t0 = experiment.y0, experiment.covariates, start_time
         if ts is None or y0 is None:
             raise ValueError("simulate: pass experiment=, or both ts= and y0=")
 

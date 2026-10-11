@@ -762,10 +762,14 @@ class BoundedPredictor(Predictor):
     def __call__(self, inputs: Mapping[str, ArrayLike] | ArrayLike) -> Array:
         n = len(self.input_keys)
         if isinstance(inputs, Mapping):
-            # A missing key raises KeyError from the dict access itself.
-            # eqx.error_if does not fit here: it needs an array to attach the
-            # check to, and the failure happens before any array exists.
             named = cast(Mapping[str, ArrayLike], inputs)  # ty narrows to bare Mapping
+            # Key membership is static Python, so this runs at trace time.
+            missing = [k for k in self.input_keys if k not in named]
+            if missing:
+                raise KeyError(
+                    f"BoundedPredictor needs inputs {list(self.input_keys)}; "
+                    f"missing {missing}, got {sorted(named)}"
+                )
             x = jnp.stack([jnp.asarray(named[k]) for k in self.input_keys])
         else:
             x = jnp.asarray(inputs)

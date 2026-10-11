@@ -12,8 +12,8 @@ Shows:
 - a ``BoundedPredictor`` split at ``out_scaler``: the policy samples in the
   latent space, so the action bound needs no ``tanh`` squash or clip
 - ``BoundScaler.saturation`` as a reward term
-- ``predict_dataset`` and ``compute_metrics`` on predictors trained outside
-  the library's trainers, against two ``train_with_optax`` baselines
+- ``predict`` and ``compute_metrics`` on a policy trained outside the
+  library's trainers, against two baselines fitted with ``HybridModel.fit``
 
 Run::
 
@@ -49,22 +49,7 @@ from jax import Array
 from jax.typing import ArrayLike
 from jaxtyping import Float
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    ChannelObs,
-    Experiment,
-    MLPPredictor,
-    SolverConfig,
-    compute_metrics,
-    load_predictors,
-    make_dataset,
-    make_experiment,
-    predict_dataset,
-    print_metrics,
-    trainable_mask,
-)
-from jaxhybridmodels.training import OptaxTrainingConfig, train_with_optax
+import jaxhybridmodels as hm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -121,11 +106,11 @@ OBS_KEYS: tuple[str, ...] = ("Ca", "temperature_C", "pH")
 # and a sigmoid only approaches its edge asymptotically. Under a hard ceiling
 # the policy would have to saturate to represent t=0 and the saturation
 # reward term would fight the fit.
-ACTIVITY_BOUNDS: tuple[tuple[float, float], ...] = ((0.0, 1.05),)
+ACTIVITY_BOUNDS: tuple[float, float] = (0.0, 1.05)
 
 # Deactivation-rate bound for the exponential baseline. Log-warped because a
 # decay constant is a rate: the interesting range spans decades.
-KD_BOUNDS: tuple[tuple[float, float], ...] = ((1e-3, 3.0),)
+KD_BOUNDS: tuple[float, float] = (1e-3, 3.0)
 
 # Policy and critic architecture. tanh rather than relu on the inner MLP: a
 # piecewise-linear activity curve reads badly against a smooth truth.
@@ -185,7 +170,7 @@ def _activity_interval_mean(t0: ArrayLike, t1: ArrayLike, pH: ArrayLike, n: int 
 
 def _make_aged_experiment(
     *, temperature_C: float, pH: float, noise_key: Array, exp_id: str
-) -> Experiment:
+) -> hm.Experiment:
     """One aged run at fixed ``(T, pH)``, integrated with the decaying activity.
 
     ``dCa/dt = -a_true(t, pH) * k_true(T, pH) * Ca`` has no tidy
@@ -215,8 +200,8 @@ def _make_aged_experiment(
     # Same noise model as the fresh runs.
     sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
     noisy = jnp.clip(clean + sigma * jr.normal(noise_key, clean.shape), 0.0, None)
-    channels = {"Ca": ChannelObs(ts=ts, values=noisy, variance=sigma**2)}
-    return make_experiment(
+    channels = {"Ca": hm.ChannelObs(ts=ts, values=noisy, variance=sigma**2)}
+    return hm.make_experiment(
         covariates={"temperature_C": float(temperature_C), "pH": float(pH)},
         channels=channels,
         y0_fn=y0_fn,
@@ -226,7 +211,7 @@ def _make_aged_experiment(
 
 def _build_aged_datasets(
     *, doe_seed: int, noise_key: Array
-) -> tuple[list[Experiment], list[Experiment]]:
+) -> tuple[list[hm.Experiment], list[hm.Experiment]]:
     """The 9 LHS aged runs plus the 2 off-grid aged validation runs.
 
     The noise keys are folded from a different root than ``train_hybrid.py``
@@ -255,7 +240,7 @@ def _build_aged_datasets(
     return train, val
 
 
-def load_trunk(path: Path, *, key: Array) -> tuple[Any, BoundedPredictor]:
+def load_trunk(path: Path, *, key: Array) -> tuple[Any, hm.BoundedPredictor]:
     """Restore the ``(ArrheniusKinetics, BoundedPredictor)`` tuple from ``path``.
 
     ``load_predictors`` needs a template whose per-leaf static configuration
@@ -269,21 +254,24 @@ def load_trunk(path: Path, *, key: Array) -> tuple[Any, BoundedPredictor]:
             f"  uv run python examples/batch_reactor/train_hybrid.py --no-plot "
             f"--save-predictors {path}"
         )
-    return load_predictors(path, build_predictors(key=key))
+    return hm.load_predictors(path, build_predictors(key=key))
 
 
-def trunk_rate(trunk: tuple[Any, BoundedPredictor], temperature_C: Array, pH: Array) -> Array:
+def trunk_rate(
+    trunk: tuple[Any, hm.BoundedPredictor], temperature_C: ArrayLike, pH: ArrayLike
+) -> Array:
     """Fresh-catalyst rate constant predicted by the frozen hybrid trunk.
 
     ``log10 k = log10 k_param(T) + delta_log10(T, pH)``, the decomposition
     ``train_hybrid.py`` fitted. A function of the covariates only, so every
     caller evaluates it once per experiment and hoists it above the rollout.
+    Array inputs broadcast, one rate per element.
     """
     return jnp.power(10.0, log10_k(trunk, temperature_C, pH))
 
 
 def _integrate_interval(
-    k_eff: Array, t0: Array, t1: Array, y: Float[Array, " 2"], solver: SolverConfig
+    k_eff: Array, t0: Array, t1: Array, y: Float[Array, " 2"], solver: hm.SolverConfig
 ) -> Float[Array, " 2"]:
     """Integrate one interval at a fixed effective rate, returning the end state.
 
@@ -308,7 +296,7 @@ def zoh_states(
     ts: Float[Array, " T"],
     k_fresh: Array,
     y0: Float[Array, " 2"],
-    solver: SolverConfig,
+    solver: hm.SolverConfig,
 ) -> Float[Array, "T 2"]:
     """Roll the reactor forward holding activity constant across each interval.
 
@@ -340,18 +328,18 @@ class ExponentialDecay(eqx.Module):
     """
 
     latent: Float[Array, " 1"]
-    out_scaler: BoundScaler
+    out_scaler: hm.BoundScaler
 
     def __init__(self, *, key: Array) -> None:
         self.latent = jr.normal(key, (1,)) * 0.1
-        self.out_scaler = BoundScaler(bounds=KD_BOUNDS, transform="sigmoid", warp="log10")
+        self.out_scaler = hm.BoundScaler(KD_BOUNDS, transform="sigmoid", warp="log10")
 
     def rate(self) -> Array:
         """Return ``k_d`` in physical units."""
         return self.out_scaler.from_latent(self.latent)[0]
 
 
-def build_policy(*, key: Array) -> BoundedPredictor:
+def build_policy(*, key: Array) -> hm.BoundedPredictor:
     """The activity policy: ``(Ca, T, pH) -> a`` in ``ACTIVITY_BOUNDS``.
 
     An ordinary ``BoundedPredictor``. PPO trains it by splitting it at
@@ -364,10 +352,10 @@ def build_policy(*, key: Array) -> BoundedPredictor:
     batch and a cool neutral one.
     """
     # region policy
-    return BoundedPredictor(
+    return hm.BoundedPredictor(
         input_keys=OBS_KEYS,
-        in_scaler=BoundScaler(bounds=OBS_BOUNDS, transform="sigmoid"),
-        inner=MLPPredictor(
+        input_bounds=OBS_BOUNDS,
+        inner=hm.MLPPredictor(
             in_size=len(OBS_KEYS),
             out_size=1,
             width_size=POLICY_WIDTH,
@@ -375,12 +363,12 @@ def build_policy(*, key: Array) -> BoundedPredictor:
             activation_name="tanh",
             key=key,
         ),
-        out_scaler=BoundScaler(bounds=ACTIVITY_BOUNDS, transform="sigmoid"),
+        output_bounds=ACTIVITY_BOUNDS,
         # endregion policy
     )
 
 
-def make_simulate_fn(trunk: tuple[Any, BoundedPredictor], *, kind: str) -> Any:
+def make_simulate_fn(trunk: tuple[Any, hm.BoundedPredictor], *, kind: str) -> Any:
     """Build a framework-shaped ``simulate_fn`` for one of the activity models.
 
     ``kind`` selects how activity is produced:
@@ -403,7 +391,7 @@ def make_simulate_fn(trunk: tuple[Any, BoundedPredictor], *, kind: str) -> Any:
         ts: Float[Array, " T"],
         covariates: dict[str, Array],
         y0: Float[Array, " 2"],
-        solver: SolverConfig,
+        solver: hm.SolverConfig,
     ) -> Float[Array, "T 2"]:
         T_C = covariates["temperature_C"]
         pH = covariates["pH"]
@@ -422,7 +410,7 @@ def make_simulate_fn(trunk: tuple[Any, BoundedPredictor], *, kind: str) -> Any:
         elif kind == "policy":
 
             def activity_fn(t: Array, ca: Array) -> Array:
-                return predictors({"Ca": ca, "temperature_C": T_C, "pH": pH})[0]
+                return predictors({"Ca": ca, "temperature_C": T_C, "pH": pH})
 
         else:
             raise ValueError(f"Unknown activity kind {kind!r}.")
@@ -430,6 +418,25 @@ def make_simulate_fn(trunk: tuple[Any, BoundedPredictor], *, kind: str) -> Any:
         return zoh_states(activity_fn, ts, k_fresh, y0, solver)
 
     return simulate_fn
+
+
+def make_model(
+    trunk: tuple[Any, hm.BoundedPredictor], predictors: Any, *, kind: str
+) -> hm.HybridModel:
+    """A ``HybridModel`` over the aged runs for one activity ``kind``.
+
+    ``predictors`` is the activity model alone (``None`` for ``"frozen"``);
+    the trunk stays inside ``simulate_fn``. Wrapping a policy trained by PPO
+    this way gives it the same ``predict`` and ``compute_metrics`` path as
+    the baselines.
+    """
+    return hm.HybridModel(
+        predictors=predictors,
+        simulate_fn=make_simulate_fn(trunk, kind=kind),
+        state_to_output=state_to_output,
+        output_channel_names=OUTPUT_CHANNELS,
+        solver=SOLVER,
+    )
 
 
 class EpisodeData(NamedTuple):
@@ -462,9 +469,9 @@ class Rollout(NamedTuple):
 class Agent(NamedTuple):
     """The trainable trio. A plain pytree, so ``eqx.partition`` walks it."""
 
-    policy: BoundedPredictor
+    policy: hm.BoundedPredictor
     log_std: Float[Array, " 1"]
-    critic: MLPPredictor
+    critic: hm.MLPPredictor
 
 
 def build_agent(*, key: Array) -> Agent:
@@ -473,7 +480,7 @@ def build_agent(*, key: Array) -> Agent:
     return Agent(
         policy=build_policy(key=k_policy),
         log_std=jnp.full((1,), INIT_LOG_STD),
-        critic=MLPPredictor(
+        critic=hm.MLPPredictor(
             in_size=len(OBS_KEYS),
             out_size=1,
             width_size=POLICY_WIDTH,
@@ -517,7 +524,7 @@ def _rollout_episode(
     episode: EpisodeData,
     key: Array,
     *,
-    solver: SolverConfig,
+    solver: hm.SolverConfig,
     penalty_weight: float,
     deterministic: bool,
 ) -> Rollout:
@@ -581,7 +588,7 @@ def rollout_batch(
     episodes: EpisodeData,
     key: Array,
     *,
-    solver: SolverConfig,
+    solver: hm.SolverConfig,
     penalty_weight: float,
     n_samples: int,
     deterministic: bool = False,
@@ -699,7 +706,7 @@ def train_ppo(
     agent: Agent,
     episodes: EpisodeData,
     *,
-    solver: SolverConfig,
+    solver: hm.SolverConfig,
     n_updates: int,
     n_samples: int,
     lr: float,
@@ -723,7 +730,7 @@ def train_ppo(
     """
     # The default mask trains everything except the scalers' arrays, which
     # are configuration rather than parameters.
-    trainable = trainable_mask(agent)
+    trainable = hm.trainable_mask(agent)
     optimiser = optax.chain(
         optax.clip_by_global_norm(MAX_GRAD_NORM),
         optax.adamw(lr),
@@ -825,7 +832,7 @@ def train_ppo(
 
 
 def episodes_from_experiments(
-    experiments: list[Experiment], trunk: tuple[Any, BoundedPredictor]
+    experiments: list[hm.Experiment], trunk: tuple[Any, hm.BoundedPredictor]
 ) -> EpisodeData:
     """Stack experiments into a vmappable :class:`EpisodeData`.
 
@@ -837,20 +844,19 @@ def episodes_from_experiments(
     variance = jnp.stack([jnp.asarray(exp.channels["Ca"].variance) for exp in experiments])
     temperature_C = jnp.array([float(exp.covariates["temperature_C"]) for exp in experiments])
     pH = jnp.array([float(exp.covariates["pH"]) for exp in experiments])
-    k_fresh = jax.vmap(lambda t, p: trunk_rate(trunk, t, p))(temperature_C, pH)
-    y0 = jnp.stack([ca_obs[:, 0], jnp.zeros_like(ca_obs[:, 0])], axis=-1)
     return EpisodeData(
         ts=ts,
         ca_obs=ca_obs,
         variance=variance,
-        k_fresh=k_fresh,
+        k_fresh=trunk_rate(trunk, temperature_C, pH),
         temperature_C=temperature_C,
         pH=pH,
-        y0=y0,
+        # The y0 make_experiment computed with y0_fn: [Ca_observed[0], 0].
+        y0=jnp.stack([exp.y0 for exp in experiments]),
     )
 
 
-def reference_returns(episodes: EpisodeData, solver: SolverConfig) -> tuple[float, float]:
+def reference_returns(episodes: EpisodeData, solver: hm.SolverConfig) -> tuple[float, float]:
     """Score the hidden truth and the frozen model against this noisy data.
 
     Returns ``(truth, static)``. ``truth`` integrates the true rate
@@ -899,11 +905,11 @@ def reference_returns(episodes: EpisodeData, solver: SolverConfig) -> tuple[floa
 def _activity_recovery_plot(
     agent: Agent,
     episodes: EpisodeData,
-    experiments: list[Experiment],
+    experiments: list[hm.Experiment],
     exponential: ExponentialDecay,
-    gradient_policy: BoundedPredictor,
+    gradient_policy: hm.BoundedPredictor,
     *,
-    solver: SolverConfig,
+    solver: hm.SolverConfig,
     save_path: Path,
 ) -> None:
     """Recovered activity against the truth, one panel per experiment."""
@@ -951,14 +957,14 @@ def _activity_recovery_plot(
         grad_states = zoh_states(
             lambda t, ca, _ep=episode: gradient_policy(
                 {"Ca": ca, "temperature_C": _ep.temperature_C, "pH": _ep.pH}
-            )[0],
+            ),
             episode.ts,
             episode.k_fresh,
             episode.y0,
             solver,
         )
         grad_activity = [
-            float(gradient_policy({"Ca": grad_states[i, 0], "temperature_C": T_C, "pH": pH})[0])
+            float(gradient_policy({"Ca": grad_states[i, 0], "temperature_C": T_C, "pH": pH}))
             for i in range(HORIZON)
         ]
         ax.step(
@@ -995,7 +1001,7 @@ def _activity_recovery_plot(
 
 
 def _trajectory_plot(
-    experiments: list[Experiment],
+    experiments: list[hm.Experiment],
     predictions: dict[str, list[np.ndarray]],
     *,
     save_path: Path,
@@ -1117,14 +1123,9 @@ def main() -> None:
     train_experiments, val_experiments = _build_aged_datasets(
         doe_seed=args.doe_seed, noise_key=k_noise
     )
-    train_dataset = make_dataset(
-        train_experiments,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    val_dataset = make_dataset(
-        val_experiments,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
+    # Bucketed once here; every fit and predict below reuses them.
+    train_dataset = hm.make_dataset(train_experiments, output_channel_names=OUTPUT_CHANNELS)
+    val_dataset = hm.make_dataset(val_experiments, output_channel_names=OUTPUT_CHANNELS)
     print(f"  {len(train_experiments)} aged training runs, {len(val_experiments)} validation")
     print(f"  buckets: {[bp.ts.shape for bp in train_dataset.bucket_payloads]}")
 
@@ -1167,35 +1168,23 @@ def main() -> None:
         "deactivation must matter, or there is nothing for the policy to learn"
     )
 
-    print("\n[fit] baseline: trunk + fitted exponential decay scalar (optax)")
-    exponential = ExponentialDecay(key=k_exp)
-    history_exp, exponential = train_with_optax(
-        exponential,
-        train_dataset,
-        OptaxTrainingConfig(
-            steps=args.baseline_steps, lr=args.baseline_lr, loss="mse", verbose=False
-        ),
-        simulate_fn=make_simulate_fn(trunk, kind="exponential"),
-        state_to_output=state_to_output,
-        solver=solver,
-        key=k_exp,
+    baseline_config = hm.OptaxTrainingConfig(
+        steps=args.baseline_steps, lr=args.baseline_lr, verbose=False
     )
-    print(f"  final loss {history_exp[-1]:.6f}, fitted k_d {float(exponential.rate()):.4f}")
+
+    print("\n[fit] baseline: trunk + fitted exponential decay scalar (optax)")
+    model = make_model(trunk, ExponentialDecay(key=k_exp), kind="exponential")
+    fit_exp = model.fit(train_dataset, baseline_config, key=k_exp)
+    exponential = fit_exp.model.predictors
+    print(
+        f"  final loss {fit_exp.history.loss[-1]:.6f}, fitted k_d {float(exponential.rate()):.4f}"
+    )
 
     print("\n[fit] baseline: trunk + the activity policy, optax through the solve")
-    gradient_policy = build_policy(key=k_grad)
-    history_grad, gradient_policy = train_with_optax(
-        gradient_policy,
-        train_dataset,
-        OptaxTrainingConfig(
-            steps=args.baseline_steps, lr=args.baseline_lr, loss="mse", verbose=False
-        ),
-        simulate_fn=make_simulate_fn(trunk, kind="policy"),
-        state_to_output=state_to_output,
-        solver=solver,
-        key=k_grad,
-    )
-    print(f"  final loss {history_grad[-1]:.6f}")
+    model = make_model(trunk, build_policy(key=k_grad), kind="policy")
+    fit_grad = model.fit(train_dataset, baseline_config, key=k_grad)
+    gradient_policy = fit_grad.model.predictors
+    print(f"  final loss {fit_grad.history.loss[-1]:.6f}")
 
     print("\n[fit] PPO: the same policy, trained without differentiating the solve")
     agent = build_agent(key=k_agent)
@@ -1229,30 +1218,14 @@ def main() -> None:
     val_predictions: dict[str, list[np.ndarray]] = {}
     train_predictions: dict[str, list[np.ndarray]] = {}
     for name, (predictors, kind) in models.items():
-        simulate = make_simulate_fn(trunk, kind=kind)
-        val_pred = predict_dataset(
-            predictors,
-            val_dataset,
-            simulate_fn=simulate,
-            state_to_output=state_to_output,
-            solver=solver,
-        )
-        train_pred = predict_dataset(
-            predictors,
-            train_dataset,
-            simulate_fn=simulate,
-            state_to_output=state_to_output,
-            solver=solver,
-        )
-        diag_val = compute_metrics(val_pred, val_dataset)["Ca"]
-        diag_train = compute_metrics(train_pred, train_dataset)["Ca"]
+        model = make_model(trunk, predictors, kind=kind)
+        val_pred = model.predict(val_dataset)
+        train_pred = model.predict(train_dataset)
+        diag_val = hm.compute_metrics(val_pred)["Ca"]
+        diag_train = hm.compute_metrics(train_pred)["Ca"]
         table.append((name, float(diag_train.r2), float(diag_val.r2), float(diag_val.rmse)))
-        val_predictions[name] = [
-            np.asarray(val_pred[0][i, :, 0]) for i in range(len(val_experiments))
-        ]
-        train_predictions[name] = [
-            np.asarray(train_pred[0][i, :, 0]) for i in range(len(train_experiments))
-        ]
+        val_predictions[name] = [np.asarray(p.outputs["Ca"]) for p in val_pred.values()]
+        train_predictions[name] = [np.asarray(p.outputs["Ca"]) for p in train_pred.values()]
 
     print(f"  {'model':<16}{'train R2':>10}{'val R2':>10}{'val RMSE':>11}{'gap':>9}")
     for name, r2_train, r2_val, rmse_val in table:
@@ -1274,8 +1247,8 @@ def main() -> None:
         truth = float(_activity_true(T_MAX, pH))
         ca_end_ppo = float(val_predictions["PPO val-sel"][val_experiments.index(exp)][-1])
         ca_end_grad = float(val_predictions["optax policy"][val_experiments.index(exp)][-1])
-        ppo_a = float(val_agent.policy({"Ca": ca_end_ppo, "temperature_C": T_C, "pH": pH})[0])
-        grad_a = float(gradient_policy({"Ca": ca_end_grad, "temperature_C": T_C, "pH": pH})[0])
+        ppo_a = float(val_agent.policy({"Ca": ca_end_ppo, "temperature_C": T_C, "pH": pH}))
+        grad_a = float(gradient_policy({"Ca": ca_end_grad, "temperature_C": T_C, "pH": pH}))
         exp_a = float(jnp.exp(-exponential.rate() * T_MAX))
         print(f"  {T_C:>7.1f}{pH:>6.2f}{truth:>9.4f}{ppo_a:>9.4f}{grad_a:>9.4f}{exp_a:>9.4f}")
 
@@ -1363,17 +1336,10 @@ def main() -> None:
         fig.tight_layout()
         fig.savefig(args.plot_dir / "05_latent_saturation.png", dpi=150)
         plt.close(fig)
-        val_policy_pred = predict_dataset(
-            val_agent.policy,
-            val_dataset,
-            simulate_fn=make_simulate_fn(trunk, kind="policy"),
-            state_to_output=state_to_output,
-            solver=solver,
-        )
-        diag = compute_metrics(val_policy_pred, val_dataset)
-        print_metrics(diag)
+        val_policy_pred = make_model(trunk, val_agent.policy, kind="policy").predict(val_dataset)
+        hm.print_metrics(val_policy_pred)
         parity_plot(
-            parity_diagnostics(val_policy_pred, val_dataset),
+            parity_diagnostics(val_policy_pred),
             title="PPO policy parity (aged validation)",
             save_path=args.plot_dir / "06_parity_ppo.png",
         )

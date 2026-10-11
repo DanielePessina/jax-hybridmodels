@@ -74,7 +74,7 @@ sbml.replace_flux(
 def simulate_fn(predictors, ts, covariates, y0, solver):
     dose = covariates["dose"]
     # The dose is constant per experiment, so Vmax is evaluated once per solve.
-    vmax = predictors["Vmax"]({"dose": dose})[0]
+    vmax = predictors["Vmax"]({"dose": dose})
     params = {**sbml.params, "EGF": dose, "Vmax": vmax}
     return sbml.integrate(solver, ts, y0, params)
 
@@ -97,11 +97,11 @@ def make_data(key: Array) -> hm.Dataset:
         scale = NOISE_STD * jnp.max(jnp.abs(clean), axis=0)
         observed = clean + scale * jax.random.normal(k, clean.shape)
         experiments.append(
-            hm.make_experiment(
+            hm.experiment_from_array(
+                ts=ts,
+                values=observed,
+                channel_names=CHANNELS,
                 covariates={"dose": dose},
-                channels={
-                    name: hm.ChannelObs(ts, observed[:, i]) for i, name in enumerate(CHANNELS)
-                },
                 y0=sbml.y0,
                 exp_id=f"dose_{dose:g}",
             )
@@ -141,16 +141,17 @@ def main() -> None:
         output_channel_names=CHANNELS,
         solver=SOLVER,
     )
+    config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2)
     # A small bound penalty keeps the output squash away from saturation.
-    config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2, penalty_weight=1e-2)
+    objective = hm.Objective(penalty_weight=1e-2)
     # endregion model
     print("\n[fit]")
-    result = model.fit(dataset, config, key=k_train)
+    result = model.fit(dataset, config, objective=objective, key=k_train)
 
     predictions = result.model.predict(dataset)
     print("\n[results]")
     hm.print_metrics(
-        hm.compute_metrics(predictions.buckets, dataset),
+        predictions,
         header=f"fit (best loss {min(result.history.loss):.3e})",
     )
 
@@ -164,14 +165,14 @@ def main() -> None:
         return
     args.plot_dir.mkdir(parents=True, exist_ok=True)
     parity_plot(
-        parity_diagnostics(predictions.buckets, dataset),
+        parity_diagnostics(predictions),
         title="SBML hybrid parity (trained model)",
         save_path=args.plot_dir / "parity.png",
     )
 
     doses = np.asarray(DOSES)
     dense = np.linspace(doses[0], doses[-1], 200)
-    learned_dense = jax.vmap(lambda d: learned_vmax({"dose": d})[0])(jnp.asarray(dense))
+    learned_dense = hm.evaluate_predictor(learned_vmax, {"dose": dense})
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     ax.plot(dense, 2.0 * dense, color="black", ls="--", lw=1.4, label="truth 2·dose")
     ax.plot(dense, learned_dense, color="tab:red", lw=1.4, label="learned Vmax(dose)")

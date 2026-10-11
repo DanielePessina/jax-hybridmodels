@@ -8,7 +8,7 @@ A mechanistic model with two missing pieces, each filled by a bounded network: o
 uv run python examples/hybrid_ode/train_hybrid_ode.py
 ```
 
-About a minute on CPU. Prints the bucket layout, the losses, the saturation penalty per network, the recovered rate law and residual error, and per-channel metrics. Writes `parity_irregular_mlp.png` and `trajectories_irregular_mlp.png` to `examples/hybrid_ode/figures/` unless you pass `--no-plot`.
+Under a minute on CPU (about 40 s; `--inner kan` takes about 75 s). Prints the bucket layout, the losses, the saturation penalty per network, the recovered rate law and residual error, and per-channel metrics. Writes `parity_irregular_mlp.png` and `trajectories_irregular_mlp.png` to `examples/hybrid_ode/figures/` unless you pass `--no-plot`.
 
 ## The model
 
@@ -80,11 +80,11 @@ The solver uses a checkpointing adjoint. `DirectAdjoint`, the default, stores th
 
 <<< @/../examples/hybrid_ode/train_hybrid_ode.py#solver
 
-Training fits the first 40% of each trajectory, then all of it, with the saturation penalty in both phases:
+The saturation penalty and where it is charged go in an [`Objective`](/guide/penalties), which `fit` applies to every phase. Training fits the first 40% of each trajectory, then all of it:
 
 <<< @/../examples/hybrid_ode/train_hybrid_ode.py#fit
 
-The saturation penalty is charged on the latent, not the physical output: a penalty on the physical value would carry the same $\sigma'(z/T)$ factor and die exactly where saturation is worst. By default it is evaluated at the measured input points. The residual reads the ODE state, which the dataset cannot resolve to measured points, so both networks get a `box_grid` sweep over their declared input box instead. `penalty_points` holds one array per network in pytree order, which for a dict means sorted keys.
+The saturation penalty is charged on the latent, not the physical output: a penalty on the physical value would carry the same $\sigma'(z/T)$ factor and die exactly where saturation is worst. By default it is evaluated at the measured input points. The residual reads the ODE state, which the dataset cannot resolve to measured points, so both networks get a `box_grid` sweep over their declared input box instead. `penalty_points` is keyed by each network's name in the predictors dict.
 
 ## Results
 

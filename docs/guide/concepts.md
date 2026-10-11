@@ -5,7 +5,8 @@ examples.
 
 ## A model is a set of functions and data
 
-`HybridModel` binds the first four pieces and takes the dataset per call:
+`HybridModel` binds the first four pieces and takes the data per call, as
+a `Dataset` or a list of experiments:
 
 | Object | What it contains |
 | --- | --- |
@@ -72,6 +73,8 @@ the declared physical range, so no iterate can leave it. A
 physical input → latent input → inner network → latent output → physical output
 ```
 
+A `BoundedPredictor` with one output returns a scalar.
+`evaluate_predictor` evaluates any predictor over a grid of named inputs.
 The optional saturation penalty discourages a network's latent output from
 sitting near a bound, where its physical gradient is small.
 
@@ -100,10 +103,15 @@ from its predicted output.
 An Optax **step** visits every bucket, averages the bucket losses and
 gradients, and applies one optimizer update. A bucket is not a step.
 
-A **phase** is a run of steps with one learning rate, optimizer and loss
-horizon, written as a `TrainingPhase`. `OptaxTrainingConfig(steps=..., lr=...)`
-is one phase; `OptaxTrainingConfig(phases=(...))` is several. Evosax runs a
-flat generation loop instead.
+A **phase** is a run of steps with one learning rate (a number or an optax
+schedule), optimizer and loss horizon, written as a `TrainingPhase`.
+`OptaxTrainingConfig(steps=..., lr=...)` is one phase;
+`OptaxTrainingConfig(phases=(...))` is several. Evosax runs a flat loop of
+`steps` generations instead.
+
+What is minimised is separate from how: an `Objective` holds the loss,
+channel weights and penalties, and both configs take the same one through
+`fit(objective=...)`.
 
 See [Training](/guide/training).
 
@@ -114,8 +122,10 @@ A trainability mask is a boolean PyTree with the same structure as
 with Optax and Evosax. `trainable_mask(predictors)` is the default: every
 float array except `Constant` values and bound scalers.
 
-Use `freeze_paths`, `freeze_modules_of_type` or `freeze_where` to derive a
-new mask. The mask is data, not state on a predictor.
+`fit(freeze=...)` freezes more by path, class or predicate. For full
+control, derive a mask with `freeze_paths`, `freeze_modules_of_type`,
+`freeze_where` or `freeze_mask` and pass it as `trainable=`. The mask is
+data, not state on a predictor.
 
 ## JAX boundaries
 

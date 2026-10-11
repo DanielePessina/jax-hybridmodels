@@ -29,11 +29,67 @@ experiment = hm.make_experiment(
 )
 ```
 
-`y0_fn(covariates, channels)` returns the full initial state, which may
-include unobserved components. Pass `y0=` instead when the state is known
-directly; give one or the other.
+`ChannelObs` is keyword-only: `ts`, `values`, and an optional `variance`
+(default 1.0, a scalar or one value per observation). `y0_fn(covariates,
+channels)` returns the full initial state, which may include unobserved
+components. Pass `y0=` instead when the state is known directly; give one or
+the other.
+
+`exp_id` names the experiment in predictions and must be unique within a
+dataset. An experiment left without one is named `experiment_<i>` by its
+position.
+
+## From an array
+
+When every channel shares one time grid, `experiment_from_array` takes a
+`[T, D]` array with columns in `channel_names` order. A `NaN` cell means not
+measured, so channels can still have different sample times:
+
+```python
+experiment = hm.experiment_from_array(
+    exp_id="run-02",
+    ts=jnp.array([0.0, 1.0, 2.0]),
+    values=jnp.array([[1.0, jnp.nan], [0.8, 4.2], [0.6, 5.0]]),
+    channel_names=("concentration", "size"),
+    variance=(0.01, 1.0),            # one per channel; a scalar or [T, D] also work
+    covariates={"temperature_C": 25.0, "feed_composition": jnp.array([0.2, 0.5, 0.3])},
+    y0=[1.0, 0.0],
+)
+```
+
+`covariates`, `t0`, `y0` and `y0_fn` mean the same as for `make_experiment`.
+
+## From a table
+
+`experiments_from_dataframe` builds one experiment per run from a wide pandas
+table: one row per run and sample time, one column per channel, `NaN` where a
+channel was not measured.
+
+```python
+experiments = hm.experiments_from_dataframe(
+    df,
+    time="time_h",
+    experiment="run",
+    channels={"concentration": "conc_g_L", "size": "d43_um"},   # {channel: column}
+    covariates=["temperature_C"],                               # constant within a run
+    variance={"concentration": "conc_var", "size": 1.0},        # column or number
+    y0_fn=lambda covariates, channels: jnp.array([channels["concentration"].values[0], 0.0]),
+)
+```
+
+A list names each channel or covariate after its column; a mapping renames.
+`t0` may be one number or a column, and `y0` one shared state or a mapping
+`{exp_id: state}`. Experiments come back in order of first appearance, with
+the run column's values as `exp_id`. A long table (one row per measurement)
+becomes wide with
+`df.pivot_table(index=["run", "time_h"], columns="channel", values="value").reset_index()`.
+pandas is imported only by your code.
 
 ## Union timestamps and masks
+
+`HybridModel.fit` and `predict` accept a list of experiments and call
+`make_dataset` for you. Call it yourself to split the data, inspect the
+buckets, or reuse one dataset across many calls.
 
 `make_dataset` merges each experiment's channel timestamps into one union
 axis, places every channel on it, and builds a mask that is `True` only where
@@ -80,7 +136,8 @@ inside a compiled solve:
 - variances must be finite and strictly positive;
 - covariates must be scalars or rank-1 vectors;
 - all experiments must use the same covariate keys and shapes;
-- each experiment must have at least one timestamp.
+- each experiment must have at least one timestamp;
+- experiment IDs must be unique.
 
 ## Split and resample
 

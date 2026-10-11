@@ -54,11 +54,9 @@ for most of them. Pass one entry per state:
 
 ```python
 solver = hm.SolverConfig(
-    solver=diffrax.Tsit5(),
     rtol=1e-4,
     atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),   # about 9 decades below each state's scale
     max_steps=500_000,
-    dt0=None,
 )
 ```
 
@@ -67,10 +65,10 @@ to the array Diffrax needs. A hand-built `PIDController` would not.
 
 ### Solver choice
 
-Start with `diffrax.Tsit5()`. Switch to the implicit `diffrax.Kvaerno3()`
-when `Tsit5` keeps hitting `max_steps`. `diffrax.Heun()` is cheap and fine
-for checking the wiring. `dt0=None` lets the controller choose the first
-step.
+`SolverConfig()` starts with `diffrax.Tsit5()`, `rtol=1e-5`, `atol=1e-7`,
+4096 steps and `dt0=None`, which lets the controller choose the first step.
+Switch to the implicit `diffrax.Kvaerno3()` when `Tsit5` keeps hitting
+`max_steps`. `diffrax.Heun()` is cheap and fine for checking the wiring.
 
 ### Adjoint
 
@@ -118,8 +116,8 @@ inputs = {
     "temperature_C": covariates["temperature_C"],
     "supersaturation": y[CONC_IDX] / covariates["c_sat"],
 }
-log10_G = predictors["growth"](inputs)[0]
-log10_J = predictors["nucleation"](inputs)[0]
+log10_G = predictors["growth"](inputs)       # one output, so a scalar
+log10_J = predictors["nucleation"](inputs)
 ```
 
 Index vector covariates into named entries (`composition[0]`), or pass a
@@ -144,12 +142,12 @@ Freeze every network and run a few steps. The loss must be identical at
 every step; if it moves, something you did not intend is training.
 
 ```python
-mask = hm.freeze_modules_of_type(hm.trainable_mask(predictors), predictors, hm.BoundedPredictor)
+mask = hm.freeze_mask(predictors, (hm.BoundedPredictor,))
 ```
 
-`Parameter` leaves are not inside a `BoundedPredictor`; freeze them with
-`freeze_modules_of_type(..., hm.Parameter)` as well. `model.fit` refuses a
-mask with nothing left to train, so use `train_with_optax` for this check.
+`Parameter` leaves are not inside a `BoundedPredictor`; add `hm.Parameter`
+to the tuple as well. `model.fit` refuses a mask with nothing left to train,
+so pass the mask to `train_with_optax` for this check.
 
 ## Traps
 
@@ -174,8 +172,11 @@ channel that was not measured, pass an empty observation; it is masked
 out of the loss. Do not pad with zeros, which would be fitted as data.
 
 ```python
-channels["d43"] = hm.ChannelObs(jnp.array([]), jnp.array([]))
+channels["d43"] = hm.ChannelObs(ts=jnp.array([]), values=jnp.array([]))
 ```
+
+`experiment_from_array` and `experiments_from_dataframe` do this for a
+column that is all `NaN`.
 
 ### One time unit everywhere
 

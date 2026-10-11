@@ -133,7 +133,7 @@ def _no_match_error(caller: str, missing: Any, mask: Any) -> ValueError:
     )
 
 
-def freeze_paths(mask: Any, paths: tuple[str, ...]) -> Any:
+def freeze_paths(mask: Any, paths: str | Sequence[str]) -> Any:
     """Return a new mask with leaves at or below ``paths`` set to ``False``.
 
     Path syntax is dot-joined segments addressing the mask PyTree from its root.
@@ -142,11 +142,14 @@ def freeze_paths(mask: Any, paths: tuple[str, ...]) -> Any:
     lists, and string keys for dicts. ``"inner.mlp.layers.0.weight"``
     addresses one leaf, ``mask.inner.mlp.layers[0].weight``. A path may also
     stop at a subtree: ``"rate"`` freezes everything under ``mask["rate"]``.
+    One path may be passed bare, as a string.
 
     A path matching nothing raises, listing the closest real paths. Ignoring
     it quietly would leave a leaf the caller believed frozen training as
     normal, which shows up as a wrong experiment, not a wrong program.
     """
+    # A bare string would otherwise be iterated character by character.
+    paths = (paths,) if isinstance(paths, str) else tuple(paths)
     out, matched = _freeze_prefixes(mask, paths)
     missing = sorted(set(paths) - matched)
     if missing:

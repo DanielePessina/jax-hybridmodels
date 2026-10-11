@@ -145,22 +145,45 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
 def _serialise_objective(objective: Objective) -> dict[str, Any]:
     """Return a JSON-encodable view of an ``Objective``.
 
-    ``penalty_points`` arrays become nested lists so the grid survives the
-    round trip; callables become ``__callable__`` markers.
+    Each ``penalty_points`` array becomes ``{"shape": [...], "data": [...]}``.
+    The shape is kept because an empty ``[0, n_inputs]`` grid flattens to
+    ``[]`` and would reload as shape ``(0,)``. Callables become
+    ``__callable__`` markers.
     """
     raw: dict[str, Any] = {
         f.name: getattr(objective, f.name) for f in dataclasses.fields(objective)
     }
     if objective.penalty_points is not None:
         raw["penalty_points"] = {
-            path: np.asarray(points).tolist() for path, points in objective.penalty_points.items()
+            path: {"shape": list(np.shape(points)), "data": np.asarray(points).tolist()}
+            for path, points in objective.penalty_points.items()
         }
     return _json_safe(raw)
 
 
+def _decode_penalty_points(raw: dict[str, Any]) -> dict[str, Any]:
+    """Turn saved ``penalty_points`` entries back into arrays of their saved shape.
+
+    A bare nested list (the format before shapes were stored) is read as is.
+    """
+    points = raw.get("penalty_points")
+    if not isinstance(points, dict):
+        return raw
+    decoded = {}
+    for path, entry in points.items():
+        if isinstance(entry, dict) and "shape" in entry:
+            decoded[path] = np.asarray(entry["data"], dtype=float).reshape(entry["shape"])
+        else:
+            decoded[path] = np.asarray(entry, dtype=float)
+    return {**raw, "penalty_points": decoded}
+
+
 def _build_objective(cls: type[Objective] | None, raw: dict[str, Any] | None) -> Any:
     """Rebuild an ``Objective`` from its dict, or pass the dict through with no class."""
-    if raw is None or cls is None:
+    if raw is None:
+        return raw
+    raw = _decode_penalty_points(raw)
+    if cls is None:
         return raw
     if _contains_serialised_callable(raw):
         raise ValueError(

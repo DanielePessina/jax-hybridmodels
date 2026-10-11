@@ -30,7 +30,7 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float
 
-from jaxhybridmodels.data import BucketPayload, Dataset
+from jaxhybridmodels.data import BucketPayload, Dataset, _require_dataset
 from jaxhybridmodels.solver import SolverConfig, simulation_state
 from jaxhybridmodels.training.kernels import predict_bucket_obs
 
@@ -113,6 +113,7 @@ def predict_dataset(
     tuple[Float[Array, "N T D"], ...]
         One ``[N_b, T_b, D]`` array per bucket, in bucket-payload order.
     """
+    _require_dataset(dataset, "predict_dataset")
     return tuple(
         predict_bucket(
             predictors,
@@ -213,6 +214,7 @@ def predict_dense(
     tuple[Float[Array, "N T_d D"], ...]
         One ``[N, T_d, D]`` array per bucket, in bucket-payload order.
     """
+    _require_dataset(dataset, "predict_dense")
     if ts_grid is None and n_points < 1:
         raise ValueError("n_points must be at least 1")
     if ts_grid is not None:
@@ -273,6 +275,7 @@ def ensemble_predictions(
     tuple[Float[Array, "N T D"], ...]
         The member-mean prediction per bucket, in bucket-payload order.
     """
+    _require_dataset(dataset, "ensemble_predictions")
     if not members:
         raise ValueError("ensemble_predictions requires at least one member")
     per_member = tuple(

@@ -46,7 +46,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 | `channel_idx` |  | Trailing-axis indices to keep. ``None`` keeps all ``D`` channels. |
 | `channel_weights` |  | Per-channel multipliers; length must match ``channel_idx`` (or ``D`` when ``channel_idx`` is ``None``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L131)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L133)</small>
 
 ---
 
@@ -76,7 +76,7 @@ Nothing is averaged. The result is a sum of log-likelihoods and grows
 linearly with the number of observations. Use ``bal_mle`` for the
 per-experiment averaged version.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L166)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L168)</small>
 
 ---
 
@@ -108,7 +108,7 @@ channel does not divide by zero. Experiments with no observations in any
 selected channel (for example, a trajectory-penalty probe) are excluded
 from the outer mean rather than diluting measured experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L192)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L194)</small>
 
 ---
 
@@ -135,7 +135,7 @@ experiments. Same reduction as ``bal_mse``, with
 pointwise squared error. Experiments with no observations in any selected
 channel are excluded from the outer mean.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L225)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L227)</small>
 
 ---
 
@@ -181,7 +181,7 @@ resolve_loss_fn(
 ) -> Callable[[Array, BucketPayload], Array]
 ```
 
-Turn a training config's ``loss`` field into a ``(pred_obs, bp) -> scalar``.
+Turn an ``Objective``'s ``loss`` field into a ``(pred_obs, bp) -> scalar``.
 
 ``loss`` is either a ``LOSS_REGISTRY`` key, matched case- and
 whitespace-insensitively, or a callable already in the right shape.
@@ -209,4 +209,4 @@ How channel selection composes depends on the loss:
 Lives here rather than in the training modules because it is registry
 lookup and channel binding, not training logic, and both loops need it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L263)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L265)</small>

@@ -15,12 +15,9 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import diffrax
 import jax.numpy as jnp
 import jax.random as jr
 import pytest
-
-from jaxhybridmodels import SolverConfig
 
 # A PPO run takes over a minute, so this file is excluded from the default
 # run and executed by the examples workflow with ``pytest -m slow``.
@@ -58,8 +55,9 @@ def example():
 
 
 @pytest.fixture(scope="module")
-def solver():
-    return SolverConfig(solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=10_000, dt0=0.05)
+def solver(example):
+    """The solver every batch reactor script integrates with."""
+    return example.SOLVER
 
 
 @pytest.fixture(scope="module")
@@ -107,18 +105,20 @@ class TestPolicySplit:
     """The thesis: the actor is split at ``out_scaler`` and nowhere else."""
 
     def test_the_halves_recombine_into_bounded_predictor_call(self, example):
-        """``from_latent(_policy_mean(obs))`` must equal ``policy(obs)`` exactly.
+        """``from_latent(_policy_mean(obs))[0]`` must equal ``policy(obs)`` exactly.
 
         PPO samples in latent space and applies ``out_scaler.from_latent``
         inside the rollout. If that split ever stops matching
         ``BoundedPredictor.__call__``, the trained artefact silently stops being
-        the model that was trained.
+        the model that was trained. The rollout keeps the latent as a
+        length-1 vector and takes element 0; the call returns a scalar.
         """
         agent = example.build_agent(key=jr.PRNGKey(3))
         obs = jnp.array([0.6, 25.0, 6.0])
-        via_split = agent.policy.out_scaler.from_latent(example._policy_mean(agent, obs))
+        via_split = agent.policy.out_scaler.from_latent(example._policy_mean(agent, obs))[0]
         via_call = agent.policy({"Ca": obs[0], "temperature_C": obs[1], "pH": obs[2]})
-        assert jnp.allclose(via_split, via_call, atol=0.0, rtol=0.0)
+        assert via_call.shape == ()
+        assert jnp.array_equal(via_split, via_call)
 
     def test_actions_stay_inside_the_activity_box(self, example, episodes, solver):
         """Bounds are structural, so no sampled latent can escape the box."""
@@ -129,7 +129,7 @@ class TestPolicySplit:
         rollout = example.rollout_batch(
             agent, episodes, jr.PRNGKey(5), solver=solver, penalty_weight=0.0, n_samples=8
         )
-        low, high = example.ACTIVITY_BOUNDS[0]
+        low, high = example.ACTIVITY_BOUNDS
         assert float(jnp.min(rollout.activity)) > low
         assert float(jnp.max(rollout.activity)) < high
 

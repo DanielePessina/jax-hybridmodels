@@ -12,7 +12,7 @@ uv sync --extra examples   # python-libsbml and sympy
 uv run python examples/sbml_hybrid/train_sbml_hybrid.py
 ```
 
-About a minute on CPU. Prints the buckets, per-channel metrics and the
+About 20 s on CPU. Prints the buckets, per-channel metrics and the
 learned `Vmax` at each dose; writes `parity.png` and `recovered_vmax.png`
 to `examples/sbml_hybrid/figures/`. `--steps 5 --no-plot` is a quick
 smoke run.
@@ -71,6 +71,7 @@ learned `Vmax` is within 5% of `2 * dose` at every training dose.
 
 - Replace a different flux with `replace_flux`, for example a
   Michaelis-Menten step further down the cascade.
-- Set `penalty_weight=0` and watch whether the output squash saturates.
+- Set `hm.Objective(penalty_weight=0.0)` and watch whether the output
+  squash saturates.
 - Drop `0.2` from `DOSES` and check how well the learned `Vmax`
   interpolates across the gap.

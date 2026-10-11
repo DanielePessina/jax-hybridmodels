@@ -81,7 +81,6 @@ SOLVER = hm.SolverConfig(
     rtol=1e-4,
     atol=(1e3, 1e-2, 1e-6, 1e-10, 1e-14, 1e-5),
     max_steps=500_000,
-    dt0=None,
 )
 
 
@@ -91,7 +90,7 @@ def simulate_fn(
     covariates: dict[str, Array],
     y0: Float[Array, " 6"],
     solver: hm.SolverConfig,
-) -> Float[Array, "T 6"]:
+) -> diffrax.Solution:
     """Integrate the moment ODE with CNT nucleation and power-law growth."""
     logA = predictors["logA"].value
     gamma = predictors["gamma"].value * 1e-3  # mJ/m^2 to J/m^2
@@ -170,7 +169,7 @@ def main() -> None:
     config = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
-        num_generations=args.generations,
+        steps=args.generations,
         init=args.init,
         init_box_extent=args.init_box_extent,
         sigma_init=args.sigma_init,
@@ -180,27 +179,24 @@ def main() -> None:
     print_constants("init", model.predictors)
     result = model.fit(dataset, config, key=jr.key(args.seed))
     print_constants("fitted", result.model.predictors)
-    print(f"  best loss {min(result.history.best_fitness):.6f}")
+    print(f"  best loss {min(result.history.loss):.6f}")
 
     print("\n[results]")
     predictions = result.model.predict(dataset)
-    hm.print_metrics(hm.compute_metrics(predictions.buckets, dataset))
+    hm.print_metrics(predictions)
 
     if args.no_plot:
         return
     args.plot_dir.mkdir(parents=True, exist_ok=True)
     parity_plot(
-        parity_diagnostics(predictions.buckets, dataset),
+        parity_diagnostics(predictions),
         title="Crystallisation parity (mechanistic CNT + power-law)",
         save_path=args.plot_dir / "parity_mechanistic.png",
     )
     trajectory_plot(
-        predictions.buckets,
+        result.model,
         dataset,
-        predictors=result.model.predictors,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=SOLVER,
+        predictions=predictions,
         title="Crystallisation trajectories (mechanistic)",
         save_path=args.plot_dir / "trajectories_mechanistic.png",
     )

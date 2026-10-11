@@ -46,7 +46,6 @@ from jaxtyping import Array, Float
 
 import jaxhybridmodels as hm
 from jaxhybridmodels.penalties import bound_penalty, box_grid
-from jaxhybridmodels.prediction import evaluate_predictor
 from jaxhybridmodels.transforms import Warp, register_warp
 
 # ``_data`` sits alongside this file, ``_shared`` one level up.
@@ -57,7 +56,6 @@ from _data import (  # noqa: E402
     COUPLING,
     OMEGA_TRUE,
     TEMPERATURES,
-    build_dataset,
     irregular_experiments,
     rectangular_experiments,
     state_to_output,
@@ -76,13 +74,14 @@ SYMLOG_EPS: float = 0.25  # half-width of the symlog warp's linear region
 # data, so ``to_latent`` stays in its exact region at the extremes. The
 # output is three decades against true rates of 0.006 to 0.28: loose on
 # purpose, which under ``log10`` costs almost nothing in resolution.
-TEMPERATURE_BOUNDS: tuple[tuple[float, float], ...] = ((270.0, 350.0),)
-K_BOUNDS: tuple[tuple[float, float], ...] = ((1e-3, 1.0),)
+TEMPERATURE_BOUNDS: tuple[float, float] = (270.0, 350.0)
+K_BOUNDS: tuple[float, float] = (1e-3, 1.0)
 
-# Residual-network boxes. The true coupling reaches about 0.6 here, so most
-# of the output box is headroom the symlog warp deliberately under-resolves.
-STATE_BOUNDS: tuple[tuple[float, float], ...] = ((-2.0, 2.0), (-2.0, 2.0))
-RESIDUAL_BOUNDS: tuple[tuple[float, float], ...] = ((-3.0, 3.0), (-3.0, 3.0))
+# Residual-network boxes, one pair shared by both components. The true
+# coupling reaches about 0.6 here, so most of the output box is headroom
+# the symlog warp deliberately under-resolves.
+STATE_BOUNDS: tuple[float, float] = (-2.0, 2.0)
+RESIDUAL_BOUNDS: tuple[float, float] = (-3.0, 3.0)
 
 
 # A signed-logarithmic axis warp under the name ``symlog``:
@@ -133,8 +132,8 @@ def simulate_fn(
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
     solver: hm.SolverConfig,
-) -> Float[Array, "T 2"]:
-    """Integrate the hybrid field for one experiment.
+) -> diffrax.Solution:
+    """Integrate the hybrid field for one experiment; the state is read from ``.ys``.
 
     The rate network runs here once and its output is closed over as a
     constant; the residual network runs inside ``vector_field`` once per
@@ -144,7 +143,7 @@ def simulate_fn(
     rate_net = predictors["rate"]
     residual_net = predictors.get("residual")
 
-    k = rate_net(covariates).reshape(())
+    k = rate_net(covariates)  # one output, so a scalar
     rotation = jnp.array([[-k, OMEGA_TRUE], [-OMEGA_TRUE, -k]])
 
     def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
@@ -153,8 +152,7 @@ def simulate_fn(
             return mechanistic
         return mechanistic + residual_net(y)
 
-    term = diffrax.ODETerm(vector_field)
-    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
     # endregion simulate-fn
 
 
@@ -193,15 +191,17 @@ def main() -> None:
         experiments = rectangular_experiments(n_experiments=args.experiments, key=k_data)
     else:
         experiments = irregular_experiments(n_experiments=args.experiments, key=k_data)
-    dataset = build_dataset(experiments)
+    # Kept as a Dataset rather than a list of experiments so the bucket
+    # layout can be printed before training.
+    dataset = hm.make_dataset(experiments, output_channel_names=CHANNELS)
     print(hm.describe_buckets(dataset))
 
     # region solver
+    # Tsit5 and max_steps=4096 are the defaults; the tolerances are looser
+    # than the default 1e-5 and 1e-7.
     solver = hm.SolverConfig(
-        solver=diffrax.Tsit5(),
         rtol=1e-4,
         atol=1e-6,
-        max_steps=4096,
         dt0=0.1,
         # A network inside the vector field makes the forward tape the
         # memory bottleneck. RecursiveCheckpoint trades recomputation for
@@ -216,10 +216,12 @@ def main() -> None:
     # the bottom 3% of the box, reachable only through large negative
     # latents. Under ``log10`` the midpoint is ``0.032`` and the true range
     # covers the middle of the box.
+    # ``input_bounds`` builds the default sigmoid scaler; ``out_scaler`` is
+    # spelled out where the warp or squash differs from the default.
     # region predictors
     rate_net = hm.BoundedPredictor(
         input_keys=("temperature",),
-        in_scaler=hm.BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
+        input_bounds=TEMPERATURE_BOUNDS,
         inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
         out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
     )
@@ -231,9 +233,13 @@ def main() -> None:
         # edge of its box early in training.
         predictors["residual"] = hm.BoundedPredictor(
             input_keys=("y1", "y2"),
-            in_scaler=hm.BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
+            input_bounds=STATE_BOUNDS,
             inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
-            out_scaler=hm.BoundScaler(bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"),
+            # A scaler on its own cannot infer its size, so the shared pair
+            # is repeated once per output.
+            out_scaler=hm.BoundScaler(
+                bounds=(RESIDUAL_BOUNDS,) * 2, transform="softsign", warp="symlog"
+            ),
         )
     # endregion predictors
     model = hm.HybridModel(
@@ -245,25 +251,27 @@ def main() -> None:
     )
 
     # region fit
+    # The residual network reads the ODE state ("y1", "y2"), so the dataset
+    # can resolve no measured points for it. Both networks are charged on a
+    # grid over their input box in warped space instead (``box_grid``),
+    # keyed by their name in the predictors dict.
+    objective = hm.Objective(
+        penalty_weight=args.penalty_weight,
+        penalty_points={
+            name: box_grid(leaf.in_scaler, n_per_dim=7) for name, leaf in predictors.items()
+        },
+    )
+    # Fit the first 40% of each trajectory, then all of it. The saturation
+    # penalty applies in both phases.
     config = hm.OptaxTrainingConfig(
-        # Fit the first 40% of each trajectory, then all of it. The
-        # saturation penalty applies in both phases.
         phases=(
-            hm.TrainingPhase(
-                steps=args.steps // 2, lr=5e-3, horizon=0.4, penalty_weight=args.penalty_weight
-            ),
-            hm.TrainingPhase(steps=args.steps, lr=1e-3, penalty_weight=args.penalty_weight),
+            hm.TrainingPhase(steps=args.steps // 2, lr=5e-3, horizon=0.4),
+            hm.TrainingPhase(steps=args.steps, lr=1e-3),
         ),
-        # The residual network reads the ODE state ("y1", "y2"), so the
-        # dataset can resolve no measured points for it. Both leaves get a
-        # grid over their input box in warped space instead (``box_grid``).
-        # One array per leaf, in pytree order (dict keys sorted).
-        penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors.values()),
-        loss="mse",
         verbose=False,
     )
     print(f"\n[fit] {list(predictors)} with {args.inner!r} inner networks, two phases")
-    result = model.fit(dataset, config, key=k_train)
+    result = model.fit(dataset, config, objective=objective, key=k_train)
     # endregion fit
     trained = result.model.predictors
     loss, phase = result.history.loss, result.history.phase
@@ -285,7 +293,7 @@ def main() -> None:
     print("  temperature   true k     fitted k    ratio")
     for temperature in TEMPERATURES:
         truth = float(true_k(temperature))
-        fitted = evaluate_predictor(trained["rate"], {"temperature": temperature})
+        fitted = float(hm.evaluate_predictor(trained["rate"], {"temperature": temperature}))
         print(f"    {temperature:6.1f}    {truth:.5f}    {fitted:.5f}    {fitted / truth:5.2f}")
     if "residual" in trained:
         print("\n[results] recovered cubic coupling")
@@ -294,32 +302,29 @@ def main() -> None:
         axis = jnp.linspace(-0.8, 1.0, 9)
         grid = jnp.stack(jnp.meshgrid(axis, axis, indexing="ij"), axis=-1).reshape(-1, 2)
         truth = (COUPLING @ (grid**3).T).T
-        fitted = jnp.stack([trained["residual"](point) for point in grid])
+        fitted = hm.evaluate_predictor(trained["residual"], {"y1": grid[:, 0], "y2": grid[:, 1]})
         rms_error = float(jnp.sqrt(jnp.mean((fitted - truth) ** 2)))
         rms_truth = float(jnp.sqrt(jnp.mean(truth**2)))
         print(f"  residual RMS error {rms_error:.4f} against a true RMS of {rms_truth:.4f}")
         print(f"  relative {rms_error / rms_truth:.2%}")
 
-    predictions = result.model.predict(dataset).buckets
+    predictions = result.model.predict(dataset)
     print()
-    hm.print_metrics(hm.compute_metrics(predictions, dataset))
+    hm.print_metrics(predictions)
 
     if not args.no_plot:
         variant = "mechanistic" if args.mechanistic_only else args.inner
         suffix = f"{args.data}_{variant}"
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         parity_plot(
-            parity_diagnostics(predictions, dataset),
+            parity_diagnostics(predictions),
             title=f"Hybrid ODE parity ({suffix})",
             save_path=args.plot_dir / f"parity_{suffix}.png",
         )
         trajectory_plot(
-            predictions,
+            result.model,
             dataset,
-            predictors=trained,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
+            predictions=predictions,
             max_experiments=4,
             title=f"Hybrid ODE trajectories ({suffix})",
             save_path=args.plot_dir / f"trajectories_{suffix}.png",

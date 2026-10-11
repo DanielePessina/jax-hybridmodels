@@ -60,7 +60,12 @@ measured once at the end.
 | `LowData4_7` | 21     | 7           | 0 to 360     | 10.5              |
 | `LowData4_9` | 21     | 7           | 0 to 375     | 11.9              |
 
-The values are rounded from the thesis `Unseeded_LowData4` cut. The
+The values are rounded from the `Unseeded_LowData4` sheet of the thesis
+workbook in `examples/crystallisation/data/`. They are typed into the
+script rather than read with `hm.experiments_from_dataframe`, since the
+results below were produced from the rounded values. Each experiment is
+built with `hm.experiment_from_array` from a `[conc, d43]` table whose
+`d43` column is NaN except at the final sample. The
 experiments do not share a time grid, so `make_dataset` groups them into
 two buckets by merged grid length, 9 for the 17 °C pair and 7 for the
 21 °C pair. Each bucket compiles once.
@@ -91,7 +96,8 @@ the networks read both the same way:
 `integrate_minutes` calls diffrax directly rather than
 `solver.diffeqsolve`, because the data are in minutes and the rates per
 second. It still takes the step controller and adjoint from the
-`SolverConfig`. The moments span about 18 decades, so the config gives
+`SolverConfig`, and returns the diffrax `Solution`, whose `ys` the library
+reads as the state. The moments span about 18 decades, so the config gives
 one `atol` per state:
 
 <<< @/../examples/crystallisation/train_kinetic.py#solver

@@ -8,7 +8,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Data: Experiments, Channels, Datasets](/api/data)
 
-[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
+[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`experiment_from_array`](/api/data#experiment_from_array), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
 
 ## [Predictors: Trainable Components](/api/predictors)
 
@@ -16,7 +16,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 
-[`PenaltyPointSource`](/api/penalties#penaltypointsource), [`attach_penalty_state`](/api/penalties#attach_penalty_state), [`bound_penalty`](/api/penalties#bound_penalty), [`box_grid`](/api/penalties#box_grid), [`box_violation`](/api/penalties#box_violation), [`clip_ste`](/api/penalties#clip_ste), [`data_penalty_points`](/api/penalties#data_penalty_points), [`length_mask_keep`](/api/penalties#length_mask_keep), [`penalty_integral`](/api/penalties#penalty_integral), [`penalty_vector_field`](/api/penalties#penalty_vector_field), [`select_penalty_points`](/api/penalties#select_penalty_points), [`soft_inverse`](/api/penalties#soft_inverse), [`soft_logit`](/api/penalties#soft_logit), [`softclip`](/api/penalties#softclip), [`strip_penalty_state`](/api/penalties#strip_penalty_state), [`trajectory_saturation_penalty`](/api/penalties#trajectory_saturation_penalty), [`validate_penalty_points`](/api/penalties#validate_penalty_points)
+[`PenaltyPointSource`](/api/penalties#penaltypointsource), [`bounded_predictor_paths`](/api/penalties#bounded_predictor_paths), [`resolve_penalty_points`](/api/penalties#resolve_penalty_points), [`attach_penalty_state`](/api/penalties#attach_penalty_state), [`bound_penalty`](/api/penalties#bound_penalty), [`box_grid`](/api/penalties#box_grid), [`box_violation`](/api/penalties#box_violation), [`clip_ste`](/api/penalties#clip_ste), [`data_penalty_points`](/api/penalties#data_penalty_points), [`length_mask_keep`](/api/penalties#length_mask_keep), [`penalty_integral`](/api/penalties#penalty_integral), [`penalty_vector_field`](/api/penalties#penalty_vector_field), [`select_penalty_points`](/api/penalties#select_penalty_points), [`soft_inverse`](/api/penalties#soft_inverse), [`soft_logit`](/api/penalties#soft_logit), [`softclip`](/api/penalties#softclip), [`strip_penalty_state`](/api/penalties#strip_penalty_state), [`trajectory_saturation_penalty`](/api/penalties#trajectory_saturation_penalty), [`validate_penalty_points`](/api/penalties#validate_penalty_points)
 
 ## [Transforms: Squash Shapes and Axis Warps](/api/transforms)
 
@@ -28,7 +28,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Training: Optax & Evosax Loops](/api/training)
 
-[`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`TrainingPhase`](/api/training#trainingphase), [`train_with_optax`](/api/training#train_with_optax), [`train_seed_ensemble`](/api/training#train_seed_ensemble), [`train_bootstrap_ensemble`](/api/training#train_bootstrap_ensemble), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
+[`Objective`](/api/training#objective), [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`TrainingPhase`](/api/training#trainingphase), [`train_with_optax`](/api/training#train_with_optax), [`train_seed_ensemble`](/api/training#train_seed_ensemble), [`train_bootstrap_ensemble`](/api/training#train_bootstrap_ensemble), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
 
 ## [Training Kernels: Build Your Own Loop](/api/kernels)
 
@@ -40,7 +40,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Trainable Masks: Freezing Leaves](/api/trainable)
 
-[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_paths`](/api/trainable#freeze_paths), [`freeze_modules_of_type`](/api/trainable#freeze_modules_of_type), [`freeze_where`](/api/trainable#freeze_where), [`count_trainable_params`](/api/trainable#count_trainable_params)
+[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_mask`](/api/trainable#freeze_mask), [`freeze_paths`](/api/trainable#freeze_paths), [`freeze_modules_of_type`](/api/trainable#freeze_modules_of_type), [`freeze_where`](/api/trainable#freeze_where), [`count_trainable_params`](/api/trainable#count_trainable_params)
 
 ## [Prediction: Forward Simulation](/api/prediction)
 

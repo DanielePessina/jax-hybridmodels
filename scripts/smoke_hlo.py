@@ -66,7 +66,7 @@ def _state_to_output(state):
 
 def _simulate_fn(predictor, ts, covariates, y0, solver):
     def vector_field(t, y, args):
-        omega = predictor({"t": t}).reshape(())
+        omega = predictor({"t": t})
         omega_sq = omega * omega
         return jnp.stack([y[1], -(omega_sq) * y[0]])
 
@@ -149,7 +149,7 @@ def main() -> int:
             activation_name="tanh",
             key=jax.random.PRNGKey(0),
         ),
-        out_scaler=BoundScaler(bounds=((0.5, 2.0),)),
+        out_scaler=BoundScaler(bounds=(0.5, 2.0)),
     )
     solver = SolverConfig(
         solver=diffrax.Tsit5(),

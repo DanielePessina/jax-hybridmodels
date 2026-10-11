@@ -29,7 +29,7 @@ Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 the container shape, writing a flat binary stream of ``np.save``-encoded
 leaves. The caller picks the file extension; ``save_run`` uses ``.eqx``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L69)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L74)</small>
 
 ---
 
@@ -51,7 +51,7 @@ and per-leaf static configuration, such as the same ``in_size`` and
 the template's array leaves; its static fields supply the structure
 ``equinox`` needs. The template is not mutated.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L80)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L85)</small>
 
 ---
 
@@ -68,6 +68,7 @@ save_run(
     solver: 'SolverConfig',
     optax_config: 'OptaxTrainingConfig | None' = None,
     evosax_config: 'EvosaxTrainingConfig | None' = None,
+    objective: 'Objective | None' = None,
     loss_history: 'list[float] | None' = None,
     extras: 'dict[str, Any] | None' = None,
 ) -> None
@@ -84,9 +85,10 @@ Persist a complete training run to ``directory``.
     precision), ``version`` (``importlib.metadata.version``-resolved),
     ``predictors`` (``{tree_structure, leaves: [{path, class}, ...]}``
     per ``_describe_predictors``), ``solver`` (``solver.to_dict()``),
-    ``optax_config`` / ``evosax_config`` (``dataclasses.asdict`` with
-    stringified ``loss``, see module docstring), ``loss_history``,
-    and ``extras``.
+    ``optax_config`` / ``evosax_config`` (``dataclasses.asdict``, with
+    callables described, see module docstring), ``objective`` (the
+    ``Objective`` fields, ``penalty_points`` as nested lists),
+    ``loss_history``, and ``extras``.
 
     ``loss_history_kind``, inferred from whichever config was passed,
     records which entry point produced ``loss_history``:
@@ -97,7 +99,7 @@ Persist a complete training run to ``directory``.
 The directory is created, parents included. Existing files are
 overwritten: this saves rather than appends.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L266)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L303)</small>
 
 ---
 
@@ -113,6 +115,7 @@ load_run(
     predictors_template: 'Any',
     optax_cls: 'type[OptaxTrainingConfig] | None' = None,
     evosax_cls: 'type[EvosaxTrainingConfig] | None' = None,
+    objective_cls: 'type[Objective] | None' = None,
 ) -> dict[str, Any]
 ```
 
@@ -122,19 +125,15 @@ Inverse of [`save_run`](/api/serialise#save_run). ``predictors_template`` is req
 the framework owns no builder registry, and must share the saved
 pytree's container shape and per-leaf static configuration.
 
-Pass ``optax_cls`` / ``evosax_cls`` to get the saved config dicts
-rebuilt as typed dataclass instances; leave them out and the raw dicts
-come back.
-
-A ``loss`` field that was a callable at save time arrives as the string
-``"{module}.{qualname}"`` and is returned as it stands. Turning it back
-into a function is the caller's job, usually
-``importlib.import_module(module).qualname``.
+Pass ``optax_cls`` / ``evosax_cls`` / ``objective_cls`` to get the saved
+dicts rebuilt as typed instances; leave them out and the raw dicts come
+back. A section holding a described callable cannot be rebuilt and
+raises; load it raw and rebind the callables yourself.
 
 **Returns**
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `dict` |  | Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver`` (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` \| dict \| None), ``evosax_config`` (``EvosaxTrainingConfig`` \| dict \| None), ``loss_history`` (``list[float] \| None``), ``loss_history_kind`` (``str \| None``), ``extras`` (``dict``). |
+| `dict` |  | Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver`` (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` \| dict \| None), ``evosax_config`` (``EvosaxTrainingConfig`` \| dict \| None), ``objective`` (``Objective`` \| dict \| None), ``loss_history`` (``list[float] \| None``), ``loss_history_kind`` (``str \| None``), ``extras`` (``dict``). |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L393)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L433)</small>

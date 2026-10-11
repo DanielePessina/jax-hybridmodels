@@ -45,7 +45,7 @@ def _simulate_fn(
     y0: jnp.ndarray,
     solver: SolverConfig,
 ) -> jnp.ndarray:
-    omega = predictor(covariates).reshape(())
+    omega = predictor(covariates)
     omega_sq = omega * omega
 
     def vector_field(t: ArrayLike, y: jnp.ndarray, args: object) -> jnp.ndarray:
@@ -119,9 +119,9 @@ def main() -> None:
     )
     predictor = BoundedPredictor(
         input_keys=("omega_input",),
-        in_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
+        in_scaler=BoundScaler(bounds=(0.5, 2.0), transform="sigmoid"),
         inner=mlp,
-        out_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
+        out_scaler=BoundScaler(bounds=(0.5, 2.0), transform="sigmoid"),
     )
 
     preds = predict_dataset(

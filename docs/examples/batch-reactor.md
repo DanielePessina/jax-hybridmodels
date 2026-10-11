@@ -12,7 +12,7 @@ and adds a small bounded residual network, fitted in two phases on one
 `HybridModel`: CMA-ES for the trunk, then AdamW for the residual. A second
 script compares it with the classical alternative, one Arrhenius fit per
 pH, on runs neither model trained on. Read this for staged training with
-`trainable` masks, or for a worked case of when a residual network earns
+`fit(freeze=...)`, or for a worked case of when a residual network earns
 its place. The [RL example](/examples/batch-reactor-rl) continues from the
 fitted model.
 
@@ -23,7 +23,7 @@ uv run python examples/batch_reactor/train_hybrid.py
 uv run python examples/batch_reactor/compare_baselines.py
 ```
 
-`train_hybrid.py` takes about 30 s and writes seven figures to
+`train_hybrid.py` takes about 20 s and writes seven figures to
 `examples/batch_reactor/figures/`. `compare_baselines.py` runs 54 fits in
 about two minutes and writes three more. Both accept `--no-plot`, and
 `--generations` / `--steps` for a short run. `train_hybrid.py
@@ -61,16 +61,14 @@ Both phases call `fit` on the same model:
 
 <<< @/../examples/batch_reactor/train_hybrid.py#model
 
-Phase 1 freezes the residual with a mask built by `freeze_modules_of_type`,
-which leaves the trunk's two scalars:
-
-<<< @/../examples/batch_reactor/train_hybrid.py#mask-p1
-
-and fits them with CMA-ES (32 candidates, 60 generations by default):
+Phase 1 passes `freeze=hm.BoundedPredictor`, which holds the residual
+fixed and leaves the trunk's two scalars, and fits them with CMA-ES (32
+candidates, 60 generations by default):
 
 <<< @/../examples/batch_reactor/train_hybrid.py#phase-1
 
-Phase 2 swaps the mask and refines the residual with AdamW (800 steps by default):
+Phase 2 freezes the trunk's class instead and refines the residual with
+AdamW (800 steps by default):
 
 <<< @/../examples/batch_reactor/train_hybrid.py#phase-2
 
@@ -79,7 +77,7 @@ frozen half is bit-identical after each phase.
 
 `compare_baselines.py` builds the classical baseline from the same
 predictor tuple. `simulate_trunk_fn` integrates the trunk alone and ignores
-the residual, so both models share every mask:
+the residual, so the same `freeze` choices work on both models:
 
 <<< @/../examples/batch_reactor/compare_baselines.py#models
 

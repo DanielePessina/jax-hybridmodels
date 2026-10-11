@@ -36,8 +36,10 @@ k_ref = hm.Parameter(1e-3, bounds=(1e-6, 1e2), warp="log10")
 ```
 
 The initial value is in physical units and must lie strictly inside its
-bounds. One bound pair applies to every element; a list of pairs applies
-per element in flattened order. The optimiser updates an unbounded latent
+bounds. Every bounds argument in the library (`Parameter(bounds=)`,
+`BoundedPredictor(input_bounds=, output_bounds=)`, `BoundScaler(bounds)`)
+reads the same way: one `(low, high)` pair applies to every element, and a
+sequence of pairs applies per element in flattened order. The optimiser updates an unbounded latent
 and `.value` maps it back, so the value never leaves its bounds. Tournament
 restarts draw a fresh latent.
 
@@ -90,8 +92,20 @@ rate({"temperature_C": 20.0, "supersaturation": 1.5})   # selects and orders by 
 rate(jnp.array([20.0, 1.5]))                            # already in input_keys order
 ```
 
-A mapping may carry extra keys; a missing key raises. The output is a
-rank-1 array in physical units, so a single rate is `rate(inputs)[0]`.
+A mapping may carry extra keys; a missing key raises. The output is in
+physical units: a scalar when there is one output bound, as here, else a
+rank-1 array with one entry per output.
+
+To evaluate over a grid, pass arrays to `evaluate_predictor`. Inputs are
+broadcast against each other and the predictor is called once per point:
+
+```python
+temps = jnp.linspace(0.0, 100.0, 50)
+hm.evaluate_predictor(rate, {"temperature_C": temps, "supersaturation": 1.5})   # [50]
+hm.evaluate_predictor(
+    rate, {"temperature_C": temps[:, None], "supersaturation": jnp.linspace(0.0, 5.0, 20)}
+)                                                                                # [50, 20]
+```
 
 A network needs at least one input. For a trainable value with no inputs,
 use `Parameter`.
@@ -99,13 +113,13 @@ use `Parameter`.
 ## Saturation
 
 Near the edge of a finite box the output squash flattens and its gradient
-vanishes. `penalty_weight` charges `BoundedPredictor` leaves for sitting
-there. `Parameter` leaves are not charged. See
+vanishes. `Objective(penalty_weight=...)` charges `BoundedPredictor` leaves
+for sitting there. `Parameter` leaves are not charged. See
 [Penalties](/guide/penalties).
 
 ## Training and saving
 
 The default mask trains `Parameter` latents and network weights, and
-freezes `Constant` values and every `BoundScaler`. See
-[Freezing leaves](/guide/training#freezing-leaves) to change that and
+freezes `Constant` values and every `BoundScaler`. `fit(freeze=...)`
+freezes more; see [Freezing leaves](/guide/training#freezing-leaves), and
 [Saving and loading](/guide/serialization) for checkpoints.

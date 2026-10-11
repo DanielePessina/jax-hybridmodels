@@ -447,6 +447,7 @@ def experiments_from_dataframe(
         Column of sample times.
     experiment
         Column identifying the run. Its values, as strings, become ``exp_id``.
+        A missing value raises ``ValueError``.
     channels
         Channel columns. A list names each channel after its column; a
         mapping ``{channel: column}`` renames.
@@ -516,6 +517,14 @@ def experiments_from_dataframe(
             return group[spec].to_numpy(dtype=float)
         return np.full(len(group), float(spec))
 
+    missing_ids = df[experiment].isna()
+    if missing_ids.any():
+        # groupby would drop these rows silently, and a NaN in an integer
+        # column turns every ID into a float ("1.0").
+        raise ValueError(
+            f"Column {experiment!r} has {int(missing_ids.sum())} missing experiment ID(s); "
+            "every row needs one"
+        )
     out = []
     for key, group in df.groupby(experiment, sort=False):
         exp_id = str(key)
@@ -684,15 +693,42 @@ def _renamed(experiment: Experiment, exp_id: str) -> Experiment:
     )
 
 
+def _require_dataset(dataset: Any, caller: str) -> None:
+    """Raise a ``TypeError`` naming the fix when ``dataset`` is not a ``Dataset``.
+
+    The functional entry points read ``dataset.bucket_payloads`` straight
+    away, so a list of experiments (which ``HybridModel.fit`` accepts) would
+    otherwise fail with an ``AttributeError`` about ``list``.
+    """
+    if not isinstance(dataset, Dataset):
+        raise TypeError(
+            f"{caller}: pass a Dataset from make_dataset(experiments, "
+            f"output_channel_names=...); got {type(dataset).__name__}. "
+            "HybridModel.fit and predict also accept a list of experiments."
+        )
+
+
 def _named_experiments(experiments: Sequence[Experiment]) -> tuple[Experiment, ...]:
     """Name empty IDs ``experiment_<i>`` and refuse duplicates.
 
     Naming happens here, once, so every consumer of a dataset (prediction
-    results, metrics, data frames) sees the same IDs.
+    results, metrics, data frames) sees the same IDs. A generated name that
+    an explicit ID already uses gets a ``_<n>`` suffix instead, so only IDs
+    the caller wrote can be reported as duplicates.
     """
-    named = tuple(
-        exp if exp.exp_id else _renamed(exp, f"experiment_{i}") for i, exp in enumerate(experiments)
-    )
+    taken = {exp.exp_id for exp in experiments if exp.exp_id}
+    named_list = []
+    for i, exp in enumerate(experiments):
+        if exp.exp_id:
+            named_list.append(exp)
+            continue
+        name, n = f"experiment_{i}", 1
+        while name in taken:
+            n += 1
+            name = f"experiment_{i}_{n}"
+        taken.add(name)
+        named_list.append(_renamed(exp, name))
+    named = tuple(named_list)
     counts = Counter(exp.exp_id for exp in named)
     duplicates = sorted(exp_id for exp_id, n in counts.items() if n > 1)
     if duplicates:
@@ -983,14 +1019,24 @@ def make_bootstrap_dataset(
         raise ValueError(f"make_bootstrap_dataset: n_experiments must be >= 1, got {n_experiments}")
     idxs = np.asarray(jr.choice(key, n, shape=(n_experiments,), replace=True)).tolist()
     # IDs must stay unique, so the k-th repeat of an experiment is renamed
-    # ``<exp_id>#<k>``; the first draw keeps its ID.
+    # ``<exp_id>#<k>``; the first draw keeps its ID. Every source ID is
+    # reserved up front, and k skips any name already taken, so a source ID
+    # that itself looks like ``a#2`` cannot clash with a renamed repeat.
     draws: dict[str, int] = defaultdict(int)
+    taken = {exp.exp_id for exp in experiments}
     resampled = []
     for i in idxs:
         exp = experiments[int(i)]
         draws[exp.exp_id] += 1
-        k = draws[exp.exp_id]
-        resampled.append(exp if k == 1 else _renamed(exp, f"{exp.exp_id}#{k}"))
+        if draws[exp.exp_id] == 1:
+            resampled.append(exp)
+            continue
+        name = f"{exp.exp_id}#{draws[exp.exp_id]}"
+        while name in taken:
+            draws[exp.exp_id] += 1
+            name = f"{exp.exp_id}#{draws[exp.exp_id]}"
+        taken.add(name)
+        resampled.append(_renamed(exp, name))
     return make_dataset(resampled, output_channel_names=dataset.output_channel_names)
 
 

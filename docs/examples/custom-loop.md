@@ -29,9 +29,9 @@ weighted by its experiment count, so the three-experiment bucket counts
 three times the one-experiment bucket. The stock trainer has no option for
 that. The loop also passes a masked Huber loss as `loss_fn` and an L2 term
 on a second [`Parameter`](/api/predictors#parameter), `scale`, as
-`penalty_fn`. `OptaxTrainingConfig` accepts both of those too (`loss=` and
-`penalty_fn=`); they are here to show where each hook enters a
-hand-written loop.
+`penalty_fn`. [`Objective`](/guide/penalties) accepts both of those too
+(`loss=` and `penalty_fn=`); they are here to show where each hook enters
+a hand-written loop.
 
 ## Code
 
@@ -43,13 +43,17 @@ Three kernels:
 | [`build_penalty_step`](/api/kernels#build_penalty_step) | `(predictors, weight, points) -> (penalty, weighted_grads)` | once per step |
 | [`build_apply_update`](/api/kernels#build_apply_update) | `(predictors, grads, opt_state) -> (predictors, opt_state)` | once per step |
 
-Building them:
+Building them from the pieces of a `HybridModel`:
 
 <<< @/../examples/custom_loop/train_custom_loop.py#bucket-step
 
 One step of the loop:
 
 <<< @/../examples/custom_loop/train_custom_loop.py#loss
+
+After the loop, `eqx.tree_at(lambda m: m.predictors, model, predictors)`
+puts the trained predictors back into the model, so `predict` and
+`print_metrics` work as they do after `fit`.
 
 ## Results
 

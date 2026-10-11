@@ -103,7 +103,8 @@ Three things follow from sampling in the latent space:
   `from_latent`'s derivative underflows exactly where the squash saturates.
 
 Recombined, the two halves are exactly `BoundedPredictor.__call__`, so the
-trained policy goes straight into `predict_dataset` and `compute_metrics`.
+trained policy goes into a `HybridModel` like the baselines and is scored
+with the same `predict` and `compute_metrics`.
 `tests/test_example_batch_reactor_rl.py` pins that identity.
 
 The activity box is $(0, 1.05)$, not $(0, 1)$. Fresh catalyst has activity

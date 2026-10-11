@@ -4,8 +4,10 @@
 
 Check that:
 
-- `simulate_fn` returns `[T, S]` and `state_to_output` returns `[T, D]`,
-  with `D` matching `output_channel_names`;
+- `simulate_fn` returns `[T, S]` (or a `diffrax.Solution` holding it) and
+  `state_to_output` returns `[T, D]`, with `D` matching
+  `output_channel_names`. `fit`, `predict` and `simulate` check this and
+  name the function at fault with its actual and expected shape;
 - `y0` has shape `[S]`;
 - every state-derived predictor input stays inside the domain of its warp
   (a `log10` input must stay positive);
@@ -38,7 +40,8 @@ cannot trace. Keep the shape fixed and mask with `jnp.where`.
 
 For a `BoundedPredictor`, the number of `input_keys`, the input bounds and
 the inner `in_size` must agree, as must the output bounds and `out_size`.
-The output is rank-1, so a scalar rate is `rate(inputs)[0]`. A vector
+With one output bound the output is a scalar; with several it is rank-1.
+Code written for the old rank-1 output must drop its `[0]`. A vector
 covariate must be indexed into named entries, or passed whole as a rank-1
 array.
 

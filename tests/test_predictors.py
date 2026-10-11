@@ -499,3 +499,23 @@ def test_mask_freezers_need_only_the_mask():
     assert _flags(hm.freeze_paths(mask, ())) == _flags(mask)
     with pytest.raises(ValueError, match="Closest matches"):
         hm.freeze_paths(mask, ("rate.in_scaler.temprature",))
+
+
+def test_bounded_predictor_names_missing_inputs():
+    """A misspelled input key lists the keys the predictor needs."""
+    inner = hm.MLPPredictor(
+        in_size=1, out_size=1, width_size=4, depth=1, activation_name="tanh", key=jr.key(0)
+    )
+    rate = hm.BoundedPredictor(
+        inner=inner, input_keys=("temp",), input_bounds=(0.0, 2.0), output_bounds=(0.05, 3.0)
+    )
+    with pytest.raises(KeyError, match=r"missing \['temp'\], got \['T'\]"):
+        rate({"T": 1.0})
+
+
+def test_freeze_paths_takes_a_bare_string():
+    """One path may be passed as a string, not only a tuple."""
+    predictors = {"rate": hm.Parameter(0.3), "offset": hm.Parameter(0.0)}
+    mask = hm.freeze_paths(hm.trainable_mask(predictors), "rate")
+    assert hm.count_trainable_params(predictors, mask) == 1
+    assert hm.count_trainable_params(predictors, hm.freeze_paths(mask, "offset")) == 0

@@ -660,6 +660,66 @@ def test_failed_seed_ensemble_falls_back_and_closes_the_bracket(decay_data):
     assert ui.count("on_run_start") == ui.count("on_run_end") == 1
 
 
+def raising_simulate(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Array:
+    """Fails while the training kernels trace, after the UI run has opened."""
+    raise RuntimeError("simulate_fn failed")
+
+
+@pytest.mark.parametrize("trainer", ["optax", "seed", "bootstrap", "evosax"])
+def test_bad_objective_raises_before_the_ui_opens(decay_data, trainer):
+    # A Rich Live dashboard opened by on_run_start would be left on screen
+    # if the objective check raised after it.
+    ui = BracketingUI()
+    bad = Objective(channel_weights={"missing": 1.0})
+    common: dict[str, Any] = dict(objective=bad, key=jr.key(0), ui=ui, **PARAMETER_KWARGS)
+    with pytest.raises(ValueError, match="unknown channels"):
+        if trainer == "optax":
+            train_with_optax(parameter_predictors(), decay_data, quiet(steps=2), **common)
+        elif trainer == "seed":
+            train_seed_ensemble(
+                parameter_predictors(), decay_data, quiet(steps=2), n_seeds=2, **common
+            )
+        elif trainer == "bootstrap":
+            train_bootstrap_ensemble(
+                parameter_predictors(), decay_data, quiet(steps=2), n_bootstraps=2, **common
+            )
+        else:
+            config = EvosaxTrainingConfig(population_size=4, steps=2, verbose=False)
+            train_with_evosax(parameter_predictors(), decay_data, config, **common)
+    assert ui.events == []
+
+
+@pytest.mark.parametrize("trainer", ["optax", "seed", "evosax"])
+def test_error_after_run_start_closes_the_ui(decay_data, trainer):
+    ui = BracketingUI()
+    kwargs: dict[str, Any] = dict(
+        simulate_fn=raising_simulate, state_to_output=identity, solver=SOLVER
+    )
+    with pytest.raises(RuntimeError, match="simulate_fn failed"):
+        if trainer == "optax":
+            train_with_optax(
+                parameter_predictors(), decay_data, quiet(steps=2), key=jr.key(0), ui=ui, **kwargs
+            )
+        elif trainer == "seed":
+            train_seed_ensemble(
+                parameter_predictors(),
+                decay_data,
+                quiet(steps=2),
+                n_seeds=2,
+                key=jr.key(0),
+                ui=ui,
+                **kwargs,
+            )
+        else:
+            config = EvosaxTrainingConfig(population_size=4, steps=2, verbose=False)
+            train_with_evosax(
+                parameter_predictors(), decay_data, config, key=jr.key(0), ui=ui, **kwargs
+            )
+    assert ui.count("on_run_start") == ui.count("on_run_end") == 1
+    assert not ui.open
+    assert math.isnan(ui.events[-1][1]["final_loss"])
+
+
 def test_ensemble_predictions_average_and_dense_grids_agree(seed_ensembles, decay_data):
     top_two, _, _ = seed_ensembles
     members = tuple(p for _, p in top_two)
@@ -735,9 +795,7 @@ def test_evosax_improves_and_keeps_the_best_ever(evolved, decay_data):
     assert history[-1] < data_loss(predictors, decay_data, **kwargs)
     # The returned candidate is the best ever seen, so no worse than the
     # final generation's mean.
-    final_mean = next(
-        kw["mean_fitness"] for n, kw in reversed(ui.events) if n == "on_generation_end"
-    )
+    final_mean = next(kw["mean_loss"] for n, kw in reversed(ui.events) if n == "on_generation_end")
     assert data_loss(trained, decay_data, **kwargs) <= final_mean + 1e-7
 
 

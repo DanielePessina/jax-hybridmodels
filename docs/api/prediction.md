@@ -91,7 +91,7 @@ is a tuple rather than one array, because buckets differ precisely in
 | --- | --- | --- |
 | `tuple[Float[Array, "N T D"], ...]` |  | One ``[N_b, T_b, D]`` array per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L89)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L90)</small>
 
 ---
 
@@ -135,7 +135,7 @@ folded in ~20 lines).
 | --- | --- | --- |
 | `tuple[Float[Array, "N T_d D"], ...]` |  | One ``[N, T_d, D]`` array per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L159)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L183)</small>
 
 ---
 
@@ -174,7 +174,7 @@ is the same shape as a single ``predict_dataset`` return.
 | --- | --- | --- |
 | `tuple[Float[Array, "N T D"], ...]` |  | The member-mean prediction per bucket, in bucket-payload order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L227)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L252)</small>
 
 ---
 
@@ -185,14 +185,29 @@ is the same shape as a single ``predict_dataset`` return.
 <small>`from jaxhybridmodels.prediction import evaluate_predictor` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.evaluate_predictor`</small>
 
 ```python
-evaluate_predictor(predictor: 'Any', covariates: 'dict[str, float]') -> 'float'
+evaluate_predictor(predictor: 'Any', inputs: 'Mapping[str, ArrayLike]') -> 'Array'
 ```
 
-Evaluate a scalar-valued predictor at named inputs, as a Python float.
+Evaluate a predictor at named inputs, vectorised over array-valued ones.
 
-Shortcut for the recovered-physics readout every example writes by hand
-(``float(predictor({"k": jnp.asarray(v)}).reshape(()))``). Takes the
-predictor's named inputs as plain Python floats, calls it, and flattens
-the scalar result to a ``float``.
+The inputs are broadcast against each other, so scalars, a 1-D sweep,
+or a 2-D grid built from ``x[:, None]`` and ``y[None, :]`` all work.
+The predictor is called once per broadcast point with a dict of scalars,
+the way a ``simulate_fn`` calls it, and the result has shape
+``broadcast_shape + output_shape``. A one-output ``BoundedPredictor``
+has output shape ``()``, so a sweep over 50 temperatures gives ``[50]``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L127)</small>
+**Examples**
+
+::
+
+    hm.evaluate_predictor(predictors["rate"], {"T": 300.0})  # shape ()
+    hm.evaluate_predictor(predictors["rate"], {"T": temps, "pH": 6.5})  # [len(temps)]
+
+**Returns**
+
+| Item | Type | Description |
+| --- | --- | --- |
+| `Array` |  | Call ``float(...)`` on a scalar result for a Python number. |
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L129)</small>

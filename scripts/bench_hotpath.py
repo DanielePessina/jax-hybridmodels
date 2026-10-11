@@ -37,12 +37,12 @@ from jaxhybridmodels import (
     make_experiment,
     predict_dataset,
 )
-from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.penalties import select_penalty_points
 from jaxhybridmodels.trainable import trainable_mask
 from jaxhybridmodels.training.optax import (
     OptaxTrainingConfig,
     _build_training_kernels,
+    _resolve_objective,
     _run_phases,
 )
 from jaxhybridmodels.ui.base import SilentUI
@@ -89,8 +89,8 @@ def simulate_fn(predictor, ts, covariates, y0, solver):
 
     def vf(t, y, args):
         y1, y2 = y[0], y[1]
-        dy1 = -k[0] * y1 + y2
-        dy2 = -k[0] * y2 - y1
+        dy1 = -k * y1 + y2
+        dy2 = -k * y2 - y1
         return jnp.stack([dy1, dy2])
 
     return jnp.asarray(
@@ -147,7 +147,7 @@ def main():
         predictors=predictor,
         dataset=dataset,
         config=config,
-        objective=Objective(),
+        resolved=_resolve_objective(None, predictor, dataset, config),
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         solver=solver,

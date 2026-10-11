@@ -34,7 +34,7 @@ import itertools
 import math
 import warnings
 from collections.abc import Callable
-from dataclasses import InitVar, dataclass
+from dataclasses import KW_ONLY, InitVar, dataclass
 from typing import Any, cast
 
 import equinox as eqx
@@ -43,13 +43,17 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array
 
-from jaxhybridmodels.data import BucketPayload, Dataset, make_bootstrap_dataset
-from jaxhybridmodels.objective import Objective
+from jaxhybridmodels.data import (
+    BucketPayload,
+    Dataset,
+    _require_dataset,
+    make_bootstrap_dataset,
+)
+from jaxhybridmodels.objective import Objective, ResolvedObjective, resolve_objective
 from jaxhybridmodels.penalties import (
     PenaltyPointSource,
     data_penalty_points,
     select_penalty_points,
-    validate_penalty_points,
 )
 from jaxhybridmodels.predictors.base import reinitialize_pytree_with_key
 from jaxhybridmodels.rng import fold
@@ -62,7 +66,7 @@ from jaxhybridmodels.training.kernels import (
     build_penalty_step,
     build_score_bucket,
 )
-from jaxhybridmodels.ui.base import SilentUI, TrainingUI
+from jaxhybridmodels.ui.base import SilentUI, TrainingUI, close_run_on_error
 from jaxhybridmodels.ui.optax import RichTrainingUI
 
 # An optimizer entry may be a registered name ("adamw"), a factory taking
@@ -94,7 +98,9 @@ class TrainingPhase:
         Learning rate: a finite non-negative float, or an optax schedule
         ``step -> lr`` whose step count starts at 0 at the start of this
         phase, whatever ran before it. Chain several curves inside one
-        phase with ``optax.join_schedules``. A float is applied to the live
+        phase with ``optax.join_schedules``. Any callable works: one JAX
+        cannot trace, such as ``lambda s: 0.1 if s < 2 else 0.01``, is
+        evaluated step by step on the host. A float is applied to the live
         optimiser state unless the phase also sets ``reset_optimizer``. A
         schedule needs an optimiser name or factory; a ready-made
         ``optax.GradientTransformation`` owns its learning rate, so pairing
@@ -130,6 +136,9 @@ class TrainingPhase:
     """
 
     steps: int
+    # ``steps`` may be positional (``TrainingPhase(200, lr=1e-2)``); the rest
+    # are keyword-only so a stray positional cannot land in the wrong field.
+    _: KW_ONLY
     lr: float | optax.Schedule = 1e-3
     optimizer: OptimizerSpec = "adamw"
     horizon: float = 1.0
@@ -161,7 +170,7 @@ class TrainingPhase:
                 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class OptaxTrainingConfig:
     """Search settings for :func:`train_with_optax` and Optax ``HybridModel.fit``.
 
@@ -369,7 +378,14 @@ def _scheduled_lrs(phase: TrainingPhase) -> Array | None:
     """
     if not callable(phase.lr):
         return None
-    return jax.vmap(phase.lr)(jnp.arange(phase.steps))
+    schedule = cast(optax.Schedule, phase.lr)
+    try:
+        return jax.vmap(schedule)(jnp.arange(phase.steps))
+    except (jax.errors.ConcretizationTypeError, jax.errors.TracerIntegerConversionError):
+        # A plain Python schedule (``lambda s: 0.1 if s < 2 else 0.01``)
+        # branches on the step, which a traced index cannot do. Evaluate it
+        # on the host instead, once per step.
+        return jnp.stack([jnp.asarray(schedule(i)) for i in range(phase.steps)])
 
 
 def _set_lr(opt_state: Any, value: Any) -> None:
@@ -893,6 +909,7 @@ def train_with_optax(
         ``config.restore_best=True``, else the final step. That minimum
         resets whenever the phase horizon changes, so the returned model
         always comes from the last horizon trained on."""
+    _require_dataset(dataset, "train_with_optax")
     run = _train_with_optax(
         predictors,
         dataset,
@@ -928,7 +945,6 @@ def _train_with_optax(
     ``HybridModel.fit`` calls this for the per-step loss, penalty, phase and
     validation series it reports in ``FitHistory``.
     """
-    objective = Objective() if objective is None else objective
     if trainable is None:
         trainable = trainable_mask(predictors)
 
@@ -941,57 +957,69 @@ def _train_with_optax(
             f"training channels {dataset.output_channel_names}"
         )
 
+    # Resolved before the dashboard opens, so a bad channel name or penalty
+    # path raises without leaving a Rich Live display on the terminal.
+    resolved = _resolve_objective(objective, predictors, dataset, config)
     ui_ = _select_ui(ui, config.verbose)
     ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+    with close_run_on_error(ui_):
+        kernels = _build_training_kernels(
+            predictors=predictors,
+            dataset=dataset,
+            config=config,
+            resolved=resolved,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
+            trainable=trainable,
+            ui=ui_,
+        )
+        select_score = (
+            None if validation is None else build_dataset_score(kernels.score_bucket, validation)
+        )
 
-    kernels = _build_training_kernels(
-        predictors=predictors,
-        dataset=dataset,
-        config=config,
-        objective=objective,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
-        ui=ui_,
-    )
-    select_score = (
-        None if validation is None else build_dataset_score(kernels.score_bucket, validation)
-    )
+        if _tournament_enabled(config):
+            ranked = _shared_tournament(
+                predictors,
+                dataset,
+                bucket_step=kernels.bucket_step,
+                score_bucket=kernels.score_bucket,
+                apply_update=kernels.apply_update,
+                optimizer=kernels.optimizer,
+                trainable=trainable,
+                tournament_attempts=config.tournament_attempts,
+                tournament_steps=config.tournament_steps,
+                tournament_lr=config.tournament_lr,
+                key=fold(key, "tournament"),
+                length_mask_fraction=jnp.asarray(1.0),
+                top_k=1,
+            )
+            predictors = ranked[0][1]
 
-    if _tournament_enabled(config):
-        ranked = _shared_tournament(
+        return _run_phases(
             predictors,
             dataset,
-            bucket_step=kernels.bucket_step,
-            score_bucket=kernels.score_bucket,
-            apply_update=kernels.apply_update,
-            optimizer=kernels.optimizer,
+            config,
+            kernels=kernels,
+            sources=kernels.sources,
             trainable=trainable,
-            tournament_attempts=config.tournament_attempts,
-            tournament_steps=config.tournament_steps,
-            tournament_lr=config.tournament_lr,
-            key=fold(key, "tournament"),
-            length_mask_fraction=jnp.asarray(1.0),
-            top_k=1,
+            ui=ui_,
+            select_score=select_score,
         )
-        predictors = ranked[0][1]
-
-    return _run_phases(
-        predictors,
-        dataset,
-        config,
-        kernels=kernels,
-        sources=kernels.sources,
-        trainable=trainable,
-        ui=ui_,
-        select_score=select_score,
-    )
 
 
 def _phase_penalty_weight(phase: TrainingPhase, objective: Objective) -> float:
     """The phase's bound-penalty weight: its own override, else the objective's."""
     return float(objective.penalty_weight if phase.penalty_weight is None else phase.penalty_weight)
+
+
+def _resolve_objective(
+    objective: Objective | None, predictors: Any, dataset: Dataset, config: OptaxTrainingConfig
+) -> ResolvedObjective:
+    """:func:`resolve_objective` with the bound penalty on when any phase weights it."""
+    objective = Objective() if objective is None else objective
+    penalty_on = any(_phase_penalty_weight(p, objective) > 0.0 for p in config.phases)
+    return resolve_objective(objective, predictors, dataset, penalty_on=penalty_on)
 
 
 def _run_phases(
@@ -1187,22 +1215,18 @@ def _build_training_kernels(
     predictors: Any,
     dataset: Dataset,
     config: OptaxTrainingConfig,
-    objective: Objective,
+    resolved: ResolvedObjective,
     simulate_fn: Callable[..., Array],
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     trainable: Any,
     ui: TrainingUI,
 ) -> _Kernels:
-    """Resolve the objective, build the compiled kernels and optimiser, and warm the caches.
+    """Build the compiled kernels and optimiser for a resolved objective, and warm the caches.
 
     Shared by :func:`train_with_optax` and the ensemble entry points so a
     seed/bootstrap ensemble reuses the exact same kernel construction. The
     jit caches come back already populated by a warm-up pass.
-
-    Everything the objective can get wrong (an unknown channel name, an
-    unknown penalty-point path, an uncovered predictor) raises here, before
-    anything compiles.
 
     The caller owns the ``on_run_start`` side of the UI bracket: the
     warm-up compile events below are meant to land inside a run, and the
@@ -1210,18 +1234,8 @@ def _build_training_kernels(
     the first.
     """
     bucket_payloads = dataset.bucket_payloads
-    loss_fn = objective.loss_fn(dataset.output_channel_names)
-    sources = data_penalty_points(predictors, dataset)
-    extras = objective.extra_penalty_points(predictors)
-    validate_penalty_points(
-        predictors,
-        sources,
-        extras,
-        # Coverage is the default bound penalty's contract; a custom
-        # ``penalty_fn`` owns its points and needs no coverage check.
-        enabled=any(_phase_penalty_weight(p, objective) > 0.0 for p in config.phases)
-        and objective.penalty_fn is None,
-    )
+    objective, loss_fn = resolved.objective, resolved.loss_fn
+    sources, extras = resolved.sources, resolved.extras
 
     bucket_step = build_bucket_step(
         simulate_fn=simulate_fn,
@@ -1322,6 +1336,7 @@ def train_seed_ensemble(
     ``on_run_end`` are fired once per member, so a live dashboard shows
     each member's phases rather than freezing after the first.
     """
+    _require_dataset(dataset, "train_seed_ensemble")
     if trainable is None:
         trainable = trainable_mask(predictors)
     if k_best is None:
@@ -1335,71 +1350,74 @@ def train_seed_ensemble(
     if not bucket_payloads:
         raise ValueError("train_seed_ensemble: dataset has no bucket payloads")
 
+    # Resolved before the dashboard opens; see _train_with_optax.
+    resolved = _resolve_objective(objective, predictors, dataset, config)
     ui_ = _select_ui(ui, config.verbose)
     ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-    kernels = _build_training_kernels(
-        predictors=predictors,
-        dataset=dataset,
-        config=config,
-        objective=Objective() if objective is None else objective,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
-        ui=ui_,
-    )
-
-    full_mask = jnp.asarray(1.0)
-    ranked = _shared_tournament(
-        predictors,
-        dataset,
-        bucket_step=kernels.bucket_step,
-        score_bucket=kernels.score_bucket,
-        apply_update=kernels.apply_update,
-        optimizer=kernels.optimizer,
-        trainable=trainable,
-        tournament_attempts=n_seeds,
-        tournament_steps=config.tournament_steps,
-        tournament_lr=config.tournament_lr,
-        key=fold(key, "seed_ensemble_tournament"),
-        length_mask_fraction=full_mask,
-        top_k=k_best,
-    )
-
-    trained: list[tuple[float, Any]] = []
-    for member_idx, (_seed_score, candidate) in enumerate(ranked):
-        if not math.isfinite(_seed_score):
-            continue
-        # Every member is its own UI run: each gets a fresh on_run_start
-        # (the first also brackets the warm-up compile), and _run_phases
-        # fires the matching on_run_end.
-        if member_idx > 0:
-            ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-        run = _run_phases(
-            candidate,
-            dataset,
-            config,
-            kernels=kernels,
-            sources=kernels.sources,
+    with close_run_on_error(ui_):
+        kernels = _build_training_kernels(
+            predictors=predictors,
+            dataset=dataset,
+            config=config,
+            resolved=resolved,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
             trainable=trainable,
             ui=ui_,
         )
-        trained.append((run.final_loss, run.predictors))
 
-    if not trained:
-        warnings.warn(
-            "train_seed_ensemble: every seed failed its warm-up; returning the "
-            "input predictors as a single-member ensemble.",
-            RuntimeWarning,
-            stacklevel=2,
+        full_mask = jnp.asarray(1.0)
+        ranked = _shared_tournament(
+            predictors,
+            dataset,
+            bucket_step=kernels.bucket_step,
+            score_bucket=kernels.score_bucket,
+            apply_update=kernels.apply_update,
+            optimizer=kernels.optimizer,
+            trainable=trainable,
+            tournament_attempts=n_seeds,
+            tournament_steps=config.tournament_steps,
+            tournament_lr=config.tournament_lr,
+            key=fold(key, "seed_ensemble_tournament"),
+            length_mask_fraction=full_mask,
+            top_k=k_best,
         )
-        # Close the run bracket opened by the per-member on_run_start
-        # above, so a live dashboard does not hang after the fallback.
-        ui_.on_run_end(final_loss=math.inf)
-        return [(math.inf, predictors)]
 
-    trained.sort(key=lambda pair: pair[0])
-    return trained
+        trained: list[tuple[float, Any]] = []
+        for member_idx, (_seed_score, candidate) in enumerate(ranked):
+            if not math.isfinite(_seed_score):
+                continue
+            # Every member is its own UI run: each gets a fresh on_run_start
+            # (the first also brackets the warm-up compile), and _run_phases
+            # fires the matching on_run_end.
+            if member_idx > 0:
+                ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+            run = _run_phases(
+                candidate,
+                dataset,
+                config,
+                kernels=kernels,
+                sources=kernels.sources,
+                trainable=trainable,
+                ui=ui_,
+            )
+            trained.append((run.final_loss, run.predictors))
+
+        if not trained:
+            warnings.warn(
+                "train_seed_ensemble: every seed failed its warm-up; returning the "
+                "input predictors as a single-member ensemble.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            # Close the run bracket opened by the per-member on_run_start
+            # above, so a live dashboard does not hang after the fallback.
+            ui_.on_run_end(final_loss=math.inf)
+            return [(math.inf, predictors)]
+
+        trained.sort(key=lambda pair: pair[0])
+        return trained
 
 
 def train_bootstrap_ensemble(
@@ -1441,6 +1459,7 @@ def train_bootstrap_ensemble(
     the whole ensemble is deterministic given it. Each member is its own
     UI run, bracketed by ``on_run_start`` / ``on_run_end``.
     """
+    _require_dataset(dataset, "train_bootstrap_ensemble")
     if n_bootstraps < 1:
         raise ValueError(f"train_bootstrap_ensemble: n_bootstraps must be >= 1, got {n_bootstraps}")
     if n_seeds < 1:
@@ -1452,80 +1471,82 @@ def train_bootstrap_ensemble(
     if not bucket_payloads:
         raise ValueError("train_bootstrap_ensemble: dataset has no bucket payloads")
 
+    # Resolved before the dashboard opens; see _train_with_optax.
+    resolved = _resolve_objective(objective, predictors, dataset, config)
     ui_ = _select_ui(ui, config.verbose)
     ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-
-    kernels = _build_training_kernels(
-        predictors=predictors,
-        dataset=dataset,
-        config=config,
-        objective=Objective() if objective is None else objective,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
-        ui=ui_,
-    )
-
-    all_trained: list[tuple[float, Any]] = []
-    for s in range(n_bootstraps):
-        boot = make_bootstrap_dataset(dataset, key=fold(key, f"bootstrap_{s}"))
-        sample_key = fold(key, f"bootstrap_seeds_{s}")
-        full_mask = jnp.asarray(1.0)
-        ranked = _shared_tournament(
-            predictors,
-            boot,
-            bucket_step=kernels.bucket_step,
-            score_bucket=kernels.score_bucket,
-            apply_update=kernels.apply_update,
-            optimizer=kernels.optimizer,
+    with close_run_on_error(ui_):
+        kernels = _build_training_kernels(
+            predictors=predictors,
+            dataset=dataset,
+            config=config,
+            resolved=resolved,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
             trainable=trainable,
-            tournament_attempts=n_seeds,
-            tournament_steps=config.tournament_steps,
-            tournament_lr=config.tournament_lr,
-            key=fold(sample_key, "bootstrap_sample_tournament"),
-            length_mask_fraction=full_mask,
-            top_k=n_seeds if n_seeds > 1 else 1,
+            ui=ui_,
         )
-        for member_idx, (_seed_score, candidate) in enumerate(ranked):
-            if not math.isfinite(_seed_score):
-                continue
-            # Every member is its own UI run: each gets a fresh
-            # on_run_start (the first also brackets the warm-up compile),
-            # and _run_phases fires the matching on_run_end.
-            if s > 0 or member_idx > 0:
-                ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-            run = _run_phases(
-                candidate,
+
+        all_trained: list[tuple[float, Any]] = []
+        for s in range(n_bootstraps):
+            boot = make_bootstrap_dataset(dataset, key=fold(key, f"bootstrap_{s}"))
+            sample_key = fold(key, f"bootstrap_seeds_{s}")
+            full_mask = jnp.asarray(1.0)
+            ranked = _shared_tournament(
+                predictors,
                 boot,
-                config,
-                kernels=kernels,
-                # The resample changes the covariate values, so the measured
-                # points are gathered from the boot sample, not the source.
-                sources=data_penalty_points(predictors, boot),
+                bucket_step=kernels.bucket_step,
+                score_bucket=kernels.score_bucket,
+                apply_update=kernels.apply_update,
+                optimizer=kernels.optimizer,
                 trainable=trainable,
-                ui=ui_,
+                tournament_attempts=n_seeds,
+                tournament_steps=config.tournament_steps,
+                tournament_lr=config.tournament_lr,
+                key=fold(sample_key, "bootstrap_sample_tournament"),
+                length_mask_fraction=full_mask,
+                top_k=n_seeds if n_seeds > 1 else 1,
             )
-            all_trained.append((run.final_loss, run.predictors))
+            for member_idx, (_seed_score, candidate) in enumerate(ranked):
+                if not math.isfinite(_seed_score):
+                    continue
+                # Every member is its own UI run: each gets a fresh
+                # on_run_start (the first also brackets the warm-up compile),
+                # and _run_phases fires the matching on_run_end.
+                if s > 0 or member_idx > 0:
+                    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+                run = _run_phases(
+                    candidate,
+                    boot,
+                    config,
+                    kernels=kernels,
+                    # The resample changes the covariate values, so the measured
+                    # points are gathered from the boot sample, not the source.
+                    sources=data_penalty_points(predictors, boot),
+                    trainable=trainable,
+                    ui=ui_,
+                )
+                all_trained.append((run.final_loss, run.predictors))
 
-    if not all_trained:
-        warnings.warn(
-            "train_bootstrap_ensemble: every member failed; returning the input "
-            "predictors as a single-member ensemble.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        # Close the run bracket opened by the per-member on_run_start
-        # above, so a live dashboard does not hang after the fallback.
-        ui_.on_run_end(final_loss=math.inf)
-        return [(math.inf, predictors)]
-
-    all_trained.sort(key=lambda pair: pair[0])
-    if k_best is not None:
-        if not (0 < k_best <= len(all_trained)):
-            raise ValueError(
-                f"train_bootstrap_ensemble: k_best={k_best} must satisfy "
-                f"0 < k_best <= ensemble size {len(all_trained)}"
+        if not all_trained:
+            warnings.warn(
+                "train_bootstrap_ensemble: every member failed; returning the input "
+                "predictors as a single-member ensemble.",
+                RuntimeWarning,
+                stacklevel=2,
             )
-        all_trained = all_trained[:k_best]
-    return all_trained
+            # Close the run bracket opened by the per-member on_run_start
+            # above, so a live dashboard does not hang after the fallback.
+            ui_.on_run_end(final_loss=math.inf)
+            return [(math.inf, predictors)]
+
+        all_trained.sort(key=lambda pair: pair[0])
+        if k_best is not None:
+            if not (0 < k_best <= len(all_trained)):
+                raise ValueError(
+                    f"train_bootstrap_ensemble: k_best={k_best} must satisfy "
+                    f"0 < k_best <= ensemble size {len(all_trained)}"
+                )
+            all_trained = all_trained[:k_best]
+        return all_trained

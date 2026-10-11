@@ -57,21 +57,21 @@ irregular data, differentiates through it, and trains the predictors.
 | `SolverConfig` | Stores the Diffrax solver and its settings. |
 | `Dataset` | Stores bucketed observations and masks. |
 
-`HybridModel` binds the first four; the dataset is passed per call:
+`HybridModel` binds the first four; the data is passed per call, as a list
+of experiments or a `Dataset`:
 
 ```python
 import jaxhybridmodels as hm
 
-dataset = hm.make_dataset(experiments, output_channel_names=("conc",))
 model = hm.HybridModel(
     predictors=predictors,
     simulate_fn=simulate_fn,
     state_to_output=state_to_output,
     output_channel_names=("conc",),
-    solver=solver,
 )
-result = model.fit(dataset, hm.OptaxTrainingConfig(steps=500, lr=1e-2), key=key)
-predictions = result.model.predict(dataset)
+result = model.fit(experiments, hm.OptaxTrainingConfig(steps=500, lr=1e-2), key=key)
+predictions = result.model.predict(experiments)
+hm.print_metrics(predictions)
 ```
 
 [Getting started](/guide/getting-started) defines every variable here.
@@ -81,10 +81,10 @@ predictions = result.model.predict(dataset)
 
 | If you want to... | Start here | Main API |
 | --- | --- | --- |
-| Build irregular experiments and datasets | [Data and buckets](/guide/data) | [`make_experiment`](/api/data#make_experiment), [`make_dataset`](/api/data#make_dataset) |
+| Build irregular experiments and datasets | [Data and buckets](/guide/data) | [`make_experiment`](/api/data#make_experiment), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe) |
 | Write the ODE and observation map | [Model interface](/guide/model-interface) | [`HybridModel`](/api/model#hybridmodel) |
 | Choose parameters, networks and bounds | [Predictors and bounds](/guide/predictors) | [`Parameter`](/api/predictors#parameter), [`BoundedPredictor`](/api/predictors#boundedpredictor) |
-| Train with gradients or population search | [Training](/guide/training) | [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig) |
+| Train with gradients or population search | [Training](/guide/training) | [`Objective`](/api/training#objective), [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig) |
 | Add time-varying inputs or schedules | [Profiles and schedules](/guide/profiles-and-schedules) | [`ramp_profile`](/api/profiles#ramp_profile), [`annealing_schedule`](/api/schedules#annealing_schedule) |
 | Save, evaluate, or ensemble models | [Saving and loading](/guide/serialization), [Ensembles](/guide/ensembles) | [`save_run`](/api/serialise#save_run), [`compute_metrics`](/api/metrics#compute_metrics) |
 

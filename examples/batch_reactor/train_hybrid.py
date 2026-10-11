@@ -10,11 +10,12 @@ Shows:
 
 - one ``HybridModel`` fitted twice, with an ``EvosaxTrainingConfig`` and
   then an ``OptaxTrainingConfig``
-- ``trainable`` masks built with ``freeze_modules_of_type`` to switch which
-  half of the predictor tuple trains
+- ``fit(freeze=...)`` with a predictor class, to switch which half of the
+  predictor tuple trains
 - a ``ramp_profile`` evaluated inside the vector field from scalar
   covariates
-- ``FitResult.history``, ``predict``, ``simulate``, ``compute_metrics``
+- ``FitResult.history``, ``predict``, ``simulate(experiment=...)``,
+  ``compute_metrics`` and ``evaluate_predictor``
 - ``save_predictors`` for the RL example, which loads this fitted model
 
 Run::
@@ -44,22 +45,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from jax import Array
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    Dataset,
-    Experiment,
-    HybridModel,
-    PredictionResult,
-    compute_metrics,
-    count_trainable_params,
-    evaluate_predictor,
-    freeze_modules_of_type,
-    make_dataset,
-    print_metrics,
-    save_predictors,
-    trainable_mask,
-)
-from jaxhybridmodels.training import EvosaxTrainingConfig, OptaxTrainingConfig
+import jaxhybridmodels as hm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # ``_model`` and ``_data`` sit in this script's own directory, so they
@@ -89,14 +75,13 @@ from _model import (  # noqa: E402
     log10_k_trunk,
     simulate_fn,
     state_to_output,
-    y0_fn,
 )
 from _shared import apply_default_style, parity_diagnostics, parity_plot  # noqa: E402
 
 
 def _trajectory_grid_plot(
-    experiments: list[Experiment],
-    predictions: PredictionResult,
+    experiments: list[hm.Experiment],
+    predictions: hm.PredictionResult,
     *,
     title: str,
     save_path: Path,
@@ -147,10 +132,10 @@ def _trajectory_grid_plot(
 
 def _k_vs_ph_reveal_plot(
     *,
-    predictors_p1: tuple[ArrheniusKinetics, BoundedPredictor],
-    predictors_p2: tuple[ArrheniusKinetics, BoundedPredictor] | None,
-    train_experiments: list[Experiment],
-    val_experiments: list[Experiment],
+    predictors_p1: tuple[ArrheniusKinetics, hm.BoundedPredictor],
+    predictors_p2: tuple[ArrheniusKinetics, hm.BoundedPredictor] | None,
+    train_experiments: list[hm.Experiment],
+    val_experiments: list[hm.Experiment],
     title: str,
     save_path: Path,
 ) -> None:
@@ -182,7 +167,7 @@ def _k_vs_ph_reveal_plot(
             label=f"parametric (T={T_C:.0f}°C)" if middle else None,
         )
         if predictors_p2 is not None:
-            hybrid = jax.vmap(lambda ph, T_C=T_C: log10_k(predictors_p2, T_C, ph))(pH_grid)
+            hybrid = log10_k(predictors_p2, T_C, pH_grid)
             ax.plot(
                 pH_grid,
                 np.asarray(hybrid),
@@ -250,19 +235,18 @@ def _loss_curve_plot(history_p1: tuple[float, ...], history_p2: tuple[float, ...
 
 
 def _report(
-    model: HybridModel, train: Dataset, val: Dataset, label: str
-) -> tuple[PredictionResult, PredictionResult]:
-    """Print training and validation metrics and return both prediction sets."""
+    model: hm.HybridModel, train: hm.Dataset, val: hm.Dataset, label: str
+) -> hm.PredictionResult:
+    """Print training and validation metrics and return the training predictions."""
     train_pred = model.predict(train)
-    val_pred = model.predict(val)
     print(f"  training metrics ({label}):")
-    print_metrics(compute_metrics(train_pred.buckets, train))
+    hm.print_metrics(train_pred)
     print(f"  validation metrics ({label}):")
-    print_metrics(compute_metrics(val_pred.buckets, val))
-    return train_pred, val_pred
+    hm.print_metrics(model.predict(val))
+    return train_pred
 
 
-def _inner_weights(residual: BoundedPredictor) -> Array:
+def _inner_weights(residual: hm.BoundedPredictor) -> Array:
     """The residual network's weights as one vector, to check a phase left them alone."""
     leaves = jax.tree_util.tree_leaves(eqx.filter(residual.inner, eqx.is_inexact_array))
     return jnp.concatenate([leaf.reshape(-1) for leaf in leaves])
@@ -321,8 +305,10 @@ def main() -> None:
         )
         for j, (T_C, pH) in enumerate(VALIDATION_POINTS)
     ]
-    train_dataset = make_dataset(train_experiments, output_channel_names=OUTPUT_CHANNELS)
-    val_dataset = make_dataset(val_experiments, output_channel_names=OUTPUT_CHANNELS)
+    # Built once here so the bucket layout can be checked; fit and predict
+    # would also take the experiment lists directly.
+    train_dataset = hm.make_dataset(train_experiments, output_channel_names=OUTPUT_CHANNELS)
+    val_dataset = hm.make_dataset(val_experiments, output_channel_names=OUTPUT_CHANNELS)
     for i, (T_C, pH) in enumerate(train_design):
         T_lo, T_hi = T_C - RAMP_HALF_WIDTH, T_C + RAMP_HALF_WIDTH
         print(f"  train [{i}] T {T_lo:.1f}→{T_hi:.1f}°C, pH={pH:.3f}")
@@ -334,7 +320,7 @@ def main() -> None:
     assert val_dataset.bucket_payloads[0].ts.shape == (len(VALIDATION_POINTS), N_TIMESTEPS)
 
     # region model
-    model = HybridModel(
+    model = hm.HybridModel(
         predictors=build_predictors(key=k_init),
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
@@ -347,64 +333,53 @@ def main() -> None:
     # network near zero decades, and one simulation should start at the
     # first observation and decay monotonically.
     parametric, residual = model.predictors
-    delta = evaluate_predictor(residual, {"temperature_C": 25.0, "pH": K_SAT_PH50})
+    delta = hm.evaluate_predictor(residual, {"temperature_C": 25.0, "pH": K_SAT_PH50})
     print(f"  residual at init, (25°C, pH 5.85): Δlog10 k={delta:+.3f}  (expect about 0)")
     assert abs(delta) < 0.5, f"a fresh residual should sit near 0, got {delta}"
-    exp = train_experiments[0]
-    sim_ca = np.asarray(
-        model.simulate(
-            ts=exp.channels["Ca"].ts,
-            y0=y0_fn(exp.covariates, exp.channels),
-            covariates=exp.covariates,
-        ).outputs["Ca"]
-    )
+    sim_ca = np.asarray(model.simulate(experiment=train_experiments[0]).outputs["Ca"])
     assert (sim_ca[1:] <= sim_ca[:-1] + 1e-6).all(), "Ca should be non-increasing"
     assert abs(sim_ca[0] - CA0) < 5.0 * NOISE_REL, "Ca starts near CA0"
 
     print("\n[fit] phase 1: CMA-ES on the trunk, residual frozen")
-    # region mask-p1
-    # The default mask already holds BoundScaler leaves fixed; this freezes
-    # the whole residual on top, leaving the trunk's two latent scalars.
-    mask_p1 = freeze_modules_of_type(
-        trainable_mask(model.predictors), model.predictors, BoundedPredictor
+    # freeze_mask is the mask behind fit(freeze=...), used here only to count
+    # what phase 1 will train.
+    n_p1 = hm.count_trainable_params(
+        model.predictors, hm.freeze_mask(model.predictors, hm.BoundedPredictor)
     )
-    # endregion mask-p1
-    n_p1 = count_trainable_params(model.predictors, mask_p1)
     print(f"  trainable scalars: {n_p1}")
     assert n_p1 == 2, f"phase 1 should train the trunk's 2 scalars, got {n_p1}"
     residual_before = _inner_weights(residual)
 
     # region phase-1
-    config_p1 = EvosaxTrainingConfig(
+    config_p1 = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
-        num_generations=args.generations,
+        steps=args.generations,
         init="lhs_box",
         init_box_extent=args.init_box_extent,
         sigma_init=args.sigma_init,
-        loss="mse",
-        verbose=True,
     )
-    fit_p1 = model.fit(train_dataset, config_p1, key=k_p1, trainable=mask_p1)
+    # The default mask already holds BoundScaler leaves fixed. Freezing every
+    # BoundedPredictor on top leaves the trunk's two latent scalars.
+    fit_p1 = model.fit(train_dataset, config_p1, key=k_p1, freeze=hm.BoundedPredictor)
     model_p1 = fit_p1.model
     # endregion phase-1
-    history_p1 = fit_p1.history.best_fitness
+    # Evosax records the best-so-far loss, one entry per generation.
+    history_p1 = fit_p1.history.loss
     log_k_ref, Ea = model_p1.predictors[0]()
     print(f"  {len(history_p1)} generations, best loss {history_p1[-1]:.6f}")
     print(f"  recovered log_k_ref={float(log_k_ref):.3f}, Ea={float(Ea):.2f} kJ/mol")
     assert history_p1[-1] <= history_p1[0], "the best-so-far loss cannot rise"
     assert jnp.array_equal(residual_before, _inner_weights(model_p1.predictors[1])), (
-        "the mask should have frozen the residual during phase 1"
+        "freeze= should have held the residual fixed during phase 1"
     )
 
     print("\n[fit] phase 2: AdamW on the residual, trunk frozen")
+    mask_p2 = hm.freeze_mask(model_p1.predictors, ArrheniusKinetics)
+    print(f"  trainable scalars: {hm.count_trainable_params(model_p1.predictors, mask_p2)}")
     # region phase-2
-    mask_p2 = freeze_modules_of_type(
-        trainable_mask(model_p1.predictors), model_p1.predictors, ArrheniusKinetics
-    )
-    print(f"  trainable scalars: {count_trainable_params(model_p1.predictors, mask_p2)}")
-    config_p2 = OptaxTrainingConfig(steps=args.steps, lr=args.lr, loss="mse", verbose=True)
-    fit_p2 = model_p1.fit(train_dataset, config_p2, key=k_p2, trainable=mask_p2)
+    config_p2 = hm.OptaxTrainingConfig(steps=args.steps, lr=args.lr)
+    fit_p2 = model_p1.fit(train_dataset, config_p2, key=k_p2, freeze=ArrheniusKinetics)
     # endregion phase-2
     model_p2 = fit_p2.model
     history_p2 = fit_p2.history.loss
@@ -421,16 +396,16 @@ def main() -> None:
             "phase 2 did not halve the loss; the residual may be undertrained", stacklevel=1
         )
     assert jnp.array_equal(model_p1.predictors[0].latent, model_p2.predictors[0].latent), (
-        "the mask should have frozen the trunk during phase 2"
+        "freeze= should have held the trunk fixed during phase 2"
     )
 
     print("\n[results]")
-    train_pred_p1, _ = _report(model_p1, train_dataset, val_dataset, "trunk only")
-    train_pred_p2, _ = _report(model_p2, train_dataset, val_dataset, "hybrid")
+    train_pred_p1 = _report(model_p1, train_dataset, val_dataset, "trunk only")
+    train_pred_p2 = _report(model_p2, train_dataset, val_dataset, "hybrid")
 
     if args.save_predictors is not None:
         args.save_predictors.parent.mkdir(parents=True, exist_ok=True)
-        save_predictors(args.save_predictors, model_p2.predictors)
+        hm.save_predictors(args.save_predictors, model_p2.predictors)
         print(f"  phase-2 predictors written to {args.save_predictors}")
 
     if args.no_plot:
@@ -450,7 +425,7 @@ def main() -> None:
             save_path=args.plot_dir / f"{offset + 1:02d}_trajectory_grid_phase{phase + 1}.png",
         )
         parity_plot(
-            parity_diagnostics(pred.buckets, train_dataset),
+            parity_diagnostics(pred),
             title=f"Phase {phase + 1} parity (training set)",
             save_path=args.plot_dir / f"{offset + 2:02d}_parity_phase{phase + 1}.png",
         )

@@ -65,8 +65,8 @@ trainer:
 `init="lhs_box"` fills generation 0 with a Latin hypercube over the latent
 box, and each generation is one compiled, vmapped evaluation of the whole
 population. CNT makes the ODE stiff for many candidates, so this script
-uses the implicit `Kvaerno3` solver. `result.history.best_fitness` holds
-the best loss so far at each generation.
+uses the implicit `Kvaerno3` solver. `result.history.loss` holds the best
+loss so far at each generation, so it never increases.
 
 ## Results
 

@@ -70,7 +70,8 @@ def compute_metrics(predictions: Mapping[str, Any]) -> dict[str, ChannelMetrics]
     Parameters
     ----------
     predictions : PredictionResult
-        From ``HybridModel.predict``, or any mapping from experiment ID to
+        From ``HybridModel.predict`` or ``PredictionResult.from_buckets``,
+        or any mapping from experiment ID to
         a record with ``outputs``, ``observed`` and ``observation_mask``
         dicts keyed by channel. Only cells the mask marks as measured
         count. Channels are read from the first experiment's ``outputs``.
@@ -80,6 +81,12 @@ def compute_metrics(predictions: Mapping[str, Any]) -> dict[str, ChannelMetrics]
     dict[str, ChannelMetrics]
         Keyed by channel, in the model's ``output_channel_names`` order.
     """
+    if not isinstance(predictions, Mapping):
+        raise TypeError(
+            "compute_metrics takes the PredictionResult from HybridModel.predict; got "
+            f"{type(predictions).__name__}. Wrap bucket arrays from predict_dataset or "
+            "ensemble_predictions with PredictionResult.from_buckets(buckets, dataset)."
+        )
     experiments = list(predictions.values())
     if not experiments:
         raise ValueError("compute_metrics needs at least one experiment")
@@ -144,7 +151,9 @@ def print_metrics(
     the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
     spanning nine decades.
     """
-    if not all(isinstance(m, ChannelMetrics) for m in metrics.values()):
+    if not isinstance(metrics, Mapping) or not all(
+        isinstance(m, ChannelMetrics) for m in metrics.values()
+    ):
         metrics = compute_metrics(metrics)
     if header:
         print(header)

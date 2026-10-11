@@ -25,7 +25,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Float
 from scipy.stats import qmc
 
-from jaxhybridmodels import ChannelObs, Experiment, make_experiment, ramp_profile
+import jaxhybridmodels as hm
 
 EA_TRUE: float = 30.0  # kJ/mol; the rate doubles about every 10 °C near T_REF
 
@@ -87,7 +87,7 @@ def true_ca(ts: Float[Array, " T"], *, T_C: float, pH: float) -> Float[Array, " 
     model evaluates, so model and truth differ only in the rate law.
     """
     ramp = ramp_covariates(T_C)
-    T_profile = ramp_profile(
+    T_profile = hm.ramp_profile(
         t0=ramp["ramp_t0"], t1=ramp["ramp_t1"], v0=ramp["T_lo"], v1=ramp["T_hi"]
     )
 
@@ -116,7 +116,7 @@ def lhs_design(seed: int, n: int = N_TRAIN_EXPERIMENTS) -> list[tuple[float, flo
     return [(float(t), float(ph)) for t, ph in lo + (hi - lo) * unit]
 
 
-def make_ramp_experiment(*, T_C: float, pH: float, noise_key: Array, exp_id: str) -> Experiment:
+def make_ramp_experiment(*, T_C: float, pH: float, noise_key: Array, exp_id: str) -> hm.Experiment:
     """One noisy run ramping through ``T_C ± RAMP_HALF_WIDTH`` at fixed pH.
 
     Noise is clipped at zero, and ``sigma**2`` is stored as the channel
@@ -126,14 +126,14 @@ def make_ramp_experiment(*, T_C: float, pH: float, noise_key: Array, exp_id: str
     clean = true_ca(ts, T_C=T_C, pH=pH)
     sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
     noisy = jnp.clip(clean + sigma * jr.normal(noise_key, clean.shape), 0.0, None)
-    return make_experiment(
+    return hm.make_experiment(
         covariates={**ramp_covariates(T_C), "pH": pH},
-        channels={"Ca": ChannelObs(ts=ts, values=noisy, variance=sigma**2)},
+        channels={"Ca": hm.ChannelObs(ts=ts, values=noisy, variance=sigma**2)},
         y0_fn=y0_fn,
         exp_id=exp_id,
     )
 
 
-def ramp_midpoint(experiment: Experiment) -> float:
+def ramp_midpoint(experiment: hm.Experiment) -> float:
     """The midpoint temperature of an experiment's ramp."""
     return (float(experiment.covariates["T_lo"]) + float(experiment.covariates["T_hi"])) / 2.0

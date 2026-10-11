@@ -42,7 +42,6 @@ experiment = hm.make_experiment(
     exp_id="oscillator", t0=0.0, y0=[1.0, 0.0],
     channels={"position": hm.ChannelObs(ts=ts, values=jnp.cos(ts))},
 )
-dataset = hm.make_dataset([experiment], output_channel_names=("position",))
 model = hm.HybridModel(
     predictors={
         "omega": hm.Parameter(1.3, bounds=(0.5, 2.0)),
@@ -51,16 +50,13 @@ model = hm.HybridModel(
     simulate_fn=simulate_fn,
     state_to_output=lambda state: state[..., :1],
     output_channel_names=("position",),
-    solver=hm.SolverConfig(
-        solver=diffrax.Tsit5(), rtol=1e-6, atol=1e-8,
-        dt0=0.05, max_steps=4096,
-    ),
+    solver=hm.SolverConfig(rtol=1e-6, atol=1e-8, dt0=0.05),
 )
-result = model.fit(dataset, hm.OptaxTrainingConfig(steps=200, lr=0.03), key=jr.key(0))
+result = model.fit([experiment], hm.OptaxTrainingConfig(steps=200, lr=0.03), key=jr.key(0))
 print(result.model.predictors["omega"].value)
 print(result.stop_reason)
 
-predictions = result.model.predict(dataset)
+predictions = result.model.predict([experiment])
 position = predictions["oscillator"].outputs["position"]
 trajectory = result.model.simulate(
     ts=jnp.linspace(1.0, 8.0, 100), t0=0.0, y0=[0.5, 0.0],
@@ -71,6 +67,11 @@ trajectory = result.model.simulate(
 every iterate inside that range. `fit` returns a new model in
 `result.model`; `model` still holds 1.3. The fitted frequency prints as
 1.0, and `stop_reason` is `"budget_exhausted"` because all 200 steps ran.
+
+`fit` and `predict` take a list of experiments, or a `Dataset` from
+`make_dataset` when you want to split it or reuse its buckets. `SolverConfig()`
+defaults to `Tsit5` with `rtol=1e-5`, `atol=1e-7` and 4096 steps; pass only
+the settings that differ.
 
 `t0=0.0` places the initial state before the first measurement at 0.2. The
 dataset adds an unobserved point at t0, so `predictions["oscillator"].times`
@@ -87,7 +88,7 @@ uv run python examples/pendulum/train_harmonic.py
 
 - [Model interface](/guide/model-interface): `fit`, `predict`, `simulate` and their results.
 - [Predictors and bounds](/guide/predictors): fixed values, trainable values and networks.
-- [Training](/guide/training): multi-phase schedules, validation and loss histories.
+- [Training](/guide/training): the objective, schedules, validation and loss histories.
 - [Data and buckets](/guide/data): channels sampled at different times.
 
 `HybridModel` is a thin layer over functions that take the predictors,

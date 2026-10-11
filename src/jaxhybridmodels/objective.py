@@ -26,9 +26,15 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 from jaxtyping import Array
 
-from jaxhybridmodels.data import BucketPayload
+from jaxhybridmodels.data import BucketPayload, Dataset
 from jaxhybridmodels.losses import resolve_loss_fn
-from jaxhybridmodels.penalties import bound_penalty, resolve_penalty_points
+from jaxhybridmodels.penalties import (
+    PenaltyPointSource,
+    bound_penalty,
+    data_penalty_points,
+    resolve_penalty_points,
+    validate_penalty_points,
+)
 
 __all__ = ("Objective",)
 
@@ -52,6 +58,9 @@ class Objective:
         in ``output_channel_names`` order, and keeps every channel's cells
         in the loss's denominator. ``None`` weights every channel 1. Names
         are checked against the dataset's channels when training starts.
+        A named channel with weight ``0.0`` contributes nothing but its
+        cells still count in the denominator, so ``{"a": 1.0, "b": 0.0}``
+        gives half the loss of ``{"a": 1.0}``; leave a name out to drop it.
     penalty_weight : float
         Weight on the bound-saturation penalty, relative to the
         per-bucket-averaged data term. ``0.0`` disables it.
@@ -98,6 +107,13 @@ class Objective:
         # Copied so later mutation of the caller's container cannot change a run.
         object.__setattr__(self, "channel_weights", _copy_channel_weights(self.channel_weights))
         if self.penalty_points is not None:
+            if not isinstance(self.penalty_points, Mapping):
+                raise TypeError(
+                    "Objective.penalty_points must be a mapping from predictor path to a "
+                    "[G, n_inputs] array, e.g. {'rate': grid}; the tuple-in-traversal-order "
+                    "form was removed (jaxhybridmodels.penalties.bounded_predictor_paths "
+                    f"lists the paths). Got {type(self.penalty_points).__name__}."
+                )
             frozen = {
                 str(path): jnp.asarray(points) for path, points in self.penalty_points.items()
             }
@@ -134,6 +150,45 @@ class Objective:
         unknown path raises, naming the valid ones.
         """
         return resolve_penalty_points(predictors, self.penalty_points)
+
+
+@dataclass(frozen=True)
+class ResolvedObjective:
+    """An objective matched against one dataset and predictors pytree.
+
+    ``loss_fn`` is the bound ``(pred_obs, bp) -> scalar``; ``sources`` and
+    ``extras`` are the measured and extra penalty points, one per
+    ``BoundedPredictor`` in traversal order. Host-side only.
+    """
+
+    objective: Objective
+    loss_fn: Callable[[Array, BucketPayload], Array]
+    sources: tuple[PenaltyPointSource | None, ...]
+    extras: tuple[Array, ...]
+
+
+def resolve_objective(
+    objective: Objective, predictors: Any, dataset: Dataset, *, penalty_on: bool
+) -> ResolvedObjective:
+    """Check ``objective`` against the data and predictors; raise on any mismatch.
+
+    Covers an unknown channel name, an unknown penalty-point path and, when
+    ``penalty_on`` (some stage of the run weights the bound penalty above
+    zero), a predictor no penalty point reaches. Cheap (no compile), so the
+    trainers run it before opening the UI.
+    """
+    loss_fn = objective.loss_fn(dataset.output_channel_names)
+    sources = data_penalty_points(predictors, dataset)
+    extras = objective.extra_penalty_points(predictors)
+    validate_penalty_points(
+        predictors,
+        sources,
+        extras,
+        # Coverage is the default bound penalty's contract; a custom
+        # ``penalty_fn`` owns its points and needs no coverage check.
+        enabled=penalty_on and objective.penalty_fn is None,
+    )
+    return ResolvedObjective(objective=objective, loss_fn=loss_fn, sources=sources, extras=extras)
 
 
 def _check_weight(name: str, value: float) -> None:

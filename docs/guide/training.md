@@ -1,7 +1,7 @@
 # Training
 
-`HybridModel.fit` trains a model and returns a new one. The config picks
-the optimiser:
+`HybridModel.fit` trains a model and returns a new one. Two arguments say
+what happens: `objective=` is what is minimised, and the config is how.
 
 | Config | Method | Use it for |
 | --- | --- | --- |
@@ -10,7 +10,7 @@ the optimiser:
 
 ```python
 config = hm.OptaxTrainingConfig(steps=1000, lr=1e-3)
-result = model.fit(dataset, config, key=jr.key(0))
+result = model.fit(experiments, config, key=jr.key(0))
 
 result.model                # new HybridModel with the fitted predictors
 result.history.loss         # data loss plus weighted trajectory penalty, per step
@@ -20,22 +20,55 @@ result.best_step            # step whose parameters were returned
 result.stop_reason          # "budget_exhausted" or "patience"
 ```
 
-Each history entry is measured at the parameters before that step's
-update, and `loss + penalty` is what the optimiser minimised. An Evosax fit
-fills `history.best_fitness` instead: best-so-far per generation, so it
-never rises. Do not plot it against an Optax `loss`.
+The data may be a list of experiments or a `Dataset`. Each history entry is
+measured at the parameters before that step's update, and `loss + penalty`
+is what the optimiser minimised. `key=` is keyword-only and required, so the
+seed is visible at every call.
 
-`key=` is keyword-only and required, so the seed is visible at every call.
+## The objective
+
+`hm.Objective` holds every term of the training objective. `Objective()`,
+the default, is MSE over every channel with no penalty.
+
+```python
+objective = hm.Objective(
+    loss="bal_mse",                                  # or "mse", "mle", "bal_mle", a callable
+    channel_weights={"concentration": 1.0, "size": 0.1},
+    penalty_weight=1e-3,
+)
+result = model.fit(experiments, config, objective=objective, key=key)
+```
+
+`loss` takes a name from [`LOSS_REGISTRY`](/api/losses#loss_registry) or a
+callable `(pred_obs: [N, T, D], bp: BucketPayload) -> scalar`.
+
+`channel_weights` keyed by channel name scores only the channels it names,
+so `{"concentration": 1.0}` fits one channel of several. A sequence gives
+one weight per output channel, in `output_channel_names` order. Names are
+checked against the data when training starts, and an unknown one raises
+before anything compiles. A named channel with weight `0.0` adds nothing
+but still counts in the loss's denominator, which scales the loss down;
+leave the name out to drop the channel. [Extending](/guide/extending#losses) covers how
+weights combine with a custom loss.
+
+`penalty_weight`, `penalty_points` and `penalty_fn` set the bound penalty,
+and `trajectory_penalty_fn` and `trajectory_penalty_weight` the trajectory
+penalty; see [Penalties](/guide/penalties).
+
+The configs hold no loss settings, so one objective can drive an Evosax
+search and then an Optax refinement. Validation is scored with the same
+objective, minus the bound penalty.
 
 ### Validation
 
 ```python
-result = model.fit(train, config, validation=val, key=key)
+result = model.fit(train, config, objective=objective, validation=val, key=key)
 result.history.validation_loss
 ```
 
 The full-horizon data loss on `validation` then picks the returned step and
-drives `patience`. It costs one extra forward pass per step. Optax only.
+drives `patience`. It costs one extra forward pass per step. Evosax takes
+`validation=` too; see [below](#evosax).
 
 ### The functional trainers
 
@@ -46,13 +79,15 @@ when you need the [ensemble helpers](/guide/ensembles):
 ```python
 history, trained = hm.train_with_optax(
     predictors, dataset, config,
+    objective=objective,
     simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver,
     key=key,
 )
 ```
 
-Both return `(loss_history, trained_predictors)`. The Optax history is the
-raw per-step `loss` above; the Evosax history is best-so-far.
+Both take a `Dataset` and return `(loss_history, trained_predictors)`. The
+Optax history is the per-step `loss` above; the Evosax history is
+best-so-far.
 
 ## Optax
 
@@ -62,17 +97,15 @@ axes have the same length; see [Data and buckets](/guide/data).
 
 ### Phases
 
-A single phase takes `steps=`, `lr=`, `optimizer=` and `penalty_weight=`
-on the config. A schedule takes `phases=`, a tuple of `TrainingPhase`, and
-those four settings move onto each phase:
+A single phase takes `steps=`, `lr=` and `optimizer=` on the config. A
+schedule takes `phases=`, a tuple of `TrainingPhase`, and those settings
+move onto each phase:
 
 ```python
-from jaxhybridmodels import OptaxTrainingConfig, TrainingPhase
-
-config = OptaxTrainingConfig(
+config = hm.OptaxTrainingConfig(
     phases=(
-        TrainingPhase(steps=200, lr=1e-2, horizon=0.5),
-        TrainingPhase(steps=800, lr=1e-3, reset_optimizer=True),
+        hm.TrainingPhase(steps=200, lr=1e-2, horizon=0.5),
+        hm.TrainingPhase(steps=800, lr=1e-3, reset_optimizer=True),
     ),
 )
 ```
@@ -90,10 +123,35 @@ runtime mask, so changing it between phases costs no recompile.
 phase. It is required when the phase changes optimiser, and useful after a
 large horizon jump. Changing `lr` alone keeps the state.
 
+**`penalty_weight`** on a phase overrides `Objective.penalty_weight` for
+that phase; `None`, the default, keeps the objective's. Use it to switch
+the bound penalty on only after a warm-up phase.
+
 `patience` counts steps without improvement and resets at every phase. The
 running best behind `restore_best=True` (the default) resets whenever the
 horizon changes, since losses over different horizons are not comparable.
 The returned model therefore always comes from the last horizon trained.
+
+### Learning-rate schedules
+
+`lr` also takes an optax schedule, a function `step -> lr`. Its step count
+starts at 0 at the start of the phase, whatever ran before:
+
+```python
+import optax
+
+config = hm.OptaxTrainingConfig(
+    steps=1000,
+    lr=optax.warmup_cosine_decay_schedule(
+        init_value=0.0, peak_value=1e-2, warmup_steps=50, decay_steps=1000
+    ),
+)
+```
+
+For several curves inside one phase, chain them with
+`optax.join_schedules`. A schedule needs an optimiser name or a factory
+taking `learning_rate`. A ready-made `optax.GradientTransformation` owns its
+learning rate, so pairing one with a schedule raises.
 
 ### What "loss" means
 
@@ -111,7 +169,7 @@ keys, trains each for `tournament_steps` at `tournament_lr`, scores each
 with a forward pass, and keeps the best:
 
 ```python
-config = OptaxTrainingConfig(
+config = hm.OptaxTrainingConfig(
     steps=1000, lr=1e-3,
     tournament_attempts=8, tournament_steps=20, tournament_lr=1e-2,
 )
@@ -125,45 +183,35 @@ your original predictors with a `RuntimeWarning`. Ties keep the earlier
 attempt, so the result is deterministic in the key. `Constant` leaves are
 never re-initialised.
 
-### Losses
-
-`loss` takes a name from [`LOSS_REGISTRY`](/api/losses#loss_registry)
-(`"mse"`, `"mle"`, `"bal_mse"`, `"bal_mle"`) or any callable
-`(pred_obs: [N, T, D], bp: BucketPayload) -> scalar`. `channel_idx` and
-`channel_weights` select and weight channels:
-
-```python
-config = OptaxTrainingConfig(
-    steps=1000,
-    loss="mse",
-    channel_idx=(0, 1),
-    channel_weights=(1.0, 0.1),   # channel 1 counts a tenth as much
-)
-```
-
-[Extending](/guide/extending#losses) covers how these combine with a
-custom loss.
-
 ## Evosax
 
 ```python
 config = hm.EvosaxTrainingConfig(
     algorithm="CMA_ES",
     population_size=64,
-    num_generations=200,
+    steps=200,            # generations
     init="lhs_box",       # Latin hypercube over the start box
     init_box_extent=0.5,  # half-width of that box, in latent units
     sigma_init=0.3,       # CMA-ES initial step size
 )
-result = model.fit(dataset, config, key=key)
+result = model.fit(experiments, config, objective=objective, key=key)
+result.history.loss       # best-so-far loss, one entry per generation
 ```
 
-There are no phases: the run is `num_generations` generations of
-`population_size` candidates. `init` sets where generation 0 sits in
-latent space: `"warm"` (the default) centres it on the current parameters,
-`"uniform_box"` samples uniformly within `±init_box_extent` of them, and
-`"lhs_box"` uses a Latin hypercube over that box, which covers it more
-evenly with a small population.
+There are no phases: the run is `steps` generations of `population_size`
+candidates. `history.loss` holds the best loss found so far, so it never
+rises; with a bound penalty on, it includes the penalty. Do not plot it
+against an Optax `loss`. `history.penalty` and `history.phase` stay empty.
+
+With `validation=`, each generation's best candidate is scored on the
+validation data, `history.validation_loss` records that score, and the
+returned model is the candidate with the lowest one.
+
+`init` sets where generation 0 sits in latent space: `"warm"` (the
+default) centres it on the current parameters, `"uniform_box"` samples
+uniformly within `±init_box_extent` of them, and `"lhs_box"` uses a Latin
+hypercube over that box, which covers it more evenly with a small
+population.
 
 The search runs on latents, so `Parameter` and `BoundedPredictor` values
 stay inside their bounds without any constraint handling. There is no
@@ -173,56 +221,68 @@ non-finite loss fails the generation. Keep `sigma_init` and
 
 ### Evosax, then Optax
 
-Run the coarse search first, then refine with gradients:
+Run the coarse search first, then refine with gradients under the same
+objective:
 
 ```python
-coarse = model.fit(dataset, evo_config, key=k1)
-result = coarse.model.fit(dataset, optax_config, key=k2)
+coarse = model.fit(data, evo_config, objective=objective, key=k1)
+result = coarse.model.fit(data, optax_config, objective=objective, key=k2)
 ```
 
-Pass the same `trainable=` mask to both if you use one. The
-[batch reactor example](/examples/batch-reactor) does this.
+Each `fit` takes its own `freeze=`. The
+[batch reactor example](/examples/batch-reactor) runs Evosax then Optax and
+freezes a different half of the predictors in each fit.
 
 ## Freezing leaves
 
-`trainable=` takes a boolean pytree matching the predictors. The default,
-`trainable_mask(predictors)`, trains floating-point arrays and freezes
-`Constant` values and `BoundScaler` temperatures. Pass
-`train_scalers=True` to train the temperatures too. Three helpers return a
-narrower mask:
+The default mask, `trainable_mask(predictors)`, trains floating-point
+arrays and freezes `Constant` values and `BoundScaler` temperatures.
+`freeze=` on `fit` holds more fixed. Each entry is a dotted path, a module
+class, or a predicate on modules:
 
 ```python
-mask = hm.trainable_mask(predictors)
-mask = hm.freeze_paths(mask, ("rate.inner.mlp.layers.0.weight",))   # one array
-mask = hm.freeze_modules_of_type(mask, predictors, hm.MLPPredictor)  # every MLP
-mask = hm.freeze_where(                                              # any matching module
-    mask, predictors, lambda m: isinstance(m, hm.BoundedPredictor) and "temp" in m.input_keys
+result = model.fit(data, config, freeze=("offset",), key=key)                 # one predictor
+result = model.fit(data, config, freeze=(hm.MLPPredictor,), key=key)          # every MLP
+result = model.fit(
+    data, config, key=key,
+    freeze=(lambda m: isinstance(m, hm.BoundedPredictor) and "temp" in m.input_keys,),
 )
-
-result = model.fit(dataset, config, trainable=mask, key=key)
 ```
 
-`freeze_paths` takes dot-joined paths to array leaves: dict keys and
-module fields by name, tuple indices as numbers. A path that matches
-nothing raises and suggests the closest matches.
+Paths are dot-joined: dict keys and module fields by name, tuple indices as
+numbers. A path may stop at a subtree (`"rate"`, `"rate.inner"`) or name
+one array (`"rate.inner.mlp.layers.0.weight"`). A class or predicate
+freezes the whole subtree of every module it matches, so matching an outer
+`BoundedPredictor` freezes everything inside it. An entry that matches
+nothing raises, and a path suggests the closest matches.
 
-`freeze_modules_of_type` and `freeze_where` freeze the whole subtree of
-every matching module, so matching an outer `BoundedPredictor` freezes
-everything inside it. The `freeze_where` predicate sees the mask's
-modules, not your predictors, so test types and static fields such as
-`input_keys`, never identity or array values.
+For full control pass an explicit boolean mask as `trainable=` instead;
+passing both raises. The mask is a pytree matching the predictors, built
+with the same helpers:
 
-The mask is an ordinary pytree, so a dict entry can also be frozen by
-hand: `mask["rate"] = jax.tree.map(lambda _: False, mask["rate"])`.
+```python
+mask = hm.trainable_mask(predictors, train_scalers=True)    # also train scaler temperatures
+mask = hm.freeze_paths(mask, ("rate.inner.mlp.layers.0.weight",))
+mask = hm.freeze_modules_of_type(mask, hm.MLPPredictor)
+mask = hm.freeze_mask(predictors, ("offset",), mask=mask)    # the freeze= rules on a mask
+result = model.fit(data, config, trainable=mask, key=key)
+```
 
-`model.fit` raises if the mask leaves nothing to train.
+`freeze_modules_of_type` and `freeze_where` read module types off the mask
+itself, so their predicate sees booleans in place of arrays: test types and
+static fields such as `input_keys`, never array values. A predicate passed
+to `freeze=` or `freeze_mask` sees the real modules.
+
+`model.fit` raises if nothing is left to train.
 
 ## Progress display
 
 `verbose=True` (the default) shows [`RichTrainingUI`](/api/ui#richtrainingui),
 a live terminal dashboard that also reports per-bucket compile time.
 `verbose=False` uses [`SilentUI`](/api/ui#silentui). `ui=` overrides both
-with any object implementing [`TrainingUI`](/api/ui#trainingui).
+with any object implementing [`TrainingUI`](/api/ui#trainingui). If a run
+raises after the dashboard opens, the UI gets `on_run_end` with a NaN loss
+before the error propagates.
 
 ## Reproducibility
 

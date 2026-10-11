@@ -61,6 +61,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "ChannelObs",
             "Experiment",
             "make_experiment",
+            "experiment_from_array",
+            "experiments_from_dataframe",
             "BucketPayload",
             "Dataset",
             "make_dataset",
@@ -90,6 +92,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "Penalties: Gradient-Safe Bound Handling",
         (
             "PenaltyPointSource",
+            "bounded_predictor_paths",
+            "resolve_penalty_points",
             "attach_penalty_state",
             "bound_penalty",
             "box_grid",
@@ -135,6 +139,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "training",
         "Training: Optax & Evosax Loops",
         (
+            "Objective",
             "OptaxTrainingConfig",
             "TrainingPhase",
             "train_with_optax",
@@ -175,6 +180,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "default_trainable",
             "trainable_mask",
+            "freeze_mask",
             "freeze_paths",
             "freeze_modules_of_type",
             "freeze_where",
@@ -258,6 +264,8 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "bound_penalty": "jaxhybridmodels.penalties",
     "box_grid": "jaxhybridmodels.penalties",
     "box_violation": "jaxhybridmodels.penalties",
+    "bounded_predictor_paths": "jaxhybridmodels.penalties",
+    "resolve_penalty_points": "jaxhybridmodels.penalties",
     "clip_ste": "jaxhybridmodels.penalties",
     "data_penalty_points": "jaxhybridmodels.penalties",
     "length_mask_keep": "jaxhybridmodels.penalties",

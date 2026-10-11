@@ -25,6 +25,9 @@ and ``on_compile_done`` exist so a progress bar does not sit at zero
 through it and make the run look hung.
 """
 
+import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -138,7 +141,7 @@ class EvosaxUI(Protocol):
         """The bucket finished compiling."""
         ...
 
-    def on_generation_end(self, *, gen_idx: int, best_fitness: float, mean_fitness: float) -> None:
+    def on_generation_end(self, *, gen_idx: int, best_loss: float, mean_loss: float) -> None:
         """Fires once per generation with population statistics."""
         ...
 
@@ -149,6 +152,21 @@ class EvosaxUI(Protocol):
     def on_message(self, *, level: str, text: str) -> None:
         """Free-form log line; same level set as ``TrainingUI.on_message``."""
         ...
+
+
+@contextmanager
+def close_run_on_error(ui: TrainingUI | EvosaxUI) -> Iterator[None]:
+    """Fire ``on_run_end(final_loss=nan)`` if the body raises, then re-raise.
+
+    The trainers wrap everything after ``on_run_start`` in it, so a compile
+    failure, a non-finite loss or Ctrl-C does not leave a Rich Live
+    dashboard running.
+    """
+    try:
+        yield
+    except BaseException:
+        ui.on_run_end(final_loss=math.nan)
+        raise
 
 
 class SilentUI:

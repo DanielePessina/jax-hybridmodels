@@ -55,8 +55,9 @@ asks:
   standard normal: the phases stop being uniform on $[0, 2\pi)$, the
   readout loses its $1/\sqrt{m}$ scale and `bandwidth` is ignored.
 - **How the bank is held fixed.** A module cannot declare its own field
-  untrainable. Trainability is a mask over the pytree, built by the caller
-  with `freeze_paths`, which raises on a path that matches nothing.
+  untrainable. Trainability is a mask over the pytree, set by the caller:
+  here `fit(freeze=...)` with the bank's paths, which raises on a path
+  that matches nothing.
 - **How it round-trips.** `load_predictors` needs a template with the same
   class, container and static fields, built here by the same
   `build_predictors` used for training.
@@ -81,7 +82,7 @@ Wrapping it with bounds:
 <<< @/../examples/custom_predictor/train_custom_predictor.py#bounds
 
 The bank is frozen by path. The paths read from the root of the predictors
-dict:
+dict, and `fit` takes them through `freeze=`:
 
 <<< @/../examples/custom_predictor/train_custom_predictor.py#bank-paths
 

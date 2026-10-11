@@ -11,8 +11,9 @@ check that your data, ODE, loss and training path are wired correctly.
 
 Shows:
 
-- ``Parameter`` (trained, bounded) and ``Constant`` (fixed), read through
-  ``.value`` in ``simulate_fn``
+- ``HybridModel.from_vector_field`` for a model that is one ODE solve
+- ``Parameter`` (trained, bounded) and ``Constant`` (fixed), both read
+  through ``.value``
 - ``make_experiment(t0=..., y0=...)``: an initial state before the first
   measurement
 - a two-phase ``OptaxTrainingConfig`` built from ``TrainingPhase``
@@ -39,7 +40,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import diffrax
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
@@ -76,21 +76,16 @@ CHANNELS: tuple[str, ...] = ("position",)
 
 
 # region model-functions
-def simulate_fn(
+def vector_field(
+    t: ArrayLike,
+    y: Float[Array, " 2"],
     predictors: dict[str, hm.Parameter | hm.Constant],
-    ts: Float[Array, " T"],
     covariates: dict[str, Array],
-    y0: Float[Array, " 2"],
-    solver: hm.SolverConfig,
-) -> Float[Array, "T 2"]:
-    """Integrate one oscillator and return the full state ``[x, v]``."""
+) -> Float[Array, " 2"]:
+    """``d[x, v]/dt`` for one oscillator. Both predictor kinds are read through ``.value``."""
     omega = predictors["omega"].value
     damping = predictors["damping"].value
-
-    def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
-        return jnp.stack([y[1], -(omega**2) * y[0] - damping * y[1]])
-
-    return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
+    return jnp.stack([y[1], -(omega**2) * y[0] - damping * y[1]])
 
 
 def state_to_output(state: Float[Array, "T 2"]) -> Float[Array, "T 1"]:
@@ -134,19 +129,19 @@ def main() -> None:
     print(hm.describe_buckets(dataset))
 
     # region model
-    model = hm.HybridModel(
+    model = hm.HybridModel.from_vector_field(
+        vector_field=vector_field,
         predictors={
             # Trained, and kept inside (0.5, 2.0) at every step.
             "omega": hm.Parameter(OMEGA_INIT, bounds=(0.5, 2.0)),
             # Known and fixed: the default training mask never updates it.
             "damping": hm.Constant(0.0),
         },
-        simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         output_channel_names=CHANNELS,
-        solver=hm.SolverConfig(
-            solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=4096, dt0=0.05
-        ),
+        # Tsit5 with rtol 1e-5 and atol 1e-7 by default; only the first
+        # step size differs here.
+        solver=hm.SolverConfig(dt0=0.05),
     )
     # endregion model
 
@@ -180,7 +175,7 @@ def main() -> None:
     print(f"new oscillator at t = 10: x = {float(new.outputs['position'][-1]):.4f}")
     # endregion predict-simulate
     print()
-    hm.print_metrics(hm.compute_metrics(predictions.buckets, dataset))
+    hm.print_metrics(predictions)
 
     if args.no_plot:
         return
@@ -188,17 +183,14 @@ def main() -> None:
     apply_default_style()
     args.plot_dir.mkdir(parents=True, exist_ok=True)
     parity_plot(
-        parity_diagnostics(predictions.buckets, dataset),
+        parity_diagnostics(predictions),
         title="Harmonic oscillator parity",
         save_path=args.plot_dir / "parity.png",
     )
     trajectory_plot(
-        predictions.buckets,
+        result.model,
         dataset,
-        predictors=result.model.predictors,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=model.solver,
+        predictions=predictions,
         max_experiments=3,
         title="Harmonic oscillator trajectories",
         save_path=args.plot_dir / "trajectories.png",

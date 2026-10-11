@@ -12,7 +12,8 @@ Shows:
 - ``build_bucket_step``, ``build_penalty_step`` and ``build_apply_update``
 - a custom loss (masked Huber) and a custom regulariser (L2 on a second
   ``Parameter``) entering a hand-written loop
-- ``predict_dataset`` and ``compute_metrics`` on raw predictors
+- ``eqx.tree_at`` to put the loop's predictors back into the model, then
+  ``predict`` and ``compute_metrics`` as after ``fit``
 
 Run::
 
@@ -29,7 +30,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -68,14 +68,10 @@ INITIAL_STATES: tuple[tuple[float, float], ...] = (
 )
 
 
-def simulate_fn(predictors, ts, covariates, y0, solver):
+def vector_field(t, y, predictors, covariates):
     """Undamped oscillator. ``scale`` does not enter the dynamics."""
     omega = predictors["omega"].value
-
-    def vector_field(t, y, args):
-        return jnp.stack([y[1], -(omega**2) * y[0]])
-
-    return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
+    return jnp.stack([y[1], -(omega**2) * y[0]])
 
 
 def state_to_output(state: Array) -> Array:
@@ -139,20 +135,28 @@ def main() -> None:
     print("[data]")
     print(hm.describe_buckets(ds))
 
-    # ``scale`` exists only for the regulariser to pull toward zero.
-    predictors = {
-        "omega": hm.Parameter(1.5, bounds=(0.5, 2.0)),
-        "scale": hm.Parameter(1.0),
-    }
-    solver = hm.SolverConfig(solver=diffrax.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=4096, dt0=0.05)
+    # The model holds the pieces the kernels need; the loop below trains
+    # its predictors directly.
+    model = hm.HybridModel.from_vector_field(
+        vector_field=vector_field,
+        # ``scale`` exists only for the regulariser to pull toward zero.
+        predictors={
+            "omega": hm.Parameter(1.5, bounds=(0.5, 2.0)),
+            "scale": hm.Parameter(1.0),
+        },
+        state_to_output=state_to_output,
+        output_channel_names=("position",),
+        solver=hm.SolverConfig(rtol=1e-6, atol=1e-8, dt0=0.05),
+    )
+    predictors = model.predictors
     # Every latent trains; scalers stay fixed. Freezing a leaf is a mask edit.
     mask = hm.trainable_mask(predictors)
 
     # region bucket-step
     bucket_step = build_bucket_step(
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
+        simulate_fn=model.simulate_fn,
+        state_to_output=model.state_to_output,
+        solver=model.solver,
         loss_fn=huber_loss,
         trainable=mask,
     )
@@ -200,15 +204,14 @@ def main() -> None:
     print(f"recovered omega = {float(predictors['omega'].value):.4f}  (truth {OMEGA_TRUE})")
     print(f"final scale     = {float(predictors['scale'].value):.6f}  (regularised toward 0)")
 
-    preds = hm.predict_dataset(
-        predictors, ds, simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver
-    )
-    hm.print_metrics(hm.compute_metrics(preds, ds), header="custom-loop result")
+    fitted = eqx.tree_at(lambda m: m.predictors, model, predictors)
+    predictions = fitted.predict(ds)
+    hm.print_metrics(predictions, header="custom-loop result")
 
     if not args.no_plot:
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         parity_plot(
-            parity_diagnostics(preds, ds),
+            parity_diagnostics(predictions),
             title="Custom loop parity",
             save_path=args.plot_dir / "parity.png",
         )

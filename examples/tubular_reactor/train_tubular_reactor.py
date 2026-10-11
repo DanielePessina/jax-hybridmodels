@@ -38,11 +38,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import diffrax
-import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
@@ -79,15 +77,8 @@ T_REF = 330.0
 # solver such as Kvaerno3 wins. RecursiveCheckpoint keeps the backward pass
 # through the network in the vector field at O(log steps) memory; the
 # default DirectAdjoint stores every step and compiles in time that grows
-# with max_steps.
-SOLVER = hm.SolverConfig(
-    solver=diffrax.Tsit5(),
-    rtol=1e-5,
-    atol=1e-7,
-    max_steps=4096,
-    dt0=1e-3,
-    adjoint=diffrax.RecursiveCheckpointAdjoint(),
-)
+# with max_steps. Tsit5 and the tolerances are the SolverConfig() defaults.
+SOLVER = hm.SolverConfig(dt0=1e-3, adjoint=diffrax.RecursiveCheckpointAdjoint())
 
 
 def true_g(c: ArrayLike, temp: ArrayLike) -> Array:
@@ -105,7 +96,7 @@ def transport(c: Array, c_in: Array) -> Array:
     return -VELOCITY * (c - left) / DZ + DISPERSION * (left - 2.0 * c + right) / DZ**2
 
 
-def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) -> Array:
+def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) -> diffrax.Solution:
     """Integrate the discretised tube for a rate ``g_fn(c, T) * c``."""
     temp, feed = covariates["T"], covariates["c_feed"]
     c_in = hm.step_profile(feed, 0.3 * feed, T_DROP)
@@ -113,17 +104,17 @@ def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) 
     def vector_field(t, c, args):
         return transport(c, c_in(t)) - g_fn(c, temp) * c
 
-    ys = solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
-    assert ys is not None
-    return ys
+    # The framework reads the state at ``ts`` from the Solution's ``ys``.
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
     # endregion pde
 
 
 # region simulate
 def simulate_hybrid(predictors, ts, covariates, y0, solver):
-    net = predictors["g"]
-    # One network call per cell; T is shared along the tube.
-    g_fn = jax.vmap(lambda c, temp: net({"c": c, "T": temp})[0], in_axes=(0, None))
+    # One network call per cell: c is the [N_CELLS] field, T is shared along the tube.
+    def g_fn(c, temp):
+        return hm.evaluate_predictor(predictors["g"], {"c": c, "T": temp})
+
     return solve_tube(g_fn, ts, covariates, y0, solver)
 
 
@@ -165,7 +156,7 @@ def make_data(key: Array) -> hm.Dataset:
             clean = truth.simulate(
                 ts=times[i], y0=jnp.zeros(N_CELLS), covariates=covariates, t0=0.0
             )
-            channels[name] = hm.ChannelObs(times[i], clean.outputs[name] + noise[i])
+            channels[name] = hm.ChannelObs(ts=times[i], values=clean.outputs[name] + noise[i])
         experiments.append(
             hm.make_experiment(
                 channels=channels,
@@ -187,7 +178,7 @@ def build_models(key: Array) -> tuple[hm.HybridModel, hm.HybridModel]:
         input_keys=("c", "T"),
         input_bounds=((0.0, 2.2), (300.0, 360.0)),
         # g spans two decades over the box, so the output is log-warped.
-        out_scaler=hm.BoundScaler(bounds=((0.05, 20.0),), warp="log"),
+        out_scaler=hm.BoundScaler(bounds=(0.05, 20.0), warp="log"),
     )
     hybrid = hm.HybridModel(
         predictors={"g": net},
@@ -197,13 +188,15 @@ def build_models(key: Array) -> tuple[hm.HybridModel, hm.HybridModel]:
         solver=SOLVER,
     )
     # Same sensors and solver; only the rate law differs.
-    mechanistic = replace(
-        hybrid,
+    mechanistic = hm.HybridModel(
         predictors={
             "k_ref": hm.Parameter(1.0, bounds=(0.05, 50.0), warp="log"),
             "Ea_over_R": hm.Parameter(2000.0, bounds=(0.0, 10000.0)),
         },
         simulate_fn=simulate_mechanistic,
+        state_to_output=state_to_output,
+        output_channel_names=CHANNELS,
+        solver=SOLVER,
     )
     # endregion models
     return hybrid, mechanistic
@@ -217,12 +210,14 @@ def plot(args, dataset, hybrid, mechanistic) -> None:
     # Sensor traces for the coldest and hottest runs.
     shown = (CONDITIONS[0], CONDITIONS[-1])
     fig, axes = plt.subplots(len(shown), len(CHANNELS), figsize=(13, 5.5), sharex=True)
+    experiments = {exp.exp_id: exp for exp in dataset.experiments}
     for row, (temp, feed) in zip(axes, shown, strict=True):
-        cov = {"T": temp, "c_feed": feed}
-        sim_h = hybrid.simulate(ts=dense, y0=jnp.zeros(N_CELLS), covariates=cov, t0=0.0)
-        sim_m = mechanistic.simulate(ts=dense, y0=jnp.zeros(N_CELLS), covariates=cov, t0=0.0)
+        # The experiment supplies y0, t0 and the covariates; dense replaces its sample times.
+        exp = experiments[exp_name(temp, feed)]
+        sim_h = hybrid.simulate(experiment=exp, ts=dense)
+        sim_m = mechanistic.simulate(experiment=exp, ts=dense)
         for ax, name in zip(row, CHANNELS, strict=True):
-            obs = pred_h[exp_name(temp, feed)]
+            obs = pred_h[exp.exp_id]
             mask = np.asarray(obs.observation_mask[name])
             ax.plot(np.asarray(obs.times)[mask], np.asarray(obs.observed[name])[mask], "ko", ms=3)
             ax.plot(dense, sim_h.outputs[name], color="tab:red", label="hybrid")
@@ -242,7 +237,7 @@ def plot(args, dataset, hybrid, mechanistic) -> None:
     for temp, colour in zip(
         (310.0, 330.0, 350.0), ("tab:blue", "tab:green", "tab:red"), strict=True
     ):
-        learned = jax.vmap(lambda ci, t=temp: hybrid.predictors["g"]({"c": ci, "T": t})[0])(c)
+        learned = hm.evaluate_predictor(hybrid.predictors["g"], {"c": c, "T": temp})
         ax.plot(c, true_g(c, temp) * c, color=colour, ls="--", lw=1.2)
         ax.plot(c, learned * c, color=colour, label=f"T = {temp:.0f} K")
     ax.set_xlabel("concentration c")
@@ -254,9 +249,7 @@ def plot(args, dataset, hybrid, mechanistic) -> None:
 
     # Space-time field of the hottest run, which no sensor sees whole.
     temp, feed = shown[-1]
-    sim = hybrid.simulate(
-        ts=dense, y0=jnp.zeros(N_CELLS), covariates={"T": temp, "c_feed": feed}, t0=0.0
-    )
+    sim = hybrid.simulate(experiment=experiments[exp_name(temp, feed)], ts=dense)
     assert sim.state is not None
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     image = ax.pcolormesh(np.asarray(Z), np.asarray(dense), np.asarray(sim.state), shading="auto")
@@ -306,9 +299,7 @@ def main() -> None:
 
     print("\n[results]")
     for name, result in fits.items():
-        hm.print_metrics(
-            hm.compute_metrics(result.model.predict(dataset).buckets, dataset), header=name
-        )
+        hm.print_metrics(result.model.predict(dataset), header=name)
     hybrid, mechanistic = fits["hybrid"].model, fits["first order"].model
     k_ref, ea = (float(mechanistic.predictors[k].value) for k in ("k_ref", "Ea_over_R"))
     print(f"\n  first order fit: k_ref = {k_ref:.3f}, Ea/R = {ea:.0f} K (truth saturates in c)")

@@ -13,7 +13,8 @@ builds one end to end. For a trainable constant, use `Parameter` instead.
 1. Subclass [`Predictor`](/api/predictors#predictor). It is an
    [`eqx.Module`](https://docs.kidger.site/equinox/), so instances are
    frozen dataclasses and JAX pytrees.
-2. Implement `__call__(self, x) -> Array`, rank-1 in and rank-1 out.
+2. Implement `__call__(self, x) -> Array`, rank-1 in and rank-1 out. A
+   module with one output may return a scalar instead.
 3. Trainable values are plain fields holding float arrays.
    Hyperparameters are `eqx.field(static=True)`.
 4. Leave bounds, named inputs and physical units out. `BoundedPredictor`
@@ -85,11 +86,10 @@ after it. The method is found with `hasattr`; nothing to register.
 
 ## Freezing fixed arrays
 
-A module cannot mark its own arrays as fixed. The caller does, with a mask:
+A module cannot mark its own arrays as fixed. The caller does, with `freeze=`:
 
 ```python
-mask = hm.freeze_paths(hm.trainable_mask(predictors), ("rate.inner.frequencies",))
-result = model.fit(dataset, config, trainable=mask, key=key)
+result = model.fit(data, config, freeze=("rate.inner.frequencies",), key=key)
 ```
 
 The path reads "the `rate` entry, its `inner` module, its `frequencies`
@@ -104,14 +104,15 @@ Wrap the module:
 rate = hm.BoundedPredictor(
     inner=Affine(1, 1, key=jr.key(0)),
     input_keys=("temperature",),
-    input_bounds=((280.0, 360.0),),
-    output_bounds=((1e-2, 3.0),),
+    input_bounds=(280.0, 360.0),
+    output_bounds=(1e-2, 3.0),
 )
 ```
 
 Your module sees latent inputs of roughly unit scale and its output is
 squashed into the output box, so unit-scale initialisation is the right
-default whatever the physical units. To pick a `transform` or `warp`, pass
+default whatever the physical units. With one output bound the wrapper
+returns a scalar. To pick a `transform` or `warp`, pass
 `in_scaler`/`out_scaler` instead; see
 [Predictors and bounds](/guide/predictors).
 
@@ -121,6 +122,6 @@ default whatever the physical units. To pick a `transform` or `warp`, pass
 - Trainable arrays are plain fields; hyperparameters are static.
 - `initialized_with_key` is defined if the constructor does anything
   smarter than standard-normal weights, and keeps the pytree shape.
-- Arrays that must stay fixed are frozen with a mask.
+- Arrays that must stay fixed are frozen with `freeze=` or a mask.
 - Saving and loading into a fresh template gives the same outputs; see
   [Saving and loading](/guide/serialization).
