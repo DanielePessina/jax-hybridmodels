@@ -18,10 +18,12 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+import optax
 import pytest
 from jax import Array
 
 import jaxhybridmodels as hm
+from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.profiles import (
     constant_profile,
     piecewise_linear_profile,
@@ -86,6 +88,13 @@ INVALID = [
     pytest.param(lambda: TrainingPhase(-1), "steps", id="phase-steps-negative"),
     pytest.param(lambda: TrainingPhase(2, lr=-1.0), "lr", id="phase-lr-negative"),
     pytest.param(lambda: TrainingPhase(2, lr=_NAN), "lr", id="phase-lr-nan"),
+    # A ready-made transformation owns its learning rate, so a schedule
+    # paired with one would be accepted and then ignored.
+    pytest.param(
+        lambda: TrainingPhase(2, lr=optax.constant_schedule(1e-3), optimizer=optax.sgd(1e-3)),
+        "owns its learning rate",
+        id="phase-schedule-with-raw-optimizer",
+    ),
     # The horizon indexes a prefix of the observation times: zero scores
     # nothing, above one claims more timestamps than exist.
     pytest.param(lambda: TrainingPhase(2, horizon=0.0), "horizon", id="phase-horizon-0"),
@@ -104,16 +113,10 @@ INVALID = [
         id="optax-steps-and-phases",
     ),
     pytest.param(
-        lambda: OptaxTrainingConfig(phases=(TrainingPhase(2),), penalty_weight=1e-2),
-        "per TrainingPhase",
-        id="optax-phases-with-shorthand-weight",
-    ),
-    pytest.param(
         lambda: OptaxTrainingConfig(phases=(TrainingPhase(2),), lr=1e-2),
         "per TrainingPhase",
         id="optax-phases-with-shorthand-lr",
     ),
-    pytest.param(lambda: OptaxTrainingConfig(steps=2, penalty_weight=-1.0), "non-negative"),
     pytest.param(lambda: OptaxTrainingConfig(steps=0), "steps", id="optax-steps-0"),
     # Optimiser state belongs to the optimiser that built it; switching
     # without a reset used to be accepted and silently keep the old one.
@@ -124,33 +127,49 @@ INVALID = [
         "reset_optimizer",
         id="optax-switch-without-reset",
     ),
-    # Penalty points are [G, n_inputs] physical input vectors.
+    # Objective: what is minimised.
+    pytest.param(lambda: Objective(penalty_weight=-1.0), "non-negative", id="objective-pw-neg"),
+    pytest.param(lambda: Objective(penalty_weight=_NAN), "finite", id="objective-pw-nan"),
     pytest.param(
-        lambda: OptaxTrainingConfig(steps=2, penalty_points=(jnp.zeros(3),)),
-        "penalty_points",
-        id="optax-points-rank-1",
+        lambda: Objective(trajectory_penalty_weight=-1.0), "non-negative", id="objective-traj-neg"
     ),
     pytest.param(
-        lambda: OptaxTrainingConfig(steps=2, penalty_points=(jnp.zeros((2, 2, 1)),)),
-        "penalty_points",
-        id="optax-points-rank-3",
-    ),
-    pytest.param(
-        lambda: OptaxTrainingConfig(steps=2, trajectory_penalty_weight=-1.0),
-        "non-negative",
-        id="optax-traj-weight-neg",
-    ),
-    pytest.param(
-        lambda: OptaxTrainingConfig(
-            steps=2, trajectory_penalty_fn=_trajectory_penalty, trajectory_penalty_weight=_NAN
+        lambda: Objective(
+            trajectory_penalty_fn=_trajectory_penalty, trajectory_penalty_weight=_INF
         ),
         "finite",
-        id="optax-traj-weight-nan",
+        id="objective-traj-inf",
     ),
     pytest.param(
-        lambda: OptaxTrainingConfig(steps=2, trajectory_penalty_weight=1.0),
+        lambda: Objective(trajectory_penalty_weight=1.0),
         "trajectory_penalty_fn is None",
-        id="optax-traj-weight-without-fn",
+        id="objective-traj-weight-without-fn",
+    ),
+    # Penalty points are [G, n_inputs] physical input vectors.
+    pytest.param(
+        lambda: Objective(penalty_points={"rate": jnp.zeros(3)}), "rank-2", id="points-rank-1"
+    ),
+    pytest.param(
+        lambda: Objective(penalty_points={"rate": jnp.zeros((2, 2, 1))}),
+        "rank-2",
+        id="points-rank-3",
+    ),
+    pytest.param(
+        lambda: Objective(channel_weights={"a": -1.0}), "non-negative", id="weights-negative"
+    ),
+    pytest.param(lambda: Objective(channel_weights=(1.0, _NAN)), "finite", id="weights-nan"),
+    pytest.param(lambda: Objective(channel_weights={}), "at least one", id="weights-empty"),
+    pytest.param(lambda: Objective(channel_weights="conc"), "mapping", id="weights-string"),  # ty: ignore[invalid-argument-type]
+    # Channel names are checked against the dataset's when the loss resolves.
+    pytest.param(
+        lambda: Objective(channel_weights={"nope": 1.0}).loss_fn(("a", "b")),
+        "unknown channels",
+        id="weights-unknown-name",
+    ),
+    pytest.param(
+        lambda: Objective(channel_weights=(1.0,)).loss_fn(("a", "b")),
+        "one weight per channel",
+        id="weights-wrong-length",
     ),
     pytest.param(lambda: OptaxTrainingConfig(steps=2, tournament_attempts=0), "attempts"),
     pytest.param(lambda: OptaxTrainingConfig(steps=2, tournament_steps=-1), "tournament_steps"),
@@ -159,25 +178,8 @@ INVALID = [
     # EvosaxTrainingConfig
     pytest.param(lambda: EvosaxTrainingConfig(algorithm="nope"), "available", id="evo-algorithm"),
     pytest.param(lambda: EvosaxTrainingConfig(init="nope"), "available", id="evo-init"),  # ty: ignore[invalid-argument-type]
-    pytest.param(lambda: EvosaxTrainingConfig(penalty_weight=-1.0), "non-negative", id="evo-pw"),
-    pytest.param(lambda: EvosaxTrainingConfig(penalty_weight=_NAN), "finite", id="evo-pw-nan"),
-    pytest.param(
-        lambda: EvosaxTrainingConfig(trajectory_penalty_weight=-1.0),
-        "non-negative",
-        id="evo-traj-weight-neg",
-    ),
-    pytest.param(
-        lambda: EvosaxTrainingConfig(trajectory_penalty_weight=1.0),
-        "trajectory_penalty_fn is None",
-        id="evo-traj-weight-without-fn",
-    ),
     pytest.param(lambda: EvosaxTrainingConfig(population_size=0), "population_size"),
-    pytest.param(lambda: EvosaxTrainingConfig(num_generations=0), "num_generations"),
-    pytest.param(
-        lambda: EvosaxTrainingConfig(penalty_points=(jnp.zeros(3),)),
-        "penalty_points",
-        id="evo-points-rank-1",
-    ),
+    pytest.param(lambda: EvosaxTrainingConfig(steps=0), "steps", id="evo-steps-0"),
     pytest.param(lambda: EvosaxTrainingConfig(init_box_extent=-1.0), "init_box_extent"),
     pytest.param(lambda: EvosaxTrainingConfig(sigma_init=0.0), "sigma_init"),
     pytest.param(lambda: EvosaxTrainingConfig(log_every=0), "log_every"),
@@ -241,17 +243,32 @@ def test_training_configs_normalise_their_schedule():
         phases=[  # ty: ignore[invalid-argument-type]
             TrainingPhase(2, horizon=0.5),
             TrainingPhase(3, optimizer="adabelief", reset_optimizer=True, penalty_weight=1e-2),
-            TrainingPhase(4, optimizer="adabelief"),
+            TrainingPhase(4, optimizer="adabelief", lr=optax.linear_schedule(1e-2, 0.0, 4)),
         ]
     )
     assert isinstance(multi.phases, tuple)
     assert multi.total_steps == 9
-    assert [p.penalty_weight for p in multi.phases] == [0.0, 1e-2, 0.0]
+    # None defers to Objective.penalty_weight; a float overrides it.
+    assert [p.penalty_weight for p in multi.phases] == [None, 1e-2, None]
 
-    # A zero trajectory weight with a function attached is a valid no-op.
-    off = OptaxTrainingConfig(steps=1, trajectory_penalty_fn=_trajectory_penalty)
+    # The objective defaults to plain MSE with every penalty off, and a zero
+    # trajectory weight with a function attached is a valid no-op.
+    default = Objective()
+    assert default.loss == "mse" and default.penalty_weight == 0.0
+    off = Objective(trajectory_penalty_fn=_trajectory_penalty)
     assert off.trajectory_penalty_weight == 0.0
-    assert EvosaxTrainingConfig().penalty_weight == 0.0
+
+
+def test_objective_copies_its_containers():
+    weights = {"a": 2.0}
+    points = {"rate": [[0.0], [1.0]]}
+    objective = Objective(channel_weights=weights, penalty_points=points)  # ty: ignore[invalid-argument-type]
+    weights["a"] = 0.0
+    points["rate"] = [[5.0]]
+    assert objective.channel_weights == {"a": 2.0}
+    assert objective.penalty_points is not None
+    assert objective.penalty_points["rate"].shape == (2, 1)
+    assert objective.bound_penalty_fn is hm.penalties.bound_penalty
 
 
 # ---------------------------------------------------------------------------

@@ -21,16 +21,17 @@ container shape, and forward it to ``simulate_fn`` unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 from jaxtyping import Array, Float
 
 from jaxhybridmodels.data import BucketPayload, Dataset
-from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.solver import SolverConfig, simulation_state
 from jaxhybridmodels.training.kernels import predict_bucket_obs
 
 
@@ -124,16 +125,38 @@ def predict_dataset(
     )
 
 
-def evaluate_predictor(predictor: Any, covariates: dict[str, float]) -> float:
-    """Evaluate a scalar-valued predictor at named inputs, as a Python float.
+def evaluate_predictor(predictor: Any, inputs: Mapping[str, ArrayLike]) -> Array:
+    """Evaluate a predictor at named inputs, vectorised over array-valued ones.
 
-    Shortcut for the recovered-physics readout every example writes by hand
-    (``float(predictor({"k": jnp.asarray(v)}).reshape(()))``). Takes the
-    predictor's named inputs as plain Python floats, calls it, and flattens
-    the scalar result to a ``float``.
+    The inputs are broadcast against each other, so scalars, a 1-D sweep,
+    or a 2-D grid built from ``x[:, None]`` and ``y[None, :]`` all work.
+    The predictor is called once per broadcast point with a dict of scalars,
+    the way a ``simulate_fn`` calls it, and the result has shape
+    ``broadcast_shape + output_shape``. A one-output ``BoundedPredictor``
+    has output shape ``()``, so a sweep over 50 temperatures gives ``[50]``.
+
+    Examples
+    --------
+    ::
+
+        hm.evaluate_predictor(predictors["rate"], {"T": 300.0})  # shape ()
+        hm.evaluate_predictor(predictors["rate"], {"T": temps, "pH": 6.5})  # [len(temps)]
+
+    Returns
+    -------
+    Array
+        Call ``float(...)`` on a scalar result for a Python number.
     """
-    x = {k: jnp.asarray(v) for k, v in covariates.items()}
-    return float(predictor(x).reshape(()))
+    arrays = {
+        key: jnp.asarray(value, dtype=jnp.result_type(jnp.asarray(value).dtype, float))
+        for key, value in inputs.items()
+    }
+    shape = jnp.broadcast_shapes(*(a.shape for a in arrays.values())) if arrays else ()
+    if not shape:
+        return jnp.asarray(predictor(arrays))
+    flat = {key: jnp.broadcast_to(a, shape).reshape(-1) for key, a in arrays.items()}
+    out = jax.vmap(predictor)(flat)
+    return out.reshape(*shape, *out.shape[1:])
 
 
 @eqx.filter_jit
@@ -150,7 +173,7 @@ def _predict_dense_bucket(
 
     def per_experiment(ts, start, covariates, y0):
         integration_ts = jnp.concatenate((start[None], ts))
-        state = simulate_fn(predictors, integration_ts, covariates, y0, solver)
+        state = simulation_state(simulate_fn(predictors, integration_ts, covariates, y0, solver))
         return state_to_output(state)[1:]
 
     return jax.vmap(per_experiment)(dense_ts, bp.ts[:, 0], bp.covariates, bp.y0)

@@ -1,4 +1,4 @@
-"""Datasets as users build them, and the losses that score predictions against them.
+"""Datasets as users build them, and the losses and metrics that score predictions against them.
 
 Most tests start from the shared decay dataset (four experiments, two
 buckets, an unobserved ``t0`` row) or a small two-channel dataset built
@@ -15,11 +15,17 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+import pandas as pd
 import pytest
 from _models import EXPERIMENTS, TRUE_RATE
 
 import jaxhybridmodels as hm
-from jaxhybridmodels.data import BucketPayload, Dataset
+from jaxhybridmodels.data import (
+    BucketPayload,
+    Dataset,
+    experiment_from_array,
+    experiments_from_dataframe,
+)
 from jaxhybridmodels.losses import (
     LOSS_REGISTRY,
     bal_mle,
@@ -33,7 +39,7 @@ ALL_LOSSES = [masked_mse, masked_mle, bal_mse, bal_mle]
 
 
 def _obs(ts, values, **kwargs) -> hm.ChannelObs:
-    return hm.ChannelObs(jnp.asarray(ts), jnp.asarray(values), **kwargs)
+    return hm.ChannelObs(ts=jnp.asarray(ts), values=jnp.asarray(values), **kwargs)
 
 
 def _exp(exp_id: str = "e", covariates: Any = None, **channels) -> hm.Experiment:
@@ -54,7 +60,7 @@ def _two_channel() -> Dataset:
 
 
 def _ids(ds: Dataset) -> list[str]:
-    return [e.exp_id for e in ds._experiments]
+    return [e.exp_id for e in ds.experiments]
 
 
 def _analytic(bp: BucketPayload, rate: float) -> jax.Array:
@@ -202,7 +208,21 @@ def test_make_dataset_is_deterministic_and_silent():
 
 def test_dataset_constructs_from_its_public_fields_alone():
     ds = Dataset(bucket_payloads=(), output_channel_names=("c",), covariate_names=("a",))
-    assert ds._experiments == ()
+    assert ds.experiments == ()
+
+
+def test_channel_obs_is_keyword_only():
+    with pytest.raises(TypeError):
+        hm.ChannelObs([0.0], [1.0])  # ty: ignore[missing-argument, too-many-positional-arguments]
+
+
+def test_experiment_ids_are_unique_and_empty_ones_are_named_by_position():
+    named = _exp("kept", x=([0.0], [1.0]))
+    anonymous = [_exp("", x=([0.0, 1.0], [1.0, 2.0])) for _ in range(2)]
+    ds = hm.make_dataset([anonymous[0], named, anonymous[1]], output_channel_names=("x",))
+    assert _ids(ds) == ["experiment_0", "kept", "experiment_2"]
+    with pytest.raises(ValueError, match=r"duplicate exp_id values \['kept'\]"):
+        hm.make_dataset([named, named], output_channel_names=("x",))
 
 
 @pytest.mark.parametrize(
@@ -286,6 +306,122 @@ def test_make_dataset_rejects_inconsistent_experiments(experiments, names, match
         hm.make_dataset(experiments, output_channel_names=names)
 
 
+def test_experiment_from_array_drops_nan_cells_per_channel():
+    exp = experiment_from_array(
+        ts=[0.0, 1.0, 2.0],
+        values=[[1.0, np.nan], [2.0, 20.0], [np.nan, 30.0]],
+        channel_names=("x", "y"),
+        variance=(0.1, 0.2),
+        covariates={"a": 1.0},
+        y0=[0.0],
+        exp_id="run",
+    )
+    np.testing.assert_allclose(exp.channels["x"].ts, [0.0, 1.0])
+    np.testing.assert_allclose(exp.channels["y"].values, [20.0, 30.0])
+    np.testing.assert_allclose(exp.channels["y"].variance, [0.2, 0.2])
+    assert exp.exp_id == "run"
+    # A [T, D] variance is read cell by cell; one channel may be rank-1.
+    single = experiment_from_array(
+        ts=[0.0, 1.0],
+        values=[1.0, 2.0],
+        channel_names=("x",),
+        variance=[[0.5], [0.25]],
+        y0=[0.0],
+        exp_id="one",
+    )
+    np.testing.assert_allclose(single.channels["x"].variance, [0.5, 0.25])
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        pytest.param({"values": np.ones((3, 1))}, r"shape \[T, D\]", id="values-shape"),
+        pytest.param({"variance": (1.0, 1.0, 1.0)}, "one entry per channel", id="variance-len"),
+        pytest.param({"variance": np.ones((3, 2))}, "variance must be", id="variance-shape"),
+        pytest.param({"variance": 0.0}, "channel 'x'.*variance", id="bad-variance"),
+    ],
+)
+def test_experiment_from_array_rejects_bad_shapes(kwargs, match):
+    base: dict[str, Any] = {
+        "ts": [0.0, 1.0],
+        "values": np.ones((2, 2)),
+        "channel_names": ("x", "y"),
+    }
+    with pytest.raises(ValueError, match=match):
+        experiment_from_array(**{**base, **kwargs}, y0=[0.0], exp_id="e")
+
+
+def _lab_table() -> pd.DataFrame:
+    """Two runs in the shape of a lab spreadsheet: one row per sample time."""
+    return pd.DataFrame(
+        {
+            "Exp": [7, 7, 7, 3, 3],
+            "Time": [0.0, 30.0, 60.0, 0.0, 45.0],
+            "Temp": [21.0, 21.0, 21.0, 25.0, 25.0],
+            "Conc": [19.1, 18.4, 13.5, 12.3, 11.9],
+            "Conc_var": [0.03, 0.16, 2.4, 0.06, 0.07],
+            "PS": [np.nan, np.nan, 13.0, np.nan, 15.0],
+        }
+    )
+
+
+def test_experiments_from_dataframe_builds_one_experiment_per_run():
+    experiments = experiments_from_dataframe(
+        _lab_table(),
+        time="Time",
+        experiment="Exp",
+        channels={"conc": "Conc", "d43": "PS"},
+        covariates={"temperature": "Temp"},
+        variance={"conc": "Conc_var", "d43": 0.5},
+        t0=0.0,
+        y0_fn=lambda cov, ch: jnp.array([ch["conc"].values[0], cov["temperature"]]),
+    )
+    # First-appearance order, IDs as strings.
+    assert [e.exp_id for e in experiments] == ["7", "3"]
+    first = experiments[0]
+    np.testing.assert_allclose(first.channels["conc"].variance, [0.03, 0.16, 2.4], rtol=1e-6)
+    np.testing.assert_allclose(first.channels["d43"].ts, [60.0])
+    np.testing.assert_allclose(first.channels["d43"].variance, [0.5])
+    np.testing.assert_allclose(first.y0, [19.1, 21.0], rtol=1e-6)
+    assert float(experiments[1].covariates["temperature"]) == 25.0
+    ds = hm.make_dataset(experiments, output_channel_names=("conc", "d43"))
+    assert int(sum(int(bp.n_obs) for bp in ds.bucket_payloads)) == 7
+
+    # A list names channels after their columns; y0 may be keyed by run.
+    plain = experiments_from_dataframe(
+        _lab_table(),
+        time="Time",
+        experiment="Exp",
+        channels=["Conc"],
+        y0={"7": [1.0], "3": [2.0]},
+    )
+    assert list(plain[1].channels) == ["Conc"] and float(plain[1].y0[0]) == 2.0
+    np.testing.assert_allclose(plain[0].channels["Conc"].variance, 1.0)
+
+
+@pytest.mark.parametrize(
+    "kwargs, error, match",
+    [
+        pytest.param({"channels": ["Nope"]}, KeyError, "Nope", id="missing-column"),
+        pytest.param(
+            {"channels": ["Conc"], "covariates": ["Conc"]},
+            ValueError,
+            "constant within experiment '7'",
+            id="varying-covariate",
+        ),
+        pytest.param(
+            {"channels": ["Conc"], "variance": {"other": 1.0}},
+            ValueError,
+            "unknown channels",
+            id="variance-key",
+        ),
+    ],
+)
+def test_experiments_from_dataframe_rejects_bad_tables(kwargs, error, match):
+    with pytest.raises(error, match=match):
+        experiments_from_dataframe(_lab_table(), time="Time", experiment="Exp", y0=[0.0], **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Splitting and resampling
 # ---------------------------------------------------------------------------
@@ -315,7 +451,7 @@ def _numbered(n: int) -> Dataset:
 def test_split_partitions_experiments(n, fractions, counts):
     source = _numbered(n)
     splits = hm.split_dataset(source, key=jr.key(0), **fractions)
-    assert tuple(len(s._experiments) for s in splits) == counts
+    assert tuple(len(s.experiments) for s in splits) == counts
     ids = [set(_ids(s)) for s in splits]
     assert set().union(*ids) == {f"e{i}" for i in range(n)}
     assert sum(len(i) for i in ids) == n
@@ -364,12 +500,16 @@ def test_split_rejects_bad_fractions(dataset, fractions, match):
 
 def test_bootstrap_resamples_with_replacement_and_rebuckets(decay_data):
     default = hm.make_bootstrap_dataset(decay_data, key=jr.key(0))
-    assert len(default._experiments) == len(decay_data._experiments)
+    assert len(default.experiments) == len(decay_data.experiments)
 
     big = hm.make_bootstrap_dataset(decay_data, key=jr.key(0), n_experiments=12)
     ids = _ids(big)
-    assert len(ids) == 12 and len(set(ids)) < 12  # duplicates, so with replacement
-    assert set(ids) <= set(_ids(decay_data))
+    # Drawn with replacement, so some source experiment repeats; repeats are
+    # renamed "<id>#<k>" to keep IDs unique.
+    sources = [i.split("#")[0] for i in ids]
+    assert len(ids) == len(set(ids)) == 12 and len(set(sources)) < 12
+    assert set(sources) <= set(_ids(decay_data))
+    assert any("#2" in i for i in ids)
     # Duplicated experiments add rows to their bucket; the irregular grids
     # still sort into the same two lengths.
     assert sum(bp.ts.shape[0] for bp in big.bucket_payloads) == 12
@@ -394,6 +534,64 @@ def test_bootstrap_resamples_with_replacement_and_rebuckets(decay_data):
 def test_bootstrap_rejects_bad_inputs(dataset, n, match):
     with pytest.raises(ValueError, match=match):
         hm.make_bootstrap_dataset(dataset, key=jr.key(0), n_experiments=n)
+
+
+# ---------------------------------------------------------------------------
+# Metrics and solver defaults
+# ---------------------------------------------------------------------------
+
+
+def _prediction(observed: dict[str, list[float]], predicted: dict[str, list[float]]):
+    """A ``PredictionResult`` with one experiment per entry, NaN marking unobserved cells."""
+    experiments = {}
+    for exp_id, values in observed.items():
+        obs = jnp.asarray(values)
+        experiments[exp_id] = hm.ExperimentPrediction(
+            times=jnp.arange(obs.shape[0], dtype=jnp.float32),
+            outputs={"x": jnp.asarray(predicted[exp_id])},
+            observed={"x": obs},
+            observation_mask={"x": ~jnp.isnan(obs)},
+        )
+    return hm.PredictionResult(experiments)
+
+
+def test_metrics_read_a_prediction_result_and_pool_experiments(capsys):
+    # Two experiments observed at 0 and 10, predicted 0: R^2 uses the pooled
+    # variance, so it is -1, not undefined per experiment. NaN cells (a t0
+    # row, say) count for nothing, whatever the prediction there.
+    result = _prediction({"a": [jnp.nan, 0.0], "b": [10.0]}, {"a": [99.0, 0.0], "b": [0.0]})
+    metrics = hm.compute_metrics(result)
+    x = metrics["x"]
+    assert int(x.n) == 2
+    assert float(x.mse) == pytest.approx(50.0) and float(x.mae) == pytest.approx(5.0)
+    assert float(x.r2) == pytest.approx(-1.0)
+    flat = _prediction({"a": [2.0], "b": [2.0]}, {"a": [0.0], "b": [0.0]})
+    assert np.isnan(float(hm.compute_metrics(flat)["x"].r2))
+
+    hm.print_metrics(result, header="RESULTS")
+    from_result = capsys.readouterr().out
+    hm.print_metrics(metrics, header="RESULTS")
+    assert capsys.readouterr().out == from_result
+    assert "RESULTS" in from_result and "5.0000e+00" in from_result
+
+
+def test_metrics_refuse_results_without_observations():
+    bare = hm.PredictionResult(
+        {"a": hm.ExperimentPrediction(times=jnp.zeros(1), outputs={"x": jnp.zeros(1)})}
+    )
+    with pytest.raises(ValueError, match="observed values"):
+        hm.compute_metrics(bare)
+    with pytest.raises(ValueError, match="at least one"):
+        hm.compute_metrics(hm.PredictionResult({}))
+
+
+def test_solver_config_has_working_defaults():
+    solver = hm.SolverConfig()
+    assert type(solver.solver).__name__ == "Tsit5"
+    assert (solver.rtol, solver.atol, solver.max_steps, solver.dt0) == (1e-5, 1e-7, 4096, None)
+    assert hm.SolverConfig.from_dict(solver.to_dict()) == solver
+    with pytest.raises(TypeError):
+        hm.SolverConfig(None, 1e-3)  # ty: ignore[too-many-positional-arguments]
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +665,20 @@ def test_channel_idx_and_channel_weights_compose_linearly():
 @pytest.mark.parametrize("loss_fn", [bal_mse, bal_mle])
 def test_balanced_losses_weight_experiments_not_observations(loss_fn, decay_data):
     base = decay_data
-    doubled = hm.make_dataset(list(base._experiments) * 2, output_channel_names=("conc",))
+    copies = [
+        exp
+        if k == 0
+        else hm.make_experiment(
+            channels=exp.channels,
+            covariates=exp.covariates,
+            y0=exp.y0,
+            t0=exp.t0,
+            exp_id=f"{exp.exp_id}-copy",
+        )
+        for k in range(2)
+        for exp in base.experiments
+    ]
+    doubled = hm.make_dataset(copies, output_channel_names=("conc",))
     for bp, bp2 in zip(base.bucket_payloads, doubled.bucket_payloads, strict=True):
         np.testing.assert_allclose(
             loss_fn(_analytic(bp, 0.5), bp), loss_fn(_analytic(bp2, 0.5), bp2), rtol=1e-6

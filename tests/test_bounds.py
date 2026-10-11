@@ -71,7 +71,7 @@ def test_scaler_properties(transform, box):
     # Outside the box the inverse keeps a finite, non-zero gradient, so a
     # state-derived input that strays does not cut the adjoint.
     if outside:
-        grads = jax.vmap(jax.grad(lambda v: scaler.to_latent(v)[0]))(jnp.asarray(outside))
+        grads = jax.vmap(jax.grad(scaler.to_latent))(jnp.asarray(outside))
         assert jnp.all(jnp.isfinite(grads)) and jnp.all(grads != 0.0)
 
     # Zero latent is the midpoint of the warped box.
@@ -87,12 +87,46 @@ def test_one_component_scaler_acts_elementwise_on_any_shape():
     assert scaler.from_latent(z).shape == (2, 3)
     assert scaler.to_latent(jnp.array([-1e4, 5.0, 1e4])).shape == (3,)
     assert jnp.all(jnp.isfinite(scaler.to_latent(jnp.array([-1e4, 1e4]))))
-    # A scalar query comes back rank 1 for every bound kind.
-    for pair in ((0.0, None), (None, 1.0), (None, None)):
-        open_scaler = hm.BoundScaler((pair,))
-        np.testing.assert_allclose(
-            open_scaler.from_latent(open_scaler.to_latent(jnp.asarray(0.2))), [0.2]
-        )
+    # A scalar query keeps its shape for every bound kind.
+    for pair in ((0.0, 10.0), (0.0, None), (None, 1.0), (None, None)):
+        one = hm.BoundScaler(pair)
+        back = one.from_latent(one.to_latent(jnp.asarray(0.2)))
+        assert back.shape == () and float(back) == pytest.approx(0.2, rel=1e-5)
+        assert one.scale_inputs(jnp.asarray(0.2)).shape == ()
+    # Saturation and input violation read every entry, not just the first.
+    assert float(scaler.saturation(jnp.array([0.0, 40.0]))) > 0.0
+    assert float(scaler.input_violation(jnp.array([5.0, 20.0]))) > 0.0
+
+
+@pytest.mark.parametrize(
+    "spec, expected",
+    [
+        ((270.0, 350.0), ((270.0, 350.0),)),
+        ([270, None], ((270.0, INF),)),
+        (((270.0, 350.0),), ((270.0, 350.0),)),
+        (((0.0, 1.0), (None, 5.0)), ((0.0, 1.0), (-INF, 5.0))),
+        ([(0.0, 1.0), (2.0, 3.0)], ((0.0, 1.0), (2.0, 3.0))),
+    ],
+    ids=["pair", "list-pair", "one-of-many", "pair-of-pairs", "list-of-pairs"],
+)
+def test_every_bounds_argument_reads_one_pair_or_a_sequence_of_pairs(spec, expected):
+    """A pair of numbers or None is one pair; a pair of pairs is per component."""
+    assert hm.BoundScaler(spec).bounds == expected
+    size = len(expected)
+    bounded = hm.BoundedPredictor(
+        inner=_Identity(), input_bounds=spec, output_bounds=spec, input_keys=("a", "b")[:size]
+    )
+    assert bounded.in_scaler.bounds == bounded.out_scaler.bounds == expected
+    inside = [
+        (lo + hi) / 2 if math.isfinite(hi - lo) else lo + 1 if math.isfinite(lo) else hi - 1
+        for lo, hi in expected
+    ]
+    assert hm.Parameter(inside, bounds=spec).scaler.bounds == expected
+
+
+class _Identity(hm.Predictor):
+    def __call__(self, x):
+        return x
 
 
 def test_vector_scaler_maps_each_component_against_its_own_box():
@@ -185,6 +219,8 @@ def test_positive_warp_rejects_nonpositive_runtime_inputs():
         (dict(bounds=((0.0, 1.0),), logit_eps=0.5), "logit_eps"),
         (dict(bounds=((0.0, 1.0),), logit_eps=0.0), "logit_eps"),
         (dict(bounds=((0.0, 1.0),), z_knee=-1.0), "z_knee"),
+        (dict(bounds=((0.0, 1.0, 2.0),)), "one \\(low, high\\) pair"),
+        (dict(bounds=(0.0, 1.0, 2.0)), "one \\(low, high\\) pair"),
     ],
 )
 def test_scaler_validation(kwargs, match):
@@ -233,6 +269,7 @@ def test_array_parameter_takes_one_bound_per_element():
 
 def test_parameter_restart_draws_a_new_latent_inside_the_same_box():
     rate = hm.Parameter(0.3, bounds=(0.0, 1.0))
+    assert rate.value.shape == ()
     fresh = rate.initialized_with_key(jr.key(0))
     assert float(fresh.latent[0]) != float(rate.latent[0])
     assert fresh.scaler.bounds == rate.scaler.bounds

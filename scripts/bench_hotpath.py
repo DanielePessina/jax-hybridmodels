@@ -37,6 +37,7 @@ from jaxhybridmodels import (
     make_experiment,
     predict_dataset,
 )
+from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.penalties import select_penalty_points
 from jaxhybridmodels.trainable import trainable_mask
 from jaxhybridmodels.training.optax import (
@@ -142,19 +143,11 @@ def main():
     ui = SilentUI()
     ui.on_run_start(total_steps=N_STEPS_BENCH, num_phases=1)
     t0 = time.perf_counter()
-    (
-        bucket_step,
-        penalty_step,
-        score_bucket,
-        optimizer,
-        apply_update,
-        step_update,
-        sources,
-        extras,
-    ) = _build_training_kernels(
+    kernels = _build_training_kernels(
         predictors=predictor,
         dataset=dataset,
         config=config,
+        objective=Objective(),
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         solver=solver,
@@ -162,11 +155,13 @@ def main():
         ui=ui,
     )
     t_build = time.perf_counter() - t0
+    bucket_step, penalty_step = kernels.bucket_step, kernels.penalty_step
+    optimizer, apply_update = kernels.optimizer, kernels.apply_update
 
     bp0 = dataset.bucket_payloads[0]
     opt_state = optimizer.init(eqx.filter(predictor, trainable))
     loss, grads = bucket_step(predictor, bp0, jnp.asarray(1.0))
-    pen_points = select_penalty_points(sources, extras, 1.0)
+    pen_points = select_penalty_points(kernels.sources, kernels.extras, 1.0)
     p, pg = penalty_step(predictor, jnp.asarray(0.0), pen_points)
     np_, os_ = apply_update(predictor, grads, opt_state)
     jax.block_until_ready((loss, p, np_))
@@ -198,12 +193,8 @@ def main():
         predictor,
         dataset,
         config,
-        optimizer=optimizer,
-        step_update=step_update,
-        bucket_step=bucket_step,
-        penalty_step=penalty_step,
-        sources=sources,
-        extras=extras,
+        kernels=kernels,
+        sources=kernels.sources,
         trainable=trainable,
         ui=ui2,
     )

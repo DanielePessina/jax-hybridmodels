@@ -54,11 +54,11 @@ def main() -> None:
     )
 
     default_mask = trainable_mask(bp)
-    no_scalers = freeze_modules_of_type(default_mask, bp, BoundScaler)
+    no_scalers = freeze_modules_of_type(default_mask, BoundScaler)
     # CovariateSelector no longer exists -- named-input ordering folded
     # into BoundedPredictor.input_keys, a static field with no leaves to
     # freeze. Demonstrate freeze_where on the inner network instead.
-    frozen_inner = freeze_where(no_scalers, bp, lambda m: isinstance(m, MLPPredictor))
+    frozen_inner = freeze_where(no_scalers, lambda m: isinstance(m, MLPPredictor))
 
     stages = [
         ("default", default_mask),

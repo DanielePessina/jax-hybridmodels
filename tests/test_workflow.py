@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
+import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -43,6 +43,7 @@ import jaxhybridmodels as hm
 import jaxhybridmodels.training.evosax as evosax_module
 import jaxhybridmodels.training.optax as optax_module
 from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.ui import EvosaxUI, RichEvosaxUI, RichTrainingUI, SilentUI, TrainingUI
 from jaxhybridmodels.ui.testing import RecordingUI
 
@@ -88,7 +89,7 @@ def test_fit_history_records_every_step_of_every_phase(fitted):
     assert len(history.loss) == len(history.penalty) == len(history.phase) == 50
     assert history.phase == (0,) * 25 + (1,) * 25
     assert history.penalty == (0.0,) * 50
-    assert history.validation_loss == () and history.best_fitness == ()
+    assert history.validation_loss == ()
     assert history.loss[-1] < 0.05 * history.loss[0]
     assert result.stop_reason == "budget_exhausted"
     # restore_best compares only within the final horizon, so the best
@@ -164,15 +165,15 @@ def test_history_separates_the_trajectory_and_fixed_point_penalties(
     def fixed_penalty(predictors, points):
         return jnp.asarray(3.0)
 
-    config = quiet(
-        steps=1,
-        lr=0.01,
+    objective = hm.Objective(
         penalty_weight=0.25,
         penalty_fn=fixed_penalty,
         trajectory_penalty_fn=trajectory_penalty,
         trajectory_penalty_weight=0.5,
     )
-    penalised = parameter_model().fit(decay_data, config, key=jr.key(3))
+    penalised = parameter_model().fit(
+        decay_data, quiet(steps=1, lr=0.01), objective=objective, key=jr.key(3)
+    )
     baseline = validation_fit.history.loss[0]
     np.testing.assert_allclose(penalised.history.loss[0] - baseline, 1.0, atol=1e-6)
     np.testing.assert_allclose(penalised.history.penalty, (0.75,), atol=1e-6)
@@ -189,8 +190,8 @@ def evosax_fit(decay_data):
     """
     console = _console()
     predictors = {**parameter_predictors(), "meta": hm.Constant((1.0, [2.0, 3.0]))}
-    model = replace(parameter_model(), predictors=predictors)
-    config = hm.EvosaxTrainingConfig(population_size=8, num_generations=10, sigma_init=0.5)
+    model = eqx.tree_at(lambda m: m.predictors, parameter_model(), predictors)
+    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(
             evosax_module,
@@ -202,13 +203,13 @@ def evosax_fit(decay_data):
 
 
 def test_population_fit_moves_values_and_keeps_constants(evosax_fit):
-    """Evosax fills ``best_fitness`` only, improves the rate, and leaves Constants alone."""
+    """Evosax fills a monotone ``loss``, improves the rate, and leaves Constants alone."""
     result, _ = evosax_fit
-    fitness = result.history.best_fitness
-    assert len(fitness) == 10
-    assert all(b <= a for a, b in zip(fitness, fitness[1:], strict=False))
-    assert result.history.loss == ()
-    assert result.best_step == int(np.argmin(fitness))
+    loss = result.history.loss
+    assert len(loss) == 10
+    assert all(b <= a for a, b in zip(loss, loss[1:], strict=False))
+    assert result.history.penalty == result.history.phase == result.history.validation_loss == ()
+    assert result.best_step == int(np.argmin(loss))
     assert abs(_rate(result.model) - TRUE_RATE) < abs(0.3 - TRUE_RATE)
     meta = result.model.predictors["meta"].value
     assert float(meta[0]) == 1.0
@@ -220,9 +221,9 @@ def test_network_fit_learns_a_covariate_dependent_rate(temp_data):
     model = network_model()
     result = model.fit(temp_data, quiet(steps=50, lr=0.05), key=jr.key(1))
     assert result.history.loss[-1] < 0.1 * result.history.loss[0]
-    slow = hm.evaluate_predictor(result.model.predictors["rate"], {"temp": 0.5})
-    fast = hm.evaluate_predictor(result.model.predictors["rate"], {"temp": 1.5})
-    assert isinstance(slow, float)
+    rates = hm.evaluate_predictor(result.model.predictors["rate"], {"temp": jnp.array([0.5, 1.5])})
+    assert rates.shape == (2,)
+    slow, fast = (float(r) for r in rates)
     assert 0.05 < slow < fast < 3.0
 
 
@@ -286,7 +287,7 @@ def test_vector_covariates_reach_each_simulation():
     ts = jnp.array([0.0, 1.0])
     experiments = [
         hm.make_experiment(
-            channels={"conc": hm.ChannelObs(ts, jnp.zeros(2))},
+            channels={"conc": hm.ChannelObs(ts=ts, values=jnp.zeros(2))},
             covariates={"features": jnp.array(features)},
             y0=[0.0],
             exp_id=name,
@@ -294,7 +295,13 @@ def test_vector_covariates_reach_each_simulation():
         for name, features in [("x", [1.0, 2.0]), ("y", [3.0, 4.0])]
     ]
     dataset = hm.make_dataset(experiments, output_channel_names=CHANNELS)
-    model = replace(parameter_model(), simulate_fn=simulate)
+    model = hm.HybridModel(
+        predictors=parameter_predictors(),
+        simulate_fn=simulate,
+        state_to_output=identity,
+        output_channel_names=CHANNELS,
+        solver=SOLVER,
+    )
     prediction = model.predict(dataset)
     np.testing.assert_array_equal(prediction["x"].outputs["conc"], [3.0, 3.0])
     np.testing.assert_array_equal(prediction["y"].outputs["conc"], [7.0, 7.0])
@@ -334,7 +341,7 @@ def test_prediction_compiles_once_per_bucket_shape(fitted, decay_data):
 def test_integer_observations_with_a_fractional_t0_are_promoted_to_float():
     """Integer times and states must not truncate a fractional ``t0``."""
     experiment = hm.make_experiment(
-        y0=[1], t0=0.5, channels={"conc": hm.ChannelObs([1, 2], [0.8, 0.6])}
+        y0=[1], t0=0.5, channels={"conc": hm.ChannelObs(ts=[1, 2], values=[0.8, 0.6])}
     )
     dataset = hm.make_dataset([experiment], output_channel_names=CHANNELS)
     assert jnp.issubdtype(experiment.y0.dtype, jnp.floating)
@@ -349,50 +356,20 @@ def test_integer_observations_with_a_fractional_t0_are_promoted_to_float():
 def test_metrics_count_only_observed_cells_and_score_a_good_fit(fitted, decay_data, capsys):
     """compute_metrics masks out padding and t0 rows; print_metrics prints them."""
     prediction = fitted[0].model.predict(decay_data)
-    metrics = hm.compute_metrics(prediction.buckets, decay_data)
+    metrics = hm.compute_metrics(prediction)
     assert set(metrics) == {"conc"}
     conc = metrics["conc"]
     assert conc.n == _N_OBSERVED
     assert float(conc.rmse) < 0.02 and float(conc.r2) > 0.99
 
     bad = parameter_model(rate=2.0).predict(decay_data)
-    assert float(hm.compute_metrics(bad.buckets, decay_data)["conc"].mse) > float(conc.mse)
+    assert float(hm.compute_metrics(bad)["conc"].mse) > float(conc.mse)
 
     hm.print_metrics(metrics, header="RESULTS")
+    hm.print_metrics(prediction, header="DIRECT")
     out = capsys.readouterr().out
-    assert "RESULTS" in out and "conc" in out
+    assert "RESULTS" in out and "DIRECT" in out and out.count("conc") == 2
     assert "2 bucket(s)" in hm.describe_buckets(decay_data)
-
-
-def test_metrics_are_jit_safe_and_pool_observations_across_buckets():
-    """R^2 uses the variance of all observations, not each bucket's own."""
-
-    def payload(value: float) -> hm.BucketPayload:
-        return hm.BucketPayload(
-            ts=jnp.array([[0.0]]),
-            y_observed=jnp.array([[[value]]]),
-            yvar=jnp.ones((1, 1, 1)),
-            mask=jnp.ones((1, 1, 1), dtype=bool),
-            covariates={},
-            y0=jnp.zeros((1, 1)),
-            n_obs=jnp.array(1, dtype=jnp.int32),
-        )
-
-    dataset = hm.Dataset(
-        bucket_payloads=(payload(0.0), payload(10.0)),
-        output_channel_names=("x",),
-        covariate_names=(),
-    )
-    zeros = tuple(jnp.zeros_like(bp.y_observed) for bp in dataset.bucket_payloads)
-    metrics = jax.jit(hm.compute_metrics)(zeros, dataset)
-    assert float(metrics["x"].r2) == pytest.approx(-1.0)
-    # Constant observations leave R^2 undefined.
-    flat = hm.Dataset(
-        bucket_payloads=(payload(2.0), payload(2.0)),
-        output_channel_names=("x",),
-        covariate_names=(),
-    )
-    assert np.isnan(float(hm.compute_metrics(zeros, flat)["x"].r2))
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +424,7 @@ def test_a_fitted_run_reloads_and_predicts_identically(fitted, decay_data, tmp_p
     assert loaded["solver"].to_dict() == SOLVER.to_dict()
     assert loaded["loss_history"] == list(result.history.loss)
     assert loaded["extras"] == {"v": 2}
-    reloaded = replace(result.model, predictors=loaded["predictors"])
+    reloaded = eqx.tree_at(lambda m: m.predictors, result.model, loaded["predictors"])
     for exp_id, exp in reloaded.predict(decay_data).items():
         np.testing.assert_array_equal(
             exp.outputs["conc"], result.model.predict(decay_data)[exp_id].outputs["conc"]
@@ -473,7 +450,7 @@ def test_network_predictors_round_trip_bit_exact(tmp_path):
 
 def test_history_kind_says_which_trainer_wrote_it(tmp_path):
     """Optax histories can rise, Evosax ones cannot; the metadata keeps them apart."""
-    evosax = hm.EvosaxTrainingConfig(population_size=8, num_generations=2, verbose=False)
+    evosax = hm.EvosaxTrainingConfig(population_size=8, steps=2, verbose=False)
     cases: list[tuple[str, dict[str, Any], list[float] | None, str | None]] = [
         ("optax", {"optax_config": quiet(steps=1)}, [1.0], "per_step_data"),
         ("evosax", {"evosax_config": evosax}, [1.0], "best_so_far"),
@@ -499,7 +476,7 @@ def test_history_kind_says_which_trainer_wrote_it(tmp_path):
 
 
 def test_callables_in_a_config_are_described_not_pickled(tmp_path):
-    """Loss callables save as a dotted name; other callables refuse to load."""
+    """Callables save as a dotted name and refuse to load as a typed object."""
 
     def optimizer_factory(learning_rate):
         return optax.adam(learning_rate)
@@ -508,40 +485,68 @@ def test_callables_in_a_config_are_described_not_pickled(tmp_path):
         return jnp.asarray(0.0)
 
     hm.save_run(
-        tmp_path / "loss",
+        tmp_path / "factory",
         predictors=parameter_predictors(),
         solver=SOLVER,
-        optax_config=quiet(steps=1, loss=masked_mse),
+        optax_config=quiet(steps=1, optimizer=optimizer_factory),
+        objective=Objective(loss=masked_mse, penalty_fn=penalty_fn),
     )
-    assert _metadata(tmp_path / "loss")["optax_config"]["loss"] == (
-        "jaxhybridmodels.losses.masked_mse"
-    )
-    loaded = hm.load_run(
-        tmp_path / "loss",
-        predictors_template=parameter_predictors(),
-        optax_cls=hm.OptaxTrainingConfig,
-    )
-    assert loaded["optax_config"].loss == "jaxhybridmodels.losses.masked_mse"
-
-    factory = quiet(steps=1, optimizer=optimizer_factory, penalty_fn=penalty_fn)
-    hm.save_run(
-        tmp_path / "factory", predictors=parameter_predictors(), solver=SOLVER, optax_config=factory
-    )
-    saved = _metadata(tmp_path / "factory")["optax_config"]
-    assert "__callable__" in saved["phases"][0]["optimizer"]
-    assert "__callable__" in saved["penalty_fn"]
+    saved = _metadata(tmp_path / "factory")
+    assert "__callable__" in saved["optax_config"]["phases"][0]["optimizer"]
+    assert saved["objective"]["loss"] == {"__callable__": "jaxhybridmodels.losses.masked_mse"}
+    assert "__callable__" in saved["objective"]["penalty_fn"]
+    template = parameter_predictors()
     with pytest.raises(ValueError, match="callable"):
         hm.load_run(
-            tmp_path / "factory",
-            predictors_template=parameter_predictors(),
-            optax_cls=hm.OptaxTrainingConfig,
+            tmp_path / "factory", predictors_template=template, optax_cls=hm.OptaxTrainingConfig
         )
+    with pytest.raises(ValueError, match="callable"):
+        hm.load_run(tmp_path / "factory", predictors_template=template, objective_cls=Objective)
+    raw = hm.load_run(tmp_path / "factory", predictors_template=parameter_predictors())
+    assert raw["objective"]["loss"] == {"__callable__": "jaxhybridmodels.losses.masked_mse"}
 
-    raw = quiet(steps=1, optimizer=optax.adam(1e-3))
+    schedule = quiet(phases=(hm.TrainingPhase(1, lr=optax.linear_schedule(0.1, 0.0, 1)),))
     hm.save_run(
-        tmp_path / "raw", predictors=parameter_predictors(), solver=SOLVER, optax_config=raw
+        tmp_path / "schedule",
+        predictors=parameter_predictors(),
+        solver=SOLVER,
+        optax_config=schedule,
+    )
+    assert "__callable__" in _metadata(tmp_path / "schedule")["optax_config"]["phases"][0]["lr"]
+
+    raw_optimizer = quiet(steps=1, optimizer=optax.adam(1e-3))
+    hm.save_run(
+        tmp_path / "raw",
+        predictors=parameter_predictors(),
+        solver=SOLVER,
+        optax_config=raw_optimizer,
     )
     assert "__opaque__" in _metadata(tmp_path / "raw")["optax_config"]["phases"][0]["optimizer"]
+
+
+def test_an_objective_without_callables_round_trips(tmp_path):
+    """Registry losses, weights by name and keyed penalty points come back as an Objective."""
+    objective = Objective(
+        loss="bal_mse",
+        channel_weights={"conc": 2.0},
+        penalty_weight=0.1,
+        penalty_points={"rate": jnp.array([[0.5], [1.5]])},
+    )
+    hm.save_run(tmp_path, predictors=parameter_predictors(), solver=SOLVER, objective=objective)
+    loaded = hm.load_run(
+        tmp_path, predictors_template=parameter_predictors(), objective_cls=Objective
+    )["objective"]
+    assert isinstance(loaded, Objective)
+    assert (loaded.loss, loaded.channel_weights, loaded.penalty_weight) == (
+        "bal_mse",
+        {"conc": 2.0},
+        0.1,
+    )
+    assert loaded.penalty_points is not None
+    np.testing.assert_array_equal(loaded.penalty_points["rate"], [[0.5], [1.5]])
+    assert hm.load_run(tmp_path, predictors_template=parameter_predictors())["objective"][
+        "penalty_points"
+    ] == {"rate": [[0.5], [1.5]]}
 
 
 class _Scaled(hm.Predictor):
@@ -640,11 +645,11 @@ def test_evosax_log_every_throttles_the_generation_table():
     """``log_every=2`` shows generations 0, 2 and 4 only."""
     console = _console()
     ui = RichEvosaxUI(console=console, log_every=2, recent_generations=10)
-    ui.on_run_start(num_generations=5, population_size=4)
+    ui.on_run_start(total_steps=5, population_size=4)
     bests = [0.7771, 0.6661, 0.5551, 0.4441, 0.3331]
     for i, best in enumerate(bests):
         ui.on_generation_end(gen_idx=i, best_fitness=best, mean_fitness=best + 0.1)
-    ui.on_run_end(best_fitness=0.2221)
+    ui.on_run_end(final_loss=0.2221)
     text = console.export_text()
     assert [f"{b:.4f}" in text for b in bests] == [True, False, True, False, True]
 
@@ -657,8 +662,8 @@ def test_dashboards_tolerate_out_of_order_events():
     training.on_step_end(step_idx=0, phase_idx=0, loss=0.0)
     training.on_run_end(final_loss=0.0)
     evosax = RichEvosaxUI(console=_console())
-    evosax.on_run_start(num_generations=3, population_size=4)
-    evosax.on_run_end(best_fitness=0.0)
+    evosax.on_run_start(total_steps=3, population_size=4)
+    evosax.on_run_end(final_loss=0.0)
 
 
 @pytest.mark.parametrize(
@@ -673,6 +678,126 @@ def test_training_uis_satisfy_the_protocol(ui):
 )
 def test_evosax_uis_satisfy_the_protocol(ui):
     assert isinstance(ui, EvosaxUI)
+
+
+# ---------------------------------------------------------------------------
+# The model as an Equinox module, and its conveniences
+# ---------------------------------------------------------------------------
+
+
+def test_the_model_is_an_equinox_module():
+    """``eqx.tree_at`` swaps one predictor; static fields carry over untouched."""
+    model = parameter_model()
+    swapped = eqx.tree_at(lambda m: m.predictors["rate"], model, hm.Parameter(0.9))
+    assert _rate(swapped) == pytest.approx(0.9) and _rate(model) == pytest.approx(0.3)
+    assert swapped.simulate_fn is simulate_parameter and swapped.solver is SOLVER
+    # Only the predictors are array leaves.
+    assert len(jax.tree_util.tree_leaves(model)) == len(jax.tree_util.tree_leaves(model.predictors))
+    with pytest.raises(TypeError):
+        hm.HybridModel(parameter_predictors(), simulate_parameter, identity, CHANNELS)  # ty: ignore[missing-argument, too-many-positional-arguments]
+
+
+def test_filter_vmap_builds_a_batch_of_models():
+    """Building models under ``eqx.filter_vmap`` gives one stacked model, one member per key."""
+    batch = eqx.filter_vmap(network_model)(jr.split(jr.key(0), 3))
+    weights = batch.predictors["rate"].inner.mlp.layers[0].weight
+    assert weights.shape[0] == 3
+    assert not np.allclose(weights[0], weights[1])
+    member = jax.tree_util.tree_map(
+        lambda x: x[1] if eqx.is_array(x) else x, batch, is_leaf=eqx.is_array
+    )
+    prediction = member.predict(decay_dataset())
+    assert list(prediction) == ["a", "b", "c", "d"]
+
+
+def test_experiments_stand_in_for_a_dataset(fitted, decay_data):
+    """fit, predict and validation= accept a plain list of experiments."""
+    experiments = list(decay_data.experiments)
+    model = fitted[0].model
+    from_list = model.predict(experiments)
+    from_dataset = model.predict(decay_data)
+    for exp_id in from_dataset:
+        np.testing.assert_array_equal(
+            from_list[exp_id].outputs["conc"], from_dataset[exp_id].outputs["conc"]
+        )
+    result = parameter_model().fit(
+        experiments, quiet(steps=2, lr=0.05), validation=experiments[:2], key=jr.key(0)
+    )
+    assert len(result.history.validation_loss) == 2
+
+
+def test_freeze_holds_named_predictors_fixed(decay_data):
+    """``freeze=`` takes paths, classes or predicates on top of the default mask."""
+    predictors = {"rate": hm.Parameter(0.3), "offset": hm.Parameter(0.0)}
+    model = eqx.tree_at(lambda m: m.predictors, parameter_model(), predictors)
+    result = model.fit(decay_data, quiet(steps=5, lr=0.1), freeze="offset", key=jr.key(0))
+    assert float(result.model.predictors["offset"].value) == 0.0
+    assert _rate(result.model) != pytest.approx(0.3)
+    with pytest.raises(ValueError, match="no trainable"):
+        model.fit(decay_data, quiet(steps=1), freeze=(hm.Parameter,), key=jr.key(0))
+    with pytest.raises(ValueError, match="no trainable"):
+        model.fit(
+            decay_data,
+            quiet(steps=1),
+            freeze=lambda m: isinstance(m, hm.Parameter),
+            key=jr.key(0),
+        )
+
+
+def test_evosax_fit_selects_by_validation(decay_data):
+    """With validation=, Evosax records one validation score per generation."""
+    config = hm.EvosaxTrainingConfig(population_size=4, steps=3, verbose=False)
+    validation = decay_dataset(lambda temp: 0.3)
+    result = parameter_model().fit(decay_data, config, validation=validation, key=jr.key(1))
+    history = result.history
+    assert len(history.loss) == len(history.validation_loss) == 3
+    assert result.best_step == int(np.argmin(history.validation_loss))
+
+
+def _decay_field(t, y, predictors, covariates):
+    return -predictors["rate"].value * y + predictors["offset"].value
+
+
+def test_from_vector_field_matches_a_hand_written_simulate_fn(decay_data):
+    """The wrapped vector field returns a diffrax Solution, and the framework reads its ys."""
+    model = hm.HybridModel.from_vector_field(
+        vector_field=_decay_field,
+        predictors=parameter_predictors(),
+        state_to_output=identity,
+        output_channel_names=CHANNELS,
+        solver=SOLVER,
+    )
+    reference = parameter_model().predict(decay_data)
+    for exp_id, exp in model.predict(decay_data).items():
+        np.testing.assert_allclose(
+            exp.outputs["conc"], reference[exp_id].outputs["conc"], rtol=1e-6
+        )
+    trajectory = model.simulate(ts=[0.0, 1.0], y0=[1.0])
+    np.testing.assert_allclose(
+        trajectory.outputs["conc"], _analytic(0.3, jnp.array([0.0, 1.0])), rtol=1e-3
+    )
+
+
+def test_simulate_reads_the_experiment(fitted, decay_data):
+    """``simulate(experiment=)`` takes y0, t0 and covariates from it and defaults to its grid."""
+    model = fitted[0].model
+    experiment = decay_data.experiments[1]
+    trajectory = model.simulate(experiment=experiment)
+    predicted = model.predict(decay_data)[experiment.exp_id]
+    np.testing.assert_allclose(trajectory.times, predicted.times)
+    np.testing.assert_allclose(trajectory.outputs["conc"], predicted.outputs["conc"], rtol=1e-5)
+    later = model.simulate(experiment=experiment, ts=[1.5, 2.0])
+    np.testing.assert_allclose(
+        later.outputs["conc"], _analytic(_rate(model), jnp.array([1.5, 2.0])), rtol=1e-3
+    )
+
+
+def test_fit_checks_output_shapes_before_compiling(decay_data):
+    """A wrong ``state_to_output`` width fails up front, before the trainer starts."""
+    ui = RecordingUI()
+    with pytest.raises(ValueError, match=re.escape("fit: state_to_output returned shape (3, 2)")):
+        _model(state_to_output=_doubled).fit(decay_data, quiet(steps=1), key=jr.key(0), ui=ui)
+    assert ui.events == []
 
 
 # ---------------------------------------------------------------------------
@@ -692,19 +817,46 @@ def test_nested_constants_are_frozen_and_survive_a_restart():
         np.testing.assert_array_equal(a, b)
 
 
-def _duplicate_ids() -> hm.Dataset:
-    first = decay_dataset()._experiments[0]
-    return hm.make_dataset([first, first], output_channel_names=CHANNELS)
+def _duplicate_ids() -> list[hm.Experiment]:
+    first = decay_dataset().experiments[0]
+    return [first, first]
 
 
 def _other_channels() -> hm.Dataset:
-    exp = hm.make_experiment(channels={"other": hm.ChannelObs([1.0], [0.5])}, y0=[1.0], t0=0.0)
+    exp = hm.make_experiment(
+        channels={"other": hm.ChannelObs(ts=[1.0], values=[0.5])}, y0=[1.0], t0=0.0
+    )
     return hm.make_dataset([exp], output_channel_names=("other",))
 
 
-_FROZEN = replace(
-    parameter_model(), predictors={"rate": hm.Constant(0.3), "offset": hm.Constant(0.0)}
-)
+def _model(**overrides: Any) -> hm.HybridModel:
+    """The Parameter model with some constructor arguments replaced."""
+    kwargs: dict[str, Any] = dict(
+        predictors=parameter_predictors(),
+        simulate_fn=simulate_parameter,
+        state_to_output=identity,
+        output_channel_names=CHANNELS,
+        solver=SOLVER,
+    )
+    return hm.HybridModel(**{**kwargs, **overrides})
+
+
+_FROZEN = _model(predictors={"rate": hm.Constant(0.3), "offset": hm.Constant(0.0)})
+
+
+def _doubled(state: Array) -> Array:
+    return jnp.concatenate([state, state], axis=-1)
+
+
+def _drops_last_row(predictors, ts, covariates, y0, solver):
+    return simulate_parameter(predictors, ts, covariates, y0, solver)[:-1]
+
+
+def _no_saved_state(predictors, ts, covariates, y0, solver):
+    term = diffrax.ODETerm(lambda t, y, args: -y)
+    # Dense output only: the solution holds an interpolant and no ys.
+    saveat = diffrax.SaveAt(dense=True)
+    return diffrax.diffeqsolve(term, solver.solver, ts[0], ts[-1], 0.1, y0, saveat=saveat)
 
 
 @pytest.mark.parametrize(
@@ -715,18 +867,8 @@ _FROZEN = replace(
             "no trainable",
             id="all-constant",
         ),
-        pytest.param(
-            lambda: parameter_model().fit(
-                decay_dataset(),
-                hm.EvosaxTrainingConfig(verbose=False),
-                validation=decay_dataset(),
-                key=jr.key(0),
-            ),
-            "Optax",
-            id="evosax-validation",
-        ),
         pytest.param(lambda: parameter_model().predict(_other_channels()), "channels", id="chan"),
-        pytest.param(lambda: parameter_model().predict(_duplicate_ids()), "Duplicate", id="dup"),
+        pytest.param(lambda: parameter_model().predict(_duplicate_ids()), "duplicate", id="dup"),
         pytest.param(
             lambda: parameter_model().simulate(ts=[1.0, 2.0], y0=[1.0], t0=1.5), "t0", id="t0"
         ),
@@ -737,20 +879,39 @@ _FROZEN = replace(
             lambda: parameter_model().simulate(ts=[1.0], y0=[[1.0]]), "rank-1", id="y0-rank"
         ),
         pytest.param(
-            lambda: replace(parameter_model(), output_channel_names=("a", "a")),
-            "unique",
-            id="duplicate-channels",
+            lambda: _model(output_channel_names=("a", "a")), "unique", id="duplicate-channels"
         ),
         pytest.param(
-            lambda: hm.HybridModel(
-                predictors=parameter_predictors(),
-                simulate_fn=simulate_parameter,
-                state_to_output=lambda y: jnp.concatenate([y, y], axis=-1),
-                output_channel_names=CHANNELS,
-                solver=SOLVER,
-            ).simulate(ts=[1.0], y0=[1.0], t0=0.0),
-            "state_to_output",
+            lambda: _model(state_to_output=_doubled).simulate(ts=[1.0], y0=[1.0], t0=0.0),
+            re.escape("simulate: state_to_output returned shape (1, 2)"),
             id="output-width",
+        ),
+        pytest.param(
+            lambda: _model(simulate_fn=_drops_last_row).simulate(ts=[1.0, 2.0], y0=[1.0]),
+            re.escape("simulate: simulate_fn returned state of shape (1, 1)"),
+            id="state-length",
+        ),
+        pytest.param(
+            lambda: _model(state_to_output=_doubled).predict(decay_dataset()),
+            re.escape("predict: state_to_output returned shape (3, 2)"),
+            id="predict-output-width",
+        ),
+        pytest.param(
+            lambda: _model(simulate_fn=_no_saved_state).simulate(ts=[1.0, 2.0], y0=[1.0]),
+            "ys=None",
+            id="solution-without-ys",
+        ),
+        pytest.param(
+            lambda: parameter_model().fit(
+                decay_dataset(), quiet(steps=1), key=jr.key(0), freeze="rate", trainable=True
+            ),
+            "not both",
+            id="freeze-and-trainable",
+        ),
+        pytest.param(
+            lambda: parameter_model().simulate(experiment=decay_dataset().experiments[0], y0=[1.0]),
+            "experiment=",
+            id="experiment-and-y0",
         ),
     ],
 )

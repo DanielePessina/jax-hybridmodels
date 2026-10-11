@@ -1,11 +1,12 @@
 """Penalties: the bound penalty and trajectory penalties through the trainers.
 
 The end-to-end tests come first. They drive the decay models from
-``tests/_models.py`` through ``HybridModel.fit``, ``train_with_optax``,
-``train_with_evosax`` and ``train_bootstrap_ensemble`` and check that a
-penalty moves the parameters it should. The property tests at the bottom
-guard the gradient-safe primitives the penalties are built from; they are
-cheap and catch the class of bug where a guard silently zeroes a gradient.
+``tests/_models.py`` through ``train_with_optax``, ``train_with_evosax``
+and ``train_bootstrap_ensemble``, with the penalties set on an
+``Objective``, and check that a penalty moves the parameters it should.
+The property tests at the bottom guard the gradient-safe primitives the
+penalties are built from; they are cheap and catch the class of bug where
+a guard silently zeroes a gradient.
 """
 
 from __future__ import annotations
@@ -19,15 +20,17 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import pytest
-from _models import NETWORK_KWARGS, SOLVER, network_model, network_predictors, quiet
+from _models import NETWORK_KWARGS, SOLVER, network_predictors, quiet
 from jax import Array
 
 import jaxhybridmodels as hm
 from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.penalties import (
     _bounded_leaves,
     attach_penalty_state,
     bound_penalty,
+    bounded_predictor_paths,
     box_grid,
     box_violation,
     clip_ste,
@@ -35,11 +38,13 @@ from jaxhybridmodels.penalties import (
     length_mask_keep,
     penalty_integral,
     penalty_vector_field,
+    resolve_penalty_points,
     soft_logit,
     softclip,
     strip_penalty_state,
     trajectory_saturation_penalty,
 )
+from jaxhybridmodels.trainable import freeze_paths, trainable_mask
 from jaxhybridmodels.training import EvosaxTrainingConfig, TrainingPhase
 from jaxhybridmodels.training.kernels import apply_length_mask, build_score_bucket
 from jaxhybridmodels.training.optax import train_bootstrap_ensemble, train_with_optax
@@ -53,16 +58,9 @@ def saturate(rate: hm.BoundedPredictor, scale: float = 50.0) -> hm.BoundedPredic
     )
 
 
-def saturated_model() -> hm.HybridModel:
-    model = network_model()
-    predictors = dict(model.predictors, rate=saturate(model.predictors["rate"]))
-    return hm.HybridModel(
-        predictors=predictors,
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        output_channel_names=model.output_channel_names,
-        solver=model.solver,
-    )
+def saturated_predictors() -> dict[str, Any]:
+    predictors = network_predictors()
+    return dict(predictors, rate=saturate(predictors["rate"]))
 
 
 def grid_penalty(predictors: Any) -> float:
@@ -72,8 +70,13 @@ def grid_penalty(predictors: Any) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Bound penalty through HybridModel.fit
+# Bound penalty through the Optax trainer
 # ---------------------------------------------------------------------------
+
+
+def step_penalties(ui: RecordingUI) -> list[float]:
+    """The unweighted bound penalty the trainer reported at every step."""
+    return [kw["penalty"] for name, kw in ui.events if name == "on_step_end"]
 
 
 @pytest.fixture(scope="module")
@@ -81,50 +84,56 @@ def penalty_runs(temp_data):
     """Two 30-step fits from the same saturated start.
 
     ``off`` never charges the penalty. ``switched`` charges nothing for 15
-    steps, then weight 100 for 15, with a box sweep as extra penalty points.
-    In deep saturation the data gradient has underflowed, so only the
-    penalty can move the readout.
+    steps (the phase overrides the objective's weight with 0), then the
+    objective's weight 100 for 15, with a box sweep as extra penalty points
+    keyed by the predictor's path. In deep saturation the data gradient has
+    underflowed, so only the penalty can move the readout.
     """
-    model = saturated_model()
-    rate = model.predictors["rate"]
-    off = model.fit(temp_data, quiet(steps=30, lr=0.05, restore_best=False), key=jr.key(0))
-    ui = RecordingUI()
-    switched = model.fit(
-        temp_data,
-        quiet(
-            phases=(TrainingPhase(15, lr=0.05), TrainingPhase(15, lr=0.05, penalty_weight=1e2)),
-            penalty_points=(box_grid(rate.in_scaler, 5),),
-            restore_best=False,
+    start = saturated_predictors()
+    runs = {}
+    for name, objective, phases in (
+        ("off", None, (TrainingPhase(30, lr=0.05),)),
+        (
+            "switched",
+            Objective(
+                penalty_weight=1e2, penalty_points={"rate": box_grid(start["rate"].in_scaler, 5)}
+            ),
+            (TrainingPhase(15, lr=0.05, penalty_weight=0.0), TrainingPhase(15, lr=0.05)),
         ),
-        key=jr.key(0),
-        ui=ui,
-    )
-    return model, off, switched, ui
+    ):
+        ui = RecordingUI()
+        history, trained = train_with_optax(
+            start,
+            temp_data,
+            quiet(phases=phases, restore_best=False),
+            objective=objective,
+            key=jr.key(0),
+            ui=ui,
+            **NETWORK_KWARGS,
+        )
+        runs[name] = (history, trained, step_penalties(ui))
+    return start, runs
 
 
 def test_zero_weight_phase_reproduces_the_unpenalised_run(penalty_runs):
-    model, off, switched, _ = penalty_runs
+    start, runs = penalty_runs
+    off_history, _, off_penalty = runs["off"]
+    history, _, penalty = runs["switched"]
     # Anti-vacuity: the start really is saturated, so a zero penalty is the
     # weight's doing, not an empty penalty.
-    assert grid_penalty(model.predictors) > 1.0
-    assert switched.history.loss[:15] == off.history.loss[:15]
-    assert all(p == 0.0 for p in switched.history.penalty[:15])
-    assert all(p == 0.0 for p in off.history.penalty)
+    assert grid_penalty(start) > 1.0
+    assert history[:15] == off_history[:15]
+    assert all(p == 0.0 for p in penalty[:15])
+    assert all(p == 0.0 for p in off_penalty)
 
 
 def test_penalty_phase_pulls_the_network_out_of_saturation(penalty_runs):
-    model, off, switched, _ = penalty_runs
-    assert all(p > 0.0 for p in switched.history.penalty[15:])
-    assert switched.history.phase == (0,) * 15 + (1,) * 15
-    start = grid_penalty(model.predictors)
-    assert grid_penalty(switched.model.predictors) < 0.5 * start
-    assert grid_penalty(switched.model.predictors) < grid_penalty(off.model.predictors)
-
-
-def test_ui_receives_the_penalty(penalty_runs):
-    *_, ui = penalty_runs
-    steps = [kw for name, kw in ui.events if name == "on_step_end"]
-    assert len(steps) == 30 and all("penalty" in kw for kw in steps)
+    start, runs = penalty_runs
+    _, off, _ = runs["off"]
+    _, switched, penalty = runs["switched"]
+    assert len(penalty) == 30 and all(p > 0.0 for p in penalty[15:])
+    assert grid_penalty(switched) < 0.5 * grid_penalty(start)
+    assert grid_penalty(switched) < grid_penalty(off)
 
 
 def test_an_uncovered_leaf_raises_before_training(temp_data):
@@ -135,39 +144,74 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
     predictors["rate"] = hm.BoundedPredictor(
         inner=inner, input_keys=("pressure",), input_bounds=(0.0, 2.0), output_bounds=(0.05, 3.0)
     )
-    config = quiet(steps=2, penalty_weight=1e-2)
-    with pytest.raises(ValueError, match="trajectory_penalty_fn"):
-        train_with_optax(predictors, temp_data, config, key=jr.key(0), **NETWORK_KWARGS)
+    with pytest.raises(ValueError, match="'rate'.*trajectory_penalty_fn"):
+        train_with_optax(
+            predictors,
+            temp_data,
+            quiet(steps=2),
+            objective=Objective(penalty_weight=1e-2),
+            key=jr.key(0),
+            **NETWORK_KWARGS,
+        )
+    # A phase override switches the penalty on for that phase alone, and
+    # the coverage check follows it.
+    with pytest.raises(ValueError, match="no penalty points"):
+        train_with_optax(
+            predictors,
+            temp_data,
+            quiet(phases=(TrainingPhase(1), TrainingPhase(1, penalty_weight=1e-2))),
+            key=jr.key(0),
+            **NETWORK_KWARGS,
+        )
 
 
 @pytest.mark.parametrize(
     "points,match",
     [
-        ((jnp.zeros((2, 1)), jnp.zeros((2, 1))), "penalty_points has"),
-        ((jnp.zeros((2, 3)),), "input columns"),
+        ({"rates": jnp.zeros((2, 1))}, r"valid paths are \['rate'\]"),
+        ({"rate": jnp.zeros((2, 3))}, "input columns"),
     ],
 )
 def test_malformed_penalty_points_raise(temp_data, points, match):
-    config = quiet(steps=2, penalty_weight=1e-2, penalty_points=points)
+    objective = Objective(penalty_weight=1e-2, penalty_points=points)
     with pytest.raises(ValueError, match=match):
-        train_with_optax(network_predictors(), temp_data, config, key=jr.key(0), **NETWORK_KWARGS)
+        train_with_optax(
+            network_predictors(),
+            temp_data,
+            quiet(steps=2),
+            objective=objective,
+            key=jr.key(0),
+            **NETWORK_KWARGS,
+        )
 
 
-@pytest.mark.parametrize(
-    "build,match",
-    [
-        (lambda: quiet(steps=1, penalty_weight=-1.0), "non-negative"),
-        (lambda: quiet(steps=1, penalty_weight=float("nan")), "finite"),
-        (lambda: quiet(steps=1, penalty_points=(jnp.zeros(3),)), "rank-2"),
-        (lambda: quiet(steps=1, trajectory_penalty_weight=-1.0), "non-negative"),
-        (lambda: quiet(steps=1, trajectory_penalty_weight=1.0), "trajectory_penalty_fn is None"),
-        (lambda: EvosaxTrainingConfig(penalty_weight=-1.0), "non-negative"),
-        (lambda: EvosaxTrainingConfig(trajectory_penalty_weight=1.0), "trajectory_penalty_fn"),
-    ],
-)
-def test_penalty_config_validation(build, match):
-    with pytest.raises(ValueError, match=match):
-        build()
+def test_penalty_points_are_keyed_by_the_freeze_paths_syntax():
+    """A predictor's penalty-points key is the dotted path ``freeze_paths`` takes.
+
+    Nested containers join with dots, and a predictor nested inside another
+    is reached through ``inner``. Each path prefixes the mask leaves of that
+    predictor, so the same string freezes it.
+    """
+    hot, cold = saturate(network_predictors()["rate"]), network_predictors(jr.key(1))["rate"]
+    outer = hm.BoundedPredictor(
+        inner=cold, input_keys=("temp",), input_bounds=(0.0, 2.0), output_bounds=(0.05, 3.0)
+    )
+    predictors = {"growth": {"rate": hot}, "nucleation": outer, "offset": hm.Constant(0.0)}
+    paths = bounded_predictor_paths(predictors)
+    assert paths == ("growth.rate", "nucleation", "nucleation.inner")
+    mask = trainable_mask(predictors)
+    for path in paths:
+        assert sum(map(bool, jax.tree.leaves(freeze_paths(mask, (path,))))) < sum(
+            map(bool, jax.tree.leaves(mask))
+        )
+
+    grid = box_grid(hot.in_scaler, 3)
+    extras = resolve_penalty_points(predictors, {"growth.rate": grid})
+    assert [e.shape for e in extras] == [(3, 1), (0, 1), (0, 1)]
+    assert jnp.array_equal(extras[0], grid)
+    assert resolve_penalty_points(predictors, None) == ()
+    with pytest.raises(ValueError, match="valid paths"):
+        resolve_penalty_points(predictors, {"growth": grid})
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +255,7 @@ def simulate_embedded(predictors: Any, ts: Array, covariates: Any, y0: Array, so
     input violation, so the final state holds both time integrals.
     """
     (p,) = predictors
-    rate = p({"u": jnp.asarray(1.0)})[0]
+    rate = jnp.reshape(p({"u": jnp.asarray(1.0)}), ())
 
     def physics(t, y, args):
         return -rate * y
@@ -248,7 +292,7 @@ def embedded_dataset(*, probe: bool = False) -> hm.Dataset:
     ts = jnp.array([0.5, 1.0, 1.5, 2.0])
     values = jnp.array([]) if probe else jnp.exp(-0.5 * ts)
     experiment = hm.make_experiment(
-        channels={"x": hm.ChannelObs(ts, values)},
+        channels={"x": hm.ChannelObs(ts=ts, values=values)},
         y0=attach_penalty_state(jnp.array([1.0]), N_ACC),
         t0=0.0,
         exp_id="probe" if probe else "real",
@@ -276,17 +320,18 @@ def test_the_score_charges_the_trajectory_penalty():
         assert float(penalised(predictors, bp, full)) > data + 1.0
 
 
+TRAJECTORY = Objective(trajectory_penalty_fn=accumulated_penalty, trajectory_penalty_weight=1.0)
+
+
 def test_evosax_ranks_by_the_trajectory_penalty():
-    config = EvosaxTrainingConfig(
-        population_size=8,
-        num_generations=10,
-        sigma_init=0.5,
-        trajectory_penalty_fn=accumulated_penalty,
-        trajectory_penalty_weight=1.0,
-        verbose=False,
-    )
+    config = EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5, verbose=False)
     history, best = hm.train_with_evosax(
-        latent_predictors(5.0), embedded_dataset(), config, key=jr.key(0), **EMBEDDED_KWARGS
+        latent_predictors(5.0),
+        embedded_dataset(),
+        config,
+        objective=TRAJECTORY,
+        key=jr.key(0),
+        **EMBEDDED_KWARGS,
     )
     assert len(history) == 10
     assert float(best[0].inner.c) < 5.0
@@ -294,17 +339,11 @@ def test_evosax_ranks_by_the_trajectory_penalty():
 
 def test_a_probe_alone_drives_every_bootstrap_member():
     # The probe has no observations, so the penalty is the only gradient.
-    config = quiet(
-        steps=10,
-        lr=1e-1,
-        trajectory_penalty_fn=accumulated_penalty,
-        trajectory_penalty_weight=1.0,
-        restore_best=False,
-    )
     members = train_bootstrap_ensemble(
         latent_predictors(5.0),
         embedded_dataset(probe=True),
-        config,
+        quiet(steps=10, lr=1e-1, restore_best=False),
+        objective=TRAJECTORY,
         n_bootstraps=2,
         key=jr.key(0),
         **EMBEDDED_KWARGS,
@@ -329,23 +368,17 @@ def test_parallel_saturation_penalty_moves_the_latent_through_the_trainer():
 
     ts = jnp.linspace(0.0, 1.0, 4)
     experiment = hm.make_experiment(
-        channels={"y": hm.ChannelObs(ts, jnp.full_like(ts, 0.99))}, y0=[0.0], exp_id="e"
+        channels={"y": hm.ChannelObs(ts=ts, values=jnp.full_like(ts, 0.99))}, y0=[0.0], exp_id="e"
     )
     dataset = hm.make_dataset([experiment], output_channel_names=("y",))
     start = latent_predictors(8.0)
     # Anti-vacuity: the penalty is live at the start.
-    assert float(saturation(jnp.full((4, 1), start[0]({"u": 0.0})[0]), None)) > 0.0
-    config = quiet(
-        steps=20,
-        lr=1e-1,
-        trajectory_penalty_fn=saturation,
-        trajectory_penalty_weight=1.0,
-        restore_best=False,
-    )
+    assert float(saturation(jnp.full((4, 1), start[0]({"u": 0.0})), None)) > 0.0
     _, trained = train_with_optax(
         start,
         dataset,
-        config,
+        quiet(steps=20, lr=1e-1, restore_best=False),
+        objective=Objective(trajectory_penalty_fn=saturation, trajectory_penalty_weight=1.0),
         simulate_fn=simulate,
         state_to_output=lambda s: s,
         solver=SOLVER,
@@ -408,10 +441,12 @@ def test_data_penalty_points_resolution():
     ts = jnp.array([0.5, 1.0])
     experiments = [
         hm.make_experiment(
-            channels={"y": hm.ChannelObs(ts, ts)}, covariates={"a": 1.0, "b": 10.0}, y0=[0.0]
+            channels={"y": hm.ChannelObs(ts=ts, values=ts)},
+            covariates={"a": 1.0, "b": 10.0},
+            y0=[0.0],
         ),
         hm.make_experiment(
-            channels={"y": hm.ChannelObs(ts, jnp.array([]))},
+            channels={"y": hm.ChannelObs(ts=ts, values=jnp.array([]))},
             covariates={"a": 9.0, "b": 99.0},
             y0=[0.0],
         ),
@@ -494,6 +529,43 @@ def test_bound_penalty_gradient_reaches_the_inner_weights():
     assert jnp.all(jnp.isfinite(w)) and float(jnp.linalg.norm(w)) > 1.0
     jitted = eqx.filter_jit(lambda p: bound_penalty(p, points))(rate)
     np.testing.assert_allclose(jitted, bound_penalty(rate, points), rtol=1e-6)
+
+
+class Latent1(Latent):
+    """``Latent`` with a rank-1 output, the shape before one-output predictors went scalar."""
+
+    def __init__(self, c: float) -> None:
+        super().__init__(c)
+
+    def __call__(self, x: Array) -> Array:
+        return self.c[None]
+
+
+def test_penalties_accept_scalar_and_rank_1_outputs():
+    """One-output predictors may return ``()`` or ``(1,)``; the penalties agree on both.
+
+    ``saturation`` reads the trailing axis as outputs, so a ``[G]`` batch of
+    scalar latents read as ``G`` outputs of one point would charge only the
+    first point.
+    """
+    points = (jnp.linspace(-3.0, 3.0, 7)[:, None],)
+
+    def bounded(inner: hm.Predictor) -> hm.BoundedPredictor:
+        return hm.BoundedPredictor(
+            inner=inner, input_keys=("u",), input_bounds=(-3.0, 3.0), output_bounds=(0.0, 1.0)
+        )
+
+    scalar = float(bound_penalty(bounded(Latent(6.0)), points))
+    rank_1 = float(bound_penalty(bounded(Latent1(6.0)), points))
+    assert scalar > 0.0 and scalar == pytest.approx(rank_1)
+
+    scaler = latent_predictors(0.0)[0].out_scaler
+    outputs = scaler.from_latent(jnp.linspace(0.0, 8.0, 5))
+    np.testing.assert_allclose(
+        trajectory_saturation_penalty(outputs, scaler),
+        trajectory_saturation_penalty(outputs[:, None], scaler),
+        rtol=1e-6,
+    )
 
 
 # ---------------------------------------------------------------------------

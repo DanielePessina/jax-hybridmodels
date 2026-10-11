@@ -70,7 +70,11 @@ class TrainingUI(Protocol):
     def on_phase_start(
         self, *, phase_idx: int, phase_steps: int, lr: float, optimizer: Any
     ) -> None:
-        """Fires at the start of each phase; ``phase_steps`` is the per-phase step budget."""
+        """Fires at the start of each phase; ``phase_steps`` is the per-phase step budget.
+
+        ``lr`` is the learning rate at the phase's first step. A phase with an
+        optax schedule moves it from there.
+        """
         ...
 
     def on_phase_end(self, *, phase_idx: int) -> None:
@@ -107,7 +111,8 @@ class EvosaxUI(Protocol):
 
     Differs from ``TrainingUI`` because the evosax loop has no phases and
     no per-step gradient loss. Each generation reports the best and mean
-    fitness across its population instead.
+    fitness across its population instead. The run-level events use the
+    same argument names as ``TrainingUI`` (``total_steps``, ``final_loss``).
 
     Event order during a typical run::
 
@@ -117,8 +122,8 @@ class EvosaxUI(Protocol):
         on_run_end
     """
 
-    def on_run_start(self, *, num_generations: int, population_size: int) -> None:
-        """Fires once before the first generation."""
+    def on_run_start(self, *, total_steps: int, population_size: int) -> None:
+        """Fires once before the first generation. ``total_steps`` is the generation count."""
         ...
 
     def on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> None:
@@ -137,8 +142,8 @@ class EvosaxUI(Protocol):
         """Fires once per generation with population statistics."""
         ...
 
-    def on_run_end(self, *, best_fitness: float) -> None:
-        """Fires once after the last generation."""
+    def on_run_end(self, *, final_loss: float) -> None:
+        """Fires once after the last generation with the loss of the returned predictors."""
         ...
 
     def on_message(self, *, level: str, text: str) -> None:

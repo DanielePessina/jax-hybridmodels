@@ -11,13 +11,17 @@ parameter vector via ``eqx.partition(predictors, mask)``. Either way the
 mask's pytree shape is what the partitioner walks.
 
 The default mask trains inexact parameter arrays and freezes ``Constant``
-and ``BoundScaler`` subtrees. The freezers here are free functions
-``(mask, predictors) -> mask`` that never mutate their input, so masks
-compose by chaining:
+and ``BoundScaler`` subtrees. ``fit(freeze=...)`` covers the common case
+in one argument, built here by :func:`freeze_mask`:
+
+    mask = freeze_mask(predictors, ("offset", MLPPredictor))
+
+The lower-level freezers are free functions ``(mask, ...) -> mask`` that
+never mutate their input, so masks also compose by chaining:
 
     mask = trainable_mask(predictors)
-    mask = freeze_modules_of_type(mask, predictors, MLPPredictor)
-    mask = freeze_paths(mask, ("inner.bias",))
+    mask = freeze_modules_of_type(mask, MLPPredictor)
+    mask = freeze_paths(mask, ("rate.inner.mlp.layers.0.bias",))
 
 Each step returns a fresh mask of the same pytree shape.
 """
@@ -25,8 +29,8 @@ Each step returns a fresh mask of the same pytree shape.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Collection, Sequence
+from typing import Any, cast
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -86,84 +90,149 @@ def _path_to_dotted(path: tuple[Any, ...]) -> str:
     return ".".join(parts)
 
 
+def _freeze_prefixes(mask: Any, prefixes: Collection[str]) -> tuple[Any, set[str]]:
+    """Set every mask leaf at or below one of ``prefixes`` to ``False``.
+
+    A prefix names a leaf or a whole subtree: ``"rate"`` covers
+    ``"rate.inner.mlp.layers.0.weight"`` and every other leaf under it, and
+    the empty string covers the root. Returns the new mask and the prefixes
+    that matched at least one leaf, so callers decide whether a miss is an
+    error.
+    """
+    matched: set[str] = set()
+
+    def _covering(dotted: str) -> list[str]:
+        return [p for p in prefixes if p in ("", dotted) or dotted.startswith(p + ".")]
+
+    def _f(path: tuple[Any, ...], leaf: Any) -> Any:
+        hits = _covering(_path_to_dotted(path))
+        matched.update(hits)
+        return False if hits else leaf
+
+    return jtu.tree_map_with_path(_f, mask), matched
+
+
+def _module_paths(tree: Any, test: Callable[[Any], bool]) -> list[str]:
+    """Dotted paths of the outermost ``eqx.Module`` nodes in ``tree`` passing ``test``."""
+
+    def _is_target(node: Any) -> bool:
+        return isinstance(node, eqx.Module) and bool(test(node))
+
+    flat, _ = jtu.tree_flatten_with_path(tree, is_leaf=_is_target)
+    return [_path_to_dotted(path) for path, node in flat if _is_target(node)]
+
+
+def _no_match_error(caller: str, missing: Any, mask: Any) -> ValueError:
+    """Name the entries that matched nothing, with the closest real paths."""
+    paths = sorted(_path_to_dotted(path) for path, _ in jtu.tree_flatten_with_path(mask)[0])
+    first = missing[0] if isinstance(missing[0], str) else ""
+    suggestions = difflib.get_close_matches(first, paths, n=3, cutoff=0.4) if first else []
+    hint = f" Closest matches: {suggestions}." if suggestions else ""
+    return ValueError(
+        f"{caller}: no leaf matches {missing}.{hint} The mask has {len(paths)} leaves."
+    )
+
+
 def freeze_paths(mask: Any, paths: tuple[str, ...]) -> Any:
-    """Return a new mask with leaves at `paths` set to ``False``.
+    """Return a new mask with leaves at or below ``paths`` set to ``False``.
 
     Path syntax is dot-joined segments addressing the mask PyTree from its root.
     Each segment is the bare key produced by :func:`jax.tree_util.tree_flatten_with_path`:
     attribute names for ``eqx.Module`` fields, integer indices for tuples and
-    lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
-    addresses ``mask.inner.mlp.layers[0].weight``.
+    lists, and string keys for dicts. ``"inner.mlp.layers.0.weight"``
+    addresses one leaf, ``mask.inner.mlp.layers[0].weight``. A path may also
+    stop at a subtree: ``"rate"`` freezes everything under ``mask["rate"]``.
 
     A path matching nothing raises, listing the closest real paths. Ignoring
     it quietly would leave a leaf the caller believed frozen training as
     normal, which shows up as a wrong experiment, not a wrong program.
     """
-    target = set(paths)
-    seen: set[str] = set()
-
-    def _f(path: tuple[Any, ...], leaf: Any) -> Any:
-        dotted = _path_to_dotted(path)
-        seen.add(dotted)
-        return False if dotted in target else leaf
-
-    out = jtu.tree_map_with_path(_f, mask)
-
-    missing = sorted(target - seen)
+    out, matched = _freeze_prefixes(mask, paths)
+    missing = sorted(set(paths) - matched)
     if missing:
-        suggestions = difflib.get_close_matches(missing[0], sorted(seen), n=3, cutoff=0.4)
-        hint = f" Closest matches: {suggestions}." if suggestions else ""
-        raise ValueError(
-            f"freeze_paths: no leaf matches {missing}.{hint} The mask has {len(seen)} leaves."
-        )
+        raise _no_match_error("freeze_paths", missing, mask)
     return out
 
 
-def _zero_subtree(submask: Any) -> Any:
-    return jtu.tree_map(lambda _: False, submask)
-
-
-def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
+def freeze_modules_of_type(mask: Any, cls: type) -> Any:
     """Return a new mask with every leaf inside any subtree of type ``cls`` set to ``False``.
 
-    Walks ``mask`` and ``predictors`` in lockstep. When a node in
-    ``predictors`` is an instance of ``cls``, the matching sub-mask is
-    replaced wholesale by an all-``False`` subtree.
-
-    For example, ``freeze_modules_of_type(mask, predictors, MLPPredictor)``
-    freezes every MLP and leaves the rest of the mask as it was.
+    Reads the types off the mask itself: a mask built by
+    :func:`trainable_mask` keeps the module classes of the predictors it was
+    built from, with booleans in place of arrays. For example,
+    ``freeze_modules_of_type(mask, MLPPredictor)`` freezes every MLP and
+    leaves the rest of the mask as it was. Matching nothing is not an error.
     """
-
-    def _is_target(node: Any) -> bool:
-        return isinstance(node, cls)
-
-    def _f(submask: Any, sub_pred: Any) -> Any:
-        if _is_target(sub_pred):
-            return _zero_subtree(submask)
-        return submask
-
-    return jtu.tree_map(_f, mask, predictors, is_leaf=_is_target)
+    return freeze_where(mask, lambda m: isinstance(m, cls))
 
 
-def freeze_where(mask: Any, predictors: Any, fn: Callable[[eqx.Module], bool]) -> Any:
+def freeze_where(mask: Any, fn: Callable[[eqx.Module], bool]) -> Any:
     """Return a new mask with every leaf inside any submodule satisfying ``fn`` set to ``False``.
 
     ``fn`` is called on the mask's copy of each module, whose array leaves
     have been replaced by booleans. Use a structural test, such as an
-    ``isinstance`` check or a look at a static field. Identity tests
-    (``m is predictors["rate"]``) and value comparisons never match; select
-    by path with ``freeze_paths`` instead.
+    ``isinstance`` check or a look at a static field. To test the real
+    modules (their values, say), pass the predicate to :func:`freeze_mask`.
+    Matching nothing is not an error.
     """
+    return _freeze_prefixes(mask, _module_paths(mask, fn))[0]
 
-    def _is_target(node: Any) -> bool:
-        return isinstance(node, eqx.Module) and fn(node)
 
-    def _f(submask: Any, sub_pred: Any) -> Any:
-        if _is_target(sub_pred):
-            return _zero_subtree(submask)
-        return submask
+FreezeSpec = str | type | Callable[[Any], bool]
+"""One ``freeze=`` entry: a dotted path, a module class, or a module predicate."""
 
-    return jtu.tree_map(_f, mask, predictors, is_leaf=_is_target)
+
+def freeze_mask(
+    predictors: Any,
+    freeze: Sequence[FreezeSpec] | FreezeSpec,
+    *,
+    mask: Any = None,
+) -> Any:
+    """The mask behind ``fit(freeze=...)``: ``mask`` with the ``freeze`` entries set to ``False``.
+
+    ``mask`` defaults to :func:`trainable_mask` of ``predictors``. Each
+    ``freeze`` entry is one of
+
+    - a dotted path, as for :func:`freeze_paths`, naming a leaf or a whole
+      subtree (``"rate"`` for ``predictors["rate"]``);
+    - a module class, freezing every instance (``hm.Constant`` is already
+      frozen; ``hm.MLPPredictor`` is the usual one);
+    - a predicate ``(module) -> bool``, called on the real modules of
+      ``predictors``, so it may read their values.
+
+    A single entry may be passed bare. An entry that matches no leaf raises,
+    for the same reason :func:`freeze_paths` does.
+
+    Examples
+    --------
+    ::
+
+        mask = freeze_mask(predictors, ("offset", hm.MLPPredictor))
+    """
+    # A string is a Sequence too, so it is checked first.
+    entries = cast(
+        tuple[FreezeSpec, ...],
+        tuple(freeze)
+        if isinstance(freeze, Sequence) and not isinstance(freeze, str)
+        else (freeze,),
+    )
+    out = trainable_mask(predictors) if mask is None else mask
+    for entry in entries:
+        if isinstance(entry, str):
+            prefixes = [entry]
+        elif isinstance(entry, type):
+            prefixes = _module_paths(predictors, lambda m, cls=entry: isinstance(m, cls))
+        elif callable(entry):
+            prefixes = _module_paths(predictors, entry)
+        else:
+            raise TypeError(
+                "freeze entries must be dotted path strings, module classes, or "
+                f"predicates (module) -> bool; got {entry!r}"
+            )
+        out, matched = _freeze_prefixes(out, prefixes)
+        if not matched:
+            raise _no_match_error("freeze", [entry], out)
+    return out
 
 
 def count_trainable_params(predictors: Any, mask: Any) -> int:

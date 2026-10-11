@@ -17,8 +17,9 @@ reconstruct it, and reads it back. Two save/load pairs exist.
     ``metadata.json`` describing the run: UTC ISO-8601 timestamp, package
     version, a structural fingerprint of the predictors pytree, the solver
     config dict, optional Optax and Evosax training configs, an optional
-    loss history, and a free-form ``extras`` dict. Stable formatting
-    (``indent=2, sort_keys=True``) keeps diffs reviewable.
+    ``Objective``, an optional loss history, and a free-form ``extras``
+    dict. Stable formatting (``indent=2, sort_keys=True``) keeps diffs
+    reviewable.
 
 The structural fingerprint exists because
 ``eqx.tree_deserialise_leaves`` raises a generic shape error when a
@@ -34,13 +35,15 @@ code by name, so loading asks the caller to rebuild a same-architecture
 template and re-import their own physics functions. Dynamic imports
 inside a load helper fail in confusing ways.
 
-Loss-field handling
--------------------
-``OptaxTrainingConfig.loss`` and ``EvosaxTrainingConfig.loss`` accept a
-callable or a string. JSON cannot encode a callable, so ``save_run``
-writes one as ``"{module}.{qualname}"`` and ``load_run`` returns that
-string as it stands, which the ``Callable | str`` annotation accepts.
-Turning it back into a function is the caller's job.
+Callables
+---------
+JSON cannot encode a callable. A callable anywhere in a training config or
+an ``Objective`` (a custom ``loss``, a ``penalty_fn``, an optimizer factory,
+an lr schedule) is written as ``{"__callable__": "{module}.{qualname}"}``,
+and a raw ``optax.GradientTransformation`` as an ``"__opaque__"`` marker.
+``load_run`` returns such a section as a plain dict, and refuses to rebuild
+it as a typed object: turning the name back into a function is the
+caller's job.
 """
 
 from __future__ import annotations
@@ -55,8 +58,10 @@ from typing import Any
 
 import equinox as eqx
 import jax.tree_util as jtu
+import numpy as np
 import optax
 
+from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.predictors.base import Predictor
 from jaxhybridmodels.solver import SolverConfig
 from jaxhybridmodels.training.evosax import EvosaxTrainingConfig
@@ -88,19 +93,6 @@ def load_predictors(path: str | Path, predictors_template: Any) -> Any:
     """
     path = Path(path)
     return eqx.tree_deserialise_leaves(path, predictors_template)
-
-
-def _stringify_loss_field(value: Any) -> Any:
-    """Replace a callable with ``"{module}.{qualname}"``; pass-through otherwise.
-
-    Keeps ``loss`` JSON-friendly. Strings pass through unchanged;
-    re-importing on load is the caller's job (module docstring).
-    """
-    if isinstance(value, str):
-        return value
-    if callable(value):
-        return _callable_path(value)
-    return value
 
 
 def _callable_path(value: Any) -> str:
@@ -140,20 +132,42 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
 
     ``dataclasses.asdict`` deep-copies the config, turning tuples into
     lists since JSON has no tuple. Callable and opaque runtime fields are
-    represented by descriptive markers; ``loss`` keeps its historical
-    import-style string representation. See ``_json_safe``.
+    represented by descriptive markers; see ``_json_safe``.
     """
     raw_unprocessed = dataclasses.asdict(config)
     for phase_raw, phase in zip(
         raw_unprocessed.get("phases", ()), getattr(config, "phases", ()), strict=True
     ):
         phase_raw["optimizer"] = _json_safe_optimizer(phase.optimizer)
-    raw = _json_safe(raw_unprocessed)
-    if "loss" in raw:
-        # Read ``loss`` from the live config, not the asdict'd copy, so the
-        # original identity is unambiguous.
-        raw["loss"] = _stringify_loss_field(config.loss)
-    return raw
+    return _json_safe(raw_unprocessed)
+
+
+def _serialise_objective(objective: Objective) -> dict[str, Any]:
+    """Return a JSON-encodable view of an ``Objective``.
+
+    ``penalty_points`` arrays become nested lists so the grid survives the
+    round trip; callables become ``__callable__`` markers.
+    """
+    raw: dict[str, Any] = {
+        f.name: getattr(objective, f.name) for f in dataclasses.fields(objective)
+    }
+    if objective.penalty_points is not None:
+        raw["penalty_points"] = {
+            path: np.asarray(points).tolist() for path, points in objective.penalty_points.items()
+        }
+    return _json_safe(raw)
+
+
+def _build_objective(cls: type[Objective] | None, raw: dict[str, Any] | None) -> Any:
+    """Rebuild an ``Objective`` from its dict, or pass the dict through with no class."""
+    if raw is None or cls is None:
+        return raw
+    if _contains_serialised_callable(raw):
+        raise ValueError(
+            "Saved objective contains callable fields that cannot be reconstructed "
+            "automatically; load it without objective_cls and rebind those fields explicitly."
+        )
+    return cls(**_filter_dataclass_kwargs(cls, raw))
 
 
 def _resolve_version() -> str:
@@ -270,6 +284,7 @@ def save_run(
     solver: SolverConfig,
     optax_config: OptaxTrainingConfig | None = None,
     evosax_config: EvosaxTrainingConfig | None = None,
+    objective: Objective | None = None,
     loss_history: list[float] | None = None,
     extras: dict[str, Any] | None = None,
 ) -> None:
@@ -284,9 +299,10 @@ def save_run(
         precision), ``version`` (``importlib.metadata.version``-resolved),
         ``predictors`` (``{tree_structure, leaves: [{path, class}, ...]}``
         per ``_describe_predictors``), ``solver`` (``solver.to_dict()``),
-        ``optax_config`` / ``evosax_config`` (``dataclasses.asdict`` with
-        stringified ``loss``, see module docstring), ``loss_history``,
-        and ``extras``.
+        ``optax_config`` / ``evosax_config`` (``dataclasses.asdict``, with
+        callables described, see module docstring), ``objective`` (the
+        ``Objective`` fields, ``penalty_points`` as nested lists),
+        ``loss_history``, and ``extras``.
 
         ``loss_history_kind``, inferred from whichever config was passed,
         records which entry point produced ``loss_history``:
@@ -315,6 +331,7 @@ def save_run(
         "evosax_config": (
             _serialise_training_config(evosax_config) if evosax_config is not None else None
         ),
+        "objective": _serialise_objective(objective) if objective is not None else None,
         "loss_history": list(loss_history) if loss_history is not None else None,
         "loss_history_kind": _loss_history_kind(optax_config, evosax_config, loss_history),
         "extras": dict(extras) if extras is not None else {},
@@ -396,6 +413,7 @@ def load_run(
     predictors_template: Any,
     optax_cls: type[OptaxTrainingConfig] | None = None,
     evosax_cls: type[EvosaxTrainingConfig] | None = None,
+    objective_cls: type[Objective] | None = None,
 ) -> dict[str, Any]:
     """Reconstruct a run from ``directory``.
 
@@ -403,14 +421,10 @@ def load_run(
     the framework owns no builder registry, and must share the saved
     pytree's container shape and per-leaf static configuration.
 
-    Pass ``optax_cls`` / ``evosax_cls`` to get the saved config dicts
-    rebuilt as typed dataclass instances; leave them out and the raw dicts
-    come back.
-
-    A ``loss`` field that was a callable at save time arrives as the string
-    ``"{module}.{qualname}"`` and is returned as it stands. Turning it back
-    into a function is the caller's job, usually
-    ``importlib.import_module(module).qualname``.
+    Pass ``optax_cls`` / ``evosax_cls`` / ``objective_cls`` to get the saved
+    dicts rebuilt as typed instances; leave them out and the raw dicts come
+    back. A section holding a described callable cannot be rebuilt and
+    raises; load it raw and rebind the callables yourself.
 
     Returns
     -------
@@ -418,7 +432,8 @@ def load_run(
         Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver``
         (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` |
         dict | None), ``evosax_config`` (``EvosaxTrainingConfig`` | dict |
-        None), ``loss_history`` (``list[float] | None``),
+        None), ``objective`` (``Objective`` | dict | None),
+        ``loss_history`` (``list[float] | None``),
         ``loss_history_kind`` (``str | None``), ``extras`` (``dict``).
     """
     directory = Path(directory)
@@ -457,6 +472,7 @@ def load_run(
         "solver": solver,
         "optax_config": optax_config,
         "evosax_config": evosax_config,
+        "objective": _build_objective(objective_cls, metadata.get("objective")),
         "loss_history": metadata.get("loss_history"),
         "loss_history_kind": metadata.get("loss_history_kind"),
         "extras": metadata.get("extras", {}),

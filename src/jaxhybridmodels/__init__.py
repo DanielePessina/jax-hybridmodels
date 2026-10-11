@@ -16,9 +16,10 @@ A model has four pieces, bound together by ``HybridModel``:
 Data arrives as ``Experiment`` records with sparse per-channel
 observations. ``make_dataset`` groups them into buckets of equal
 timestamp-axis length so JAX can compile one kernel per bucket shape.
-``HybridModel.fit`` trains with an ``OptaxTrainingConfig`` or an
-``EvosaxTrainingConfig``; ``predict`` and ``simulate`` return results
-keyed by experiment and channel name.
+``HybridModel.fit`` minimises an ``Objective`` (what to minimise) with an
+``OptaxTrainingConfig`` or an ``EvosaxTrainingConfig`` (how to search);
+``predict`` and ``simulate`` return results keyed by experiment and
+channel name.
 
 The top level holds that workflow. Lower-level pieces (training kernels,
 penalties, losses, transforms, UI classes, registries) live in their
@@ -54,6 +55,9 @@ if TYPE_CHECKING:
     )
     from jaxhybridmodels import (
         model as model,
+    )
+    from jaxhybridmodels import (
+        objective as objective,
     )
     from jaxhybridmodels import (
         penalties as penalties,
@@ -94,6 +98,8 @@ if TYPE_CHECKING:
         Dataset,
         Experiment,
         describe_buckets,
+        experiment_from_array,
+        experiments_from_dataframe,
         make_bootstrap_dataset,
         make_dataset,
         make_experiment,
@@ -107,6 +113,7 @@ if TYPE_CHECKING:
         HybridModel,
         PredictionResult,
     )
+    from jaxhybridmodels.objective import Objective
     from jaxhybridmodels.prediction import (
         ensemble_predictions,
         evaluate_predictor,
@@ -133,6 +140,7 @@ if TYPE_CHECKING:
     from jaxhybridmodels.solver import SolverConfig
     from jaxhybridmodels.trainable import (
         count_trainable_params,
+        freeze_mask,
         freeze_modules_of_type,
         freeze_paths,
         freeze_where,
@@ -170,6 +178,8 @@ _EXPORTS: dict[str, str] = {
     "Dataset": "jaxhybridmodels.data",
     "BucketPayload": "jaxhybridmodels.data",
     "make_experiment": "jaxhybridmodels.data",
+    "experiment_from_array": "jaxhybridmodels.data",
+    "experiments_from_dataframe": "jaxhybridmodels.data",
     "make_dataset": "jaxhybridmodels.data",
     "split_dataset": "jaxhybridmodels.data",
     "make_bootstrap_dataset": "jaxhybridmodels.data",
@@ -180,6 +190,7 @@ _EXPORTS: dict[str, str] = {
     "piecewise_linear_profile": "jaxhybridmodels.profiles",
     # Solving and training.
     "SolverConfig": "jaxhybridmodels.solver",
+    "Objective": "jaxhybridmodels.objective",
     "OptaxTrainingConfig": "jaxhybridmodels.training",
     "TrainingPhase": "jaxhybridmodels.training",
     "EvosaxTrainingConfig": "jaxhybridmodels.training",
@@ -188,6 +199,7 @@ _EXPORTS: dict[str, str] = {
     "train_seed_ensemble": "jaxhybridmodels.training",
     "train_bootstrap_ensemble": "jaxhybridmodels.training",
     "trainable_mask": "jaxhybridmodels.trainable",
+    "freeze_mask": "jaxhybridmodels.trainable",
     "freeze_modules_of_type": "jaxhybridmodels.trainable",
     "freeze_paths": "jaxhybridmodels.trainable",
     "freeze_where": "jaxhybridmodels.trainable",
@@ -215,6 +227,7 @@ _SUBMODULES: frozenset[str] = frozenset(
         "losses",
         "metrics",
         "model",
+        "objective",
         "penalties",
         "prediction",
         "predictors",
@@ -250,6 +263,8 @@ __all__: list[str] = [
     "Dataset",
     "BucketPayload",
     "make_experiment",
+    "experiment_from_array",
+    "experiments_from_dataframe",
     "make_dataset",
     "split_dataset",
     "make_bootstrap_dataset",
@@ -259,6 +274,7 @@ __all__: list[str] = [
     "ramp_profile",
     "piecewise_linear_profile",
     "SolverConfig",
+    "Objective",
     "OptaxTrainingConfig",
     "TrainingPhase",
     "EvosaxTrainingConfig",
@@ -267,6 +283,7 @@ __all__: list[str] = [
     "train_seed_ensemble",
     "train_bootstrap_ensemble",
     "trainable_mask",
+    "freeze_mask",
     "freeze_modules_of_type",
     "freeze_paths",
     "freeze_where",

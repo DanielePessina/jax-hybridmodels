@@ -99,8 +99,30 @@ def _float_array(value: Any) -> Array:
 
 
 def _is_pair(spec: Any) -> bool:
-    """True for one ``(low, high)`` pair, as opposed to a sequence of pairs."""
-    return len(spec) == 2 and all(v is None or isinstance(v, Real) for v in spec)
+    """True for one ``(low, high)`` pair, as opposed to a sequence of pairs.
+
+    The one rule for every bounds argument in the package: two entries that
+    are each a number or None form a pair; anything else is read as a
+    sequence of pairs, one per component.
+    """
+    try:
+        return len(spec) == 2 and all(v is None or isinstance(v, Real) for v in spec)
+    except TypeError:  # a bare number has no len
+        return False
+
+
+def _as_pairs(spec: Any) -> tuple[tuple[Any, Any], ...]:
+    """Read one pair as a one-component sequence; check every entry is a pair."""
+    if _is_pair(spec):
+        return (tuple(spec),)
+    entries = tuple(spec)
+    bad = [entry for entry in entries if not _is_pair(entry)]
+    if bad:
+        raise ValueError(
+            "Bounds must be one (low, high) pair or a sequence of such pairs, with None "
+            f"for an open end; got entries {bad}"
+        )
+    return tuple(tuple(entry) for entry in entries)
 
 
 def _bound_pairs(spec: Any, size: int) -> tuple[tuple[Any, Any], ...]:
@@ -109,7 +131,7 @@ def _bound_pairs(spec: Any, size: int) -> tuple[tuple[Any, Any], ...]:
         return ((None, None),) * size
     if _is_pair(spec):
         return (tuple(spec),) * size
-    pairs = tuple(tuple(pair) for pair in spec)
+    pairs = _as_pairs(spec)
     if len(pairs) != size:
         raise ValueError(f"Expected {size} bound pairs, got {len(pairs)}")
     return pairs
@@ -225,8 +247,11 @@ class BoundScaler(eqx.Module):
     bounds : tuple[tuple[float, float], ...]
         Per-component ``(low, high)`` pairs in physical units. Length
         sets the input/output dimension and the pairs apply elementwise
-        to the last axis. Use None or signed infinity for a missing endpoint.
-        Finite pairs must satisfy ``low < high``. Open pairs require a linear warp.
+        to the last axis. The constructor also takes one bare pair,
+        ``BoundScaler((270.0, 350.0))``, as a one-component scaler, which
+        acts elementwise on an array of any shape. Use None or signed
+        infinity for a missing endpoint. Finite pairs must satisfy
+        ``low < high``. Open pairs require a linear warp.
     transform : str
         Static. Squash name, a key of ``BOUND_TRANSFORMS``. Register your
         own with ``register_bound_transform``.
@@ -261,7 +286,7 @@ class BoundScaler(eqx.Module):
 
     def __init__(
         self,
-        bounds: tuple[tuple[float | None, float | None], ...],
+        bounds: Any,
         transform: str = "sigmoid",
         temperature: Any = 1.0,
         warp: str = "linear",
@@ -284,7 +309,7 @@ class BoundScaler(eqx.Module):
                 float("-inf") if low is None else float(low),
                 float("inf") if high is None else float(high),
             )
-            for low, high in bounds
+            for low, high in _as_pairs(bounds)
         )
         check_bounds(bounds, warp)
         temperature_arr = jnp.asarray(temperature)
@@ -379,12 +404,14 @@ class BoundScaler(eqx.Module):
     def _map(self, x: Array, *, inverse: bool, guard: bool = True) -> Array:
         """Apply :meth:`_component` along the last axis; a scalar broadcasts.
 
-        A one-component scaler acts elementwise on any shape, so a batch of
-        values against a single box needs no reshaping.
+        A one-component scaler acts elementwise and keeps the input's shape,
+        scalars included, so a batch of values against a single box needs
+        no reshaping.
         """
-        x = jnp.atleast_1d(x)
+        x = jnp.asarray(x)
         if len(self.bounds) == 1:
             return self._component(x, 0, inverse=inverse, guard=guard)
+        x = jnp.atleast_1d(x)
         x = jnp.broadcast_to(x, (*x.shape[:-1], len(self.bounds)))
         parts = [
             self._component(x[..., i], i, inverse=inverse, guard=guard)
@@ -445,7 +472,7 @@ class BoundScaler(eqx.Module):
         restoring force that keeps working far outside it. Pure, so the
         caller decides whether and where to pay for it.
         """
-        x = jnp.atleast_1d(x)
+        x = self._components_last(x)
         terms = []
         for i, (low, high) in enumerate(self.bounds):
             width = high - low if math.isfinite(low) and math.isfinite(high) else 1.0
@@ -453,6 +480,16 @@ class BoundScaler(eqx.Module):
             above = jnp.maximum(x[..., i] - high, 0.0) if math.isfinite(high) else 0.0
             terms.append((below / width) ** 2 + (above / width) ** 2)
         return jnp.sum(jnp.stack(terms, axis=-1)) if terms else jnp.asarray(0.0)
+
+    def _components_last(self, x: Array) -> Array:
+        """Give ``x`` a trailing component axis for the per-component reductions.
+
+        A one-component scaler is elementwise, so every entry of ``x`` is a
+        value of that one component; a multi-component scaler reads the
+        last axis.
+        """
+        x = jnp.asarray(x)
+        return x[..., None] if len(self.bounds) == 1 else jnp.atleast_1d(x)
 
     def saturation(self, z: Array) -> Array:
         """Scalar squared overshoot of ``|z / temperature|`` past ``z_knee``.
@@ -470,7 +507,7 @@ class BoundScaler(eqx.Module):
         Reduced with ``mean``, not ``sum``, so one weight means the same for
         a one-output and a six-output predictor.
         """
-        z = jnp.atleast_1d(z)
+        z = self._components_last(z)
         terms = []
         for i, (low, high) in enumerate(self.bounds):
             temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
@@ -500,6 +537,8 @@ class BoundScaler(eqx.Module):
         """
         if all(all(map(math.isfinite, pair)) for pair in self.bounds):
             return self.to_latent(x)
+        if len(self.bounds) == 1:
+            return jnp.asarray(x)
         x = jnp.atleast_1d(x)
         parts = [
             self._component(x[..., i], i, inverse=True)
@@ -616,6 +655,10 @@ class BoundedPredictor(Predictor):
       in ``self.input_keys`` is pulled, in declared order. A missing key
       raises ``KeyError``.
     - An array, rank-1 of length ``len(input_keys)``, shape-checked.
+
+    It returns a scalar ``()`` when there is one output bound, else a
+    rank-1 ``[n_out]`` array. To evaluate over a grid of inputs, use
+    :func:`~jaxhybridmodels.prediction.evaluate_predictor`.
 
     Construction
     ------------
@@ -737,11 +780,21 @@ class BoundedPredictor(Predictor):
             )
         z_in = self.in_scaler.scale_inputs(x)
         z_out = jnp.asarray(self.inner(z_in))
-        if z_out.ndim == 0 and len(self.out_scaler.bounds) == 1:
-            z_out = jnp.reshape(z_out, (1,))
+        n_out = len(self.out_scaler.bounds)
+        if n_out == 1:
+            # One output comes back as a scalar, so a rate reads
+            # ``k = predictor(inputs)`` with no ``[0]``. The inner network
+            # may return ``()`` or ``(1,)``.
+            z_out = eqx.error_if(
+                z_out,
+                z_out.size != 1 or z_out.ndim > 1,
+                "BoundedPredictor inner output must be a scalar or shape (1,) for one "
+                f"output bound; got shape {z_out.shape}.",
+            )
+            return self.out_scaler.from_latent(z_out.reshape(()))
         z_out = eqx.error_if(
             z_out,
-            z_out.ndim != 1 or z_out.shape[0] != len(self.out_scaler.bounds),
+            z_out.ndim != 1 or z_out.shape[0] != n_out,
             "BoundedPredictor inner output must be rank-1 with one entry per "
             f"out_scaler bound; got shape {z_out.shape}.",
         )

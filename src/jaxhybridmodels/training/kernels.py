@@ -17,6 +17,8 @@ kernels here are the compiled pieces that step makes:
   trajectories differ).
 - :func:`build_score_bucket`: a forward-only scorer (no backward pass),
   for sweeps like the tournament where gradients would be wasted.
+- :func:`build_dataset_score`: that scorer averaged over a whole dataset,
+  which is how a ``validation=`` set is scored.
 - :func:`build_penalty_step`: one jitted ``penalty_step(predictors,
   weight, points=()) -> (penalty, weighted_grads)`` per step, evaluated
   outside the bucket loop because it reads only the predictors tree and
@@ -39,6 +41,7 @@ loop *outside* any jit.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -48,8 +51,8 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array
 
-from jaxhybridmodels.data import BucketPayload
-from jaxhybridmodels.solver import SolverConfig
+from jaxhybridmodels.data import BucketPayload, Dataset
+from jaxhybridmodels.solver import SolverConfig, simulation_state
 
 
 def apply_length_mask(bp: BucketPayload, length_mask_fraction: Array) -> BucketPayload:
@@ -89,11 +92,12 @@ def simulate_bucket(
     ``[N, T, S]``, the state *before* ``state_to_output``. Needed by
     trajectory-aware penalties, which read extra ODE components (see
     :mod:`jaxhybridmodels.penalties`). Uncompiled, like :func:`predict_bucket_obs`;
-    each caller traces it into its own kernel.
+    each caller traces it into its own kernel. ``simulate_fn`` may return the
+    ``[T, S]`` array or a ``diffrax.Solution``, whose ``ys`` is taken.
     """
 
     def per_experiment(ts: Array, covariates: dict[str, Array], y0: Array) -> Array:
-        return simulate_fn(predictors, ts, covariates, y0, solver)
+        return simulation_state(simulate_fn(predictors, ts, covariates, y0, solver))
 
     return jax.vmap(per_experiment, in_axes=(0, 0, 0))(bp.ts, bp.covariates, bp.y0)
 
@@ -209,6 +213,46 @@ def build_score_bucket(
         return loss
 
     return score_bucket
+
+
+def build_dataset_score(
+    score_bucket: Callable[[Any, BucketPayload, Array], Array],
+    dataset: Dataset,
+    *,
+    channel_names: tuple[str, ...] | None = None,
+) -> Callable[[Any], float]:
+    """Return ``score(predictors) -> float``, the bucket-averaged full-horizon score.
+
+    Wraps a :func:`build_score_bucket` kernel over every bucket of
+    ``dataset``, averaged with equal weight per bucket as the trainers
+    average their own loss. The stock trainers use it to score a
+    ``validation=`` set with the training objective; reusing the trainer's
+    own ``score_bucket`` means a bucket shape the two datasets share
+    compiles once.
+
+    ``channel_names``, when given, must equal ``dataset.output_channel_names``,
+    since the scorer's loss was resolved against those channels. A
+    non-finite score raises ``FloatingPointError``, as it would otherwise
+    win or lose every comparison silently. Each call blocks on the result.
+    """
+    if channel_names is not None and dataset.output_channel_names != channel_names:
+        raise ValueError(
+            f"validation channels {dataset.output_channel_names} do not match the "
+            f"training channels {channel_names}"
+        )
+    buckets = dataset.bucket_payloads
+    if not buckets:
+        raise ValueError("validation dataset has no bucket payloads")
+    full_horizon = jnp.asarray(1.0)
+
+    def score(predictors: Any) -> float:
+        total = sum(float(score_bucket(predictors, bp, full_horizon)) for bp in buckets)
+        value = total / len(buckets)
+        if not math.isfinite(value):
+            raise FloatingPointError("validation loss is not finite")
+        return value
+
+    return score
 
 
 def build_penalty_step(

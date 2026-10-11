@@ -18,6 +18,7 @@ import jax.flatten_util as jfu
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import numpy as np
 import optax
 import pytest
 from _models import (
@@ -36,6 +37,7 @@ from jax import Array
 import jaxhybridmodels as hm
 from jaxhybridmodels.data import Dataset, make_bootstrap_dataset
 from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.prediction import predict_dataset, predict_dense
 from jaxhybridmodels.predictors import BoundScaler, MLPPredictor
 from jaxhybridmodels.solver import ADJOINT_REGISTRY
@@ -51,10 +53,12 @@ from jaxhybridmodels.training.evosax import (
     _box_population,
     _build_single_eval,
     _build_strategy,
+    _train_with_evosax,
     train_with_evosax,
 )
 from jaxhybridmodels.training.optax import (
     _shared_tournament,
+    _train_with_optax,
     train_bootstrap_ensemble,
     train_seed_ensemble,
 )
@@ -291,11 +295,11 @@ def test_factory_optimizer_custom_loss_and_network_dict(temp_data):
         quiet(
             steps=30,
             lr=0.05,
-            loss=loss,
             optimizer=lambda learning_rate: optax.chain(
                 optax.clip_by_global_norm(1.0), optax.adam(learning_rate)
             ),
         ),
+        objective=Objective(loss=loss),
         key=jr.key(0),
         **NETWORK_KWARGS,
     )
@@ -332,6 +336,96 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     with pytest.raises(ValueError, match="cannot be re-hyperparametrised"):
         train_with_optax(
             parameter_predictors(), decay_data, refused, key=jr.key(0), **PARAMETER_KWARGS
+        )
+
+
+def test_lr_schedule_counts_from_the_phase_start(decay_data):
+    """A phase's schedule sees step 0 at the phase start, not the run start.
+
+    Phase 1 runs five steps at zero. Phase 2's schedule is zero for its own
+    first three steps and then trains. Each history entry is measured before
+    that step's update, so the loss stays flat through step 8 (the fourth
+    step of phase 2) and moves at step 9. Counting from the run start would
+    already train at step 5.
+    """
+    held = optax.join_schedules([optax.constant_schedule(0.0), optax.constant_schedule(0.1)], [3])
+    history, trained = train_with_optax(
+        parameter_predictors(),
+        decay_data,
+        quiet(phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=held)), restore_best=False),
+        key=jr.key(0),
+        **PARAMETER_KWARGS,
+    )
+    assert len(set(history[:9])) == 1
+    assert history[9] != history[8]
+    assert rate_of(trained) != 0.3
+
+
+def test_lr_schedule_on_the_single_phase_shorthand_and_after_a_float_phase(decay_data):
+    """``steps=, lr=schedule`` trains, and a float phase after it resets the lr.
+
+    A schedule that decays to zero halfway leaves the second half flat; the
+    float phase that follows must move the parameter again, so the schedule's
+    last value cannot leak past its phase.
+    """
+    to_zero = optax.linear_schedule(0.1, 0.0, 4)
+    history, _ = train_with_optax(
+        parameter_predictors(),
+        decay_data,
+        quiet(steps=8, lr=to_zero, restore_best=False),
+        key=jr.key(0),
+        **PARAMETER_KWARGS,
+    )
+    assert history[1] != history[0] and len(set(history[5:])) == 1
+
+    history, _ = train_with_optax(
+        parameter_predictors(),
+        decay_data,
+        quiet(phases=(TrainingPhase(6, lr=to_zero), TrainingPhase(3, lr=0.05))),
+        key=jr.key(0),
+        **PARAMETER_KWARGS,
+    )
+    assert history[5] == history[6] and history[8] != history[7]
+
+
+def test_validation_set_drives_selection_through_the_functional_layer(decay_data, temp_data):
+    """``validation=`` scores every step with the training objective.
+
+    Validating on data the model is not trained on means the selection
+    series differs from the training loss, and the returned step is the
+    validation minimum.
+    """
+    run = _train_with_optax(
+        parameter_predictors(),
+        decay_data,
+        quiet(steps=12, lr=0.1),
+        key=jr.key(0),
+        validation=temp_data,
+        **PARAMETER_KWARGS,
+    )
+    assert len(run.selection) == len(run.loss) == 12
+    assert run.selection != run.loss
+    assert run.best_step == int(np.argmin(run.selection))
+    assert data_loss(run.predictors, temp_data) == pytest.approx(min(run.selection), rel=1e-4)
+
+    mismatched = hm.make_dataset(
+        [
+            hm.make_experiment(
+                channels={"other": hm.ChannelObs(ts=jnp.array([1.0]), values=jnp.array([0.5]))},
+                y0=[1.0],
+                exp_id="x",
+            )
+        ],
+        output_channel_names=("other",),
+    )
+    with pytest.raises(ValueError, match="validation channels"):
+        train_with_optax(
+            parameter_predictors(),
+            decay_data,
+            quiet(steps=1),
+            key=jr.key(0),
+            validation=mismatched,
+            **PARAMETER_KWARGS,
         )
 
 
@@ -583,12 +677,15 @@ def test_ensemble_predictions_average_and_dense_grids_agree(seed_ensembles, deca
 
 def test_bootstrap_dataset_resamples_with_replacement(decay_data):
     boot = make_bootstrap_dataset(decay_data, key=jr.key(0), n_experiments=8)
-    ids = [e.exp_id for e in boot._experiments]
-    assert len(ids) == 8 and len(set(ids)) < 8  # pigeonhole: a duplicate exists
+    ids = [e.exp_id for e in boot.experiments]
+    # Pigeonhole: eight draws from four experiments repeat one, and a repeat
+    # is renamed "<id>#<k>" so experiment IDs stay unique.
+    sources = [i.split("#")[0] for i in ids]
+    assert len(ids) == len(set(ids)) == 8 and len(set(sources)) < 8
     assert sum(int(bp.y0.shape[0]) for bp in boot.bucket_payloads) == 8
     same = make_bootstrap_dataset(decay_data, key=jr.key(0), n_experiments=8)
-    assert [e.exp_id for e in same._experiments] == ids
-    assert len(make_bootstrap_dataset(decay_data, key=jr.key(1))._experiments) == 4
+    assert [e.exp_id for e in same.experiments] == ids
+    assert len(make_bootstrap_dataset(decay_data, key=jr.key(1)).experiments) == 4
 
     bare = Dataset(
         bucket_payloads=decay_data.bucket_payloads,
@@ -620,7 +717,7 @@ def evolved(decay_data):
     history, trained = train_with_evosax(
         predictors,
         decay_data,
-        EvosaxTrainingConfig(population_size=8, num_generations=10, sigma_init=0.5, verbose=False),
+        EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5, verbose=False),
         simulate_fn=simulate_nested,
         state_to_output=identity,
         solver=SOLVER,
@@ -671,7 +768,7 @@ QUADRATIC_KWARGS: dict[str, Any] = dict(
 @pytest.fixture(scope="module")
 def quadratic_data():
     ts = jnp.array([0.0])
-    channels = {f"c{i}": hm.ChannelObs(ts, THETA_STAR[i : i + 1]) for i in range(4)}
+    channels = {f"c{i}": hm.ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(4)}
     experiment = hm.make_experiment(channels=channels, y0=jnp.zeros(4), exp_id="q")
     return hm.make_dataset([experiment], output_channel_names=tuple(channels))
 
@@ -681,9 +778,7 @@ def test_registered_algorithms_run(quadratic_data, algorithm):
     history, _ = train_with_evosax(
         hm.Parameter(jnp.zeros(4)),
         quadratic_data,
-        EvosaxTrainingConfig(
-            algorithm=algorithm, population_size=8, num_generations=3, verbose=False
-        ),
+        EvosaxTrainingConfig(algorithm=algorithm, population_size=8, steps=3, verbose=False),
         key=jr.key(0),
         **QUADRATIC_KWARGS,
     )
@@ -691,7 +786,7 @@ def test_registered_algorithms_run(quadratic_data, algorithm):
 
 
 def test_evosax_rejects_nonfinite_fitness_and_a_missing_key(quadratic_data):
-    config = EvosaxTrainingConfig(population_size=4, num_generations=1, verbose=False)
+    config = EvosaxTrainingConfig(population_size=4, steps=1, verbose=False)
     with pytest.raises(TypeError):
         train_with_evosax(hm.Parameter(jnp.zeros(4)), quadratic_data, config, **QUADRATIC_KWARGS)
     with pytest.raises(FloatingPointError, match="non-finite"):
@@ -750,6 +845,79 @@ def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
         **QUADRATIC_KWARGS,
     )
     assert float(evaluate(flat)) == pytest.approx(2.0)
+
+
+def test_evosax_validation_picks_the_generation_best_it_scores_lowest(quadratic_data):
+    """With ``validation=``, the returned individual is the validation argmin.
+
+    Validating against a shifted target makes the validation and training
+    rankings disagree, so the selection is visibly not the training best.
+    """
+    shifted = hm.make_dataset(
+        [
+            hm.make_experiment(
+                channels={
+                    f"c{i}": hm.ChannelObs(ts=jnp.array([0.0]), values=THETA_STAR[i : i + 1] * 0.0)
+                    for i in range(4)
+                },
+                y0=jnp.zeros(4),
+                exp_id="v",
+            )
+        ],
+        output_channel_names=quadratic_data.output_channel_names,
+    )
+    run = _train_with_evosax(
+        hm.Parameter(jnp.zeros(4)),
+        quadratic_data,
+        EvosaxTrainingConfig(population_size=8, steps=6, sigma_init=0.5, verbose=False),
+        key=jr.key(0),
+        validation=shifted,
+        **QUADRATIC_KWARGS,
+    )
+    assert len(run.loss) == len(run.validation) == 6
+    assert all(b <= a for a, b in zip(run.loss, run.loss[1:], strict=False))
+    assert run.best_step == int(np.argmin(run.validation))
+    returned = float(jnp.mean(run.predictors.value**2))
+    assert returned == pytest.approx(run.validation[run.best_step], rel=1e-5)
+
+
+def test_channel_weights_by_name_fit_only_the_named_channels(quadratic_data):
+    """A by-name mapping scores only the channels it names.
+
+    The unnamed channels get no gradient, and adamw's decoupled weight decay
+    leaves a zero leaf at exactly zero, so they stay put.
+    """
+    _, trained = train_with_optax(
+        hm.Parameter(jnp.zeros(4)),
+        quadratic_data,
+        quiet(steps=60, lr=0.2),
+        objective=Objective(channel_weights={"c0": 1.0, "c1": 2.0}),
+        key=jr.key(0),
+        **QUADRATIC_KWARGS,
+    )
+    value = trained.value
+    assert float(jnp.abs(value[:2] - THETA_STAR[:2]).max()) < 0.2
+    assert value[2:].tolist() == [0.0, 0.0]
+
+
+def test_channel_selection_composes_with_a_plain_custom_loss(quadratic_data):
+    """Unit weights by name become a pure selection, so a ``(pred_obs, bp)`` loss works.
+
+    Non-unit weights cannot be applied inside a custom reduction and raise.
+    """
+
+    def plain(pred_obs, bp):
+        return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.y_observed) ** 2, 0.0))
+
+    names = quadratic_data.output_channel_names
+    bp = quadratic_data.bucket_payloads[0]
+    pred = jnp.zeros_like(bp.y_observed)
+    selected = Objective(loss=plain, channel_weights={"c2": 1.0}).loss_fn(names)
+    assert float(selected(pred, bp)) == pytest.approx(float(THETA_STAR[2] ** 2))
+    with pytest.raises(ValueError, match="channel_weights cannot be applied"):
+        Objective(loss=plain, channel_weights={"c2": 2.0}).loss_fn(names)
+    # Positional weights keep every channel; unit weights are the plain loss.
+    assert Objective(loss=plain, channel_weights=(1.0,) * 4).loss_fn(names) is plain
 
 
 # ---------------------------------------------------------------------------
@@ -833,14 +1001,14 @@ def test_freeze_helpers_return_new_masks():
     predictors = network_predictors()["rate"]
     mask = trainable_mask(predictors, train_scalers=True)
 
-    by_type = freeze_modules_of_type(mask, predictors, BoundScaler)
-    by_fn = freeze_where(mask, predictors, lambda m: isinstance(m, BoundScaler))
+    by_type = freeze_modules_of_type(mask, BoundScaler)
+    by_fn = freeze_where(mask, lambda m: isinstance(m, BoundScaler))
     for frozen in (by_type, by_fn):
         assert frozen.in_scaler.temperature is False and frozen.out_scaler.temperature is False
         assert flags(frozen.inner) == flags(mask.inner)
     assert mask.in_scaler.temperature is True, "the input mask was mutated"
 
-    both = freeze_modules_of_type(by_type, predictors, MLPPredictor)
+    both = freeze_modules_of_type(by_type, MLPPredictor)
     assert not any(flags(both))
 
     one = freeze_paths(mask, ("in_scaler.temperature",))

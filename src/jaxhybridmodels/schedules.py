@@ -1,19 +1,21 @@
-"""Epoch-scaled schedule multipliers for custom training loops.
+"""Epoch-scaled schedule multipliers.
 
-The stock trainers express changing hyperparameters as **phases**,
-contiguous blocks of steps sharing an lr or penalty weight. A smooth curve
-instead, such as a cosine-decayed learning rate or a penalty weight that
-ramps in, needs a custom loop, and :func:`annealing_schedule` returns an optax-style
-callable ``(step: int) -> float`` that is already normalised to a
-multiplier, with the run length baked in.
+The stock Optax trainer changes hyperparameters per **phase**, a block of
+steps sharing an lr or penalty weight, and within a phase
+``TrainingPhase.lr`` also takes any optax schedule, counted from the phase's
+first step. :func:`annealing_schedule` returns such a callable
+``(step: int) -> float``, normalised to a multiplier with the run length
+baked in. Scale it into a learning rate for a phase, or use it to ramp a
+penalty weight in a custom loop:
 
-A library *step* is one full pass over every bucket, i.e. one epoch
-(CONTEXT.md, "step (training)"), so the schedule's ``total_epochs`` is
-the step budget of the run it scales:
-
-    lr = base_lr * annealing_schedule("cosine", total_epochs=steps)(step)
+    phase = hm.TrainingPhase(steps, lr=lambda step: 1e-2 * cosine(step))
 
     penalty_weight = 0.5 * annealing_schedule("linear", total_epochs=steps)(step)
+
+where ``cosine = annealing_schedule("cosine", total_epochs=steps)``. A
+library *step* is one full pass over every bucket, i.e. one epoch
+(CONTEXT.md, "step (training)"), so ``total_epochs`` is the step budget of
+the phase or run it scales.
 
 The name is deliberate: it is an *annealing* schedule, which only
 smooths a training hyperparameter. It has nothing to do with a physical

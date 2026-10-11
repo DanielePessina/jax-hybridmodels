@@ -31,6 +31,7 @@ from jaxhybridmodels.predictors import (
     reinitialize_with_key,
 )
 from jaxhybridmodels.predictors.kan import _scaffold_parts
+from jaxhybridmodels.trainable import freeze_mask
 
 IN, OUT = 2, 1
 
@@ -111,9 +112,10 @@ def test_drops_in_as_a_bounded_inner(build):
         input_bounds=((0.0, 1.0), (-1.0, 1.0)),
         output_bounds=(0.0, 10.0),
     )
+    # One output bound, so a scalar comes back: ``k = rate(inputs)``.
     out = bounded({"a": 0.3, "b": 0.5})
-    assert out.shape == (1,) and 0.0 <= float(out[0]) <= 10.0
-    grads = eqx.filter_jit(eqx.filter_grad(lambda p: p({"a": 0.3, "b": 0.5})[0]))(bounded)
+    assert out.shape == () and 0.0 <= float(out) <= 10.0
+    grads = eqx.filter_jit(eqx.filter_grad(lambda p: p({"a": 0.3, "b": 0.5})))(bounded)
     assert all(jnp.all(jnp.isfinite(g)) for g in arrays(grads.inner))
 
 
@@ -292,6 +294,42 @@ def test_inner_output_size_is_checked_at_call_when_unknown():
     bp = BoundedPredictor(inner=Identity(), input_keys=("x",), output_bounds=((0, 1), (0, 1)))
     with pytest.raises(eqx.EquinoxTracetimeError):
         bp({"x": 0.5})
+    single = BoundedPredictor(inner=Identity(), input_keys=("x", "y"), output_bounds=(0, 1))
+    with pytest.raises(eqx.EquinoxTracetimeError, match="scalar or shape"):
+        single({"x": 0.5, "y": 0.5})
+
+
+class Scalar(hm.Predictor):
+    """Returns a rank-0 latent, which a one-output wrapper must also accept."""
+
+    def __call__(self, x: Array) -> Array:
+        return jnp.sum(x)
+
+
+def test_one_output_is_a_scalar_whatever_the_inner_returns():
+    for inner in (Scalar(), Identity()):
+        bp = BoundedPredictor(
+            inner=inner, input_keys=("x",), input_bounds=(0.0, 1.0), output_bounds=(0.0, 1.0)
+        )
+        out = bp({"x": 0.25})
+        assert out.shape == ()
+        np.testing.assert_allclose(out, 0.25, rtol=1e-5)
+
+
+def test_evaluate_predictor_broadcasts_named_inputs():
+    bp = identity_bounded()
+    scalar = hm.evaluate_predictor(bp, {"a": 0.4, "b": 0.7})
+    np.testing.assert_allclose(scalar, [0.4, 0.7], atol=1e-5)
+    sweep = hm.evaluate_predictor(bp, {"a": jnp.linspace(0.1, 0.9, 5), "b": 0.5})
+    assert sweep.shape == (5, 2)
+    np.testing.assert_allclose(sweep[:, 0], jnp.linspace(0.1, 0.9, 5), atol=1e-5)
+    np.testing.assert_allclose(sweep[:, 1], 0.5, atol=1e-5)
+    grid = hm.evaluate_predictor(bp, {"a": jnp.array([0.2, 0.3])[:, None], "b": jnp.ones(3) / 4})
+    assert grid.shape == (2, 3, 2)
+    # One output gives just the broadcast shape; ints are promoted to float.
+    rate = BoundedPredictor(inner=Scalar(), input_keys=("T",), output_bounds=(0.0, None))
+    assert hm.evaluate_predictor(rate, {"T": jnp.arange(4)}).shape == (4,)
+    assert hm.evaluate_predictor(rate, {"T": 1}).shape == ()
 
 
 def test_open_input_bounds_pass_inputs_through_unscaled():
@@ -378,3 +416,86 @@ def test_kan_scaffold_warmed_inside_jit_survives_a_second_trace():
     _, rest = _scaffold_parts(IN, OUT, (3,), 3, predictor.basis, predictor.seed)
     leaves = [leaf for leaf in jtu.tree_leaves(rest) if hasattr(leaf, "shape")]
     assert leaves and not any(isinstance(leaf, jax.core.Tracer) for leaf in leaves)
+
+
+# ---------------------------------------------------------------------------
+# Trainability masks
+# ---------------------------------------------------------------------------
+
+
+def _model_predictors() -> dict[str, eqx.Module]:
+    return {
+        "rate": BoundedPredictor(inner=mlp(jr.key(0)), input_keys=("a", "b"), output_bounds=(0, 1)),
+        "offset": hm.Parameter(0.5, bounds=(0.0, 1.0)),
+        "gain": hm.Parameter(2.0, bounds=(0.0, None)),
+        "fixed": hm.Constant(1.0),
+    }
+
+
+def _flags(tree: object) -> list[bool]:
+    return [bool(leaf) for leaf in jtu.tree_leaves(tree)]
+
+
+def test_freeze_mask_takes_paths_classes_and_predicates():
+    predictors = _model_predictors()
+    base = hm.trainable_mask(predictors)
+    assert any(_flags(base["rate"].inner)) and base["offset"].latent and base["gain"].latent
+
+    # A path may stop at a subtree: "rate" freezes the whole network.
+    by_path = freeze_mask(predictors, ("rate",))
+    assert not any(_flags(by_path["rate"])) and by_path["offset"].latent
+    # A class freezes every instance, and a bare entry needs no tuple.
+    by_class = freeze_mask(predictors, hm.Parameter)
+    assert not by_class["offset"].latent and not by_class["gain"].latent
+    assert _flags(by_class["rate"]) == _flags(base["rate"])
+    # Predicates see the real modules, so they may read values.
+    by_value = freeze_mask(
+        predictors, (lambda m: isinstance(m, hm.Parameter) and float(m.value) > 1.0,)
+    )
+    assert by_value["offset"].latent and not by_value["gain"].latent
+    # Entries compose, on top of an explicit starting mask if given.
+    both = freeze_mask(predictors, ("offset", MLPPredictor), mask=by_value)
+    assert not any(_flags(both))
+    # The input mask is never mutated.
+    assert base["offset"].latent and any(_flags(base["rate"].inner))
+
+
+@pytest.mark.parametrize(
+    "freeze, error, match",
+    [
+        (("rate.inner.nope",), ValueError, "no leaf matches"),
+        ((KANPredictor,), ValueError, "no leaf matches"),
+        ((lambda m: False,), ValueError, "no leaf matches"),
+        ((3,), TypeError, "freeze entries"),
+    ],
+    ids=["path", "class", "predicate", "type"],
+)
+def test_freeze_mask_rejects_entries_that_match_nothing(freeze, error, match):
+    with pytest.raises(error, match=match):
+        freeze_mask(_model_predictors(), freeze)
+
+
+def test_mask_freezers_need_only_the_mask():
+    predictors = _model_predictors()
+    mask = hm.trainable_mask(predictors, train_scalers=True)
+    assert mask["rate"].in_scaler.temperature is True
+    by_type = hm.freeze_modules_of_type(mask, hm.BoundScaler)
+    by_fn = hm.freeze_where(mask, lambda m: isinstance(m, hm.BoundScaler))
+    for frozen in (by_type, by_fn):
+        assert frozen["rate"].in_scaler.temperature is False
+        assert frozen["offset"].scaler.temperature is False
+        assert _flags(frozen["rate"].inner) == _flags(mask["rate"].inner)
+    assert not any(_flags(hm.freeze_modules_of_type(mask, MLPPredictor)["rate"].inner))
+    # Matching nothing is fine for the structural freezers.
+    assert _flags(hm.freeze_modules_of_type(mask, KANPredictor)) == _flags(mask)
+
+    one = hm.freeze_paths(mask, ("rate.in_scaler.temperature",))
+    assert one["rate"].in_scaler.temperature is False and one["rate"].out_scaler.temperature
+    assert sum(_flags(one)) == sum(_flags(mask)) - 1
+    # "rate.inner.mlp.layers.1" must not swallow a sibling like "layers.10".
+    layer = hm.freeze_paths(mask, ("rate.inner.mlp.layers.1",))
+    assert not any(_flags(layer["rate"].inner.mlp.layers[1]))
+    assert all(_flags(layer["rate"].inner.mlp.layers[0]))
+    assert _flags(hm.freeze_paths(mask, ())) == _flags(mask)
+    with pytest.raises(ValueError, match="Closest matches"):
+        hm.freeze_paths(mask, ("rate.in_scaler.temprature",))

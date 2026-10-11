@@ -59,7 +59,7 @@ def decay_dataset(rate_fn: Callable[[float], float] = constant_rate) -> hm.Datas
         values = jnp.exp(-rate_fn(temp) * ts)
         experiments.append(
             hm.make_experiment(
-                channels={"conc": hm.ChannelObs(ts, values, variance=1e-2)},
+                channels={"conc": hm.ChannelObs(ts=ts, values=values, variance=1e-2)},
                 covariates={"temp": temp},
                 y0=[1.0],
                 t0=0.0,
@@ -84,7 +84,7 @@ def simulate_parameter(
 
 
 def simulate_network(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Array:
-    rate = predictors["rate"](covariates)[0]
+    rate = predictors["rate"](covariates)
     return _decay(rate, predictors["offset"].value, ts, y0, solver)
 
 

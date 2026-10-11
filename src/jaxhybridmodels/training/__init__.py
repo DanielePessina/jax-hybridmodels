@@ -7,9 +7,10 @@ is the default, and the one to use for anything network-sized.
 for small kinetic predictors, roughly 4 to 10 trainable scalars, or when
 the adjoint through the solve is unreliable.
 
-They are separate entry points with no shared config. To combine them,
-call evosax first and then feed its result to optax, passing the same
-trainable mask to both.
+They are separate entry points with separate search configs. What is
+minimised is a shared :class:`~jaxhybridmodels.Objective`, passed to either
+as ``objective=``. To combine them, call evosax first and then feed its
+result to optax, passing the same objective and trainable mask to both.
 
 For ensembles of hybrid models:
 
