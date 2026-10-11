@@ -17,13 +17,16 @@ Data arrives as ``Experiment`` records with sparse per-channel
 observations. ``make_dataset`` groups them into buckets of equal
 timestamp-axis length so JAX can compile one kernel per bucket shape.
 ``HybridModel.fit`` minimises an ``Objective`` (what to minimise) with an
-``OptaxTrainingConfig`` or an ``EvosaxTrainingConfig`` (how to search);
-``predict`` and ``simulate`` return results keyed by experiment and
-channel name.
+``OptaxTrainingConfig`` or an ``EvosaxTrainingConfig`` (how to search),
+and ``fit_ensemble`` trains several members. ``predict``,
+``predict_ensemble`` and ``simulate`` return results keyed by experiment
+and channel name. ``save`` writes a model or a fit to a directory, and
+``load(path, like=model)`` reads it back.
 
-The top level holds that workflow. Lower-level pieces (training kernels,
-penalties, losses, transforms, UI classes, registries) live in their
-submodules, such as ``jaxhybridmodels.penalties``.
+The top level holds that workflow. Lower-level pieces (the trainers
+``fit`` dispatches to, training kernels, mask helpers, penalties, losses,
+transforms, UI classes, registries) live in their submodules, such as
+``jaxhybridmodels.training`` and ``jaxhybridmodels.penalties``.
 
 Every name is imported lazily: the ``TYPE_CHECKING`` block gives type
 checkers the real symbols, and ``__getattr__`` resolves a name to its
@@ -72,6 +75,9 @@ if TYPE_CHECKING:
         profiles as profiles,
     )
     from jaxhybridmodels import (
+        results as results,
+    )
+    from jaxhybridmodels import (
         schedules as schedules,
     )
     from jaxhybridmodels import (
@@ -106,20 +112,9 @@ if TYPE_CHECKING:
         split_dataset,
     )
     from jaxhybridmodels.metrics import ChannelMetrics, compute_metrics, print_metrics
-    from jaxhybridmodels.model import (
-        ExperimentPrediction,
-        FitHistory,
-        FitResult,
-        HybridModel,
-        PredictionResult,
-    )
+    from jaxhybridmodels.model import HybridModel
     from jaxhybridmodels.objective import Objective
-    from jaxhybridmodels.prediction import (
-        ensemble_predictions,
-        evaluate_predictor,
-        predict_dataset,
-        predict_dense,
-    )
+    from jaxhybridmodels.prediction import evaluate_predictor, predict_ensemble
     from jaxhybridmodels.predictors import (
         BoundedPredictor,
         BoundScaler,
@@ -136,33 +131,29 @@ if TYPE_CHECKING:
         ramp_profile,
         step_profile,
     )
-    from jaxhybridmodels.serialise import load_predictors, load_run, save_predictors, save_run
-    from jaxhybridmodels.solver import SolverConfig
-    from jaxhybridmodels.trainable import (
-        count_trainable_params,
-        freeze_mask,
-        freeze_modules_of_type,
-        freeze_paths,
-        freeze_where,
-        trainable_mask,
+    from jaxhybridmodels.results import (
+        ExperimentPrediction,
+        FitHistory,
+        FitResult,
+        PredictionResult,
+        SavedRun,
     )
+    from jaxhybridmodels.serialise import load, save
+    from jaxhybridmodels.solver import SolverConfig
+    from jaxhybridmodels.trainable import count_trainable_params, trainable_mask
     from jaxhybridmodels.training import (
         EvosaxTrainingConfig,
         OptaxTrainingConfig,
         TrainingPhase,
-        train_bootstrap_ensemble,
-        train_seed_ensemble,
-        train_with_evosax,
-        train_with_optax,
     )
 
 _EXPORTS: dict[str, str] = {
     # Model workflow.
     "HybridModel": "jaxhybridmodels.model",
-    "FitResult": "jaxhybridmodels.model",
-    "FitHistory": "jaxhybridmodels.model",
-    "PredictionResult": "jaxhybridmodels.model",
-    "ExperimentPrediction": "jaxhybridmodels.model",
+    "FitResult": "jaxhybridmodels.results",
+    "FitHistory": "jaxhybridmodels.results",
+    "PredictionResult": "jaxhybridmodels.results",
+    "ExperimentPrediction": "jaxhybridmodels.results",
     # Predictors.
     "Parameter": "jaxhybridmodels.predictors",
     "Constant": "jaxhybridmodels.predictors",
@@ -194,29 +185,18 @@ _EXPORTS: dict[str, str] = {
     "OptaxTrainingConfig": "jaxhybridmodels.training",
     "TrainingPhase": "jaxhybridmodels.training",
     "EvosaxTrainingConfig": "jaxhybridmodels.training",
-    "train_with_optax": "jaxhybridmodels.training",
-    "train_with_evosax": "jaxhybridmodels.training",
-    "train_seed_ensemble": "jaxhybridmodels.training",
-    "train_bootstrap_ensemble": "jaxhybridmodels.training",
     "trainable_mask": "jaxhybridmodels.trainable",
-    "freeze_mask": "jaxhybridmodels.trainable",
-    "freeze_modules_of_type": "jaxhybridmodels.trainable",
-    "freeze_paths": "jaxhybridmodels.trainable",
-    "freeze_where": "jaxhybridmodels.trainable",
     "count_trainable_params": "jaxhybridmodels.trainable",
     # Prediction and evaluation.
-    "predict_dataset": "jaxhybridmodels.prediction",
-    "predict_dense": "jaxhybridmodels.prediction",
-    "ensemble_predictions": "jaxhybridmodels.prediction",
+    "predict_ensemble": "jaxhybridmodels.prediction",
     "evaluate_predictor": "jaxhybridmodels.prediction",
     "ChannelMetrics": "jaxhybridmodels.metrics",
     "compute_metrics": "jaxhybridmodels.metrics",
     "print_metrics": "jaxhybridmodels.metrics",
     # Persistence.
-    "save_run": "jaxhybridmodels.serialise",
-    "load_run": "jaxhybridmodels.serialise",
-    "save_predictors": "jaxhybridmodels.serialise",
-    "load_predictors": "jaxhybridmodels.serialise",
+    "save": "jaxhybridmodels.serialise",
+    "load": "jaxhybridmodels.serialise",
+    "SavedRun": "jaxhybridmodels.results",
 }
 
 # Submodules reachable as attributes, e.g. ``jaxhybridmodels.penalties``,
@@ -232,6 +212,7 @@ _SUBMODULES: frozenset[str] = frozenset(
         "prediction",
         "predictors",
         "profiles",
+        "results",
         "schedules",
         "serialise",
         "solver",
@@ -278,27 +259,16 @@ __all__: list[str] = [
     "OptaxTrainingConfig",
     "TrainingPhase",
     "EvosaxTrainingConfig",
-    "train_with_optax",
-    "train_with_evosax",
-    "train_seed_ensemble",
-    "train_bootstrap_ensemble",
     "trainable_mask",
-    "freeze_mask",
-    "freeze_modules_of_type",
-    "freeze_paths",
-    "freeze_where",
     "count_trainable_params",
-    "predict_dataset",
-    "predict_dense",
-    "ensemble_predictions",
+    "predict_ensemble",
     "evaluate_predictor",
     "ChannelMetrics",
     "compute_metrics",
     "print_metrics",
-    "save_run",
-    "load_run",
-    "save_predictors",
-    "load_predictors",
+    "save",
+    "load",
+    "SavedRun",
 ]
 
 

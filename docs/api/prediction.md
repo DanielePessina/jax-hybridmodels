@@ -1,180 +1,43 @@
 # Prediction: Forward Simulation
 
-Forward-simulate trained predictors against a dataset. [`predict_bucket`](#predict_bucket) is the single-bucket primitive (JIT-compiled, vmapped over the bucket's `N` axis); [`predict_dataset`](#predict_dataset) walks every bucket and returns one `[N, T, D]` array per bucket.
+`HybridModel.predict` and `HybridModel.simulate` cover one model. [`predict_ensemble`](#predict_ensemble) predicts with several and returns the member mean as a `PredictionResult`, with the per-channel spread in each experiment's `std` and each member's own result in `members`. [`evaluate_predictor`](#evaluate_predictor) calls one predictor outside any ODE.
 
 ## Quick links
 
-- [`predict_bucket`](#predict_bucket)
-- [`predict_dataset`](#predict_dataset)
-- [`predict_dense`](#predict_dense)
-- [`ensemble_predictions`](#ensemble_predictions)
+- [`predict_ensemble`](#predict_ensemble)
 - [`evaluate_predictor`](#evaluate_predictor)
 
 ---
 
-<a id="predict_bucket"></a>
+<a id="predict_ensemble"></a>
 
-### `predict_bucket()`
+### `predict_ensemble()`
 
-<small>`from jaxhybridmodels.prediction import predict_bucket`</small>
-
-```python
-predict_bucket(
-    predictors: 'Any',
-    bp: 'BucketPayload',
-    simulate_fn: 'Callable[..., Array]',
-    state_to_output: 'Callable[[Array], Array]',
-    solver: 'SolverConfig',
-) -> Float[Array, 'N T D']
-```
-
-Vmap ``simulate_fn`` over the bucket's ``N`` axis and project to observed channels.
-
-``predict_bucket_obs`` runs ``simulate_fn`` for one experiment, giving a
-state trajectory ``[T, S]``, and maps it to observed channels ``[T, D]``.
-``jax.vmap`` lifts that over ``(ts, covariates, y0)`` along ``N``.
-``predictors`` and ``solver`` are closed over with no vmap axis, being
-the same for every experiment in the bucket.
-
-One compiled kernel per bucket shape. Python dispatch over buckets lives
-in ``predict_dataset``, never inside the compiled region.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `predictors` | `PyTree[eqx.Module]` | The trainable part of the model, typically a tuple of ``BoundedPredictor`` leaves. Forwarded to ``simulate_fn`` unchanged. |
-| `bp` | `BucketPayload` | One bucket. Its ``ts``, ``covariates``, and ``y0`` are vmapped along ``N``. |
-| `simulate_fn` |  | User-supplied integrator with signature ``(predictors, ts, covariates, y0, solver) -> [T, S]``. |
-| `state_to_output` |  | Pure ``[T, S] -> [T, D]`` map from full state to observed channels. A property of the model, passed explicitly. |
-| `solver` |  | ``SolverConfig``. All its fields are static, so it enters the compiled kernel as configuration rather than as data. |
-
-**Returns**
-
-| Item | Type | Description |
-| --- | --- | --- |
-| `Float[Array, "N T D"]` |  | Predicted output channels for every experiment in the bucket. |
-
----
-
-<a id="predict_dataset"></a>
-
-### `predict_dataset()`
-
-<small>`from jaxhybridmodels.prediction import predict_dataset` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_dataset`</small>
+<small>`from jaxhybridmodels.prediction import predict_ensemble` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_ensemble`</small>
 
 ```python
-predict_dataset(
-    predictors: 'Any',
-    dataset: 'Dataset',
-    simulate_fn: 'Callable[..., Array]',
-    state_to_output: 'Callable[[Array], Array]',
-    solver: 'SolverConfig',
-) -> tuple[Float[Array, 'N T D'], ...]
+predict_ensemble(
+    models: 'Sequence[HybridModel | FitResult]',
+    data: 'Data',
+    ts: 'ArrayLike | None' = None,
+    n_points: 'int | None' = None,
+) -> PredictionResult
 ```
 
-Run ``predict_bucket`` over every bucket in ``dataset`` and return the stack tuple.
+Predict with every model and return the member mean, with the spread.
 
-Each bucket shape compiles ``predict_bucket`` exactly once. The result
-is a tuple rather than one array, because buckets differ precisely in
-``T`` and cannot be stacked.
+``outputs`` (and ``buckets``) hold the mean across members, so
+``compute_metrics`` scores the ensemble mean. Each experiment's ``std``
+holds the per-channel standard deviation across members (population,
+``ddof=0``; zero for one member), and ``members`` holds each model's
+own [`PredictionResult`](/api/model#predictionresult).
 
-**Parameters**
+``models`` holds ``HybridModel``\ s or ``FitResult``\ s, so the list
+``fit_ensemble`` returns can be passed as is. They must share
+``output_channel_names``. ``data``, ``ts`` and ``n_points`` are as for
+[`HybridModel.predict`](/api/model#hybridmodelpredict).
 
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `state_to_output` |  | Pure mapping ``[T, S] -> [T, D]`` from full simulator state to the observed channels. A property of the model, passed here rather than stored on the ``Dataset``. |
-
-**Returns**
-
-| Item | Type | Description |
-| --- | --- | --- |
-| `tuple[Float[Array, "N T D"], ...]` |  | One ``[N_b, T_b, D]`` array per bucket, in bucket-payload order. |
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L90)</small>
-
----
-
-<a id="predict_dense"></a>
-
-### `predict_dense()`
-
-<small>`from jaxhybridmodels.prediction import predict_dense` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.predict_dense`</small>
-
-```python
-predict_dense(
-    predictors: 'Any',
-    dataset: 'Dataset',
-    simulate_fn: 'Callable[..., Array]',
-    state_to_output: 'Callable[[Array], Array]',
-    solver: 'SolverConfig',
-    ts_grid: 'Array | None' = None,
-    n_points: 'int' = 100,
-) -> tuple[Float[Array, 'N T_d D'], ...]
-```
-
-Evaluate a trained model on a dense time grid, one array per bucket.
-
-``predict_dataset`` returns predictions only at the *measured*
-timestamps. For smooth trajectory plots or dense evaluation you usually
-want more points than that. This builds a fine grid per experiment and
-reuses the same compiled forward pass, so no new kernel or dependency
-is needed (the diffraxtra ``VectorizedDenseInterpolation`` equivalent,
-folded in ~20 lines).
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `ts_grid` |  | Optional shared grid ``[T_d]`` to evaluate every experiment on. If ``None``, each experiment gets its own ``linspace`` from its first to its last measured time with ``n_points`` points. |
-| `n_points` |  | Points per experiment when ``ts_grid`` is ``None``. Ignored otherwise. |
-
-**Returns**
-
-| Item | Type | Description |
-| --- | --- | --- |
-| `tuple[Float[Array, "N T_d D"], ...]` |  | One ``[N, T_d, D]`` array per bucket, in bucket-payload order. |
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L183)</small>
-
----
-
-<a id="ensemble_predictions"></a>
-
-### `ensemble_predictions()`
-
-<small>`from jaxhybridmodels.prediction import ensemble_predictions` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.ensemble_predictions`</small>
-
-```python
-ensemble_predictions(
-    members: 'Sequence[Any]',
-    dataset: 'Dataset',
-    simulate_fn: 'Callable[..., Array]',
-    state_to_output: 'Callable[[Array], Array]',
-    solver: 'SolverConfig',
-) -> tuple[Float[Array, 'N T D'], ...]
-```
-
-Average per-bucket predictions across an ensemble of models.
-
-``members`` is a sequence of predictor pytrees, each one the ``predictors``
-argument you would pass to [`predict_dataset`](/api/prediction#predict_dataset) alone. Each member is
-run forward and the per-bucket predictions are averaged, so the result
-is the same shape as a single ``predict_dataset`` return.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `members` |  | Non-empty sequence of predictor pytrees. Every member must be compatible with the same ``simulate_fn``. |
-
-**Returns**
-
-| Item | Type | Description |
-| --- | --- | --- |
-| `tuple[Float[Array, "N T D"], ...]` |  | The member-mean prediction per bucket, in bucket-payload order. |
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L252)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L201)</small>
 
 ---
 
@@ -210,4 +73,4 @@ has output shape ``()``, so a sweep over 50 temperatures gives ``[50]``.
 | --- | --- | --- |
 | `Array` |  | Call ``float(...)`` on a scalar result for a Python number. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L129)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L268)</small>

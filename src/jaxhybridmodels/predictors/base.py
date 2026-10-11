@@ -287,6 +287,7 @@ class BoundScaler(eqx.Module):
     def __init__(
         self,
         bounds: Any,
+        *,
         transform: str = "sigmoid",
         temperature: Any = 1.0,
         warp: str = "linear",

@@ -138,16 +138,18 @@ See [Training](/guide/training#evosax-then-optax).
 
 ### Check the wiring with everything frozen
 
-Freeze every network and run a few steps. The loss must be identical at
-every step; if it moves, something you did not intend is training.
+Freeze every network and count what is left. Only the `Parameter` scalars
+should remain; anything more is training without your intent.
 
 ```python
-mask = hm.freeze_mask(predictors, (hm.BoundedPredictor,))
+from jaxhybridmodels.trainable import freeze_mask
+
+mask = freeze_mask(model.predictors, hm.BoundedPredictor)
+hm.count_trainable_params(model.predictors, mask=mask)
 ```
 
-`Parameter` leaves are not inside a `BoundedPredictor`; add `hm.Parameter`
-to the tuple as well. `model.fit` refuses a mask with nothing left to train,
-so pass the mask to `train_with_optax` for this check.
+Adding `hm.Parameter` to the entries must bring the count to 0. `fit`
+refuses a mask with nothing left to train, so the count is the check.
 
 ## Traps
 

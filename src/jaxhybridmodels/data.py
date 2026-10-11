@@ -269,6 +269,15 @@ class Dataset(eqx.Module):
         return self._experiments
 
 
+Data = Dataset | Sequence[Experiment]
+"""What the model-level entry points accept as data: a ``Dataset`` or a list of experiments.
+
+``HybridModel.fit``, ``fit_ensemble``, ``predict``, ``predict_ensemble``
+and the trainers in :mod:`jaxhybridmodels.training` all take either. A list
+goes through :func:`make_dataset` with the model's ``output_channel_names``.
+"""
+
+
 def make_experiment(
     *,
     channels: dict[str, ChannelObs],
@@ -691,21 +700,6 @@ def _renamed(experiment: Experiment, exp_id: str) -> Experiment:
         exp_id=exp_id,
         t0=experiment.t0,
     )
-
-
-def _require_dataset(dataset: Any, caller: str) -> None:
-    """Raise a ``TypeError`` naming the fix when ``dataset`` is not a ``Dataset``.
-
-    The functional entry points read ``dataset.bucket_payloads`` straight
-    away, so a list of experiments (which ``HybridModel.fit`` accepts) would
-    otherwise fail with an ``AttributeError`` about ``list``.
-    """
-    if not isinstance(dataset, Dataset):
-        raise TypeError(
-            f"{caller}: pass a Dataset from make_dataset(experiments, "
-            f"output_channel_names=...); got {type(dataset).__name__}. "
-            "HybridModel.fit and predict also accept a list of experiments."
-        )
 
 
 def _named_experiments(experiments: Sequence[Experiment]) -> tuple[Experiment, ...]:

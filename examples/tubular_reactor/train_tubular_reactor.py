@@ -99,7 +99,7 @@ def transport(c: Array, c_in: Array) -> Array:
 def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) -> diffrax.Solution:
     """Integrate the discretised tube for a rate ``g_fn(c, T) * c``."""
     temp, feed = covariates["T"], covariates["c_feed"]
-    c_in = hm.step_profile(feed, 0.3 * feed, T_DROP)
+    c_in = hm.step_profile(before=feed, after=0.3 * feed, jump_at=T_DROP)
 
     def vector_field(t, c, args):
         return transport(c, c_in(t)) - g_fn(c, temp) * c

@@ -1,7 +1,7 @@
 """End-to-end smoke run for losses + prediction (Phase 5).
 
 Builds a tiny harmonic-oscillator dataset, defines a SPEC §4.2-shaped
-``simulate_fn``, runs ``predict_dataset`` with a fixed scalar predictor
+``simulate_fn``, runs ``HybridModel.predict`` with a fixed scalar predictor
 (MLP -> sigmoid-bounded omega), and prints per-bucket prediction shapes
 and ``masked_mse`` losses against ``bp.y_observed``.
 
@@ -20,11 +20,11 @@ from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
+    HybridModel,
     MLPPredictor,
     SolverConfig,
     make_dataset,
     make_experiment,
-    predict_dataset,
 )
 from jaxhybridmodels.losses import masked_mse
 
@@ -124,13 +124,15 @@ def main() -> None:
         out_scaler=BoundScaler(bounds=(0.5, 2.0), transform="sigmoid"),
     )
 
-    preds = predict_dataset(
-        predictor,
-        dataset,
+    model = HybridModel(
+        predictors=predictor,
         simulate_fn=_simulate_fn,
         state_to_output=_state_to_output,
+        output_channel_names=("x",),
         solver=solver,
     )
+    # ``buckets`` keeps the raw [N, T, D] arrays, aligned with the payloads.
+    preds = model.predict(dataset).buckets
 
     for i, (bp, pred) in enumerate(zip(dataset.bucket_payloads, preds, strict=True)):
         loss = masked_mse(pred, bp)

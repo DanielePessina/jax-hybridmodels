@@ -2,7 +2,7 @@
 
 The end-to-end tests come first. They drive the decay models from
 ``tests/_models.py`` through ``train_with_optax``, ``train_with_evosax``
-and ``train_bootstrap_ensemble``, with the penalties set on an
+and a bootstrap ``fit_ensemble``, with the penalties set on an
 ``Objective``, and check that a penalty moves the parameters it should.
 The property tests at the bottom guard the gradient-safe primitives the
 penalties are built from; they are cheap and catch the class of bug where
@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import pytest
-from _models import NETWORK_KWARGS, SOLVER, network_predictors, quiet
+from _models import SOLVER, make_model, network_predictors, quiet, simulate_network
 from jax import Array
 
 import jaxhybridmodels as hm
@@ -44,10 +44,14 @@ from jaxhybridmodels.penalties import (
     strip_penalty_state,
     trajectory_saturation_penalty,
 )
-from jaxhybridmodels.trainable import freeze_paths, trainable_mask
-from jaxhybridmodels.training import EvosaxTrainingConfig, TrainingPhase
+from jaxhybridmodels.trainable import freeze_mask, trainable_mask
+from jaxhybridmodels.training import (
+    EvosaxTrainingConfig,
+    TrainingPhase,
+    train_with_evosax,
+    train_with_optax,
+)
 from jaxhybridmodels.training.kernels import apply_length_mask, build_score_bucket
-from jaxhybridmodels.training.optax import train_bootstrap_ensemble, train_with_optax
 from jaxhybridmodels.ui.testing import RecordingUI
 
 
@@ -102,16 +106,15 @@ def penalty_runs(temp_data):
         ),
     ):
         ui = RecordingUI()
-        history, trained = train_with_optax(
-            start,
+        result = train_with_optax(
+            make_model(start, simulate_network),
             temp_data,
             quiet(phases=phases, restore_best=False),
             objective=objective,
             key=jr.key(0),
             ui=ui,
-            **NETWORK_KWARGS,
         )
-        runs[name] = (history, trained, step_penalties(ui))
+        runs[name] = (list(result.history.loss), result.model.predictors, step_penalties(ui))
     return start, runs
 
 
@@ -136,6 +139,11 @@ def test_penalty_phase_pulls_the_network_out_of_saturation(penalty_runs):
     assert grid_penalty(switched) < grid_penalty(off)
 
 
+def simulate_pressure(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Array:
+    """``simulate_network`` feeding ``temp`` to a rate network that calls it ``pressure``."""
+    return simulate_network(predictors, ts, {"pressure": covariates["temp"]}, y0, solver)
+
+
 def test_an_uncovered_leaf_raises_before_training(temp_data):
     # input_keys that match no covariate leave the leaf with no measured
     # points. With the penalty on, that must fail loudly, not skip the leaf.
@@ -146,22 +154,20 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
     )
     with pytest.raises(ValueError, match="'rate'.*trajectory_penalty_fn"):
         train_with_optax(
-            predictors,
+            make_model(predictors, simulate_pressure),
             temp_data,
             quiet(steps=2),
             objective=Objective(penalty_weight=1e-2),
             key=jr.key(0),
-            **NETWORK_KWARGS,
         )
     # A phase override switches the penalty on for that phase alone, and
     # the coverage check follows it.
     with pytest.raises(ValueError, match="no penalty points"):
         train_with_optax(
-            predictors,
+            make_model(predictors, simulate_pressure),
             temp_data,
             quiet(phases=(TrainingPhase(1), TrainingPhase(1, penalty_weight=1e-2))),
             key=jr.key(0),
-            **NETWORK_KWARGS,
         )
 
 
@@ -176,17 +182,16 @@ def test_malformed_penalty_points_raise(temp_data, points, match):
     objective = Objective(penalty_weight=1e-2, penalty_points=points)
     with pytest.raises(ValueError, match=match):
         train_with_optax(
-            network_predictors(),
+            make_model(network_predictors(), simulate_network),
             temp_data,
             quiet(steps=2),
             objective=objective,
             key=jr.key(0),
-            **NETWORK_KWARGS,
         )
 
 
-def test_penalty_points_are_keyed_by_the_freeze_paths_syntax():
-    """A predictor's penalty-points key is the dotted path ``freeze_paths`` takes.
+def test_penalty_points_are_keyed_by_the_freeze_path_syntax():
+    """A predictor's penalty-points key is the dotted path ``freeze_mask`` takes.
 
     Nested containers join with dots, and a predictor nested inside another
     is reached through ``inner``. Each path prefixes the mask leaves of that
@@ -201,7 +206,7 @@ def test_penalty_points_are_keyed_by_the_freeze_paths_syntax():
     assert paths == ("growth.rate", "nucleation", "nucleation.inner")
     mask = trainable_mask(predictors)
     for path in paths:
-        assert sum(map(bool, jax.tree.leaves(freeze_paths(mask, (path,))))) < sum(
+        assert sum(map(bool, jax.tree.leaves(freeze_mask(predictors, path)))) < sum(
             map(bool, jax.tree.leaves(mask))
         )
 
@@ -282,6 +287,11 @@ EMBEDDED_KWARGS: dict[str, Any] = dict(
 )
 
 
+def embedded_model(predictors: Any) -> hm.HybridModel:
+    """The embedded-penalty model: one observed channel ``x``, accumulators stripped."""
+    return hm.HybridModel(predictors=predictors, output_channel_names=("x",), **EMBEDDED_KWARGS)
+
+
 def embedded_dataset(*, probe: bool = False) -> hm.Dataset:
     """One experiment observed at four times, or a probe with no observations.
 
@@ -325,33 +335,31 @@ TRAJECTORY = Objective(trajectory_penalty_fn=accumulated_penalty, trajectory_pen
 
 def test_evosax_ranks_by_the_trajectory_penalty():
     config = EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5, verbose=False)
-    history, best = hm.train_with_evosax(
-        latent_predictors(5.0),
+    result = train_with_evosax(
+        embedded_model(latent_predictors(5.0)),
         embedded_dataset(),
         config,
         objective=TRAJECTORY,
         key=jr.key(0),
-        **EMBEDDED_KWARGS,
     )
-    assert len(history) == 10
-    assert float(best[0].inner.c) < 5.0
+    assert len(result.history.loss) == 10
+    assert float(result.model.predictors[0].inner.c) < 5.0
 
 
 def test_a_probe_alone_drives_every_bootstrap_member():
     # The probe has no observations, so the penalty is the only gradient.
-    members = train_bootstrap_ensemble(
-        latent_predictors(5.0),
+    members = embedded_model(latent_predictors(5.0)).fit_ensemble(
         embedded_dataset(probe=True),
         quiet(steps=10, lr=1e-1, restore_best=False),
         objective=TRAJECTORY,
-        n_bootstraps=2,
+        n_members=2,
+        bootstrap=True,
         key=jr.key(0),
-        **EMBEDDED_KWARGS,
     )
     assert len(members) == 2
-    for loss, member in members:
-        assert np.isfinite(loss)
-        assert float(member[0].inner.c) < 4.5
+    for member in members:
+        assert np.isfinite(member.final_loss)
+        assert float(member.model.predictors[0].inner.c) < 4.5
 
 
 def test_parallel_saturation_penalty_moves_the_latent_through_the_trainer():
@@ -374,17 +382,21 @@ def test_parallel_saturation_penalty_moves_the_latent_through_the_trainer():
     start = latent_predictors(8.0)
     # Anti-vacuity: the penalty is live at the start.
     assert float(saturation(jnp.full((4, 1), start[0]({"u": 0.0})), None)) > 0.0
-    _, trained = train_with_optax(
-        start,
+    model = hm.HybridModel(
+        predictors=start,
+        simulate_fn=simulate,
+        state_to_output=lambda s: s,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    result = train_with_optax(
+        model,
         dataset,
         quiet(steps=20, lr=1e-1, restore_best=False),
         objective=Objective(trajectory_penalty_fn=saturation, trajectory_penalty_weight=1.0),
-        simulate_fn=simulate,
-        state_to_output=lambda s: s,
-        solver=SOLVER,
         key=jr.key(0),
     )
-    assert float(trained[0].inner.c) < 8.0
+    assert float(result.model.predictors[0].inner.c) < 8.0
 
 
 def test_penalty_state_helpers():

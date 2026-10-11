@@ -45,8 +45,8 @@ asks:
 
 - **Which fields are static.** `in_size`, `out_size`, `n_features` and
   `bandwidth` are `eqx.field(static=True)`. The optimiser never sees them
-  and `save_predictors` does not write them, so the load site has to be
-  able to rebuild them. `bandwidth` is the standard deviation of the
+  and `hm.save` does not write them, so the load site has to be able to
+  rebuild them. `bandwidth` is the standard deviation of the
   frequency draw; because `BoundScaler` hands the inner predictor a latent
   input of roughly unit scale, a value near 1 is the sane start.
 - **How it re-initialises.** The restart
@@ -58,9 +58,9 @@ asks:
   untrainable. Trainability is a mask over the pytree, set by the caller:
   here `fit(freeze=...)` with the bank's paths, which raises on a path
   that matches nothing.
-- **How it round-trips.** `load_predictors` needs a template with the same
-  class, container and static fields, built here by the same
-  `build_predictors` used for training.
+- **How it round-trips.** `hm.load(path, like=model)` needs a model with
+  the same class, container and static fields. The untrained model, built
+  by the same `build_predictors` used for training, is one.
 
 Bounds stay outside: `RandomFourierPredictor` has no bound, covariate name
 or unit. `BoundedPredictor` supplies all three. The rate is constant along

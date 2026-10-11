@@ -31,6 +31,7 @@ from jaxhybridmodels.predictors import (
     reinitialize_with_key,
 )
 from jaxhybridmodels.predictors.kan import _scaffold_parts
+from jaxhybridmodels.serialise import load_predictors, save_predictors
 from jaxhybridmodels.trainable import freeze_mask
 
 IN, OUT = 2, 1
@@ -81,8 +82,8 @@ def test_save_and_load_are_bit_exact(build, tmp_path):
     """R-A5: every family round-trips through save_predictors into a fresh template."""
     predictor = build(jr.key(0))
     path = tmp_path / "predictor.eqx"
-    hm.save_predictors(path, predictor)
-    loaded = hm.load_predictors(path, build(jr.key(1)))
+    save_predictors(path, predictor)
+    loaded = load_predictors(path, like=build(jr.key(1)))
     for a, b in zip(arrays(predictor), arrays(loaded), strict=True):
         np.testing.assert_array_equal(a, b)
     x = jnp.array([0.3, -0.2])
@@ -475,30 +476,24 @@ def test_freeze_mask_rejects_entries_that_match_nothing(freeze, error, match):
         freeze_mask(_model_predictors(), freeze)
 
 
-def test_mask_freezers_need_only_the_mask():
+def test_freeze_mask_chains_on_a_mask_that_trains_the_scalers():
     predictors = _model_predictors()
     mask = hm.trainable_mask(predictors, train_scalers=True)
     assert mask["rate"].in_scaler.temperature is True
-    by_type = hm.freeze_modules_of_type(mask, hm.BoundScaler)
-    by_fn = hm.freeze_where(mask, lambda m: isinstance(m, hm.BoundScaler))
-    for frozen in (by_type, by_fn):
-        assert frozen["rate"].in_scaler.temperature is False
-        assert frozen["offset"].scaler.temperature is False
-        assert _flags(frozen["rate"].inner) == _flags(mask["rate"].inner)
-    assert not any(_flags(hm.freeze_modules_of_type(mask, MLPPredictor)["rate"].inner))
-    # Matching nothing is fine for the structural freezers.
-    assert _flags(hm.freeze_modules_of_type(mask, KANPredictor)) == _flags(mask)
+    frozen = freeze_mask(predictors, hm.BoundScaler, mask=mask)
+    assert frozen["rate"].in_scaler.temperature is False
+    assert frozen["offset"].scaler.temperature is False
+    assert _flags(frozen["rate"].inner) == _flags(mask["rate"].inner)
 
-    one = hm.freeze_paths(mask, ("rate.in_scaler.temperature",))
+    one = freeze_mask(predictors, "rate.in_scaler.temperature", mask=mask)
     assert one["rate"].in_scaler.temperature is False and one["rate"].out_scaler.temperature
     assert sum(_flags(one)) == sum(_flags(mask)) - 1
     # "rate.inner.mlp.layers.1" must not swallow a sibling like "layers.10".
-    layer = hm.freeze_paths(mask, ("rate.inner.mlp.layers.1",))
+    layer = freeze_mask(predictors, "rate.inner.mlp.layers.1", mask=mask)
     assert not any(_flags(layer["rate"].inner.mlp.layers[1]))
     assert all(_flags(layer["rate"].inner.mlp.layers[0]))
-    assert _flags(hm.freeze_paths(mask, ())) == _flags(mask)
     with pytest.raises(ValueError, match="Closest matches"):
-        hm.freeze_paths(mask, ("rate.in_scaler.temprature",))
+        freeze_mask(predictors, "rate.in_scaler.temprature", mask=mask)
 
 
 def test_bounded_predictor_names_missing_inputs():
@@ -513,9 +508,11 @@ def test_bounded_predictor_names_missing_inputs():
         rate({"T": 1.0})
 
 
-def test_freeze_paths_takes_a_bare_string():
-    """One path may be passed as a string, not only a tuple."""
-    predictors = {"rate": hm.Parameter(0.3), "offset": hm.Parameter(0.0)}
-    mask = hm.freeze_paths(hm.trainable_mask(predictors), "rate")
-    assert hm.count_trainable_params(predictors, mask) == 1
-    assert hm.count_trainable_params(predictors, hm.freeze_paths(mask, "offset")) == 0
+def test_count_trainable_params_defaults_to_the_trainable_mask():
+    """The count takes the predictors first and an optional ``mask=``, like ``freeze_mask``."""
+    predictors = {"rate": hm.Parameter(0.3), "offset": hm.Parameter(0.0), "c": hm.Constant(1.0)}
+    assert hm.count_trainable_params(predictors) == 2
+    mask = freeze_mask(predictors, "rate")
+    assert hm.count_trainable_params(predictors, mask=mask) == 1
+    both = freeze_mask(predictors, "offset", mask=mask)
+    assert hm.count_trainable_params(predictors, mask=both) == 0

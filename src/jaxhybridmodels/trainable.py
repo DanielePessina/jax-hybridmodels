@@ -10,20 +10,16 @@ via ``eqx.filter_value_and_grad``; Evosax partitions to derive the flat
 parameter vector via ``eqx.partition(predictors, mask)``. Either way the
 mask's pytree shape is what the partitioner walks.
 
-The default mask trains inexact parameter arrays and freezes ``Constant``
-and ``BoundScaler`` subtrees. ``fit(freeze=...)`` covers the common case
-in one argument, built here by :func:`freeze_mask`:
+The default mask, :func:`trainable_mask`, trains inexact parameter arrays
+and freezes ``Constant`` and ``BoundScaler`` subtrees. ``fit(freeze=...)``
+covers the common case in one argument. :func:`freeze_mask` builds the
+same mask by hand, for inspection or for ``trainable=``. Every function
+here takes ``predictors`` first and never mutates its input, so masks
+chain through ``mask=``::
 
-    mask = freeze_mask(predictors, ("offset", MLPPredictor))
-
-The lower-level freezers are free functions ``(mask, ...) -> mask`` that
-never mutate their input, so masks also compose by chaining:
-
-    mask = trainable_mask(predictors)
-    mask = freeze_modules_of_type(mask, MLPPredictor)
-    mask = freeze_paths(mask, ("rate.inner.mlp.layers.0.bias",))
-
-Each step returns a fresh mask of the same pytree shape.
+    mask = freeze_mask(predictors, MLPPredictor)
+    mask = freeze_mask(predictors, "rate.inner.mlp.layers.0.bias", mask=mask)
+    count_trainable_params(predictors, mask=mask)
 """
 
 from __future__ import annotations
@@ -49,8 +45,8 @@ def default_trainable(leaf: Any) -> bool:
 
 def trainable_mask(
     predictors: Any,
-    predicate: Callable[[Any], bool] = default_trainable,
     *,
+    predicate: Callable[[Any], bool] = default_trainable,
     train_scalers: bool = False,
 ) -> Any:
     """Build a boolean mask matching the structure of ``predictors``.
@@ -133,54 +129,6 @@ def _no_match_error(caller: str, missing: Any, mask: Any) -> ValueError:
     )
 
 
-def freeze_paths(mask: Any, paths: str | Sequence[str]) -> Any:
-    """Return a new mask with leaves at or below ``paths`` set to ``False``.
-
-    Path syntax is dot-joined segments addressing the mask PyTree from its root.
-    Each segment is the bare key produced by :func:`jax.tree_util.tree_flatten_with_path`:
-    attribute names for ``eqx.Module`` fields, integer indices for tuples and
-    lists, and string keys for dicts. ``"inner.mlp.layers.0.weight"``
-    addresses one leaf, ``mask.inner.mlp.layers[0].weight``. A path may also
-    stop at a subtree: ``"rate"`` freezes everything under ``mask["rate"]``.
-    One path may be passed bare, as a string.
-
-    A path matching nothing raises, listing the closest real paths. Ignoring
-    it quietly would leave a leaf the caller believed frozen training as
-    normal, which shows up as a wrong experiment, not a wrong program.
-    """
-    # A bare string would otherwise be iterated character by character.
-    paths = (paths,) if isinstance(paths, str) else tuple(paths)
-    out, matched = _freeze_prefixes(mask, paths)
-    missing = sorted(set(paths) - matched)
-    if missing:
-        raise _no_match_error("freeze_paths", missing, mask)
-    return out
-
-
-def freeze_modules_of_type(mask: Any, cls: type) -> Any:
-    """Return a new mask with every leaf inside any subtree of type ``cls`` set to ``False``.
-
-    Reads the types off the mask itself: a mask built by
-    :func:`trainable_mask` keeps the module classes of the predictors it was
-    built from, with booleans in place of arrays. For example,
-    ``freeze_modules_of_type(mask, MLPPredictor)`` freezes every MLP and
-    leaves the rest of the mask as it was. Matching nothing is not an error.
-    """
-    return freeze_where(mask, lambda m: isinstance(m, cls))
-
-
-def freeze_where(mask: Any, fn: Callable[[eqx.Module], bool]) -> Any:
-    """Return a new mask with every leaf inside any submodule satisfying ``fn`` set to ``False``.
-
-    ``fn`` is called on the mask's copy of each module, whose array leaves
-    have been replaced by booleans. Use a structural test, such as an
-    ``isinstance`` check or a look at a static field. To test the real
-    modules (their values, say), pass the predicate to :func:`freeze_mask`.
-    Matching nothing is not an error.
-    """
-    return _freeze_prefixes(mask, _module_paths(mask, fn))[0]
-
-
 FreezeSpec = str | type | Callable[[Any], bool]
 """One ``freeze=`` entry: a dotted path, a module class, or a module predicate."""
 
@@ -196,21 +144,30 @@ def freeze_mask(
     ``mask`` defaults to :func:`trainable_mask` of ``predictors``. Each
     ``freeze`` entry is one of
 
-    - a dotted path, as for :func:`freeze_paths`, naming a leaf or a whole
-      subtree (``"rate"`` for ``predictors["rate"]``);
+    - a dotted path naming a leaf or a whole subtree: ``"rate"`` for
+      ``predictors["rate"]``, ``"rate.inner.mlp.layers.0.weight"`` for one
+      leaf. Segments are the bare keys of
+      :func:`jax.tree_util.tree_flatten_with_path`: attribute names for
+      ``eqx.Module`` fields, integer indices for tuples and lists, and dict
+      keys;
     - a module class, freezing every instance (``hm.Constant`` is already
       frozen; ``hm.MLPPredictor`` is the usual one);
     - a predicate ``(module) -> bool``, called on the real modules of
       ``predictors``, so it may read their values.
 
-    A single entry may be passed bare. An entry that matches no leaf raises,
-    for the same reason :func:`freeze_paths` does.
+    A single entry may be passed bare. An entry that matches no leaf
+    raises, listing the closest real paths: ignoring it would leave a leaf
+    the caller believed frozen training as normal, which shows up as a
+    wrong experiment rather than a wrong program.
 
     Examples
     --------
     ::
 
         mask = freeze_mask(predictors, ("offset", hm.MLPPredictor))
+        # Chain onto a mask that also trains the scalers.
+        base = trainable_mask(predictors, train_scalers=True)
+        mask = freeze_mask(predictors, "offset", mask=base)
     """
     # A string is a Sequence too, so it is checked first.
     entries = cast(
@@ -238,13 +195,15 @@ def freeze_mask(
     return out
 
 
-def count_trainable_params(predictors: Any, mask: Any) -> int:
-    """Number of trainable scalar parameters selected by ``mask``.
+def count_trainable_params(predictors: Any, *, mask: Any = None) -> int:
+    """Number of trainable scalar parameters ``mask`` selects in ``predictors``.
 
-    Sums the sizes of every leaf the mask marks ``True``. Useful for
-    reporting the effective search dimension before a run (e.g. to sanity
-    check an evosax budget or a phase-transition threshold).
+    ``mask`` defaults to :func:`trainable_mask` of ``predictors``. Sums the
+    sizes of every leaf the mask marks ``True``. Useful for reporting the
+    effective search dimension before a run, say to check an Evosax budget.
     """
+    if mask is None:
+        mask = trainable_mask(predictors)
     total = 0
     for leaf, m in zip(jtu.tree_leaves(predictors), jtu.tree_leaves(mask), strict=True):
         if eqx.is_inexact_array(leaf) and bool(m):

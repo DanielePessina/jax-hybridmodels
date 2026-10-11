@@ -1,7 +1,8 @@
 """Model definitions shared by the batch reactor scripts.
 
 ``train_hybrid.py`` and ``compare_baselines.py`` fit these predictors, and
-``train_rl_deactivation.py`` loads the fitted ones with ``load_predictors``.
+``train_rl_deactivation.py`` loads the fitted ones with
+``serialise.load_predictors``.
 Loading needs a template whose leaves have the same classes and static
 configuration as the saved tree, so every script builds the predictors from
 this one definition. The hidden truth and data generation are in

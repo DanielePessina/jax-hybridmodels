@@ -60,9 +60,9 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import equinox as eqx
 import jax
@@ -75,12 +75,13 @@ from evosax.algorithms.distribution_based.simple_es import SimpleES
 from jax import Array
 from scipy.stats import qmc
 
-from jaxhybridmodels.data import BucketPayload, Dataset, _require_dataset
+from jaxhybridmodels.data import BucketPayload, Data, Dataset
 from jaxhybridmodels.objective import Objective, resolve_objective
 from jaxhybridmodels.penalties import select_penalty_points
+from jaxhybridmodels.results import FitHistory, FitResult
 from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
-from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.trainable import FreezeSpec, trainable_mask
 from jaxhybridmodels.training.kernels import (
     build_dataset_score,
     build_score_bucket,
@@ -88,6 +89,9 @@ from jaxhybridmodels.training.kernels import (
 )
 from jaxhybridmodels.ui.base import EvosaxUI, SilentUI, close_run_on_error
 from jaxhybridmodels.ui.evosax import RichEvosaxUI
+
+if TYPE_CHECKING:
+    from jaxhybridmodels.model import HybridModel
 
 _SUPPORTED_INIT_MODES: tuple[str, ...] = ("warm", "uniform_box", "lhs_box")
 
@@ -348,77 +352,64 @@ class _EvosaxRun:
 
 
 def train_with_evosax(
-    predictors: Any,
-    dataset: Dataset,
+    model: HybridModel,
+    data: Data,
     config: EvosaxTrainingConfig,
     *,
-    objective: Objective | None = None,
-    simulate_fn: Callable[..., Array],
-    state_to_output: Callable[[Array], Array],
-    solver: SolverConfig,
-    trainable: Any = None,
     key: Array,
+    objective: Objective | None = None,
+    freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
+    trainable: Any = None,
     ui: EvosaxUI | None = None,
-    validation: Dataset | None = None,
-) -> tuple[list[float], Any]:
-    """Train ``predictors`` against ``dataset`` with an evolutionary strategy.
+    validation: Data | None = None,
+) -> FitResult:
+    """Train ``model``'s predictors with an evolutionary strategy; ``fit`` for an Evosax config.
 
-    Runs ``config.steps`` generations of CMA-ES over a population of
+    Runs ``config.steps`` generations over a population of
     ``config.population_size`` candidates, taking no gradient. See the
     module docstring for the JIT boundary and the initial-population modes.
+    Every keyword means what it does for :meth:`HybridModel.fit
+    <jaxhybridmodels.HybridModel.fit>`, and ``data`` and ``validation`` may
+    be a ``Dataset`` or a list of experiments.
 
-    ``objective`` says what is minimised; ``None`` means ``Objective()``.
     Each individual's fitness is the bucket-averaged data loss plus any
     trajectory penalty plus ``objective.penalty_weight`` times the bound
     penalty, since evosax ranks by one scalar.
 
-    ``predictors`` is a ``PyTree[eqx.Module]`` in any shape. ``key`` is
-    keyword-only and required. ``state_to_output`` is the pure mapping
-    ``[T, S] -> [T, D]`` from full simulator state to observed channels; a
-    property of the model, passed here rather than stored on the
-    ``Dataset``. ``trainable`` defaults to
-    :func:`jaxhybridmodels.trainable.trainable_mask`, and must select at
-    least one scalar.
-
-    ``validation`` is a held-out dataset with the same channels. When given,
-    each generation's best individual is scored on it (data loss plus any
-    trajectory penalty, full horizon), and the returned predictors are the
-    generation best with the lowest validation score rather than the lowest
-    training fitness. It costs one forward pass over the validation set per
-    generation.
-
-    Returns
-    -------
-    history : list[float]
-        **Best loss so far** at the end of each generation, so the series
-        is monotone non-increasing, one entry per generation (length
-        ``config.steps``). With a bound penalty on, it is the combined
-        fitness.
-
-        It differs from
-        :func:`~jaxhybridmodels.training.optax.train_with_optax`, whose
-        history is the raw per-step loss and can go up. Same type, same
-        position, different meaning: plotting both on one axis misleads.
-    best_predictors : Any
-        Without ``validation``, predictors rebuilt from the lowest-loss flat
-        vector seen in any generation, the warm-up evaluation of the input
-        predictors included. Same container shape as the input.
+    ``history.loss`` is the best fitness so far after each generation, so
+    it is monotone non-increasing; Optax records the raw per-step loss
+    instead, so the two series mean different things. Without
+    ``validation`` the returned model is rebuilt from the lowest-loss
+    candidate seen in any generation, the warm-up evaluation of the input
+    included. With it, each generation's best is scored on the validation
+    set and the returned model is the one that scored lowest there.
     """
-    _require_dataset(dataset, "train_with_evosax")
+    if not isinstance(config, EvosaxTrainingConfig):
+        raise TypeError(
+            f"train_with_evosax takes an EvosaxTrainingConfig; got {type(config).__name__}"
+        )
+    dataset, validation_set, mask = model._prepare_fit(
+        data, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
+    )
     run = _train_with_evosax(
-        predictors,
+        model.predictors,
         dataset,
         config,
         objective=objective,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
+        simulate_fn=model.simulate_fn,
+        state_to_output=model.state_to_output,
+        solver=model.solver,
+        trainable=mask,
         key=key,
         ui=ui,
-        validation=validation,
+        validation=validation_set,
     )
-    return run.loss, run.predictors
+    return FitResult(
+        model=model._with_predictors(run.predictors),
+        history=FitHistory(loss=tuple(run.loss), validation_loss=tuple(run.validation)),
+        best_step=run.best_step,
+        stop_reason="budget_exhausted",
+    )
 
 
 def _train_with_evosax(
@@ -435,10 +426,10 @@ def _train_with_evosax(
     ui: EvosaxUI | None = None,
     validation: Dataset | None = None,
 ) -> _EvosaxRun:
-    """Train and return the per-generation record behind ``train_with_evosax``.
+    """Train loose predictors and return the per-generation record.
 
-    ``HybridModel.fit`` calls this for the loss and validation series and
-    the best generation it reports.
+    The engine behind :func:`train_with_evosax`, on the pieces of a model
+    rather than the model, after its checks have run.
     """
     objective = Objective() if objective is None else objective
     if trainable is None:
@@ -474,7 +465,7 @@ def _train_with_evosax(
             trajectory_penalty_weight=objective.trajectory_penalty_weight,
         )
         select_score = build_dataset_score(
-            score_bucket, validation, channel_names=dataset.output_channel_names
+            score_bucket, validation, output_channel_names=dataset.output_channel_names
         )
 
     ui_ = _select_ui(ui, config.verbose, config.log_every)

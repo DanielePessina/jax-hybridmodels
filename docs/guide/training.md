@@ -72,22 +72,18 @@ drives `patience`. It costs one extra forward pass per step. Evosax takes
 
 ### The functional trainers
 
-`model.fit` wraps `train_with_optax` and `train_with_evosax`. Call them
-directly when you have predictors and callables but no `HybridModel`, or
-when you need the [ensemble helpers](/guide/ensembles):
+`model.fit` picks `train_with_optax` or `train_with_evosax` from
+`jaxhybridmodels.training` by the type of `config`. They take the model
+first and then `fit`'s arguments, and return the same `FitResult`:
 
 ```python
-history, trained = hm.train_with_optax(
-    predictors, dataset, config,
-    objective=objective,
-    simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver,
-    key=key,
-)
+from jaxhybridmodels.training import train_with_optax
+
+result = train_with_optax(model, data, config, objective=objective, key=key)
 ```
 
-Both take a `Dataset` and return `(loss_history, trained_predictors)`. The
-Optax history is the per-step `loss` above; the Evosax history is
-best-so-far.
+For a loop of your own, the compiled pieces they are built from are in
+`jaxhybridmodels.training.kernels`; see [Extending](/guide/extending).
 
 ## Optax
 
@@ -257,21 +253,22 @@ freezes the whole subtree of every module it matches, so matching an outer
 nothing raises, and a path suggests the closest matches.
 
 For full control pass an explicit boolean mask as `trainable=` instead;
-passing both raises. The mask is a pytree matching the predictors, built
-with the same helpers:
+passing both raises. The mask is a pytree matching the predictors.
+`freeze_mask` in `jaxhybridmodels.trainable` is what `freeze=` calls, and
+chains onto any base mask through `mask=`:
 
 ```python
+from jaxhybridmodels.trainable import freeze_mask
+
 mask = hm.trainable_mask(predictors, train_scalers=True)    # also train scaler temperatures
-mask = hm.freeze_paths(mask, ("rate.inner.mlp.layers.0.weight",))
-mask = hm.freeze_modules_of_type(mask, hm.MLPPredictor)
-mask = hm.freeze_mask(predictors, ("offset",), mask=mask)    # the freeze= rules on a mask
+mask = freeze_mask(predictors, ("offset", hm.MLPPredictor), mask=mask)
 result = model.fit(data, config, trainable=mask, key=key)
+hm.count_trainable_params(predictors, mask=mask)
 ```
 
-`freeze_modules_of_type` and `freeze_where` read module types off the mask
-itself, so their predicate sees booleans in place of arrays: test types and
-static fields such as `input_keys`, never array values. A predicate passed
-to `freeze=` or `freeze_mask` sees the real modules.
+`freeze_mask(predictors, freeze, *, mask=None)` takes the same entries as
+`freeze=`, a single one or a sequence, and its predicates see the real
+modules.
 
 `model.fit` raises if nothing is left to train.
 

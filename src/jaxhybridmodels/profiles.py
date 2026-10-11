@@ -9,13 +9,15 @@ profile itself is a pure callable ``t -> Array`` used inside the user's
 vector field:
 
     def vector_field(t, y, args):
-        T = ramp_profile(t0, t1, 25.0, 60.0)(t)   # flat 25, ramp, flat 60
+        T = ramp_profile(t0=t0, t1=t1, v0=25.0, v1=60.0)(t)  # flat, ramp, flat
         ...
 
 Everything here is a pure JAX function, safe under ``jit``, ``vmap``
 and ``grad``, so a profile composes with the framework exactly like
 any other term in the vector field. The functions are factories: they
 close over their parameters and return the ``t -> Array`` callable.
+``step_profile`` and ``ramp_profile`` take their parameters by keyword,
+since several same-typed numbers in a row are easy to swap.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ def constant_profile(value: ArrayLike) -> Profile:
     return profile
 
 
-def step_profile(before: ArrayLike, after: ArrayLike, jump_at: ArrayLike) -> Profile:
+def step_profile(*, before: ArrayLike, after: ArrayLike, jump_at: ArrayLike) -> Profile:
     """Return ``t -> before if t < jump_at else after``: a step change.
 
     For a reactor, the moment a feed valve opens or a heater switches.
@@ -59,7 +61,7 @@ def step_profile(before: ArrayLike, after: ArrayLike, jump_at: ArrayLike) -> Pro
     return profile
 
 
-def ramp_profile(t0: ArrayLike, t1: ArrayLike, v0: ArrayLike, v1: ArrayLike) -> Profile:
+def ramp_profile(*, t0: ArrayLike, t1: ArrayLike, v0: ArrayLike, v1: ArrayLike) -> Profile:
     """Return a flat-ramp-flat profile: ``v0`` until ``t0``, linear to ``v1`` by ``t1``, then flat.
 
     The reactor heat-up shape: hold at the initial set point, ramp to the

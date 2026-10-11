@@ -2,7 +2,7 @@
 
 A review habit from the JAX scalability research: the compiled kernel can
 surprise you even when the Python source looks right. This script lowers
-``predict_bucket`` and a training-style ``bucket_step`` (value_and_grad)
+the private ``_predict_bucket`` and a training-style ``bucket_step`` (value_and_grad)
 to HLO and reports any unexpected dtype ``convert``, layout ``copy``, or
 ``retile`` ops, which XLA inserts "sometimes at non-trivial overhead".
 
@@ -34,7 +34,7 @@ from jaxhybridmodels import (
     make_dataset,
     make_experiment,
 )
-from jaxhybridmodels.prediction import predict_bucket
+from jaxhybridmodels.prediction import _predict_bucket
 from jaxhybridmodels.solver import ADJOINT_REGISTRY
 
 # How many layout-related ops (copy/retile/transpose) are "normal" for
@@ -162,7 +162,7 @@ def main() -> int:
 
     kernels = {}
 
-    compiled_predict = predict_bucket.lower(
+    compiled_predict = _predict_bucket.lower(
         predictor,
         bp,
         simulate_fn=_simulate_fn,
@@ -172,7 +172,7 @@ def main() -> int:
     kernels["predict_bucket"] = compiled_predict.compiled.as_text()
 
     def loss(predictors, bucket):
-        pred = predict_bucket(
+        pred = _predict_bucket(
             predictors,
             bucket,
             simulate_fn=_simulate_fn,

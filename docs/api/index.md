@@ -28,7 +28,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Training: Optax & Evosax Loops](/api/training)
 
-[`Objective`](/api/training#objective), [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`TrainingPhase`](/api/training#trainingphase), [`train_with_optax`](/api/training#train_with_optax), [`train_seed_ensemble`](/api/training#train_seed_ensemble), [`train_bootstrap_ensemble`](/api/training#train_bootstrap_ensemble), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
+[`Objective`](/api/training#objective), [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`TrainingPhase`](/api/training#trainingphase), [`train_with_optax`](/api/training#train_with_optax), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
 
 ## [Training Kernels: Build Your Own Loop](/api/kernels)
 
@@ -40,11 +40,11 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Trainable Masks: Freezing Leaves](/api/trainable)
 
-[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_mask`](/api/trainable#freeze_mask), [`freeze_paths`](/api/trainable#freeze_paths), [`freeze_modules_of_type`](/api/trainable#freeze_modules_of_type), [`freeze_where`](/api/trainable#freeze_where), [`count_trainable_params`](/api/trainable#count_trainable_params)
+[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_mask`](/api/trainable#freeze_mask), [`count_trainable_params`](/api/trainable#count_trainable_params)
 
 ## [Prediction: Forward Simulation](/api/prediction)
 
-[`predict_bucket`](/api/prediction#predict_bucket), [`predict_dataset`](/api/prediction#predict_dataset), [`predict_dense`](/api/prediction#predict_dense), [`ensemble_predictions`](/api/prediction#ensemble_predictions), [`evaluate_predictor`](/api/prediction#evaluate_predictor)
+[`predict_ensemble`](/api/prediction#predict_ensemble), [`evaluate_predictor`](/api/prediction#evaluate_predictor)
 
 ## [Metrics: Per-Channel Evaluation](/api/metrics)
 
@@ -60,7 +60,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Serialise: Save & Load Runs](/api/serialise)
 
-[`save_predictors`](/api/serialise#save_predictors), [`load_predictors`](/api/serialise#load_predictors), [`save_run`](/api/serialise#save_run), [`load_run`](/api/serialise#load_run)
+[`save`](/api/serialise#save), [`load`](/api/serialise#load), [`SavedRun`](/api/serialise#savedrun), [`save_predictors`](/api/serialise#save_predictors), [`load_predictors`](/api/serialise#load_predictors)
 
 ## [UI: Training Dashboards](/api/ui)
 

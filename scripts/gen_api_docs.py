@@ -143,8 +143,6 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "OptaxTrainingConfig",
             "TrainingPhase",
             "train_with_optax",
-            "train_seed_ensemble",
-            "train_bootstrap_ensemble",
             "EvosaxTrainingConfig",
             "train_with_evosax",
             "register_algorithm",
@@ -181,9 +179,6 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "default_trainable",
             "trainable_mask",
             "freeze_mask",
-            "freeze_paths",
-            "freeze_modules_of_type",
-            "freeze_where",
             "count_trainable_params",
         ),
     ),
@@ -191,10 +186,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "prediction",
         "Prediction: Forward Simulation",
         (
-            "predict_bucket",
-            "predict_dataset",
-            "predict_dense",
-            "ensemble_predictions",
+            "predict_ensemble",
             "evaluate_predictor",
         ),
     ),
@@ -226,10 +218,11 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "serialise",
         "Serialise: Save & Load Runs",
         (
+            "save",
+            "load",
+            "SavedRun",
             "save_predictors",
             "load_predictors",
-            "save_run",
-            "load_run",
         ),
     ),
     (
@@ -278,7 +271,6 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "strip_penalty_state": "jaxhybridmodels.penalties",
     "trajectory_saturation_penalty": "jaxhybridmodels.penalties",
     "validate_penalty_points": "jaxhybridmodels.penalties",
-    "predict_bucket": "jaxhybridmodels.prediction",
     "reinitialize_pytree_with_key": "jaxhybridmodels.predictors",
     "reinitialize_with_key": "jaxhybridmodels.predictors",
     "fold": "jaxhybridmodels.rng",
@@ -288,6 +280,11 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "register_adjoint": "jaxhybridmodels.solver",
     "register_solver": "jaxhybridmodels.solver",
     "default_trainable": "jaxhybridmodels.trainable",
+    "freeze_mask": "jaxhybridmodels.trainable",
+    "load_predictors": "jaxhybridmodels.serialise",
+    "save_predictors": "jaxhybridmodels.serialise",
+    "train_with_evosax": "jaxhybridmodels.training",
+    "train_with_optax": "jaxhybridmodels.training",
     "register_algorithm": "jaxhybridmodels.training.evosax",
     "apply_length_mask": "jaxhybridmodels.training.kernels",
     "build_apply_update": "jaxhybridmodels.training.kernels",
@@ -750,11 +747,14 @@ PAGE_INTROS: dict[str, str] = {
         "implementations so saved configs round-trip cleanly."
     ),
     "training": (
-        "Choose [`train_with_optax`](#train_with_optax) for gradient-based "
-        "fitting or [`train_with_evosax`](#train_with_evosax) for population "
-        "search over small parameter sets. Both take the same model pieces, "
-        "return `(loss_history, trained_predictors)`, and require an explicit "
-        "keyword-only `key`."
+        "`HybridModel.fit` and `HybridModel.fit_ensemble` are the entry points. "
+        "[`Objective`](#objective) says what is minimised; "
+        "[`OptaxTrainingConfig`](#optaxtrainingconfig) or "
+        "[`EvosaxTrainingConfig`](#evosaxtrainingconfig) says how to search. "
+        "[`train_with_optax`](#train_with_optax) and "
+        "[`train_with_evosax`](#train_with_evosax) are the functions `fit` "
+        "dispatches to: they take the model first, then `fit`'s arguments, "
+        "and return a `FitResult`."
     ),
     "losses": (
         "Loss functions consume a model's predicted output `[N, T, D]` and "
@@ -777,43 +777,47 @@ PAGE_INTROS: dict[str, str] = {
     "metrics": (
         "Per-channel evaluation of trained predictions, mirroring the loss "
         "mask discipline: only cells the bucket mask marks as real "
-        "measurements count. `compute_metrics(predictions, dataset)` returns "
-        "one `ChannelMetrics` per output channel with MSE, RMSE, MAE and R^2; "
+        "measurements count. `compute_metrics(predictions)` takes the result "
+        "of `model.predict(data)` and returns one `ChannelMetrics` per output "
+        "channel with MSE, RMSE, MAE and R^2; "
         "`print_metrics` renders them as a table."
     ),
     "trainable": (
-        "Trainability is encoded as a boolean PyTree mask matching the "
-        "predictors pytree's structure. The training loop calls "
-        "`eqx.partition(predictors, mask)` once at start, optimises only the "
-        "`True` leaves, and re-combines.\n\n"
-        "[`trainable_mask`](#trainable_mask) builds the default mask "
-        "(every inexact-array leaf trainable). The `freeze_*` helpers compose "
-        "to zero out subsets — by path, by module type, or by arbitrary "
-        "predicate."
+        "Trainability is a boolean pytree mask with the structure of the "
+        "predictors. Training partitions the predictors on it once and "
+        "optimises only the `True` leaves.\n\n"
+        "[`trainable_mask`](#trainable_mask) builds the default mask (every "
+        "inexact-array leaf except `Constant`s and scalers). "
+        "[`freeze_mask`](#freeze_mask) is what `fit(freeze=...)` calls: it "
+        "sets the leaves matched by paths, classes or predicates to `False`, "
+        "on top of an optional `mask=`. Pass its result as `fit(trainable=...)` "
+        "when `freeze=` is not enough."
     ),
     "prediction": (
-        "Forward-simulate trained predictors against a dataset. "
-        "[`predict_bucket`](#predict_bucket) is the single-bucket primitive "
-        "(JIT-compiled, vmapped over the bucket's `N` axis); "
-        "[`predict_dataset`](#predict_dataset) walks every bucket and returns "
-        "one `[N, T, D]` array per bucket."
+        "`HybridModel.predict` and `HybridModel.simulate` cover one model. "
+        "[`predict_ensemble`](#predict_ensemble) predicts with several and "
+        "returns the member mean as a `PredictionResult`, with the "
+        "per-channel spread in each experiment's `std` and each member's own "
+        "result in `members`. [`evaluate_predictor`](#evaluate_predictor) "
+        "calls one predictor outside any ODE."
     ),
     "serialise": (
-        "Serialisation uses Equinox's `tree_serialise_leaves` / "
-        "`tree_deserialise_leaves` under the hood. "
-        "[`save_predictors`](#save_predictors) / [`load_predictors`](#load_predictors) "
-        "round-trip a single predictor tree; [`save_run`](#save_run) / "
-        "[`load_run`](#load_run) bundle predictors, solver config, training "
-        "config, and loss history into one directory.\n\n"
-        "**Loading requires a template.** Equinox can't reconstruct module "
-        "shapes from a binary blob, so you instantiate the same predictor "
-        "structure (same shapes, same Module types) and the loader fills its "
-        "leaves."
+        "[`save`](#save) writes a `HybridModel` or a `FitResult` to a "
+        "directory, with the solver, and optionally the training config and "
+        "objective. [`load`](#load) reads it back into a "
+        "[`SavedRun`](#savedrun).\n\n"
+        "**Loading needs a template.** Equinox cannot rebuild module shapes "
+        "from the leaf file, so `load(path, like=model)` takes a model built "
+        "the same way and fills its leaves. The template also supplies "
+        "`simulate_fn` and `state_to_output`, which are code and are not "
+        "saved. [`save_predictors`](#save_predictors) / "
+        "[`load_predictors`](#load_predictors) do the same for a bare "
+        "predictor tree."
     ),
     "ui": (
         "Training UIs are protocols implemented by `RichTrainingUI` / "
         "`RichEvosaxUI` (live dashboards) and `SilentUI` (no-op). Pass via "
-        "the `ui=` keyword on `train_with_optax` / `train_with_evosax`; the "
+        "the `ui=` keyword of `fit` or `fit_ensemble`; the "
         "trainer calls lifecycle hooks (`on_phase_start`, `on_step_end`, "
         "`on_run_end`, ...) at the right points. Custom UIs implement the "
         "matching protocol — useful for piping training metrics into your "

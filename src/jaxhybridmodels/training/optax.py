@@ -33,9 +33,9 @@ from __future__ import annotations
 import itertools
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import KW_ONLY, InitVar, dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import equinox as eqx
 import jax
@@ -45,8 +45,8 @@ from jaxtyping import Array
 
 from jaxhybridmodels.data import (
     BucketPayload,
+    Data,
     Dataset,
-    _require_dataset,
     make_bootstrap_dataset,
 )
 from jaxhybridmodels.objective import Objective, ResolvedObjective, resolve_objective
@@ -56,9 +56,10 @@ from jaxhybridmodels.penalties import (
     select_penalty_points,
 )
 from jaxhybridmodels.predictors.base import reinitialize_pytree_with_key
+from jaxhybridmodels.results import FitHistory, FitResult
 from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
-from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.trainable import FreezeSpec, trainable_mask
 from jaxhybridmodels.training.kernels import (
     build_apply_update,
     build_bucket_step,
@@ -68,6 +69,9 @@ from jaxhybridmodels.training.kernels import (
 )
 from jaxhybridmodels.ui.base import SilentUI, TrainingUI, close_run_on_error
 from jaxhybridmodels.ui.optax import RichTrainingUI
+
+if TYPE_CHECKING:
+    from jaxhybridmodels.model import HybridModel
 
 # An optimizer entry may be a registered name ("adamw"), a factory taking
 # ``learning_rate`` and returning an ``optax.GradientTransformation``, or a
@@ -518,7 +522,15 @@ def _shared_tournament(
         try:
             # One subkey per Module leaf, so identical-shape sibling
             # predictors get genuinely different fresh weights.
-            candidate: Any = reinitialize_pytree_with_key(predictors, attempt_key)
+            fresh = reinitialize_pytree_with_key(predictors, attempt_key)
+            # Re-init draws every Module leaf, frozen ones included. Put the
+            # frozen leaves back, so a frozen pre-trained subtree (or a
+            # default-frozen BoundScaler) keeps its values instead of being
+            # held fixed at random ones.
+            candidate: Any = eqx.combine(
+                eqx.filter(fresh, trainable),
+                eqx.filter(predictors, trainable, inverse=True),
+            )
             opt_state = optimizer.init(eqx.filter(candidate, trainable))
             if _optimiser_state_supports_lr(opt_state):
                 _set_lr(opt_state, tournament_lr)
@@ -845,85 +857,74 @@ def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
 
 
 def train_with_optax(
-    predictors: Any,
-    dataset: Dataset,
+    model: HybridModel,
+    data: Data,
     config: OptaxTrainingConfig,
     *,
-    objective: Objective | None = None,
-    simulate_fn: Callable[..., Array],
-    state_to_output: Callable[[Array], Array],
-    solver: SolverConfig,
-    trainable: Any = None,
     key: Array,
+    objective: Objective | None = None,
+    freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
+    trainable: Any = None,
     ui: TrainingUI | None = None,
-    validation: Dataset | None = None,
-) -> tuple[list[float], Any]:
-    """Train ``predictors`` against ``dataset`` with Optax.
+    validation: Data | None = None,
+) -> FitResult:
+    """Train ``model``'s predictors with Optax; what ``model.fit`` runs for an Optax config.
 
     Runs the phases described by ``config``, optionally preceded by a
-    tournament. See the module docstring for what a step, a phase, and
-    the tournament are, and :class:`OptaxTrainingConfig` for the fields.
+    tournament. See the module docstring for what a step, a phase, and the
+    tournament are, and :class:`OptaxTrainingConfig` for the fields. Every
+    keyword means what it does for :meth:`HybridModel.fit
+    <jaxhybridmodels.HybridModel.fit>`, and ``data`` and ``validation`` may
+    be a ``Dataset`` or a list of experiments.
 
-    ``objective`` says what is minimised (loss, channel weights,
-    penalties); ``None`` means ``Objective()``, plain MSE with no penalty.
+    ``history.loss`` is the raw per-step loss, measured before that step's
+    update, concatenated across phases. It can go up. It is the data term
+    plus any trajectory penalty; the bound penalty is in
+    ``history.penalty``, so a ramping bound weight does not move the loss
+    series. Evosax records best-so-far instead, so the two series mean
+    different things.
 
-    ``predictors`` is a ``PyTree[eqx.Module]``, conventionally a dict of
-    predictors but any shape ``eqx.partition`` can walk. ``key`` is
-    keyword-only and required, so reproducibility never rests on an
-    implicit default.
-
-    ``state_to_output`` is the pure mapping ``[T, S] -> [T, D]`` from full
-    simulator state to observed channels. It is a property of the model,
-    passed here rather than stored on the ``Dataset``.
-
-    ``trainable`` is a boolean mask matching ``predictors``. Omitting it
-    defaults to :func:`jaxhybridmodels.trainable.trainable_mask`, which marks
-    inexact parameter arrays trainable, with constants and scalers fixed.
-    Pass a custom mask to hold additional leaves fixed.
-
-    ``validation`` is a held-out dataset with the same channels. When given,
-    its full-horizon score under the same objective (data loss plus any
-    trajectory penalty) replaces the training loss for picking the returned
-    step and for ``patience``, at the cost of one forward pass over it per
-    step.
-
-    Returns
-    -------
-    tuple[list[float], PyTree[eqx.Module]]
-        ``(loss_history, trained_predictors)``.
-
-        ``loss_history`` is the **raw per-step loss**, one entry per
-        step, concatenated across phases. It can go up. It is the data
-        term plus any configured trajectory penalty (charged inside the
-        bucket forward pass); the bound penalty is excluded, so a ramping
-        bound-penalty weight cannot move the series and runs with
-        different bound weights stay comparable, and nothing is smoothed:
-        these are the values the optimiser saw.
-
-        It differs from
-        :func:`~jaxhybridmodels.training.evosax.train_with_evosax`, whose
-        history is best-so-far and therefore monotone. Same type, same
-        position, different meaning: plotting both on one axis misleads.
-
-        ``trained_predictors`` comes from the lowest-loss step when
-        ``config.restore_best=True``, else the final step. That minimum
-        resets whenever the phase horizon changes, so the returned model
-        always comes from the last horizon trained on."""
-    _require_dataset(dataset, "train_with_optax")
+    The returned model comes from the lowest-loss step when
+    ``config.restore_best=True``, else the final step. That minimum resets
+    whenever the phase horizon changes, so the returned model always comes
+    from the last horizon trained on.
+    """
+    if not isinstance(config, OptaxTrainingConfig):
+        raise TypeError(
+            f"train_with_optax takes an OptaxTrainingConfig; got {type(config).__name__}"
+        )
+    dataset, validation_set, mask = model._prepare_fit(
+        data, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
+    )
     run = _train_with_optax(
-        predictors,
+        model.predictors,
         dataset,
         config,
         objective=objective,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
+        simulate_fn=model.simulate_fn,
+        state_to_output=model.state_to_output,
+        solver=model.solver,
+        trainable=mask,
         key=key,
         ui=ui,
-        validation=validation,
+        validation=validation_set,
     )
-    return run.loss, run.predictors
+    return _fit_result(model, run)
+
+
+def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
+    """Wrap one phase run as the user-facing :class:`FitResult`."""
+    return FitResult(
+        model=model._with_predictors(run.predictors),
+        history=FitHistory(
+            loss=tuple(run.loss),
+            penalty=tuple(run.penalty),
+            phase=tuple(run.phase),
+            validation_loss=tuple(run.selection),
+        ),
+        best_step=run.best_step,
+        stop_reason="patience" if run.stopped_early else "budget_exhausted",
+    )
 
 
 def _train_with_optax(
@@ -940,10 +941,10 @@ def _train_with_optax(
     ui: TrainingUI | None = None,
     validation: Dataset | None = None,
 ) -> _PhaseRun:
-    """Train and return the full per-step record behind ``train_with_optax``.
+    """Train loose predictors and return the full per-step record.
 
-    ``HybridModel.fit`` calls this for the per-step loss, penalty, phase and
-    validation series it reports in ``FitHistory``.
+    The engine behind :func:`train_with_optax`, on the pieces of a model
+    rather than the model, after its checks have run.
     """
     if trainable is None:
         trainable = trainable_mask(predictors)
@@ -1264,7 +1265,7 @@ def _build_training_kernels(
     settle = _has_weak_scalar_trainable(predictors, trainable)
     first = config.phases[0]
     optimizer = _build_optimizer(first.optimizer, _start_lr(first.lr))
-    apply_update = build_apply_update(optimizer, trainable)
+    apply_update = build_apply_update(optimizer=optimizer, trainable=trainable)
     step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
     _warmup_compile(
         predictors,
@@ -1293,183 +1294,45 @@ def _build_training_kernels(
     )
 
 
-def train_seed_ensemble(
-    predictors: Any,
-    dataset: Dataset,
+def _fit_ensemble(
+    model: HybridModel,
+    data: Data,
     config: OptaxTrainingConfig,
     *,
-    objective: Objective | None = None,
-    simulate_fn: Callable[..., Array],
-    state_to_output: Callable[[Array], Array],
-    solver: SolverConfig,
-    n_seeds: int,
-    k_best: int | None = None,
-    trainable: Any = None,
     key: Array,
-    ui: TrainingUI | None = None,
-) -> list[tuple[float, Any]]:
-    """Train a seed ensemble: rank warm starts, fully train the best ``k_best``.
+    n_members: int,
+    n_seeds: int | None,
+    bootstrap: bool,
+    objective: Objective | None,
+    freeze: Sequence[FreezeSpec] | FreezeSpec | None,
+    trainable: Any,
+    ui: TrainingUI | None,
+) -> list[FitResult]:
+    """The body of :meth:`HybridModel.fit_ensemble`; see there for the two modes.
 
-    The **tournament** already ranks fresh initialisations cheaply (a few
-    warm-up steps each, scored forward-only). This reuses that ranking to
-    pick which seeds deserve a full training run, instead of fully training
-    every seed: with ``n_seeds`` tournament attempts it keeps the best
-    ``k_best`` (default: all ``n_seeds``) and runs the full phase schedule
-    on each.
-
-    Returns the fully trained members as a list of ``(final_loss,
-    predictors)`` ranked ascending by final loss, in the same container
-    shape as the single ``predictors`` you passed in, so the result is an
-    ensemble of model pytrees ready for :func:`ensemble_predictions`.
-    ``final_loss`` labels the returned member: the best-step loss when
-    ``config.restore_best`` is set (measured exactly at the returned
-    parameters), else the last step's reported loss (measured one update
-    before, as the loop reports it).
-
-    ``config.tournament_steps`` controls how much warm-up each seed gets
-    before ranking; the default ``0`` ranks by the initialisation score
-    alone (still a valid, cheapest ranking). ``config`` is otherwise used
-    exactly as in :func:`train_with_optax`.
-
-    Each member is its own UI run: the warm-up compile and the tournament
-    land inside the first member's bracket, and ``on_run_start`` /
-    ``on_run_end`` are fired once per member, so a live dashboard shows
-    each member's phases rather than freezing after the first.
+    The kernels are built and warmed once and shared by every member. Each
+    member is its own UI run: the warm-up compile and the first scoring
+    sweep land inside the first member's bracket, and ``_run_phases`` fires
+    each member's ``on_run_end``.
     """
-    _require_dataset(dataset, "train_seed_ensemble")
-    if trainable is None:
-        trainable = trainable_mask(predictors)
-    if k_best is None:
-        k_best = n_seeds
-    if not (0 < k_best <= n_seeds):
-        raise ValueError(
-            f"train_seed_ensemble: k_best={k_best} must satisfy 0 < k_best <= n_seeds={n_seeds}"
-        )
-
-    bucket_payloads = dataset.bucket_payloads
-    if not bucket_payloads:
-        raise ValueError("train_seed_ensemble: dataset has no bucket payloads")
-
-    # Resolved before the dashboard opens; see _train_with_optax.
-    resolved = _resolve_objective(objective, predictors, dataset, config)
-    ui_ = _select_ui(ui, config.verbose)
-    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-    with close_run_on_error(ui_):
-        kernels = _build_training_kernels(
-            predictors=predictors,
-            dataset=dataset,
-            config=config,
-            resolved=resolved,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
-            trainable=trainable,
-            ui=ui_,
-        )
-
-        full_mask = jnp.asarray(1.0)
-        ranked = _shared_tournament(
-            predictors,
-            dataset,
-            bucket_step=kernels.bucket_step,
-            score_bucket=kernels.score_bucket,
-            apply_update=kernels.apply_update,
-            optimizer=kernels.optimizer,
-            trainable=trainable,
-            tournament_attempts=n_seeds,
-            tournament_steps=config.tournament_steps,
-            tournament_lr=config.tournament_lr,
-            key=fold(key, "seed_ensemble_tournament"),
-            length_mask_fraction=full_mask,
-            top_k=k_best,
-        )
-
-        trained: list[tuple[float, Any]] = []
-        for member_idx, (_seed_score, candidate) in enumerate(ranked):
-            if not math.isfinite(_seed_score):
-                continue
-            # Every member is its own UI run: each gets a fresh on_run_start
-            # (the first also brackets the warm-up compile), and _run_phases
-            # fires the matching on_run_end.
-            if member_idx > 0:
-                ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-            run = _run_phases(
-                candidate,
-                dataset,
-                config,
-                kernels=kernels,
-                sources=kernels.sources,
-                trainable=trainable,
-                ui=ui_,
-            )
-            trained.append((run.final_loss, run.predictors))
-
-        if not trained:
-            warnings.warn(
-                "train_seed_ensemble: every seed failed its warm-up; returning the "
-                "input predictors as a single-member ensemble.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            # Close the run bracket opened by the per-member on_run_start
-            # above, so a live dashboard does not hang after the fallback.
-            ui_.on_run_end(final_loss=math.inf)
-            return [(math.inf, predictors)]
-
-        trained.sort(key=lambda pair: pair[0])
-        return trained
-
-
-def train_bootstrap_ensemble(
-    predictors: Any,
-    dataset: Dataset,
-    config: OptaxTrainingConfig,
-    *,
-    objective: Objective | None = None,
-    simulate_fn: Callable[..., Array],
-    state_to_output: Callable[[Array], Array],
-    solver: SolverConfig,
-    n_bootstraps: int,
-    n_seeds: int = 1,
-    k_best: int | None = None,
-    trainable: Any = None,
-    key: Array,
-    ui: TrainingUI | None = None,
-) -> list[tuple[float, Any]]:
-    """Train a bootstrap ensemble: one (or a seed-set of) model(s) per resample.
-
-    For each of ``n_bootstraps`` resampled datasets (via
-    :func:`jaxhybridmodels.make_bootstrap_dataset`), trains a model. With
-    ``n_seeds > 1`` each resample's member is itself seed-selected by
-    :func:`train_seed_ensemble` (so every member both sees different data
-    *and* is a good seed); with ``n_seeds == 1`` each resample contributes
-    one fresh re-initialisation trained via the same phase schedule as
-    :func:`train_with_optax`.
-
-    Returns the members as a list of ``(final_loss, predictors)`` ranked
-    ascending by final loss across **all** bootstrap samples. ``k_best``
-    trims the ensemble to its best members overall (default: keep
-    ``n_bootstraps * max(n_seeds, 1)``). ``final_loss`` labels the
-    returned member: the best-step loss when ``config.restore_best`` is
-    set (measured exactly at the returned parameters), else the last
-    step's reported loss (measured one update before, as the loop
-    reports it).
-
-    Every resample and every training run is folded off the one ``key``, so
-    the whole ensemble is deterministic given it. Each member is its own
-    UI run, bracketed by ``on_run_start`` / ``on_run_end``.
-    """
-    _require_dataset(dataset, "train_bootstrap_ensemble")
-    if n_bootstraps < 1:
-        raise ValueError(f"train_bootstrap_ensemble: n_bootstraps must be >= 1, got {n_bootstraps}")
+    for name, value in (("n_members", n_members), ("n_seeds", n_seeds)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise TypeError(f"fit_ensemble: {name} must be an int; got {value!r}")
+    if n_members < 1:
+        raise ValueError(f"fit_ensemble: n_members must be >= 1, got {n_members}")
+    if n_seeds is None:
+        n_seeds = 1 if bootstrap else n_members
     if n_seeds < 1:
-        raise ValueError(f"train_bootstrap_ensemble: n_seeds must be >= 1, got {n_seeds}")
-    if trainable is None:
-        trainable = trainable_mask(predictors)
-
-    bucket_payloads = dataset.bucket_payloads
-    if not bucket_payloads:
-        raise ValueError("train_bootstrap_ensemble: dataset has no bucket payloads")
+        raise ValueError(f"fit_ensemble: n_seeds must be >= 1, got {n_seeds}")
+    if not bootstrap and n_members > n_seeds:
+        raise ValueError(
+            f"fit_ensemble: n_members={n_members} exceeds n_seeds={n_seeds}; a seed "
+            "ensemble trains the best n_members of n_seeds seeds"
+        )
+    dataset, _, mask = model._prepare_fit(
+        data, validation=None, freeze=freeze, trainable=trainable, caller="fit_ensemble"
+    )
+    predictors = model.predictors
 
     # Resolved before the dashboard opens; see _train_with_optax.
     resolved = _resolve_objective(objective, predictors, dataset, config)
@@ -1481,72 +1344,78 @@ def train_bootstrap_ensemble(
             dataset=dataset,
             config=config,
             resolved=resolved,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
-            trainable=trainable,
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+            trainable=mask,
             ui=ui_,
         )
 
-        all_trained: list[tuple[float, Any]] = []
-        for s in range(n_bootstraps):
-            boot = make_bootstrap_dataset(dataset, key=fold(key, f"bootstrap_{s}"))
-            sample_key = fold(key, f"bootstrap_seeds_{s}")
-            full_mask = jnp.asarray(1.0)
-            ranked = _shared_tournament(
+        def rank(data_: Dataset, seed_key: Array, top_k: int) -> list[tuple[float, Any]]:
+            return _shared_tournament(
                 predictors,
-                boot,
+                data_,
                 bucket_step=kernels.bucket_step,
                 score_bucket=kernels.score_bucket,
                 apply_update=kernels.apply_update,
                 optimizer=kernels.optimizer,
-                trainable=trainable,
+                trainable=mask,
                 tournament_attempts=n_seeds,
                 tournament_steps=config.tournament_steps,
                 tournament_lr=config.tournament_lr,
-                key=fold(sample_key, "bootstrap_sample_tournament"),
-                length_mask_fraction=full_mask,
-                top_k=n_seeds if n_seeds > 1 else 1,
+                key=seed_key,
+                length_mask_fraction=jnp.asarray(1.0),
+                top_k=top_k,
             )
-            for member_idx, (_seed_score, candidate) in enumerate(ranked):
-                if not math.isfinite(_seed_score):
-                    continue
-                # Every member is its own UI run: each gets a fresh
-                # on_run_start (the first also brackets the warm-up compile),
-                # and _run_phases fires the matching on_run_end.
-                if s > 0 or member_idx > 0:
-                    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-                run = _run_phases(
-                    candidate,
-                    boot,
-                    config,
-                    kernels=kernels,
-                    # The resample changes the covariate values, so the measured
-                    # points are gathered from the boot sample, not the source.
-                    sources=data_penalty_points(predictors, boot),
-                    trainable=trainable,
-                    ui=ui_,
-                )
-                all_trained.append((run.final_loss, run.predictors))
 
-        if not all_trained:
-            warnings.warn(
-                "train_bootstrap_ensemble: every member failed; returning the input "
-                "predictors as a single-member ensemble.",
-                RuntimeWarning,
-                stacklevel=2,
+        # (training data, seed) per member. The key labels are the ones the
+        # earlier train_seed_ensemble and train_bootstrap_ensemble used, so a
+        # given key still draws the same members.
+        jobs: list[tuple[Dataset, tuple[float, Any]]]
+        if bootstrap:
+            jobs = []
+            for s in range(n_members):
+                boot = make_bootstrap_dataset(dataset, key=fold(key, f"bootstrap_{s}"))
+                sample_key = fold(key, f"bootstrap_seeds_{s}")
+                best = rank(boot, fold(sample_key, "bootstrap_sample_tournament"), 1)
+                jobs.append((boot, best[0]))
+        else:
+            ranked = rank(dataset, fold(key, "seed_ensemble_tournament"), n_members)
+            jobs = [(dataset, seed) for seed in ranked]
+
+        trained: list[FitResult] = []
+        for data_, (seed_score, candidate) in jobs:
+            if not math.isfinite(seed_score):
+                continue
+            # The first member's on_run_start is the one opened above.
+            if trained:
+                ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+            run = _run_phases(
+                candidate,
+                data_,
+                config,
+                kernels=kernels,
+                # A resample changes the covariate values, so its measured
+                # penalty points are gathered from the resample itself.
+                sources=data_penalty_points(predictors, data_) if bootstrap else kernels.sources,
+                trainable=mask,
+                ui=ui_,
             )
-            # Close the run bracket opened by the per-member on_run_start
-            # above, so a live dashboard does not hang after the fallback.
-            ui_.on_run_end(final_loss=math.inf)
-            return [(math.inf, predictors)]
+            trained.append(_fit_result(model, run))
 
-        all_trained.sort(key=lambda pair: pair[0])
-        if k_best is not None:
-            if not (0 < k_best <= len(all_trained)):
-                raise ValueError(
-                    f"train_bootstrap_ensemble: k_best={k_best} must satisfy "
-                    f"0 < k_best <= ensemble size {len(all_trained)}"
-                )
-            all_trained = all_trained[:k_best]
-        return all_trained
+        if not trained:
+            raise RuntimeError(
+                "fit_ensemble: every seed failed its warm-up (a solver error or a "
+                "non-finite loss); no member was trained"
+            )
+    # Stable, so a tie keeps the seed ranking. FitResult.final_loss is the
+    # loss _run_phases reports for the returned parameters. It is NaN when
+    # restore_best found no finite loss, and NaN breaks the ordering of the
+    # whole sort, so such a member ranks last.
+    return sorted(trained, key=_rank_key)
+
+
+def _rank_key(result: FitResult) -> float:
+    """Sort key for ensemble members: final loss, with NaN ranked as ``inf``."""
+    loss = result.final_loss
+    return loss if not math.isnan(loss) else math.inf

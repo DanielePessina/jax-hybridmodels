@@ -132,11 +132,16 @@ def quiet(**kwargs: Any) -> OptaxTrainingConfig:
     return OptaxTrainingConfig(verbose=False, **kwargs)
 
 
-# Keyword arguments for the functional trainers (train_with_optax and
-# friends) on the Parameter model.
-PARAMETER_KWARGS: dict[str, Any] = dict(
-    simulate_fn=simulate_parameter, state_to_output=identity, solver=SOLVER
-)
-NETWORK_KWARGS: dict[str, Any] = dict(
-    simulate_fn=simulate_network, state_to_output=identity, solver=SOLVER
-)
+def make_model(
+    predictors: Any,
+    simulate_fn: Callable[..., Any] = simulate_parameter,
+    output_channel_names: tuple[str, ...] = CHANNELS,
+) -> hm.HybridModel:
+    """A model around any predictors and ``simulate_fn``, with the shared solver."""
+    return hm.HybridModel(
+        predictors=predictors,
+        simulate_fn=simulate_fn,
+        state_to_output=identity,
+        output_channel_names=output_channel_names,
+        solver=SOLVER,
+    )

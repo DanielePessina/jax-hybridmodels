@@ -11,7 +11,7 @@ Shows:
 - a custom ``Predictor`` with static fields and ``initialized_with_key``
 - ``HybridModel.fit(freeze=...)`` with dotted paths to hold the bank
 - the restart tournament (``tournament_attempts``)
-- ``save_predictors`` / ``load_predictors`` round-trip through a template
+- ``hm.save`` / ``hm.load(like=...)`` round-trip through a template model
 
 Run::
 
@@ -336,13 +336,14 @@ def main() -> None:
     print(f"{len(result.history.loss)} steps; final loss {result.history.loss[-1]:.6e}")
     print_rate_table(trained, "rates after training:")
 
-    # Static fields are not saved. ``load_predictors`` takes them from a
-    # template, built here by the same function with any key.
-    template = build_predictors(jr.key(0), n_features=args.n_features, bandwidth=args.bandwidth)
+    # Static fields and simulate_fn are not saved. ``load`` takes them from
+    # ``like``, a model built the same way: the untrained ``model`` is one.
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "custom_predictor.eqx"
-        hm.save_predictors(path, trained)
-        reloaded = hm.load_predictors(path, template)
+        path = Path(tmp) / "custom_predictor"
+        hm.save(path, result, config=config)
+        run = hm.load(path, like=model)
+    reloaded = run.model.predictors
+    assert len(run.history.loss) == len(result.history.loss), "history should round-trip"
     grid = {"temperature": jnp.asarray(TEMPERATURES)}
     k_reloaded = hm.evaluate_predictor(reloaded["rate"], grid)
     k_trained = hm.evaluate_predictor(trained["rate"], grid)

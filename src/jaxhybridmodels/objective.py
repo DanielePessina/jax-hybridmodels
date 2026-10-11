@@ -68,7 +68,7 @@ class Objective:
     penalty_points : Mapping[str, ArrayLike] | None
         Extra points where the bound penalty is charged, keyed by the path of
         a ``BoundedPredictor`` in the predictors pytree. The path is the
-        dotted string ``freeze_paths`` uses, so for a dict of predictors it
+        dotted string ``fit(freeze=...)`` takes, so for a dict of predictors it
         is the key: ``{"rate": grid}``. Each value is a ``[G, n_inputs]``
         array of physical input vectors in that predictor's ``input_keys``
         order. Predictors left out are charged at the measured points only.

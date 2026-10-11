@@ -90,9 +90,7 @@ uv run python examples/pendulum/train_harmonic.py
 - [Predictors and bounds](/guide/predictors): fixed values, trainable values and networks.
 - [Training](/guide/training): the objective, schedules, validation and loss histories.
 - [Data and buckets](/guide/data): channels sampled at different times.
+- [Ensembles](/guide/ensembles): `fit_ensemble` and `predict_ensemble`.
 
-`HybridModel` is a thin layer over functions that take the predictors,
-simulator, observation map and solver as separate arguments:
-`train_with_optax`, `train_with_evosax` and `predict_dataset`. Call them
-directly when you need something the methods do not cover, such as ensembles
-or a custom training loop.
+For a training loop of your own, build it from the kernels in
+`jaxhybridmodels.training.kernels`; see [Extending](/guide/extending#training-loops).

@@ -1,7 +1,7 @@
 """Write your own training loop from the public gradient kernels.
 
-``train_with_optax`` is assembled from the pieces in
-``jaxhybridmodels.training.kernels``. When you need a loop it cannot
+``HybridModel.fit`` with an ``OptaxTrainingConfig`` is assembled from the
+pieces in ``jaxhybridmodels.training.kernels``. When you need a loop it cannot
 express, compose the same pieces instead of forking the trainer. This
 script recovers a harmonic oscillator's frequency with a loop that weights
 each bucket's loss and gradients by its experiment count, which the stock
@@ -162,7 +162,7 @@ def main() -> None:
     )
     penalty_step = build_penalty_step(penalty_fn=weight_decay, trainable=mask)
     optimizer = optax.adamw(learning_rate=1e-2)
-    apply_update = build_apply_update(optimizer, mask)
+    apply_update = build_apply_update(optimizer=optimizer, trainable=mask)
     opt_state = optimizer.init(eqx.filter(predictors, mask))
     # endregion bucket-step
 

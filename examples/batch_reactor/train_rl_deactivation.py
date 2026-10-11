@@ -8,7 +8,7 @@ After Mowbray et al., Biotechnol Bioeng 120:154 (2023).
 
 Shows:
 
-- ``load_predictors`` against a template from ``build_predictors``
+- ``serialise.load_predictors`` against a template from ``build_predictors``
 - a ``BoundedPredictor`` split at ``out_scaler``: the policy samples in the
   latent space, so the action bound needs no ``tanh`` squash or clip
 - ``BoundScaler.saturation`` as a reward term
@@ -50,6 +50,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Float
 
 import jaxhybridmodels as hm
+from jaxhybridmodels.serialise import load_predictors
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -254,7 +255,7 @@ def load_trunk(path: Path, *, key: Array) -> tuple[Any, hm.BoundedPredictor]:
             f"  uv run python examples/batch_reactor/train_hybrid.py --no-plot "
             f"--save-predictors {path}"
         )
-    return hm.load_predictors(path, build_predictors(key=key))
+    return load_predictors(path, like=build_predictors(key=key))
 
 
 def trunk_rate(

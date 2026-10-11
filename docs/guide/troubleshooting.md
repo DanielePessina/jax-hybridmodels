@@ -63,7 +63,8 @@ level; a closure rebuilt per call is a new function to JAX.
 
 ## A saved run does not load
 
-The template passed to `load_run` or `load_predictors` must be built with
-the same container, predictor classes, sizes, bounds, warps and activation
-names as the saved model. `load_run` names the part that differs. See
+The `like=` model passed to `load` (or template passed to `load_predictors`)
+must be built with the same container, predictor classes, sizes, bounds,
+warps, activation names and output channels as the saved model. `load`
+names the part that differs. See
 [Saving and loading](/guide/serialization).

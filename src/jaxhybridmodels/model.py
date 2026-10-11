@@ -1,17 +1,19 @@
 """``HybridModel``: the predictors, simulator, observation map and solver held together.
 
-The functional layer (``train_with_optax``, ``predict_dataset`` and so on)
-takes these four pieces as separate arguments on every call. This module
-binds them once and returns results keyed by experiment ID and channel
-name instead of bucket arrays.
+The model binds the four pieces once. ``fit``, ``fit_ensemble``,
+``predict`` and ``simulate`` take data keyed by experiment and return
+results keyed by experiment ID and channel name (:mod:`jaxhybridmodels.results`).
+``fit`` dispatches to :func:`~jaxhybridmodels.training.train_with_optax`
+or :func:`~jaxhybridmodels.training.train_with_evosax`, which take the
+model and the same keywords.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import diffrax
 import equinox as eqx
@@ -22,13 +24,15 @@ from jaxtyping import Array
 
 from jaxhybridmodels.data import (
     BucketPayload,
+    Data,
     Dataset,
     Experiment,
     _per_experiment_arrays,
     make_dataset,
 )
 from jaxhybridmodels.objective import Objective
-from jaxhybridmodels.prediction import predict_dataset
+from jaxhybridmodels.prediction import _check_grid_args, _predict
+from jaxhybridmodels.results import ExperimentPrediction, FitResult, PredictionResult
 from jaxhybridmodels.solver import SolverConfig, simulation_state
 from jaxhybridmodels.trainable import (
     FreezeSpec,
@@ -36,171 +40,8 @@ from jaxhybridmodels.trainable import (
     freeze_mask,
     trainable_mask,
 )
-from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, _train_with_evosax
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, _train_with_optax
-
-StopReason = Literal["budget_exhausted", "patience"]
-
-Data = Dataset | Sequence[Experiment]
-"""What ``fit``, ``predict`` and ``validation=`` accept: a ``Dataset`` or the experiments."""
-
-
-@dataclass(frozen=True)
-class ExperimentPrediction:
-    """One experiment's times, named outputs, and optional observed values.
-
-    ``outputs`` maps each channel name to its ``[T]`` prediction.
-    ``observed`` holds the measurements on the same grid, NaN where a cell
-    was not measured, and ``observation_mask`` says which cells were.
-    Both are empty for :meth:`HybridModel.simulate`, which instead fills
-    ``state`` with the full ``[T, S]`` simulator state.
-    """
-
-    times: Array
-    outputs: dict[str, Array]
-    observed: dict[str, Array] = field(default_factory=dict)
-    observation_mask: dict[str, Array] = field(default_factory=dict)
-    state: Array | None = None
-
-
-@dataclass(frozen=True)
-class PredictionResult(Mapping[str, ExperimentPrediction]):
-    """Predictions keyed by experiment ID, in the order the experiments were given.
-
-    Pass it straight to ``compute_metrics`` or ``print_metrics``.
-    ``buckets`` keeps the raw ``[N, T, D]`` arrays from ``predict_dataset``
-    for custom JAX analysis. :meth:`from_buckets` builds one from bucket
-    arrays made by the functional layer (``predict_dataset``,
-    ``ensemble_predictions``), so those can be scored too.
-    """
-
-    experiments: dict[str, ExperimentPrediction]
-    buckets: tuple[Array, ...] = ()
-
-    @classmethod
-    def from_buckets(cls, buckets: Sequence[Array], dataset: Dataset) -> PredictionResult:
-        """Key per-bucket ``[N, T, D]`` predictions by experiment ID.
-
-        ``dataset`` must be the one the predictions were made on, built by
-        ``make_dataset`` so it keeps its source experiments::
-
-            mean = hm.ensemble_predictions(members, dataset, ...)
-            hm.print_metrics(hm.PredictionResult.from_buckets(mean, dataset))
-        """
-        if not dataset.experiments:
-            raise ValueError(
-                "PredictionResult.from_buckets: the dataset holds no source experiments; "
-                "build it with make_dataset"
-            )
-        buckets = tuple(buckets)
-        if len(buckets) != len(dataset.bucket_payloads):
-            raise ValueError(
-                f"PredictionResult.from_buckets: got {len(buckets)} bucket arrays for a "
-                f"dataset with {len(dataset.bucket_payloads)} buckets"
-            )
-        # make_dataset groups experiments by union-grid length, keeping input
-        # order inside each group. Walking the experiments in input order and
-        # counting rows per length recovers each one's bucket row.
-        bucket_of_length = {bp.ts.shape[1]: i for i, bp in enumerate(dataset.bucket_payloads)}
-        next_row: dict[int, int] = {}
-        names = dataset.output_channel_names
-        experiments: dict[str, ExperimentPrediction] = {}
-        for exp in dataset.experiments:
-            arrays = _per_experiment_arrays(exp, names)
-            length = arrays.ts.shape[0]
-            row = next_row.get(length, 0)
-            next_row[length] = row + 1
-            values = buckets[bucket_of_length[length]][row]
-            observed = jnp.where(arrays.mask, arrays.y_observed, jnp.nan)
-            experiments[exp.exp_id] = ExperimentPrediction(
-                times=arrays.ts,
-                outputs=dict(zip(names, values.T, strict=True)),
-                observed=dict(zip(names, observed.T, strict=True)),
-                observation_mask=dict(zip(names, arrays.mask.T, strict=True)),
-            )
-        return cls(experiments, buckets)
-
-    def __getitem__(self, exp_id: str) -> ExperimentPrediction:
-        return self.experiments[exp_id]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.experiments)
-
-    def __len__(self) -> int:
-        return len(self.experiments)
-
-    def to_dataframe(self) -> Any:
-        """Long table: one row per experiment, time and channel.
-
-        Columns are ``experiment_id``, ``time``, ``channel``,
-        ``prediction``, ``observed`` and ``is_observed``. Needs pandas,
-        which the ``examples`` extra installs.
-        """
-        import pandas as pd
-
-        columns = ["experiment_id", "time", "channel", "prediction", "observed", "is_observed"]
-        frames = [
-            pd.DataFrame(
-                {
-                    "experiment_id": exp_id,
-                    "time": np.asarray(experiment.times),
-                    "channel": channel,
-                    "prediction": np.asarray(values),
-                    "observed": np.asarray(
-                        experiment.observed.get(channel, np.full(values.shape, np.nan))
-                    ),
-                    "is_observed": np.asarray(
-                        experiment.observation_mask.get(channel, np.zeros(values.shape, bool))
-                    ),
-                },
-                columns=columns,
-            )
-            for exp_id, experiment in self.items()
-            for channel, values in experiment.outputs.items()
-        ]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
-
-
-@dataclass(frozen=True)
-class FitHistory:
-    """Per-step records from a fit.
-
-    ``loss`` has one entry per step (Optax) or per generation (Evosax).
-
-    Optax measures it at the parameters before that step's update: the data
-    term plus any trajectory penalty. ``penalty`` is the weighted bound
-    penalty at the same step, so ``loss + penalty`` is what the optimiser
-    minimised, and ``phase`` is the step's phase index.
-
-    Evosax records the best fitness found so far, so its ``loss`` is
-    monotone non-increasing; with a bound penalty on, that fitness includes
-    it. ``penalty`` and ``phase`` stay empty.
-
-    ``validation_loss`` is the full-horizon data loss on the validation set,
-    present when one was given: per step for Optax, and for each
-    generation's best individual for Evosax.
-    """
-
-    loss: tuple[float, ...] = ()
-    penalty: tuple[float, ...] = ()
-    phase: tuple[int, ...] = ()
-    validation_loss: tuple[float, ...] = ()
-
-
-@dataclass(frozen=True)
-class FitResult:
-    """The fitted model, its history, and how the run ended.
-
-    ``best_step`` indexes the history at the returned parameters. It is
-    None when ``restore_best=False`` returned the final update instead.
-    ``stop_reason`` is ``"patience"`` when early stopping cut the final
-    phase short, else ``"budget_exhausted"``.
-    """
-
-    model: HybridModel
-    history: FitHistory
-    best_step: int | None
-    stop_reason: StopReason
+from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, _fit_ensemble, train_with_optax
 
 
 @dataclass(frozen=True)
@@ -372,6 +213,39 @@ class HybridModel(eqx.Module):
                 f"output_channel_names {self.output_channel_names}"
             )
 
+    def _prepare_fit(
+        self,
+        data: Data,
+        *,
+        validation: Data | None,
+        freeze: Sequence[FreezeSpec] | FreezeSpec | None,
+        trainable: Any,
+        caller: str,
+    ) -> tuple[Dataset, Dataset | None, Any]:
+        """Everything the trainers check before compiling: data, mask and shapes.
+
+        Returns the training ``Dataset``, the validation one (or None) and
+        the trainable mask built from ``freeze`` or ``trainable``.
+        """
+        dataset = self._dataset(data, caller)
+        validation_set = None if validation is None else self._dataset(validation, "validation")
+        if freeze is not None and trainable is not None:
+            raise ValueError(
+                "Pass freeze= or trainable=, not both; build the mask with "
+                "jaxhybridmodels.trainable.freeze_mask(predictors, freeze, mask=...) "
+                "to combine them"
+            )
+        if freeze is not None:
+            mask = freeze_mask(self.predictors, freeze)
+        elif trainable is not None:
+            mask = trainable
+        else:
+            mask = trainable_mask(self.predictors)
+        if count_trainable_params(self.predictors, mask=mask) == 0:
+            raise ValueError("Model has no trainable parameters")
+        self._check_shapes(dataset.bucket_payloads[0], caller)
+        return dataset, validation_set, mask
+
     def fit(
         self,
         data: Data,
@@ -405,94 +279,120 @@ class HybridModel(eqx.Module):
         ``data`` and ``validation`` may be a ``Dataset`` or a sequence of
         experiments. ``simulate_fn`` and ``state_to_output`` shapes are
         checked once on the first experiment before anything compiles.
+
+        Same as ``train_with_optax(model, ...)`` or
+        ``train_with_evosax(model, ...)`` in :mod:`jaxhybridmodels.training`,
+        picked by the type of ``config``.
         """
-        dataset = self._dataset(data, "fit")
-        validation_set = None if validation is None else self._dataset(validation, "validation")
-        if freeze is not None and trainable is not None:
-            raise ValueError(
-                "Pass freeze= or trainable=, not both; build the mask with "
-                "freeze_mask(predictors, freeze, mask=...) to combine them"
-            )
-        if freeze is not None:
-            mask = freeze_mask(self.predictors, freeze)
-        elif trainable is not None:
-            mask = trainable
-        else:
-            mask = trainable_mask(self.predictors)
-        if count_trainable_params(self.predictors, mask) == 0:
-            raise ValueError("Model has no trainable parameters")
-        self._check_shapes(dataset.bucket_payloads[0], "fit")
-        common: dict[str, Any] = dict(
-            objective=objective,
-            simulate_fn=self.simulate_fn,
-            state_to_output=self.state_to_output,
-            solver=self.solver,
-            trainable=mask,
+        kwargs: dict[str, Any] = dict(
             key=key,
+            objective=objective,
+            freeze=freeze,
+            trainable=trainable,
             ui=ui,
-            validation=validation_set,
+            validation=validation,
+        )
+        if isinstance(config, EvosaxTrainingConfig):
+            return train_with_evosax(self, data, config, **kwargs)
+        if isinstance(config, OptaxTrainingConfig):
+            return train_with_optax(self, data, config, **kwargs)
+        raise TypeError(
+            "config must be an OptaxTrainingConfig or an EvosaxTrainingConfig; "
+            f"got {type(config).__name__}"
         )
 
-        if isinstance(config, EvosaxTrainingConfig):
-            evo = _train_with_evosax(self.predictors, dataset, config, **common)
-            return FitResult(
-                model=self._with_predictors(evo.predictors),
-                history=FitHistory(loss=tuple(evo.loss), validation_loss=tuple(evo.validation)),
-                best_step=evo.best_step,
-                stop_reason="budget_exhausted",
-            )
+    def fit_ensemble(
+        self,
+        data: Data,
+        config: OptaxTrainingConfig,
+        *,
+        key: Array,
+        n_members: int,
+        n_seeds: int | None = None,
+        bootstrap: bool = False,
+        objective: Objective | None = None,
+        freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
+        trainable: Any = None,
+        ui: Any = None,
+    ) -> list[FitResult]:
+        """Train an ensemble of up to ``n_members`` models, best first.
+
+        Every member starts from a fresh initialisation of the predictors
+        drawn from ``key``. A candidate seed is trained briefly
+        (``config.tournament_steps`` steps at ``config.tournament_lr``) and
+        scored, as in the tournament, then the chosen seeds get the full
+        phase schedule.
+
+        Seed ensemble (``bootstrap=False``)
+            Score ``n_seeds`` seeds on all of ``data`` and fully train the
+            best ``n_members``. ``n_seeds`` defaults to ``n_members``, which
+            trains every seed.
+        Bootstrap ensemble (``bootstrap=True``)
+            Draw ``n_members`` resamples of the experiments with replacement
+            (:func:`~jaxhybridmodels.make_bootstrap_dataset`) and train one
+            member on each: the best of ``n_seeds`` seeds scored on that
+            resample. ``n_seeds`` defaults to 1, one fresh seed per resample.
+
+        ``config.tournament_attempts`` is not used: ``n_seeds`` takes its
+        place. ``objective``, ``freeze``, ``trainable`` and ``ui`` are as
+        for :meth:`fit`; each member is its own UI run. The result is sorted
+        by each member's final loss, the loss at its returned parameters
+        when ``config.restore_best`` is set. A seed whose warm-up fails is
+        dropped, so fewer than ``n_members`` may come back; if every seed
+        fails it raises ``RuntimeError``. Optax only. The list goes straight
+        into :func:`~jaxhybridmodels.predict_ensemble`.
+        """
         if not isinstance(config, OptaxTrainingConfig):
             raise TypeError(
-                "config must be an OptaxTrainingConfig or an EvosaxTrainingConfig; "
+                "fit_ensemble trains with Optax only; pass an OptaxTrainingConfig, "
                 f"got {type(config).__name__}"
             )
-        run = _train_with_optax(self.predictors, dataset, config, **common)
-        return FitResult(
-            model=self._with_predictors(run.predictors),
-            history=FitHistory(
-                loss=tuple(run.loss),
-                penalty=tuple(run.penalty),
-                phase=tuple(run.phase),
-                validation_loss=tuple(run.selection),
-            ),
-            best_step=run.best_step,
-            stop_reason="patience" if run.stopped_early else "budget_exhausted",
+        return _fit_ensemble(
+            self,
+            data,
+            config,
+            key=key,
+            n_members=n_members,
+            n_seeds=n_seeds,
+            bootstrap=bootstrap,
+            objective=objective,
+            freeze=freeze,
+            trainable=trainable,
+            ui=ui,
         )
 
-    def predict(self, data: Data) -> PredictionResult:
-        """Predict every experiment on its measured time grid, keyed by experiment ID.
+    def predict(
+        self,
+        data: Data,
+        *,
+        ts: Any = None,
+        n_points: int | None = None,
+    ) -> PredictionResult:
+        """Predict every experiment, keyed by experiment ID.
+
+        By default each experiment is predicted on its measured time grid
+        (``t0`` included when set), with its observations alongside, ready
+        for ``compute_metrics``. ``n_points`` instead gives each experiment
+        an even grid of that many points over its own time span, from its
+        ``t0`` (or first observation) to its last observation, for smooth
+        plots. ``ts`` gives one explicit grid for every experiment; it must
+        not start before any experiment's start. Off the measured grid,
+        ``observed`` and ``observation_mask`` are empty. Each experiment
+        still integrates from its own start, so ``y0`` stays in place.
 
         ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
         experiments.
         """
         dataset = self._dataset(data, "predict")
-        if not dataset.experiments:
-            raise ValueError(
-                "predict: the dataset holds no source experiments; build it with make_dataset"
-            )
-        buckets = predict_dataset(
-            self.predictors,
-            dataset,
-            simulate_fn=self.simulate_fn,
-            state_to_output=self.state_to_output,
-            solver=self.solver,
-        )
-        for bp, values in zip(dataset.bucket_payloads, buckets, strict=True):
-            if values.shape != bp.y_observed.shape:
-                # Re-trace one row abstractly to say which function is at
-                # fault; the batched shape alone cannot tell.
-                self._check_shapes(bp, "predict")
-                raise ValueError(
-                    f"predict: bucket predictions have shape {values.shape}; expected "
-                    f"[N, T, D] = {bp.y_observed.shape}"
-                )
-        return PredictionResult.from_buckets(buckets, dataset)
+        grid = _check_grid_args(ts, n_points, "predict")
+        return _predict(self, dataset, ts=grid, n_points=n_points, caller="predict")
 
     def simulate(
         self,
-        *,
         experiment: Experiment | None = None,
+        *,
         ts: Any = None,
+        n_points: int | None = None,
         y0: Any = None,
         covariates: Mapping[str, Any] | None = None,
         t0: float | None = None,
@@ -501,6 +401,8 @@ class HybridModel(eqx.Module):
 
         With ``experiment``, its ``y0``, ``t0`` and covariates are used, and
         ``ts`` defaults to its measured times (``t0`` included when set).
+        ``n_points`` instead gives an even grid of that many points from the
+        experiment's start to its last observation, as in :meth:`predict`.
         ``y0`` is placed at the experiment's ``t0``, or at its first
         observation time when ``t0`` is unset, whatever ``ts`` is passed; a
         ``ts`` starting before that time is rejected.
@@ -512,6 +414,11 @@ class HybridModel(eqx.Module):
         ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
         returned times and outputs.
         """
+        _check_grid_args(ts, n_points, "simulate")
+        if n_points is not None and experiment is None:
+            raise ValueError(
+                "simulate: n_points= needs experiment= for its time span; pass ts= instead"
+            )
         if experiment is not None:
             if y0 is not None or covariates is not None or t0 is not None:
                 raise ValueError(
@@ -523,6 +430,8 @@ class HybridModel(eqx.Module):
             # y0 belongs to the experiment's own start: t0 when set, else its
             # first observation time. Pin it so a caller's ts cannot move it.
             start_time = experiment.t0 if experiment.t0 is not None else float(measured[0])
+            if n_points is not None:
+                ts = jnp.linspace(start_time, measured[-1], n_points, dtype=measured.dtype)
             y0, covariates, t0 = experiment.y0, experiment.covariates, start_time
         if ts is None or y0 is None:
             raise ValueError("simulate: pass experiment=, or both ts= and y0=")

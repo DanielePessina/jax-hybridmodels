@@ -81,6 +81,6 @@ can call the same multiplier to ramp a penalty weight.
 | --- | --- | --- |
 | Constant per-experiment condition | `Experiment.covariates` | `simulate_fn` |
 | Changing physical quantity | Profile parameters in covariates plus a profile factory | The vector field at time `t` |
-| Piecewise training strategy | `OptaxTrainingConfig(phases=...)` | `fit` or `train_with_optax` |
-| Smooth learning rate | An optax schedule or `annealing_schedule` as `TrainingPhase.lr` | `fit` or `train_with_optax` |
+| Piecewise training strategy | `OptaxTrainingConfig(phases=...)` | `fit` |
+| Smooth learning rate | An optax schedule or `annealing_schedule` as `TrainingPhase.lr` | `fit` |
 | Other smooth hyperparameters | `annealing_schedule` | A custom loop |

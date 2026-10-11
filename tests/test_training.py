@@ -1,15 +1,18 @@
-"""The functional trainers, end to end on the decay model.
+"""The trainers and ensembles, end to end on the decay model.
 
-Every trainer call compiles its kernels from scratch, which costs a couple
-of seconds, so runs are shared through module fixtures and each test reads
-one property off a run. Config validation lives in ``test_config.py`` and
-the bound and trajectory penalties in ``test_penalties.py``.
+``train_with_optax`` and ``train_with_evosax`` take a ``HybridModel`` and
+the keywords of ``fit``; ``fit`` dispatches to them. Every trainer call
+compiles its kernels from scratch, which costs a couple of seconds, so runs
+are shared through module fixtures and each test reads one property off a
+run. Config validation lives in ``test_config.py`` and the bound and
+trajectory penalties in ``test_penalties.py``.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, Literal
+from types import SimpleNamespace
+from typing import Any, Literal, cast
 
 import diffrax
 import equinox as eqx
@@ -22,12 +25,13 @@ import numpy as np
 import optax
 import pytest
 from _models import (
-    NETWORK_KWARGS,
-    PARAMETER_KWARGS,
     SOLVER,
     TRUE_RATE,
     identity,
+    make_model,
+    network_model,
     network_predictors,
+    parameter_model,
     parameter_predictors,
     quiet,
     simulate_parameter,
@@ -38,46 +42,32 @@ import jaxhybridmodels as hm
 from jaxhybridmodels.data import Dataset, make_bootstrap_dataset
 from jaxhybridmodels.losses import masked_mse
 from jaxhybridmodels.objective import Objective
-from jaxhybridmodels.prediction import predict_dataset, predict_dense
 from jaxhybridmodels.predictors import BoundScaler, MLPPredictor
 from jaxhybridmodels.solver import ADJOINT_REGISTRY
-from jaxhybridmodels.trainable import (
-    freeze_modules_of_type,
-    freeze_paths,
-    freeze_where,
-    trainable_mask,
-)
-from jaxhybridmodels.training import TrainingPhase, train_with_optax
+from jaxhybridmodels.trainable import count_trainable_params, freeze_mask, trainable_mask
+from jaxhybridmodels.training import TrainingPhase, train_with_evosax, train_with_optax
 from jaxhybridmodels.training.evosax import (
     EvosaxTrainingConfig,
     _box_population,
     _build_single_eval,
     _build_strategy,
-    _train_with_evosax,
-    train_with_evosax,
 )
-from jaxhybridmodels.training.optax import (
-    _shared_tournament,
-    _train_with_optax,
-    train_bootstrap_ensemble,
-    train_seed_ensemble,
-)
+from jaxhybridmodels.training.optax import _rank_key, _shared_tournament
 from jaxhybridmodels.ui.testing import RecordingUI
 
 
-def data_loss(predictors: Any, dataset: Dataset, **kwargs: Any) -> float:
+def data_loss(model: hm.HybridModel, dataset: Dataset) -> float:
     """The trainer's data term: per-bucket ``masked_mse``, averaged over buckets."""
-    kwargs = kwargs or PARAMETER_KWARGS
-    predictions = predict_dataset(predictors, dataset, **kwargs)
+    buckets = model.predict(dataset).buckets
     total = sum(
         float(masked_mse(pred, bp))
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True)
+        for pred, bp in zip(buckets, dataset.bucket_payloads, strict=True)
     )
     return total / len(dataset.bucket_payloads)
 
 
-def rate_of(predictors: Any) -> float:
-    return float(predictors["rate"].value)
+def rate_of(model: hm.HybridModel) -> float:
+    return float(model.predictors["rate"].value)
 
 
 def nan_simulate(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Array:
@@ -104,46 +94,45 @@ def phased(decay_data):
         return simulate_parameter(predictors, ts, covariates, y0, solver)
 
     predictors = {"rate": hm.Parameter(0.3, bounds=(0.0, None)), "offset": hm.Parameter(0.0)}
-    mask = freeze_paths(trainable_mask(predictors), ("offset.latent",))
     ui = RecordingUI()
-    history, trained = train_with_optax(
-        predictors,
+    result = train_with_optax(
+        make_model(predictors, counted),
         decay_data,
         quiet(phases=(TrainingPhase(20, lr=0.1, horizon=0.5), TrainingPhase(20, lr=0.05))),
-        simulate_fn=counted,
-        state_to_output=identity,
-        solver=SOLVER,
-        trainable=mask,
+        freeze="offset.latent",
         key=jr.key(0),
         ui=ui,
     )
-    return history, trained, ui, traces[0]
+    return result, ui, traces[0]
 
 
 def test_two_phase_fit_recovers_the_rate(phased):
-    history, trained, _, _ = phased
-    assert len(history) == 40
-    assert rate_of(trained) == pytest.approx(TRUE_RATE, abs=0.02)
-    assert history[-1] < history[0]
+    result, _, _ = phased
+    loss = result.history.loss
+    assert len(loss) == 40
+    assert rate_of(result.model) == pytest.approx(TRUE_RATE, abs=0.02)
+    assert loss[-1] < loss[0]
+    assert result.history.phase == (0,) * 20 + (1,) * 20
 
 
 def test_a_horizon_change_does_not_recompile(phased):
     # The horizon is a traced fraction, not a static shape, so both phases
     # share one compiled kernel per bucket. The decay data has one bucket
-    # per union length; anything above that count is a retrace.
-    _, _, _, traces = phased
-    assert traces <= 2
+    # per union length, plus one abstract trace from the shape check before
+    # training; anything above that count is a retrace.
+    _, _, traces = phased
+    assert traces <= 3
 
 
 def test_frozen_leaf_does_not_move_through_optax(phased):
     # adamw decays every leaf it is given, gradient or not, so a frozen
     # leaf that leaked into the optimiser would drift away from zero.
-    _, trained, _, _ = phased
-    assert float(trained["offset"].value) == 0.0
+    result, _, _ = phased
+    assert float(result.model.predictors["offset"].value) == 0.0
 
 
 def test_ui_events_bracket_the_run_in_order(phased):
-    _, _, ui, _ = phased
+    _, ui, _ = phased
     names = [name for name, _ in ui.events]
     assert names[0] == "on_run_start"
     assert names[-1] == "on_run_end"
@@ -152,9 +141,27 @@ def test_ui_events_bracket_the_run_in_order(phased):
     assert names.index("on_compile_done") < names.index("on_phase_start")
 
 
+def test_train_with_optax_is_what_fit_runs(decay_data):
+    """``fit`` dispatches to ``train_with_optax``, which takes a list of experiments too."""
+    config = quiet(steps=5, lr=0.1)
+    model = parameter_model()
+    via_fit = model.fit(decay_data, config, key=jr.key(3))
+    direct = train_with_optax(model, list(decay_data.experiments), config, key=jr.key(3))
+    assert direct.history == via_fit.history
+    assert rate_of(direct.model) == rate_of(via_fit.model)
+    assert rate_of(model) == pytest.approx(0.3), "the input model was changed"
+    with pytest.raises(TypeError, match="OptaxTrainingConfig"):
+        train_with_optax(
+            model,
+            decay_data,
+            EvosaxTrainingConfig(population_size=4, steps=1),  # ty: ignore[invalid-argument-type]
+            key=jr.key(0),
+        )
+
+
 def test_missing_key_raises(decay_data):
     with pytest.raises(TypeError):
-        train_with_optax(parameter_predictors(), decay_data, quiet(steps=1), **PARAMETER_KWARGS)
+        train_with_optax(parameter_model(), decay_data, quiet(steps=1))  # ty: ignore[missing-argument]
 
 
 def test_patience_stops_early_and_weak_scalars_train(decay_data, capsys):
@@ -173,15 +180,12 @@ def test_patience_stops_early_and_weak_scalars_train(decay_data, capsys):
 
     predictors = {**parameter_predictors(), "weak": WeakScale(jnp.asarray(1.0))}
     assert jax.typeof(predictors["weak"].scale).weak_type
-    history, _ = train_with_optax(
-        predictors,
-        decay_data,
-        quiet(steps=20, lr=0.0, patience=3),
-        key=jr.key(0),
-        **PARAMETER_KWARGS,
+    result = train_with_optax(
+        make_model(predictors), decay_data, quiet(steps=20, lr=0.0, patience=3), key=jr.key(0)
     )
-    assert len(history) == 4
-    assert all(math.isfinite(v) for v in history)
+    assert len(result.history.loss) == 4
+    assert result.stop_reason == "patience"
+    assert all(math.isfinite(v) for v in result.history.loss)
     assert capsys.readouterr().out == ""
 
 
@@ -196,16 +200,12 @@ OVERSHOOT_PHASES = (TrainingPhase(15, lr=0.6), TrainingPhase(3, lr=0.0))
 
 @pytest.fixture(scope="module")
 def overshoot(decay_data):
-    runs = {}
-    for restore in (True, False):
-        runs[restore] = train_with_optax(
-            parameter_predictors(),
-            decay_data,
-            quiet(phases=OVERSHOOT_PHASES, restore_best=restore),
-            key=jr.key(0),
-            **PARAMETER_KWARGS,
+    return {
+        restore: parameter_model().fit(
+            decay_data, quiet(phases=OVERSHOOT_PHASES, restore_best=restore), key=jr.key(0)
         )
-    return runs
+        for restore in (True, False)
+    }
 
 
 def test_restore_best_returns_the_pre_update_snapshot(overshoot, decay_data):
@@ -215,21 +215,23 @@ def test_restore_best_returns_the_pre_update_snapshot(overshoot, decay_data):
     after the update would return a model whose loss is not the reported
     minimum.
     """
-    history, best = overshoot[True]
+    best = overshoot[True]
+    history = best.history.loss
     argmin = min(range(len(history)), key=history.__getitem__)
     assert argmin < OVERSHOOT_PHASES[0].steps - 1, "phase 1 was meant to overshoot"
-    assert data_loss(best, decay_data) == pytest.approx(min(history), rel=1e-4)
+    assert best.best_step == argmin and best.final_loss == min(history)
+    assert data_loss(best.model, decay_data) == pytest.approx(min(history), rel=1e-4)
 
 
 def test_restore_best_false_returns_the_final_step(overshoot, decay_data):
     # restore_best changes what is handed back, not how training runs.
-    best_history, best = overshoot[True]
-    last_history, last = overshoot[False]
-    assert best_history == last_history
-    assert rate_of(last) != rate_of(best)
+    best, last = overshoot[True], overshoot[False]
+    assert best.history.loss == last.history.loss
+    assert last.best_step is None and last.final_loss == last.history.loss[-1]
+    assert rate_of(last.model) != rate_of(best.model)
     # Same horizon in both phases, so the running minimum carries across
     # the boundary and the mid-phase-1 best beats the endpoint.
-    assert data_loss(best, decay_data) < data_loss(last, decay_data)
+    assert data_loss(best.model, decay_data) < data_loss(last.model, decay_data)
 
 
 @pytest.fixture(scope="module")
@@ -241,20 +243,10 @@ def curriculum(temp_data):
     observation every curve looks alike and the loss is far lower.
     """
     short = TrainingPhase(10, lr=0.1, horizon=0.2)
-    both = train_with_optax(
-        parameter_predictors(),
-        temp_data,
-        quiet(phases=(short, TrainingPhase(15, lr=0.05))),
-        key=jr.key(0),
-        **PARAMETER_KWARGS,
+    both = parameter_model().fit(
+        temp_data, quiet(phases=(short, TrainingPhase(15, lr=0.05))), key=jr.key(0)
     )
-    short_only = train_with_optax(
-        parameter_predictors(),
-        temp_data,
-        quiet(phases=(short,)),
-        key=jr.key(0),
-        **PARAMETER_KWARGS,
-    )
+    short_only = parameter_model().fit(temp_data, quiet(phases=(short,)), key=jr.key(0))
     return both, short_only
 
 
@@ -265,10 +257,11 @@ def test_restore_best_does_not_compare_across_horizons(curriculum, temp_data):
     minimum across both phases lands in the short phase, handing back the
     least-trained model of the run.
     """
-    (history, restored), (_, short_only) = curriculum
+    both, short_only = curriculum
+    history = both.history.loss
     # Anti-vacuity: the global minimum of the history is in the short phase.
     assert min(range(len(history)), key=history.__getitem__) < 10
-    assert data_loss(restored, temp_data) < data_loss(short_only, temp_data)
+    assert data_loss(both.model, temp_data) < data_loss(short_only.model, temp_data)
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +281,8 @@ def test_factory_optimizer_custom_loss_and_network_dict(temp_data):
         calls.append(1)
         return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.y_observed) ** 2, 0.0))
 
-    predictors = network_predictors()
-    history, trained = train_with_optax(
-        predictors,
+    result = train_with_optax(
+        network_model(),
         temp_data,
         quiet(
             steps=30,
@@ -301,11 +293,10 @@ def test_factory_optimizer_custom_loss_and_network_dict(temp_data):
         ),
         objective=Objective(loss=loss),
         key=jr.key(0),
-        **NETWORK_KWARGS,
     )
     assert calls, "the custom loss was never traced"
-    assert history[-1] < 0.5 * history[0]
-    assert set(trained) == {"rate", "offset"}
+    assert result.history.loss[-1] < 0.5 * result.history.loss[0]
+    assert set(result.model.predictors) == {"rate", "offset"}
 
 
 def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
@@ -316,8 +307,7 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     specs are equal) and must be refused when the phase begins.
     """
     raw = optax.adam(1e-2)
-    history, trained = train_with_optax(
-        parameter_predictors(),
+    result = parameter_model().fit(
         decay_data,
         quiet(
             phases=(
@@ -326,17 +316,14 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
             )
         ),
         key=jr.key(0),
-        **PARAMETER_KWARGS,
     )
-    assert len(history) == 6 and rate_of(trained) != 0.3
+    assert len(result.history.loss) == 6 and rate_of(result.model) != 0.3
 
     refused = quiet(
         phases=(TrainingPhase(2, lr=1e-3, optimizer=raw), TrainingPhase(2, lr=1e-2, optimizer=raw))
     )
     with pytest.raises(ValueError, match="cannot be re-hyperparametrised"):
-        train_with_optax(
-            parameter_predictors(), decay_data, refused, key=jr.key(0), **PARAMETER_KWARGS
-        )
+        parameter_model().fit(decay_data, refused, key=jr.key(0))
 
 
 def test_lr_schedule_counts_from_the_phase_start(decay_data):
@@ -349,16 +336,15 @@ def test_lr_schedule_counts_from_the_phase_start(decay_data):
     already train at step 5.
     """
     held = optax.join_schedules([optax.constant_schedule(0.0), optax.constant_schedule(0.1)], [3])
-    history, trained = train_with_optax(
-        parameter_predictors(),
+    result = parameter_model().fit(
         decay_data,
         quiet(phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=held)), restore_best=False),
         key=jr.key(0),
-        **PARAMETER_KWARGS,
     )
+    history = result.history.loss
     assert len(set(history[:9])) == 1
     assert history[9] != history[8]
-    assert rate_of(trained) != 0.3
+    assert rate_of(result.model) != 0.3
 
 
 def test_lr_schedule_on_the_single_phase_shorthand_and_after_a_float_phase(decay_data):
@@ -369,44 +355,46 @@ def test_lr_schedule_on_the_single_phase_shorthand_and_after_a_float_phase(decay
     last value cannot leak past its phase.
     """
     to_zero = optax.linear_schedule(0.1, 0.0, 4)
-    history, _ = train_with_optax(
-        parameter_predictors(),
-        decay_data,
-        quiet(steps=8, lr=to_zero, restore_best=False),
-        key=jr.key(0),
-        **PARAMETER_KWARGS,
+    history = (
+        parameter_model()
+        .fit(decay_data, quiet(steps=8, lr=to_zero, restore_best=False), key=jr.key(0))
+        .history.loss
     )
     assert history[1] != history[0] and len(set(history[5:])) == 1
 
-    history, _ = train_with_optax(
-        parameter_predictors(),
-        decay_data,
-        quiet(phases=(TrainingPhase(6, lr=to_zero), TrainingPhase(3, lr=0.05))),
-        key=jr.key(0),
-        **PARAMETER_KWARGS,
+    history = (
+        parameter_model()
+        .fit(
+            decay_data,
+            quiet(phases=(TrainingPhase(6, lr=to_zero), TrainingPhase(3, lr=0.05))),
+            key=jr.key(0),
+        )
+        .history.loss
     )
     assert history[5] == history[6] and history[8] != history[7]
 
 
-def test_validation_set_drives_selection_through_the_functional_layer(decay_data, temp_data):
+def test_validation_set_drives_selection(decay_data, temp_data):
     """``validation=`` scores every step with the training objective.
 
     Validating on data the model is not trained on means the selection
     series differs from the training loss, and the returned step is the
-    validation minimum.
+    validation minimum. Validation may be a list of experiments.
     """
-    run = _train_with_optax(
-        parameter_predictors(),
+    result = train_with_optax(
+        parameter_model(),
         decay_data,
         quiet(steps=12, lr=0.1),
         key=jr.key(0),
-        validation=temp_data,
-        **PARAMETER_KWARGS,
+        validation=list(temp_data.experiments),
     )
-    assert len(run.selection) == len(run.loss) == 12
-    assert run.selection != run.loss
-    assert run.best_step == int(np.argmin(run.selection))
-    assert data_loss(run.predictors, temp_data) == pytest.approx(min(run.selection), rel=1e-4)
+    history = result.history
+    assert len(history.validation_loss) == len(history.loss) == 12
+    assert history.validation_loss != history.loss
+    assert result.best_step == int(np.argmin(history.validation_loss))
+    assert data_loss(result.model, temp_data) == pytest.approx(
+        min(history.validation_loss), rel=1e-4
+    )
 
     mismatched = hm.make_dataset(
         [
@@ -418,14 +406,9 @@ def test_validation_set_drives_selection_through_the_functional_layer(decay_data
         ],
         output_channel_names=("other",),
     )
-    with pytest.raises(ValueError, match="validation channels"):
+    with pytest.raises(ValueError, match="validation: dataset channels"):
         train_with_optax(
-            parameter_predictors(),
-            decay_data,
-            quiet(steps=1),
-            key=jr.key(0),
-            validation=mismatched,
-            **PARAMETER_KWARGS,
+            parameter_model(), decay_data, quiet(steps=1), key=jr.key(0), validation=mismatched
         )
 
 
@@ -455,17 +438,13 @@ def tournament_losses(decay_data):
     larger pool has something to find. Under most keys the best candidate
     is already among the first two and the comparison would be flat.
     """
-    losses = {}
-    for attempts in (2, 3):
-        _, winner = train_with_optax(
-            parameter_predictors(),
+    return {
+        attempts: data_loss(
+            parameter_model().fit(decay_data, tournament_config(attempts), key=jr.key(12)).model,
             decay_data,
-            tournament_config(attempts),
-            key=jr.key(12),
-            **PARAMETER_KWARGS,
         )
-        losses[attempts] = data_loss(winner, decay_data)
-    return losses
+        for attempts in (2, 3)
+    }
 
 
 def test_more_attempts_give_a_better_winner(tournament_losses):
@@ -480,14 +459,8 @@ def test_more_attempts_give_a_better_winner(tournament_losses):
 
 def test_tournament_falls_back_when_every_attempt_fails(decay_data):
     with pytest.warns(RuntimeWarning, match="all attempts failed"):
-        train_with_optax(
-            parameter_predictors(),
-            decay_data,
-            quiet(steps=1, tournament_attempts=2, tournament_steps=1),
-            simulate_fn=nan_simulate,
-            state_to_output=identity,
-            solver=SOLVER,
-            key=jr.key(0),
+        make_model(parameter_predictors(), nan_simulate).fit(
+            decay_data, quiet(steps=1, tournament_attempts=2, tournament_steps=1), key=jr.key(0)
         )
 
 
@@ -571,50 +544,40 @@ SEED_CONFIG = quiet(steps=8, lr=0.05, tournament_steps=2)
 
 @pytest.fixture(scope="module")
 def seed_ensembles(decay_data):
-    """The same key with ``k_best=2`` and with the default ``k_best = n_seeds``."""
+    """Under one key: the best two of three seeds, and all three (``n_seeds`` defaulted)."""
     ui = BracketingUI()
-    top_two = train_seed_ensemble(
-        parameter_predictors(),
-        decay_data,
-        SEED_CONFIG,
-        n_seeds=3,
-        k_best=2,
-        key=jr.key(0),
-        ui=ui,
-        **PARAMETER_KWARGS,
+    top_two = parameter_model().fit_ensemble(
+        decay_data, SEED_CONFIG, key=jr.key(0), n_members=2, n_seeds=3, ui=ui
     )
-    all_three = train_seed_ensemble(
-        parameter_predictors(),
-        decay_data,
-        SEED_CONFIG,
-        n_seeds=3,
-        key=jr.key(0),
-        **PARAMETER_KWARGS,
+    all_three = parameter_model().fit_ensemble(
+        list(decay_data.experiments), SEED_CONFIG, key=jr.key(0), n_members=3
     )
     return top_two, all_three, ui
 
 
-def test_seed_ensemble_ranks_the_k_best_members(seed_ensembles, decay_data):
+def test_seed_ensemble_ranks_the_best_members(seed_ensembles, decay_data):
     top_two, all_three, _ = seed_ensembles
     assert len(top_two) == 2 and len(all_three) == 3
-    losses = [loss for loss, _ in top_two]
+    assert all(isinstance(r, hm.FitResult) for r in top_two)
+    losses = [r.final_loss for r in top_two]
     assert losses == sorted(losses)
-    assert losses[0] < data_loss(parameter_predictors(), decay_data)
+    assert losses[0] < data_loss(parameter_model(), decay_data)
+    assert all(len(r.history.loss) == SEED_CONFIG.total_steps for r in top_two)
 
 
 def test_seed_ensemble_is_deterministic_in_the_key(seed_ensembles):
     # Members are seeded by rank, so the top two of a three-member run with
     # the same key are the same models as a two-member run.
     top_two, all_three, _ = seed_ensembles
-    assert [rate_of(p) for _, p in top_two] == [rate_of(p) for _, p in all_three[:2]]
+    assert [rate_of(r.model) for r in top_two] == [rate_of(r.model) for r in all_three[:2]]
 
 
 def test_reported_loss_labels_the_returned_member(seed_ensembles, decay_data):
     # Under restore_best each member comes back from its best step, so the
     # reported loss must be measured at those parameters, not the last step.
     top_two, _, _ = seed_ensembles
-    for loss, member in top_two:
-        assert loss == pytest.approx(data_loss(member, decay_data), abs=1e-5)
+    for result in top_two:
+        assert result.final_loss == pytest.approx(data_loss(result.model, decay_data), abs=1e-5)
 
 
 def test_each_seed_member_is_its_own_ui_run(seed_ensembles):
@@ -624,45 +587,136 @@ def test_each_seed_member_is_its_own_ui_run(seed_ensembles):
     assert ui.count("on_phase_start") == 2
 
 
-def test_bootstrap_members_are_ui_bracketed(decay_data):
+@pytest.fixture(scope="module")
+def bootstrap_ensemble(decay_data):
+    """Two bootstrap members, each the better of two seeds on its resample."""
     ui = BracketingUI()
-    members = train_bootstrap_ensemble(
-        parameter_predictors(),
+    members = parameter_model().fit_ensemble(
         decay_data,
-        quiet(steps=4, lr=0.05),
-        n_bootstraps=2,
+        quiet(steps=4, lr=0.05, tournament_steps=1),
         key=jr.key(0),
+        n_members=2,
+        n_seeds=2,
+        bootstrap=True,
         ui=ui,
-        **PARAMETER_KWARGS,
     )
+    return members, ui
+
+
+def test_bootstrap_ensemble_trains_one_member_per_resample(bootstrap_ensemble):
+    members, ui = bootstrap_ensemble
     assert len(members) == 2
+    assert members[0].final_loss <= members[1].final_loss
+    assert rate_of(members[0].model) != rate_of(members[1].model)
     assert ui.invalid == []
     assert ui.count("on_run_start") == ui.count("on_run_end") == 2
 
 
-def test_failed_seed_ensemble_falls_back_and_closes_the_bracket(decay_data):
+@pytest.mark.parametrize(
+    "kwargs,error,match",
+    [
+        (dict(n_members=3, n_seeds=2), ValueError, "exceeds n_seeds"),
+        (dict(n_members=0), ValueError, "n_members must be >= 1"),
+        (dict(n_members=2, n_seeds=0, bootstrap=True), ValueError, "n_seeds must be >= 1"),
+        (dict(n_members=2.0), TypeError, "must be an int"),
+    ],
+)
+def test_fit_ensemble_rejects_bad_sizes(decay_data, kwargs, error, match):
+    with pytest.raises(error, match=match):
+        parameter_model().fit_ensemble(decay_data, quiet(steps=1), key=jr.key(0), **kwargs)
+
+
+def test_the_tournament_keeps_frozen_leaves(temp_data):
+    """Re-initialising a candidate must not redraw what the mask freezes.
+
+    The frozen first layer and the default-frozen scalers keep the original
+    values in a tournament run and in every ensemble member.
+    """
+    model = network_model(jr.key(1))
+    frozen = "rate.inner.mlp.layers.0"
+    config = quiet(steps=2, lr=1e-2, tournament_attempts=2, tournament_steps=1)
+    fitted = model.fit(temp_data, config, key=jr.key(0), freeze=frozen).model
+    members = model.fit_ensemble(
+        temp_data, quiet(steps=2, lr=1e-2), key=jr.key(0), n_members=2, freeze=frozen
+    )
+
+    def kept(new: hm.HybridModel, select: Any) -> bool:
+        old_leaves = jtu.tree_leaves(eqx.filter(select(model.predictors), eqx.is_array))
+        new_leaves = jtu.tree_leaves(eqx.filter(select(new.predictors), eqx.is_array))
+        return all(np.array_equal(a, b) for a, b in zip(old_leaves, new_leaves, strict=True))
+
+    def layer0(p: Any) -> Any:
+        return p["rate"].inner.mlp.layers[0]
+
+    def scalers(p: Any) -> Any:
+        return [
+            n
+            for n in jtu.tree_leaves(p, is_leaf=lambda x: isinstance(x, BoundScaler))
+            if isinstance(n, BoundScaler)
+        ]
+
+    for new in (fitted, *(r.model for r in members)):
+        assert kept(new, layer0) and kept(new, scalers)
+        assert not kept(new, lambda p: p["rate"].inner.mlp.layers[1])
+
+
+def test_ensemble_ranking_puts_a_nan_loss_last():
+    """A NaN final loss would scramble a plain sort; it ranks as ``inf``."""
+    losses = [0.5, float("nan"), 0.1]
+    members = [cast(hm.FitResult, SimpleNamespace(final_loss=v)) for v in losses]
+    ranked = [m.final_loss for m in sorted(members, key=_rank_key)]
+    assert ranked[:2] == [0.1, 0.5] and np.isnan(ranked[2])
+
+
+def test_fit_ensemble_is_optax_only(decay_data):
+    config = EvosaxTrainingConfig(population_size=4, steps=1, verbose=False)
+    with pytest.raises(TypeError, match="Optax only"):
+        parameter_model().fit_ensemble(
+            decay_data,
+            config,  # ty: ignore[invalid-argument-type]
+            key=jr.key(0),
+            n_members=1,
+        )
+
+
+def test_failed_seed_ensemble_raises_and_closes_the_bracket(decay_data):
     ui = BracketingUI()
-    with pytest.warns(RuntimeWarning, match="every seed failed"):
-        members = train_seed_ensemble(
-            parameter_predictors(),
+    with pytest.raises(RuntimeError, match="every seed failed"):
+        make_model(parameter_predictors(), nan_simulate).fit_ensemble(
             decay_data,
             quiet(steps=2, tournament_steps=1),
-            simulate_fn=nan_simulate,
-            state_to_output=identity,
-            solver=SOLVER,
-            n_seeds=2,
-            k_best=1,
             key=jr.key(0),
+            n_members=1,
+            n_seeds=2,
             ui=ui,
         )
-    assert len(members) == 1 and members[0][0] == float("inf")
     assert ui.invalid == []
     assert ui.count("on_run_start") == ui.count("on_run_end") == 1
 
 
-def raising_simulate(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Array:
-    """Fails while the training kernels trace, after the UI run has opened."""
-    raise RuntimeError("simulate_fn failed")
+def failing_after_the_shape_check() -> Any:
+    """A ``simulate_fn`` that passes the shape check and fails once training traces it."""
+    calls = [0]
+
+    def simulate(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Array:
+        calls[0] += 1
+        if calls[0] > 1:
+            raise RuntimeError("simulate_fn failed")
+        return simulate_parameter(predictors, ts, covariates, y0, solver)
+
+    return simulate
+
+
+def train_with(trainer: str, model: hm.HybridModel, data: Dataset, **kwargs: Any) -> Any:
+    """Run one of the four training entry points with two cheap steps."""
+    if trainer == "optax":
+        return train_with_optax(model, data, quiet(steps=2), **kwargs)
+    if trainer == "seed":
+        return model.fit_ensemble(data, quiet(steps=2), n_members=2, **kwargs)
+    if trainer == "bootstrap":
+        return model.fit_ensemble(data, quiet(steps=2), n_members=2, bootstrap=True, **kwargs)
+    config = EvosaxTrainingConfig(population_size=4, steps=2, verbose=False)
+    return train_with_evosax(model, data, config, **kwargs)
 
 
 @pytest.mark.parametrize("trainer", ["optax", "seed", "bootstrap", "evosax"])
@@ -671,68 +725,135 @@ def test_bad_objective_raises_before_the_ui_opens(decay_data, trainer):
     # if the objective check raised after it.
     ui = BracketingUI()
     bad = Objective(channel_weights={"missing": 1.0})
-    common: dict[str, Any] = dict(objective=bad, key=jr.key(0), ui=ui, **PARAMETER_KWARGS)
     with pytest.raises(ValueError, match="unknown channels"):
-        if trainer == "optax":
-            train_with_optax(parameter_predictors(), decay_data, quiet(steps=2), **common)
-        elif trainer == "seed":
-            train_seed_ensemble(
-                parameter_predictors(), decay_data, quiet(steps=2), n_seeds=2, **common
-            )
-        elif trainer == "bootstrap":
-            train_bootstrap_ensemble(
-                parameter_predictors(), decay_data, quiet(steps=2), n_bootstraps=2, **common
-            )
-        else:
-            config = EvosaxTrainingConfig(population_size=4, steps=2, verbose=False)
-            train_with_evosax(parameter_predictors(), decay_data, config, **common)
+        train_with(trainer, parameter_model(), decay_data, objective=bad, key=jr.key(0), ui=ui)
     assert ui.events == []
 
 
 @pytest.mark.parametrize("trainer", ["optax", "seed", "evosax"])
 def test_error_after_run_start_closes_the_ui(decay_data, trainer):
     ui = BracketingUI()
-    kwargs: dict[str, Any] = dict(
-        simulate_fn=raising_simulate, state_to_output=identity, solver=SOLVER
-    )
+    model = make_model(parameter_predictors(), failing_after_the_shape_check())
     with pytest.raises(RuntimeError, match="simulate_fn failed"):
-        if trainer == "optax":
-            train_with_optax(
-                parameter_predictors(), decay_data, quiet(steps=2), key=jr.key(0), ui=ui, **kwargs
-            )
-        elif trainer == "seed":
-            train_seed_ensemble(
-                parameter_predictors(),
-                decay_data,
-                quiet(steps=2),
-                n_seeds=2,
-                key=jr.key(0),
-                ui=ui,
-                **kwargs,
-            )
-        else:
-            config = EvosaxTrainingConfig(population_size=4, steps=2, verbose=False)
-            train_with_evosax(
-                parameter_predictors(), decay_data, config, key=jr.key(0), ui=ui, **kwargs
-            )
+        train_with(trainer, model, decay_data, key=jr.key(0), ui=ui)
     assert ui.count("on_run_start") == ui.count("on_run_end") == 1
     assert not ui.open
     assert math.isnan(ui.events[-1][1]["final_loss"])
 
 
-def test_ensemble_predictions_average_and_dense_grids_agree(seed_ensembles, decay_data):
-    top_two, _, _ = seed_ensembles
-    members = tuple(p for _, p in top_two)
-    mean = hm.ensemble_predictions(members, decay_data, **PARAMETER_KWARGS)
-    singles = [predict_dataset(p, decay_data, **PARAMETER_KWARGS) for p in members]
-    for b, bucket_mean in enumerate(mean):
-        expected = (singles[0][b] + singles[1][b]) / 2
-        assert jnp.allclose(bucket_mean, expected)
+# ---------------------------------------------------------------------------
+# Prediction grids and ensemble prediction
+# ---------------------------------------------------------------------------
 
-    # A dense grid at the measured times reproduces predict_dataset.
-    bucket = decay_data.bucket_payloads[0]
-    dense = predict_dense(members[0], decay_data, ts_grid=bucket.ts[0], **PARAMETER_KWARGS)
-    assert jnp.allclose(dense[0][0], singles[0][0][0], atol=1e-4)
+
+def test_predict_ensemble_is_the_member_mean_with_its_spread(seed_ensembles, decay_data):
+    top_two, _, _ = seed_ensembles
+    models = [r.model for r in top_two]
+    ensemble = hm.predict_ensemble(models, decay_data)
+    singles = [m.predict(decay_data) for m in models]
+    assert list(ensemble) == list(singles[0]) and len(ensemble.members) == 2
+    for exp_id, experiment in ensemble.items():
+        a, b = (s[exp_id].outputs["conc"] for s in singles)
+        np.testing.assert_allclose(experiment.outputs["conc"], (a + b) / 2, rtol=1e-6)
+        np.testing.assert_allclose(experiment.std["conc"], jnp.abs(a - b) / 2, atol=1e-6)
+        np.testing.assert_array_equal(
+            experiment.observed["conc"], singles[0][exp_id].observed["conc"]
+        )
+        np.testing.assert_allclose(ensemble.members[1][exp_id].outputs["conc"], b)
+    for bucket, s0, s1 in zip(ensemble.buckets, *(s.buckets for s in singles), strict=True):
+        np.testing.assert_allclose(bucket, (s0 + s1) / 2, rtol=1e-6)
+
+    # compute_metrics scores the mean, so the ensemble's error is the mean's.
+    metrics = hm.compute_metrics(ensemble)["conc"]
+    mean_only = hm.PredictionResult(
+        {
+            exp_id: hm.ExperimentPrediction(
+                times=e.times,
+                outputs=e.outputs,
+                observed=e.observed,
+                observation_mask=e.observation_mask,
+            )
+            for exp_id, e in ensemble.items()
+        }
+    )
+    assert float(metrics.mse) == pytest.approx(float(hm.compute_metrics(mean_only)["conc"].mse))
+
+    pytest.importorskip("pandas")
+    frame = ensemble.to_dataframe()
+    assert list(frame.columns)[-1] == "std" and frame["std"].notna().all()
+
+    # The FitResults from fit_ensemble go in as is.
+    from_results = hm.predict_ensemble(top_two, decay_data)
+    np.testing.assert_array_equal(from_results["a"].outputs["conc"], ensemble["a"].outputs["conc"])
+
+    dense = hm.predict_ensemble(models, list(decay_data.experiments), n_points=7)
+    assert dense["a"].times.shape == (7,) and dense["a"].std["conc"].shape == (7,)
+    assert dense["a"].observed == {}
+
+
+def test_predict_ensemble_needs_matching_channels(decay_data):
+    other = hm.HybridModel(
+        predictors=parameter_predictors(),
+        simulate_fn=simulate_parameter,
+        state_to_output=identity,
+        output_channel_names=("other",),
+        solver=SOLVER,
+    )
+    with pytest.raises(ValueError, match="same channels"):
+        hm.predict_ensemble([parameter_model(), other], decay_data)
+    with pytest.raises(ValueError, match="at least one model"):
+        hm.predict_ensemble([], decay_data)
+    with pytest.raises(TypeError, match="member 1 is a dict"):
+        hm.predict_ensemble(
+            [parameter_model(), parameter_predictors()],  # ty: ignore[invalid-argument-type]
+            decay_data,
+        )
+
+
+def test_predict_on_explicit_and_even_grids(decay_data):
+    """``ts`` and ``n_points`` change the grid; each experiment still starts at its ``t0``."""
+    model = parameter_model(TRUE_RATE)
+    measured = model.predict(decay_data)
+    times = measured["b"].times
+    on_ts = model.predict(decay_data, ts=times)
+    for exp_id in measured:
+        np.testing.assert_allclose(on_ts[exp_id].times, times)
+        assert on_ts[exp_id].observed == {} and on_ts[exp_id].observation_mask == {}
+    np.testing.assert_allclose(on_ts["b"].outputs["conc"], measured["b"].outputs["conc"], atol=1e-4)
+
+    even = model.predict(list(decay_data.experiments), n_points=9)
+    for exp_id, experiment in even.items():
+        start, end = measured[exp_id].times[0], measured[exp_id].times[-1]
+        np.testing.assert_allclose(experiment.times, jnp.linspace(start, end, 9), rtol=1e-6)
+        np.testing.assert_allclose(
+            experiment.outputs["conc"], jnp.exp(-TRUE_RATE * experiment.times), rtol=1e-3
+        )
+    with pytest.raises(ValueError, match="measured grid"):
+        hm.compute_metrics(even)
+
+    # simulate takes n_points for the same even grid over one experiment.
+    first = decay_data.experiments[0]
+    simulated = model.simulate(first, n_points=9)
+    np.testing.assert_allclose(simulated.times, even[first.exp_id].times, rtol=1e-6)
+    with pytest.raises(ValueError, match="not both"):
+        model.simulate(first, ts=times, n_points=9)
+    with pytest.raises(ValueError, match="needs experiment="):
+        model.simulate(n_points=9, y0=[1.0])
+
+
+@pytest.mark.parametrize(
+    "kwargs,error,match",
+    [
+        (dict(ts=[0.0, 1.0], n_points=3), ValueError, "not both"),
+        (dict(n_points=0), ValueError, "at least 1"),
+        (dict(n_points=2.5), TypeError, "must be an int"),
+        (dict(ts=[1.0, 0.5]), ValueError, "strictly increasing"),
+        (dict(ts=[-1.0, 1.0]), ValueError, "before the start"),
+    ],
+)
+def test_predict_rejects_bad_grids(decay_data, kwargs, error, match):
+    with pytest.raises(error, match=match):
+        parameter_model().predict(decay_data, **kwargs)
 
 
 def test_bootstrap_dataset_resamples_with_replacement(decay_data):
@@ -771,92 +892,107 @@ def simulate_nested(predictors: Any, ts: Array, covariates: Any, y0: Array, solv
 @pytest.fixture(scope="module")
 def evolved(decay_data):
     """CMA-ES on a nested-tuple pytree with the offset frozen by path."""
-    predictors = ((hm.Parameter(0.3, bounds=(0.0, None)),), hm.Parameter(0.0))
-    mask = freeze_paths(trainable_mask(predictors), ("1.latent",))
+    model = make_model(
+        ((hm.Parameter(0.3, bounds=(0.0, None)),), hm.Parameter(0.0)), simulate_nested
+    )
     ui = RecordingUI()
-    history, trained = train_with_evosax(
-        predictors,
-        decay_data,
+    result = train_with_evosax(
+        model,
+        list(decay_data.experiments),
         EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5, verbose=False),
-        simulate_fn=simulate_nested,
-        state_to_output=identity,
-        solver=SOLVER,
-        trainable=mask,
+        freeze="1.latent",
         key=jr.key(0),
         ui=ui,
     )
-    return predictors, history, trained, ui
+    return model, result, ui
 
 
 def test_evosax_improves_and_keeps_the_best_ever(evolved, decay_data):
-    predictors, history, trained, ui = evolved
-    kwargs = dict(simulate_fn=simulate_nested, state_to_output=identity, solver=SOLVER)
+    model, result, ui = evolved
+    history = result.history.loss
     assert all(b <= a for a, b in zip(history, history[1:], strict=False))
-    assert history[-1] < data_loss(predictors, decay_data, **kwargs)
+    assert history[-1] < data_loss(model, decay_data)
     # The returned candidate is the best ever seen, so no worse than the
     # final generation's mean.
     final_mean = next(kw["mean_loss"] for n, kw in reversed(ui.events) if n == "on_generation_end")
-    assert data_loss(trained, decay_data, **kwargs) <= final_mean + 1e-7
+    assert data_loss(result.model, decay_data) <= final_mean + 1e-7
 
 
 def test_frozen_leaf_does_not_move_through_evosax(evolved):
-    _, _, trained, _ = evolved
+    _, result, _ = evolved
+    trained = result.model.predictors
     assert float(trained[1].value) == 0.0
     assert isinstance(trained[0], tuple) and len(trained[0]) == 1
 
 
 def test_evosax_ui_reports_every_generation(evolved):
-    _, _, _, ui = evolved
+    _, _, ui = evolved
     names = [n for n, _ in ui.events]
     assert names[0] == "on_run_start" and names[-1] == "on_run_end"
     generations = [kw["gen_idx"] for n, kw in ui.events if n == "on_generation_end"]
     assert generations == list(range(10))
 
 
+def test_train_with_evosax_is_what_fit_runs(decay_data):
+    config = EvosaxTrainingConfig(population_size=4, steps=3, verbose=False)
+    model = parameter_model()
+    via_fit = model.fit(decay_data, config, key=jr.key(1))
+    direct = train_with_evosax(model, decay_data, config, key=jr.key(1))
+    assert direct.history == via_fit.history and direct.best_step == via_fit.best_step
+    assert rate_of(direct.model) == rate_of(via_fit.model)
+    with pytest.raises(TypeError, match="EvosaxTrainingConfig"):
+        train_with_evosax(model, decay_data, quiet(steps=1), key=jr.key(0))  # ty: ignore[invalid-argument-type]
+
+
 # A no-ODE target for the cheap evosax checks: the "simulation" is the
 # parameter vector itself, observed once.
 THETA_STAR = jnp.array([1.0, -2.0, 3.0, -4.0])
-QUADRATIC_KWARGS: dict[str, Any] = dict(
-    simulate_fn=lambda p, ts, cov, y0, solver: jnp.broadcast_to(p.value, (ts.shape[0], 4)),
-    state_to_output=identity,
-    solver=SOLVER,
-)
+QUADRATIC_CHANNELS = ("c0", "c1", "c2", "c3")
+
+
+def simulate_quadratic(
+    predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any
+) -> Array:
+    return jnp.broadcast_to(predictors.value, (ts.shape[0], 4))
+
+
+def quadratic_model(simulate_fn: Any = simulate_quadratic) -> hm.HybridModel:
+    return make_model(hm.Parameter(jnp.zeros(4)), simulate_fn, QUADRATIC_CHANNELS)
 
 
 @pytest.fixture(scope="module")
 def quadratic_data():
     ts = jnp.array([0.0])
-    channels = {f"c{i}": hm.ChannelObs(ts=ts, values=THETA_STAR[i : i + 1]) for i in range(4)}
+    channels = {
+        name: hm.ChannelObs(ts=ts, values=THETA_STAR[i : i + 1])
+        for i, name in enumerate(QUADRATIC_CHANNELS)
+    }
     experiment = hm.make_experiment(channels=channels, y0=jnp.zeros(4), exp_id="q")
-    return hm.make_dataset([experiment], output_channel_names=tuple(channels))
+    return hm.make_dataset([experiment], output_channel_names=QUADRATIC_CHANNELS)
 
 
 @pytest.mark.parametrize("algorithm", ["CMA_ES", "Sep_CMA_ES", "SimpleES"])
 def test_registered_algorithms_run(quadratic_data, algorithm):
-    history, _ = train_with_evosax(
-        hm.Parameter(jnp.zeros(4)),
+    result = train_with_evosax(
+        quadratic_model(),
         quadratic_data,
         EvosaxTrainingConfig(algorithm=algorithm, population_size=8, steps=3, verbose=False),
         key=jr.key(0),
-        **QUADRATIC_KWARGS,
     )
+    history = result.history.loss
     assert len(history) == 3 and all(math.isfinite(v) for v in history)
 
 
 def test_evosax_rejects_nonfinite_fitness_and_a_missing_key(quadratic_data):
     config = EvosaxTrainingConfig(population_size=4, steps=1, verbose=False)
     with pytest.raises(TypeError):
-        train_with_evosax(hm.Parameter(jnp.zeros(4)), quadratic_data, config, **QUADRATIC_KWARGS)
+        train_with_evosax(quadratic_model(), quadratic_data, config)  # ty: ignore[missing-argument]
+
+    def nan_quadratic(predictors, ts, covariates, y0, solver):
+        return jnp.full((ts.shape[0], 4), jnp.nan)
+
     with pytest.raises(FloatingPointError, match="non-finite"):
-        train_with_evosax(
-            hm.Parameter(jnp.zeros(4)),
-            quadratic_data,
-            config,
-            simulate_fn=lambda p, ts, cov, y0, solver: jnp.full((ts.shape[0], 4), jnp.nan),
-            state_to_output=identity,
-            solver=SOLVER,
-            key=jr.key(0),
-        )
+        train_with_evosax(quadratic_model(nan_quadratic), quadratic_data, config, key=jr.key(0))
 
 
 def test_box_init_modes_spread_wider_than_a_warm_start():
@@ -900,7 +1036,9 @@ def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
         loss_fn=lambda _pred, bucket: bucket.n_obs.astype(jnp.float32),
         penalty_fn=lambda _p, _points: jnp.asarray(0.0),
         penalty_weight=0.0,
-        **QUADRATIC_KWARGS,
+        simulate_fn=simulate_quadratic,
+        state_to_output=identity,
+        solver=SOLVER,
     )
     assert float(evaluate(flat)) == pytest.approx(2.0)
 
@@ -915,28 +1053,29 @@ def test_evosax_validation_picks_the_generation_best_it_scores_lowest(quadratic_
         [
             hm.make_experiment(
                 channels={
-                    f"c{i}": hm.ChannelObs(ts=jnp.array([0.0]), values=THETA_STAR[i : i + 1] * 0.0)
-                    for i in range(4)
+                    name: hm.ChannelObs(ts=jnp.array([0.0]), values=THETA_STAR[i : i + 1] * 0.0)
+                    for i, name in enumerate(QUADRATIC_CHANNELS)
                 },
                 y0=jnp.zeros(4),
                 exp_id="v",
             )
         ],
-        output_channel_names=quadratic_data.output_channel_names,
+        output_channel_names=QUADRATIC_CHANNELS,
     )
-    run = _train_with_evosax(
-        hm.Parameter(jnp.zeros(4)),
+    result = train_with_evosax(
+        quadratic_model(),
         quadratic_data,
         EvosaxTrainingConfig(population_size=8, steps=6, sigma_init=0.5, verbose=False),
         key=jr.key(0),
         validation=shifted,
-        **QUADRATIC_KWARGS,
     )
-    assert len(run.loss) == len(run.validation) == 6
-    assert all(b <= a for a, b in zip(run.loss, run.loss[1:], strict=False))
-    assert run.best_step == int(np.argmin(run.validation))
-    returned = float(jnp.mean(run.predictors.value**2))
-    assert returned == pytest.approx(run.validation[run.best_step], rel=1e-5)
+    history = result.history
+    assert len(history.loss) == len(history.validation_loss) == 6
+    assert all(b <= a for a, b in zip(history.loss, history.loss[1:], strict=False))
+    assert result.best_step == int(np.argmin(history.validation_loss))
+    assert result.best_step is not None
+    returned = float(jnp.mean(result.model.predictors.value**2))
+    assert returned == pytest.approx(history.validation_loss[result.best_step], rel=1e-5)
 
 
 def test_channel_weights_by_name_fit_only_the_named_channels(quadratic_data):
@@ -945,15 +1084,14 @@ def test_channel_weights_by_name_fit_only_the_named_channels(quadratic_data):
     The unnamed channels get no gradient, and adamw's decoupled weight decay
     leaves a zero leaf at exactly zero, so they stay put.
     """
-    _, trained = train_with_optax(
-        hm.Parameter(jnp.zeros(4)),
+    result = train_with_optax(
+        quadratic_model(),
         quadratic_data,
         quiet(steps=60, lr=0.2),
         objective=Objective(channel_weights={"c0": 1.0, "c1": 2.0}),
         key=jr.key(0),
-        **QUADRATIC_KWARGS,
     )
-    value = trained.value
+    value = result.model.predictors.value
     assert float(jnp.abs(value[:2] - THETA_STAR[:2]).max()) < 0.2
     assert value[2:].tolist() == [0.0, 0.0]
 
@@ -1055,30 +1193,45 @@ def test_default_mask_trains_networks_and_parameters_only():
     assert not any(flags(trainable_mask(predictors, predicate=lambda _: False)))
 
 
-def test_freeze_helpers_return_new_masks():
+def test_mask_helpers_take_predictors_first_and_chain_through_mask():
+    """Every helper takes the predictors first and an optional base mask=.
+
+    A chained call freezes on top of the base without mutating it, and
+    count_trainable_params counts against the same default mask.
+    """
     predictors = network_predictors()["rate"]
-    mask = trainable_mask(predictors, train_scalers=True)
+    base = trainable_mask(predictors, train_scalers=True)
 
-    by_type = freeze_modules_of_type(mask, BoundScaler)
-    by_fn = freeze_where(mask, lambda m: isinstance(m, BoundScaler))
-    for frozen in (by_type, by_fn):
+    no_scalers = freeze_mask(predictors, BoundScaler, mask=base)
+    by_fn = freeze_mask(predictors, lambda m: isinstance(m, BoundScaler), mask=base)
+    for frozen in (no_scalers, by_fn):
         assert frozen.in_scaler.temperature is False and frozen.out_scaler.temperature is False
-        assert flags(frozen.inner) == flags(mask.inner)
-    assert mask.in_scaler.temperature is True, "the input mask was mutated"
+        assert flags(frozen.inner) == flags(base.inner)
+    assert base.in_scaler.temperature is True, "the base mask was mutated"
 
-    both = freeze_modules_of_type(by_type, MLPPredictor)
-    assert not any(flags(both))
+    nothing = freeze_mask(predictors, MLPPredictor, mask=no_scalers)
+    assert not any(flags(nothing))
+    assert count_trainable_params(predictors, mask=nothing) == 0
 
-    one = freeze_paths(mask, ("in_scaler.temperature",))
+    one = freeze_mask(predictors, "in_scaler.temperature", mask=base)
     assert one.in_scaler.temperature is False and one.out_scaler.temperature is True
-    assert sum(flags(one)) == sum(flags(mask)) - 1
-    assert flags(freeze_paths(mask, ())) == flags(mask)
+    assert sum(flags(one)) == sum(flags(base)) - 1
+    assert flags(freeze_mask(predictors, (), mask=base)) == flags(base)
+
+    # The default base is trainable_mask(predictors), scalers frozen.
+    assert flags(freeze_mask(predictors, ())) == flags(trainable_mask(predictors))
+    n_inner = sum(
+        int(leaf.size)
+        for leaf in jtu.tree_leaves(eqx.filter(predictors.inner, eqx.is_inexact_array))
+    )
+    assert count_trainable_params(predictors) == n_inner
+    assert count_trainable_params(predictors, mask=base) == n_inner + 2
 
 
-def test_freeze_paths_refuses_unknown_paths_and_suggests_matches():
+def test_freeze_mask_refuses_entries_that_match_nothing_and_suggests_paths():
     # A silent no-op on a typo trains a leaf the caller believes is frozen.
-    mask = trainable_mask(network_predictors()["rate"], train_scalers=True)
+    predictors = network_predictors()["rate"]
     with pytest.raises(ValueError, match="no leaf matches"):
-        freeze_paths(mask, ("in_scaler.temperature", "nope.nope"))
+        freeze_mask(predictors, ("in_scaler.temperature", "nope.nope"))
     with pytest.raises(ValueError, match="Closest matches"):
-        freeze_paths(mask, ("in_scaler.temperatur",))
+        freeze_mask(predictors, "in_scaler.temperatur")

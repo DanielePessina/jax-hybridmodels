@@ -34,19 +34,13 @@ CORE = [
     "OptaxTrainingConfig",
     "TrainingPhase",
     "EvosaxTrainingConfig",
-    "train_with_optax",
-    "train_with_evosax",
-    "train_seed_ensemble",
-    "train_bootstrap_ensemble",
-    "predict_dataset",
-    "predict_dense",
-    "ensemble_predictions",
+    "predict_ensemble",
     "compute_metrics",
     "evaluate_predictor",
     "trainable_mask",
-    "freeze_mask",
-    "save_run",
-    "load_run",
+    "count_trainable_params",
+    "save",
+    "load",
 ]
 
 
@@ -64,18 +58,68 @@ def test_all_matches_the_lazy_exports_and_every_export_resolves():
 
 def test_submodules_resolve_as_attributes():
     # Lower-level pieces left the top level; they stay one attribute away.
+    assert callable(jaxhybridmodels.training.train_with_optax)
+    assert callable(jaxhybridmodels.training.train_with_evosax)
+    assert callable(jaxhybridmodels.trainable.freeze_mask)
     assert callable(jaxhybridmodels.penalties.box_grid)
+    assert callable(jaxhybridmodels.serialise.save_predictors)
+    assert callable(jaxhybridmodels.serialise.load_predictors)
     assert callable(jaxhybridmodels.losses.masked_mse)
     assert "Tsit5" in jaxhybridmodels.solver.SOLVER_REGISTRY
 
 
 @pytest.mark.parametrize(
     "name",
-    ["ConstantPredictor", "fit", "predict", "frozen_default_mask", "SOLVER_REGISTRY", "box_grid"],
+    [
+        "ConstantPredictor",
+        "fit",
+        "predict",
+        "frozen_default_mask",
+        "SOLVER_REGISTRY",
+        "box_grid",
+        # Duplicates of model methods, and helpers fit(freeze=) covers.
+        "train_with_optax",
+        "train_with_evosax",
+        "train_seed_ensemble",
+        "train_bootstrap_ensemble",
+        "predict_dataset",
+        "predict_dense",
+        "ensemble_predictions",
+        "freeze_mask",
+        "freeze_paths",
+        "freeze_where",
+        "freeze_modules_of_type",
+        # save/load replace the loose-pieces pair; the predictors-only pair
+        # stays in jaxhybridmodels.serialise.
+        "save_run",
+        "load_run",
+        "save_predictors",
+        "load_predictors",
+    ],
 )
 def test_removed_and_demoted_names_are_not_top_level(name):
     with pytest.raises(AttributeError):
         getattr(jaxhybridmodels, name)
+
+
+@pytest.mark.parametrize(
+    "module,name",
+    [
+        ("jaxhybridmodels.training", "train_seed_ensemble"),
+        ("jaxhybridmodels.training", "train_bootstrap_ensemble"),
+        ("jaxhybridmodels.prediction", "predict_dataset"),
+        ("jaxhybridmodels.prediction", "predict_dense"),
+        ("jaxhybridmodels.prediction", "ensemble_predictions"),
+        ("jaxhybridmodels.trainable", "freeze_paths"),
+        ("jaxhybridmodels.trainable", "freeze_where"),
+        ("jaxhybridmodels.trainable", "freeze_modules_of_type"),
+        ("jaxhybridmodels.serialise", "save_run"),
+        ("jaxhybridmodels.serialise", "load_run"),
+    ],
+)
+def test_replaced_functions_are_gone_from_their_modules(module, name):
+    assert not hasattr(importlib.import_module(module), name)
+    assert not hasattr(jaxhybridmodels.PredictionResult, "from_buckets")
 
 
 def test_distribution_metadata_matches_public_version():

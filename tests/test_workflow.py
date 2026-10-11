@@ -13,7 +13,7 @@ import json
 import re
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import diffrax
 import equinox as eqx
@@ -29,6 +29,7 @@ from _models import (
     TRUE_RATE,
     decay_dataset,
     identity,
+    make_model,
     network_model,
     network_predictors,
     parameter_model,
@@ -44,6 +45,7 @@ import jaxhybridmodels.training.evosax as evosax_module
 import jaxhybridmodels.training.optax as optax_module
 from jaxhybridmodels.losses import masked_mse
 from jaxhybridmodels.objective import Objective
+from jaxhybridmodels.serialise import load_predictors, save_predictors
 from jaxhybridmodels.ui import EvosaxUI, RichEvosaxUI, RichTrainingUI, SilentUI, TrainingUI
 from jaxhybridmodels.ui.testing import RecordingUI
 
@@ -310,7 +312,7 @@ def test_vector_covariates_reach_each_simulation():
 def test_prediction_compiles_once_per_bucket_shape(fitted, decay_data):
     """Same shapes reuse the trace, and new parameter values do not retrace.
 
-    The dense grid starts after ``t0``; each experiment still integrates
+    The explicit grid starts after ``t0``; each experiment still integrates
     from its own ``t0``, so every row matches the analytic curve.
     """
     traces = []
@@ -319,23 +321,30 @@ def test_prediction_compiles_once_per_bucket_shape(fitted, decay_data):
         traces.append(ts.shape)
         return simulate_parameter(predictors, ts, covariates, y0, solver)
 
-    kwargs: dict[str, Any] = dict(simulate_fn=counting, state_to_output=identity, solver=SOLVER)
-    fitted_predictors = fitted[0].model.predictors
-    hm.predict_dataset(fitted_predictors, decay_data, **kwargs)
+    def model_with(predictors: Any) -> hm.HybridModel:
+        return hm.HybridModel(
+            predictors=predictors,
+            simulate_fn=counting,
+            state_to_output=identity,
+            output_channel_names=CHANNELS,
+            solver=SOLVER,
+        )
+
+    trained, other = model_with(fitted[0].model.predictors), model_with(parameter_predictors(0.5))
+    trained.predict(decay_data)
     assert len(traces) == 2, "expected one trace per distinct bucket shape"
-    hm.predict_dataset(fitted_predictors, decay_data, **kwargs)
-    hm.predict_dataset(parameter_predictors(0.5), decay_data, **kwargs)
+    trained.predict(decay_data)
+    other.predict(decay_data)
     assert len(traces) == 2
 
     grid = jnp.array([1.0, 2.0])
-    dense = hm.predict_dense(fitted_predictors, decay_data, ts_grid=grid, **kwargs)
+    on_grid = trained.predict(decay_data, ts=grid)
     compiled = len(traces)
-    hm.predict_dense(parameter_predictors(0.5), decay_data, ts_grid=grid, **kwargs)
+    other.predict(decay_data, ts=grid)
     assert compiled == 4 and len(traces) == compiled
     expected = _analytic(_rate(fitted[0].model), grid)
-    for bucket in dense:
-        for row in bucket:
-            np.testing.assert_allclose(row[:, 0], expected, rtol=1e-3)
+    for experiment in on_grid.values():
+        np.testing.assert_allclose(experiment.outputs["conc"], expected, rtol=1e-3)
 
 
 def test_integer_observations_with_a_fractional_t0_are_promoted_to_float():
@@ -388,22 +397,15 @@ def _edit_metadata(run_dir: Path, edit) -> None:
 
 
 def test_a_fitted_run_reloads_and_predicts_identically(fitted, decay_data, tmp_path):
-    """save_run then load_run gives back the same predictions, config and history."""
+    """save then load gives back the same predictions, config and history."""
     result, _ = fitted
     config = quiet(
         phases=(hm.TrainingPhase(25, lr=0.1, horizon=0.5), hm.TrainingPhase(25, lr=0.05))
     )
     run_dir = tmp_path / "does" / "not" / "exist"
     # A first save to the same directory is overwritten by the second.
-    hm.save_run(run_dir, predictors=parameter_predictors(), solver=SOLVER, extras={"v": 1})
-    hm.save_run(
-        run_dir,
-        predictors=result.model.predictors,
-        solver=SOLVER,
-        optax_config=config,
-        loss_history=list(result.history.loss),
-        extras={"v": 2},
-    )
+    hm.save(run_dir, parameter_model(), extras={"v": 1})
+    hm.save(run_dir, result, config=config, extras={"v": 2})
     assert (run_dir / "predictors.eqx").exists()
 
     def reject_nonfinite(token):
@@ -411,36 +413,93 @@ def test_a_fitted_run_reloads_and_predicts_identically(fitted, decay_data, tmp_p
 
     # The rate's open upper bound must not leak Infinity into the JSON.
     metadata = json.loads((run_dir / "metadata.json").read_text(), parse_constant=reject_nonfinite)
-    assert metadata["loss_history_kind"] == "per_step_data"
+    assert metadata["config"]["kind"] == "optax"
     assert [leaf["path"] for leaf in metadata["predictors"]["leaves"]] == [
         "['offset']",
         "['rate']",
     ]
 
-    loaded = hm.load_run(
-        run_dir, predictors_template=parameter_predictors(), optax_cls=hm.OptaxTrainingConfig
-    )
-    assert loaded["optax_config"].phases == config.phases
-    assert loaded["solver"].to_dict() == SOLVER.to_dict()
-    assert loaded["loss_history"] == list(result.history.loss)
-    assert loaded["extras"] == {"v": 2}
-    reloaded = eqx.tree_at(lambda m: m.predictors, result.model, loaded["predictors"])
-    for exp_id, exp in reloaded.predict(decay_data).items():
+    loaded = hm.load(run_dir, like=parameter_model())
+    assert isinstance(loaded, hm.SavedRun)
+    assert loaded.config == config
+    assert loaded.model.solver.to_dict() == SOLVER.to_dict()
+    assert loaded.history == result.history
+    assert (loaded.best_step, loaded.stop_reason) == (result.best_step, result.stop_reason)
+    assert loaded.objective is None
+    assert loaded.extras == {"v": 2}
+    for exp_id, exp in loaded.model.predict(decay_data).items():
         np.testing.assert_array_equal(
             exp.outputs["conc"], result.model.predict(decay_data)[exp_id].outputs["conc"]
         )
 
-    raw = hm.load_run(run_dir, predictors_template=parameter_predictors())
-    assert raw["optax_config"]["phases"][0]["steps"] == 25
+
+def test_a_bare_model_saves_without_history(tmp_path):
+    """A HybridModel saves its weights alone; the history comes back empty."""
+    model = parameter_model()
+    hm.save(tmp_path, model)
+    loaded = hm.load(tmp_path, like=parameter_model())
+    assert loaded.history == hm.FitHistory()
+    assert (loaded.best_step, loaded.stop_reason, loaded.config) == (None, None, None)
+    assert _rate(loaded.model) == _rate(model)
+
+
+def test_load_keeps_like_solver_and_save_accepts_any_solver(tmp_path):
+    """The saved solver is a record; ``load`` keeps ``like.solver`` and checks it.
+
+    The record names classes only, so rebuilding from it would drop
+    constructor arguments such as ``checkpoints=7``. An unregistered solver
+    still saves, and fails nothing half-way.
+    """
+
+    def with_solver(solver: hm.SolverConfig) -> hm.HybridModel:
+        return hm.HybridModel(
+            predictors=parameter_predictors(),
+            simulate_fn=simulate_parameter,
+            state_to_output=identity,
+            output_channel_names=CHANNELS,
+            solver=solver,
+        )
+
+    checkpointed = hm.SolverConfig(adjoint=diffrax.RecursiveCheckpointAdjoint(checkpoints=7))
+    hm.save(tmp_path / "a", with_solver(checkpointed))
+    loaded = hm.load(tmp_path / "a", like=with_solver(checkpointed))
+    assert loaded.model.solver == checkpointed
+    with pytest.warns(RuntimeWarning, match="keeping like.solver"):
+        loaded = hm.load(tmp_path / "a", like=parameter_model())
+    assert loaded.model.solver == SOLVER
+
+    stiff = hm.SolverConfig(solver=diffrax.Kvaerno5())
+    hm.save(tmp_path / "b", with_solver(stiff))
+    metadata = json.loads((tmp_path / "b" / "metadata.json").read_text())
+    assert "Kvaerno5" in metadata["solver"]["unregistered"]
+    assert hm.load(tmp_path / "b", like=with_solver(stiff)).model.solver == stiff
+
+
+def test_nonfinite_history_entries_survive_a_save(tmp_path):
+    """NaN and inf losses are written as markers and read back as floats."""
+    history = hm.FitHistory(loss=(1.0, float("nan"), float("inf")), phase=(0, 0, 0))
+    result = hm.FitResult(
+        model=parameter_model(), history=history, best_step=0, stop_reason="patience"
+    )
+    hm.save(tmp_path, result)
+    loss = hm.load(tmp_path, like=parameter_model()).history.loss
+    assert loss[0] == 1.0 and np.isnan(loss[1]) and loss[2] == float("inf")
+
+
+def test_save_rejects_what_it_cannot_write(tmp_path):
+    """Only a model or a fit saves, and only a training config goes in config=."""
+    with pytest.raises(TypeError, match="HybridModel or FitResult"):
+        hm.save(tmp_path, parameter_predictors())  # ty: ignore[invalid-argument-type]
+    with pytest.raises(TypeError, match="OptaxTrainingConfig or EvosaxTrainingConfig"):
+        hm.save(tmp_path, parameter_model(), config=Objective())  # ty: ignore[invalid-argument-type]
 
 
 def test_network_predictors_round_trip_bit_exact(tmp_path):
     """save_predictors / load_predictors restore every leaf into a fresh template."""
     predictors = network_predictors(jr.key(0))
     path = str(tmp_path / "net.eqx")
-    hm.save_predictors(path, predictors)
-    template = network_predictors(jr.key(99))
-    restored = hm.load_predictors(path, template)
+    save_predictors(path, predictors)
+    restored = load_predictors(path, like=network_predictors(jr.key(99)))
     leaves = jax.tree_util.tree_leaves(eqx.filter(predictors, eqx.is_inexact_array))
     back = jax.tree_util.tree_leaves(eqx.filter(restored, eqx.is_inexact_array))
     assert len(leaves) == len(back)
@@ -448,35 +507,16 @@ def test_network_predictors_round_trip_bit_exact(tmp_path):
         np.testing.assert_array_equal(a, b)
 
 
-def test_history_kind_says_which_trainer_wrote_it(tmp_path):
-    """Optax histories can rise, Evosax ones cannot; the metadata keeps them apart."""
+def test_an_evosax_config_reloads_as_its_own_type(tmp_path):
+    """The config's kind is recorded, so an Evosax config comes back as one."""
     evosax = hm.EvosaxTrainingConfig(population_size=8, steps=2, verbose=False)
-    cases: list[tuple[str, dict[str, Any], list[float] | None, str | None]] = [
-        ("optax", {"optax_config": quiet(steps=1)}, [1.0], "per_step_data"),
-        ("evosax", {"evosax_config": evosax}, [1.0], "best_so_far"),
-        ("both", {"optax_config": quiet(steps=1), "evosax_config": evosax}, [1.0], "unknown"),
-        ("none", {"optax_config": quiet(steps=1)}, None, None),
-    ]
-    for name, configs, history, kind in cases:
-        hm.save_run(
-            tmp_path / name,
-            predictors=parameter_predictors(),
-            solver=SOLVER,
-            loss_history=history,
-            **configs,
-        )
-        assert _metadata(tmp_path / name)["loss_history_kind"] == kind, name
-    loaded = hm.load_run(
-        tmp_path / "both",
-        predictors_template=parameter_predictors(),
-        optax_cls=hm.OptaxTrainingConfig,
-        evosax_cls=hm.EvosaxTrainingConfig,
-    )
-    assert loaded["evosax_config"] == evosax
+    hm.save(tmp_path, parameter_model(), config=evosax)
+    assert _metadata(tmp_path)["config"]["kind"] == "evosax"
+    assert hm.load(tmp_path, like=parameter_model()).config == evosax
 
 
 def test_callables_in_a_config_are_described_not_pickled(tmp_path):
-    """Callables save as a dotted name and refuse to load as a typed object."""
+    """Callables save as a dotted name and load back as the raw dict."""
 
     def optimizer_factory(learning_rate):
         return optax.adam(learning_rate)
@@ -484,44 +524,34 @@ def test_callables_in_a_config_are_described_not_pickled(tmp_path):
     def penalty_fn(predictors, points):
         return jnp.asarray(0.0)
 
-    hm.save_run(
+    hm.save(
         tmp_path / "factory",
-        predictors=parameter_predictors(),
-        solver=SOLVER,
-        optax_config=quiet(steps=1, optimizer=optimizer_factory),
+        parameter_model(),
+        config=quiet(steps=1, optimizer=optimizer_factory),
         objective=Objective(loss=masked_mse, penalty_fn=penalty_fn),
     )
     saved = _metadata(tmp_path / "factory")
-    assert "__callable__" in saved["optax_config"]["phases"][0]["optimizer"]
+    assert "__callable__" in saved["config"]["fields"]["phases"][0]["optimizer"]
     assert saved["objective"]["loss"] == {"__callable__": "jaxhybridmodels.losses.masked_mse"}
     assert "__callable__" in saved["objective"]["penalty_fn"]
-    template = parameter_predictors()
-    with pytest.raises(ValueError, match="callable"):
-        hm.load_run(
-            tmp_path / "factory", predictors_template=template, optax_cls=hm.OptaxTrainingConfig
-        )
-    with pytest.raises(ValueError, match="callable"):
-        hm.load_run(tmp_path / "factory", predictors_template=template, objective_cls=Objective)
-    raw = hm.load_run(tmp_path / "factory", predictors_template=parameter_predictors())
-    assert raw["objective"]["loss"] == {"__callable__": "jaxhybridmodels.losses.masked_mse"}
+    raw = hm.load(tmp_path / "factory", like=parameter_model())
+    assert isinstance(raw.config, dict) and isinstance(raw.objective, dict)
+    raw_config, raw_objective = (
+        cast(dict[str, Any], raw.config),
+        cast(dict[str, Any], raw.objective),
+    )
+    assert "__callable__" in raw_config["phases"][0]["optimizer"]
+    assert raw_objective["loss"] == {"__callable__": "jaxhybridmodels.losses.masked_mse"}
 
     schedule = quiet(phases=(hm.TrainingPhase(1, lr=optax.linear_schedule(0.1, 0.0, 1)),))
-    hm.save_run(
-        tmp_path / "schedule",
-        predictors=parameter_predictors(),
-        solver=SOLVER,
-        optax_config=schedule,
-    )
-    assert "__callable__" in _metadata(tmp_path / "schedule")["optax_config"]["phases"][0]["lr"]
+    hm.save(tmp_path / "schedule", parameter_model(), config=schedule)
+    fields = _metadata(tmp_path / "schedule")["config"]["fields"]
+    assert "__callable__" in fields["phases"][0]["lr"]
 
     raw_optimizer = quiet(steps=1, optimizer=optax.adam(1e-3))
-    hm.save_run(
-        tmp_path / "raw",
-        predictors=parameter_predictors(),
-        solver=SOLVER,
-        optax_config=raw_optimizer,
-    )
-    assert "__opaque__" in _metadata(tmp_path / "raw")["optax_config"]["phases"][0]["optimizer"]
+    hm.save(tmp_path / "raw", parameter_model(), config=raw_optimizer)
+    fields = _metadata(tmp_path / "raw")["config"]["fields"]
+    assert "__opaque__" in fields["phases"][0]["optimizer"]
 
 
 def test_an_objective_without_callables_round_trips(tmp_path):
@@ -532,10 +562,8 @@ def test_an_objective_without_callables_round_trips(tmp_path):
         penalty_weight=0.1,
         penalty_points={"rate": jnp.array([[0.5], [1.5]])},
     )
-    hm.save_run(tmp_path, predictors=parameter_predictors(), solver=SOLVER, objective=objective)
-    loaded = hm.load_run(
-        tmp_path, predictors_template=parameter_predictors(), objective_cls=Objective
-    )["objective"]
+    hm.save(tmp_path, parameter_model(), objective=objective)
+    loaded = hm.load(tmp_path, like=parameter_model()).objective
     assert isinstance(loaded, Objective)
     assert (loaded.loss, loaded.channel_weights, loaded.penalty_weight) == (
         "bal_mse",
@@ -544,9 +572,6 @@ def test_an_objective_without_callables_round_trips(tmp_path):
     )
     assert loaded.penalty_points is not None
     np.testing.assert_array_equal(loaded.penalty_points["rate"], [[0.5], [1.5]])
-    # Without objective_cls the grids still come back as arrays of their saved shape.
-    raw = hm.load_run(tmp_path, predictors_template=parameter_predictors())["objective"]
-    np.testing.assert_array_equal(raw["penalty_points"]["rate"], [[0.5], [1.5]])
 
 
 class _Scaled(hm.Predictor):
@@ -568,7 +593,11 @@ def _bump_version(metadata: dict[str, Any]) -> None:
 
 
 def _add_config_field(metadata: dict[str, Any]) -> None:
-    metadata["optax_config"]["future_field"] = True
+    metadata["config"]["fields"]["future_field"] = True
+
+
+def _rename_channel(metadata: dict[str, Any]) -> None:
+    metadata["output_channel_names"] = ["other"]
 
 
 @pytest.mark.parametrize(
@@ -599,15 +628,21 @@ def _add_config_field(metadata: dict[str, Any]) -> None:
         pytest.param(lambda: _Scaled(3.0), lambda: _Scaled(99.0), None, "static", id="custom"),
         pytest.param(parameter_predictors, parameter_predictors, _bump_version, "version"),
         pytest.param(parameter_predictors, parameter_predictors, _add_config_field, "future_field"),
+        pytest.param(
+            parameter_predictors,
+            parameter_predictors,
+            _rename_channel,
+            "output_channel_names",
+        ),
     ],
 )
-def test_load_run_rejects_a_mismatched_run(tmp_path, saved, template, edit, match):
+def test_load_rejects_a_mismatched_run(tmp_path, saved, template, edit, match):
     """Loading fails loudly rather than silently mis-reading a different model."""
-    hm.save_run(tmp_path, predictors=saved(), solver=SOLVER, optax_config=quiet(steps=1))
+    hm.save(tmp_path, make_model(saved()), config=quiet(steps=1))
     if edit is not None:
         _edit_metadata(tmp_path, edit)
     with pytest.raises(ValueError, match=match):
-        hm.load_run(tmp_path, predictors_template=template(), optax_cls=hm.OptaxTrainingConfig)
+        hm.load(tmp_path, like=make_model(template()))
 
 
 # ---------------------------------------------------------------------------
@@ -936,44 +971,20 @@ def test_simulate_keeps_y0_at_the_experiment_start():
         model.simulate(experiment=experiment, ts=[0.5, 1.0])
 
 
-def test_prediction_result_from_buckets_matches_predict(fitted, decay_data):
-    """Bucket arrays from the functional layer score like ``predict``'s result."""
-    model = fitted[0].model
-    buckets = hm.predict_dataset(
-        model.predictors,
-        decay_data,
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-    )
-    wrapped = hm.PredictionResult.from_buckets(buckets, decay_data)
-    direct = hm.compute_metrics(model.predict(decay_data))
-    for name, metrics in hm.compute_metrics(wrapped).items():
-        np.testing.assert_allclose(metrics.mse, direct[name].mse, rtol=1e-6)
-    with pytest.raises(TypeError, match="from_buckets"):
-        hm.compute_metrics(buckets)  # ty: ignore[invalid-argument-type]
-
-
-def test_functional_entry_points_name_the_dataset_they_need(decay_data):
-    """A list of experiments gives a TypeError pointing at make_dataset."""
-    model = parameter_model()
-    with pytest.raises(TypeError, match="make_dataset"):
-        hm.predict_dataset(
-            model.predictors,
-            list(decay_data.experiments),  # ty: ignore[invalid-argument-type]
-            simulate_fn=model.simulate_fn,
-            state_to_output=model.state_to_output,
-            solver=model.solver,
-        )
+def test_compute_metrics_names_what_it_takes(fitted, decay_data):
+    """Raw bucket arrays are not a result; the error names the entry points that make one."""
+    buckets = fitted[0].model.predict(decay_data).buckets
+    with pytest.raises(TypeError, match="predict_ensemble"):
+        hm.compute_metrics(buckets)
 
 
 def test_empty_penalty_points_survive_a_save(tmp_path):
     """An empty ``[0, n_inputs]`` grid reloads with its shape, so Objective accepts it."""
     objective = hm.Objective(penalty_points={"rate": jnp.zeros((0, 1)), "other": jnp.ones((2, 3))})
-    hm.save_run(tmp_path, predictors=parameter_predictors(), solver=SOLVER, objective=objective)
-    loaded = hm.load_run(
-        tmp_path, predictors_template=parameter_predictors(), objective_cls=hm.Objective
-    )
-    points = loaded["objective"].penalty_points
+    hm.save(tmp_path, parameter_model(), objective=objective)
+    loaded = hm.load(tmp_path, like=parameter_model()).objective
+    assert isinstance(loaded, hm.Objective)
+    points = loaded.penalty_points
+    assert points is not None
     assert points["rate"].shape == (0, 1)
     np.testing.assert_array_equal(points["other"], np.ones((2, 3)))

@@ -27,6 +27,10 @@ step.
 `fit` returns a `FitResult`: the fitted `model`, its `history`, the
 `best_step` that `restore_best` returned, and a `stop_reason` of
 `"budget_exhausted"` or `"patience"`. The original model is unchanged.
+`fit_ensemble` trains several members and returns a list of `FitResult`s;
+see [Ensembles](/guide/ensembles).
+
+## Predicting
 
 `predict` returns a `PredictionResult` keyed by experiment ID, in dataset
 order. Each entry has `times`, `outputs`, `observed` and `observation_mask`,
@@ -38,6 +42,24 @@ returns a long table (needs pandas), and `predictions.buckets` keeps the raw
 
 `hm.compute_metrics(predictions)` returns per-channel statistics over the
 measured cells, and `hm.print_metrics(predictions)` prints them as a table.
+
+By default each experiment is predicted on its measured times. For smooth
+plots, pick another grid:
+
+```python
+smooth = fitted.predict(experiments, n_points=200)              # even grid per experiment
+shared = fitted.predict(experiments, ts=jnp.linspace(0.0, 10.0, 200))  # one grid for all
+```
+
+`n_points` spans each experiment from its `t0` (or first observation) to
+its last observation. `ts` must not start before any experiment's start.
+Each experiment still integrates from its own start, so `y0` stays in
+place. Off the measured grid, `observed` and `observation_mask` are empty.
+For several models, `hm.predict_ensemble(models, data)` takes the same
+arguments and returns the mean with its spread; see
+[Ensembles](/guide/ensembles).
+
+## Simulating
 
 Simulate new conditions without constructing observations:
 
@@ -61,12 +83,15 @@ measured time when `t0` is unset, so a `ts` that starts before that is
 rejected:
 
 ```python
-dense = fitted.simulate(experiment=experiments[0], ts=jnp.linspace(0.0, 10.0, 200))
+dense = fitted.simulate(experiments[0], ts=jnp.linspace(0.0, 10.0, 200))
+smooth = fitted.simulate(experiments[0], n_points=200)
 ```
 
+`n_points` gives an even grid from the experiment's start to its last
+observation, as in `predict`; it needs `experiment=` and cannot be
+combined with `ts`.
+
 `output_channel_names` must match the dataset's, in order.
-`train_with_optax`, `train_with_evosax` and `predict_dataset` take the pieces
-below as separate arguments instead of a model.
 
 ## The model is an Equinox module
 

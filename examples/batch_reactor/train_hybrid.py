@@ -16,7 +16,8 @@ Shows:
   covariates
 - ``FitResult.history``, ``predict``, ``simulate(experiment=...)``,
   ``compute_metrics`` and ``evaluate_predictor``
-- ``save_predictors`` for the RL example, which loads this fitted model
+- ``serialise.save_predictors`` for the RL example, which loads this
+  fitted model's predictors
 
 Run::
 
@@ -46,6 +47,8 @@ import numpy as np
 from jax import Array
 
 import jaxhybridmodels as hm
+from jaxhybridmodels.serialise import save_predictors
+from jaxhybridmodels.trainable import freeze_mask
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # ``_model`` and ``_data`` sit in this script's own directory, so they
@@ -343,9 +346,8 @@ def main() -> None:
     print("\n[fit] phase 1: CMA-ES on the trunk, residual frozen")
     # freeze_mask is the mask behind fit(freeze=...), used here only to count
     # what phase 1 will train.
-    n_p1 = hm.count_trainable_params(
-        model.predictors, hm.freeze_mask(model.predictors, hm.BoundedPredictor)
-    )
+    mask_p1 = freeze_mask(model.predictors, hm.BoundedPredictor)
+    n_p1 = hm.count_trainable_params(model.predictors, mask=mask_p1)
     print(f"  trainable scalars: {n_p1}")
     assert n_p1 == 2, f"phase 1 should train the trunk's 2 scalars, got {n_p1}"
     residual_before = _inner_weights(residual)
@@ -375,8 +377,8 @@ def main() -> None:
     )
 
     print("\n[fit] phase 2: AdamW on the residual, trunk frozen")
-    mask_p2 = hm.freeze_mask(model_p1.predictors, ArrheniusKinetics)
-    print(f"  trainable scalars: {hm.count_trainable_params(model_p1.predictors, mask_p2)}")
+    mask_p2 = freeze_mask(model_p1.predictors, ArrheniusKinetics)
+    print(f"  trainable scalars: {hm.count_trainable_params(model_p1.predictors, mask=mask_p2)}")
     # region phase-2
     config_p2 = hm.OptaxTrainingConfig(steps=args.steps, lr=args.lr)
     fit_p2 = model_p1.fit(train_dataset, config_p2, key=k_p2, freeze=ArrheniusKinetics)
@@ -405,7 +407,9 @@ def main() -> None:
 
     if args.save_predictors is not None:
         args.save_predictors.parent.mkdir(parents=True, exist_ok=True)
-        hm.save_predictors(args.save_predictors, model_p2.predictors)
+        # Predictors only: the RL example rebuilds its own simulate_fn
+        # around them, so it has no HybridModel to pass hm.load as like=.
+        save_predictors(args.save_predictors, model_p2.predictors)
         print(f"  phase-2 predictors written to {args.save_predictors}")
 
     if args.no_plot:

@@ -1,6 +1,6 @@
 # UI: Training Dashboards
 
-Training UIs are protocols implemented by `RichTrainingUI` / `RichEvosaxUI` (live dashboards) and `SilentUI` (no-op). Pass via the `ui=` keyword on `train_with_optax` / `train_with_evosax`; the trainer calls lifecycle hooks (`on_phase_start`, `on_step_end`, `on_run_end`, ...) at the right points. Custom UIs implement the matching protocol — useful for piping training metrics into your own logger.
+Training UIs are protocols implemented by `RichTrainingUI` / `RichEvosaxUI` (live dashboards) and `SilentUI` (no-op). Pass via the `ui=` keyword of `fit` or `fit_ensemble`; the trainer calls lifecycle hooks (`on_phase_start`, `on_step_end`, `on_run_end`, ...) at the right points. Custom UIs implement the matching protocol — useful for piping training metrics into your own logger.
 
 ## Quick links
 

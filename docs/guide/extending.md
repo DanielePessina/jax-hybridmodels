@@ -121,7 +121,7 @@ step = build_bucket_step(
     simulate_fn=simulate_fn, state_to_output=state_to_output,
     solver=solver, loss_fn=loss_fn, trainable=mask,
 )
-apply_update = build_apply_update(optimizer, mask)
+apply_update = build_apply_update(optimizer=optimizer, trainable=mask)
 
 buckets = dataset.bucket_payloads
 grads = [step(predictors, bp, horizon)[1] for bp in buckets]

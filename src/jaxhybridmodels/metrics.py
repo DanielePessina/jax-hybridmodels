@@ -70,8 +70,8 @@ def compute_metrics(predictions: Mapping[str, Any]) -> dict[str, ChannelMetrics]
     Parameters
     ----------
     predictions : PredictionResult
-        From ``HybridModel.predict`` or ``PredictionResult.from_buckets``,
-        or any mapping from experiment ID to
+        From ``HybridModel.predict`` or ``predict_ensemble`` (which is
+        scored on its member mean), or any mapping from experiment ID to
         a record with ``outputs``, ``observed`` and ``observation_mask``
         dicts keyed by channel. Only cells the mask marks as measured
         count. Channels are read from the first experiment's ``outputs``.
@@ -83,16 +83,16 @@ def compute_metrics(predictions: Mapping[str, Any]) -> dict[str, ChannelMetrics]
     """
     if not isinstance(predictions, Mapping):
         raise TypeError(
-            "compute_metrics takes the PredictionResult from HybridModel.predict; got "
-            f"{type(predictions).__name__}. Wrap bucket arrays from predict_dataset or "
-            "ensemble_predictions with PredictionResult.from_buckets(buckets, dataset)."
+            "compute_metrics takes the PredictionResult from HybridModel.predict or "
+            f"predict_ensemble; got {type(predictions).__name__}."
         )
     experiments = list(predictions.values())
     if not experiments:
         raise ValueError("compute_metrics needs at least one experiment")
     if not experiments[0].observation_mask:
         raise ValueError(
-            "compute_metrics needs observed values; pass the result of predict(), not simulate()"
+            "compute_metrics needs observed values; pass the result of predict() on the "
+            "measured grid, not simulate() or predict(ts=...) / predict(n_points=...)"
         )
     out: dict[str, ChannelMetrics] = {}
     for name in experiments[0].outputs:

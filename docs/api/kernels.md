@@ -37,7 +37,7 @@ The cutoff is clamped at 1. A fraction small enough to floor to zero
 would otherwise give an all-false mask, and every loss here divides by a
 count clamped at 1, so the step would silently score nothing.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L58)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L64)</small>
 
 ---
 
@@ -59,13 +59,13 @@ predict_bucket_obs(
 
 Simulate every experiment in the bucket and project to ``[N, T, D]``.
 
-The uncompiled shared core behind both `predict_bucket
-<jaxhybridmodels.prediction.predict_bucket>` and the training kernels.
+The uncompiled shared core behind both ``HybridModel.predict`` and the
+training kernels.
 Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
 the training and prediction jit caches separate (R-J1): this body is
 traced into whichever kernel calls it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L105)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L111)</small>
 
 ---
 
@@ -104,7 +104,7 @@ in a step contributes its own trajectory penalty, unlike the bound
 penalty's once-per-step charge. When it is ``None`` (the default) the loss
 is the data term alone.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L125)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L131)</small>
 
 ---
 
@@ -134,7 +134,7 @@ two attempts. The returned score includes the data loss and, when
 configured, the trajectory penalty; the bound penalty remains
 outside this per-bucket scorer.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L186)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L192)</small>
 
 ---
 
@@ -175,7 +175,7 @@ Returns the gradient of ``weight * penalty``, to add straight onto the
 averaged data gradient. ``penalty`` comes back unweighted, since that
 is what gets reported.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L258)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L264)</small>
 
 ---
 
@@ -198,4 +198,4 @@ The single optimiser update per training step. Build once per
 optimiser; reuse its returned state across steps, rebuilding only at a
 reset/phase boundary.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L307)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L313)</small>

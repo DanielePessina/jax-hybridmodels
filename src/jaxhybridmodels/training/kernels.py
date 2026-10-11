@@ -1,10 +1,16 @@
 """Public gradient-kernel builders for writing your own training loop.
 
-The stock trainers (:func:`jaxhybridmodels.training.optax.train_with_optax`,
-:func:`jaxhybridmodels.training.evosax.train_with_evosax`) are assembled from
+The stock trainers (:func:`jaxhybridmodels.training.train_with_optax`,
+:func:`jaxhybridmodels.training.train_with_evosax`) are assembled from
 these pieces. They are public so that a custom loop (different accumulation, a custom
 regulariser, per-bucket weighting, a custom schedule) can compose the same
 kernels the framework uses instead of forking the trainer.
+
+Unlike the trainers, the kernels take a model's pieces (``simulate_fn``,
+``state_to_output``, ``solver``) rather than a ``HybridModel``, so a loop
+can swap any of them. Every builder takes keyword arguments only, except
+:func:`build_dataset_score`, which wraps a scorer built here around a
+dataset.
 
 A training *step* in this library is one full pass over every bucket,
 accumulating per-bucket gradients, then a single optimiser update. The
@@ -112,8 +118,8 @@ def predict_bucket_obs(
 ) -> Array:
     """Simulate every experiment in the bucket and project to ``[N, T, D]``.
 
-    The uncompiled shared core behind both :func:`predict_bucket
-    <jaxhybridmodels.prediction.predict_bucket>` and the training kernels.
+    The uncompiled shared core behind both ``HybridModel.predict`` and the
+    training kernels.
     Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
     the training and prediction jit caches separate (R-J1): this body is
     traced into whichever kernel calls it.
@@ -219,7 +225,7 @@ def build_dataset_score(
     score_bucket: Callable[[Any, BucketPayload, Array], Array],
     dataset: Dataset,
     *,
-    channel_names: tuple[str, ...] | None = None,
+    output_channel_names: tuple[str, ...] | None = None,
 ) -> Callable[[Any], float]:
     """Return ``score(predictors) -> float``, the bucket-averaged full-horizon score.
 
@@ -230,15 +236,15 @@ def build_dataset_score(
     own ``score_bucket`` means a bucket shape the two datasets share
     compiles once.
 
-    ``channel_names``, when given, must equal ``dataset.output_channel_names``,
+    ``output_channel_names``, when given, must equal the dataset's own,
     since the scorer's loss was resolved against those channels. A
     non-finite score raises ``FloatingPointError``, as it would otherwise
     win or lose every comparison silently. Each call blocks on the result.
     """
-    if channel_names is not None and dataset.output_channel_names != channel_names:
+    if output_channel_names is not None and dataset.output_channel_names != output_channel_names:
         raise ValueError(
             f"validation channels {dataset.output_channel_names} do not match the "
-            f"training channels {channel_names}"
+            f"training channels {output_channel_names}"
         )
     buckets = dataset.bucket_payloads
     if not buckets:
@@ -305,7 +311,7 @@ def build_penalty_step(
 
 
 def build_apply_update(
-    optimizer: optax.GradientTransformation, trainable: Any
+    *, optimizer: optax.GradientTransformation, trainable: Any
 ) -> Callable[[Any, Any, Any], tuple[Any, Any]]:
     """Return a jitted ``apply_update(predictors, grads, opt_state)``.
 

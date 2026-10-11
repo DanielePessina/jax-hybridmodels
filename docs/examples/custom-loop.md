@@ -1,6 +1,6 @@
 # Custom training loop
 
-`train_with_optax` is assembled from public pieces in
+`model.fit` with an `OptaxTrainingConfig` is assembled from public pieces in
 [`jaxhybridmodels.training.kernels`](/api/kernels). Read this example when
 you need a loop the stock trainer cannot express, such as a different
 accumulation rule or per-bucket weights: compose the same pieces instead of

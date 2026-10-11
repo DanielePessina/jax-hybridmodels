@@ -31,11 +31,11 @@ from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
+    HybridModel,
     MLPPredictor,
     SolverConfig,
     make_dataset,
     make_experiment,
-    predict_dataset,
 )
 from jaxhybridmodels.penalties import select_penalty_points
 from jaxhybridmodels.trainable import trainable_mask
@@ -130,11 +130,15 @@ def main():
 
     # ---- prediction ----
     t0 = time.perf_counter()
-    preds = predict_dataset(
-        predictor, dataset, simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver
+    model = HybridModel(
+        predictors=predictor,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        output_channel_names=("y",),
+        solver=solver,
     )
-    for p in preds:
-        jax.block_until_ready(p)
+    preds = model.predict(dataset)
+    jax.block_until_ready(preds.buckets)
     t_pred_total = time.perf_counter() - t0
 
     # ---- production kernel build (warm-up + settle cycle) ----

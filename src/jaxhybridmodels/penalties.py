@@ -98,7 +98,7 @@ def _bounded_leaves_with_paths(
     nested predictor's path runs through ``inner`` (``"rate.inner"``).
 
     Paths use the same dotted syntax as
-    :func:`~jaxhybridmodels.trainable.freeze_paths`, built by the same
+    :func:`~jaxhybridmodels.trainable.freeze_mask`, built by the same
     helper, so a key that freezes a predictor's leaves also names it here.
     A lone predictor passed as the whole tree has the empty path ``""``.
 

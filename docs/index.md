@@ -86,7 +86,7 @@ hm.print_metrics(predictions)
 | Choose parameters, networks and bounds | [Predictors and bounds](/guide/predictors) | [`Parameter`](/api/predictors#parameter), [`BoundedPredictor`](/api/predictors#boundedpredictor) |
 | Train with gradients or population search | [Training](/guide/training) | [`Objective`](/api/training#objective), [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig) |
 | Add time-varying inputs or schedules | [Profiles and schedules](/guide/profiles-and-schedules) | [`ramp_profile`](/api/profiles#ramp_profile), [`annealing_schedule`](/api/schedules#annealing_schedule) |
-| Save, evaluate, or ensemble models | [Saving and loading](/guide/serialization), [Ensembles](/guide/ensembles) | [`save_run`](/api/serialise#save_run), [`compute_metrics`](/api/metrics#compute_metrics) |
+| Save, evaluate, or ensemble models | [Saving and loading](/guide/serialization), [Ensembles](/guide/ensembles) | [`save`](/api/serialise#save), [`compute_metrics`](/api/metrics#compute_metrics) |
 
 ## Install
 

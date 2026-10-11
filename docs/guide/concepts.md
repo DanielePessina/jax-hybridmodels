@@ -123,9 +123,9 @@ with Optax and Evosax. `trainable_mask(predictors)` is the default: every
 float array except `Constant` values and bound scalers.
 
 `fit(freeze=...)` freezes more by path, class or predicate. For full
-control, derive a mask with `freeze_paths`, `freeze_modules_of_type`,
-`freeze_where` or `freeze_mask` and pass it as `trainable=`. The mask is
-data, not state on a predictor.
+control, build a mask with `jaxhybridmodels.trainable.freeze_mask`, which
+takes the same entries, and pass it as `trainable=`. The mask is data, not
+state on a predictor.
 
 ## JAX boundaries
 
