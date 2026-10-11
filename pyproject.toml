@@ -103,6 +103,8 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.12",
     "rlax>=0.1.9",
+    # tests cover experiments_from_dataframe and PredictionResult.to_dataframe
+    "pandas>=3.0.2",
 ]
 
 [tool.ruff]
