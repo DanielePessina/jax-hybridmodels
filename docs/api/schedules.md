@@ -44,6 +44,6 @@ is genuinely baked in.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `optax.Schedule` |  | ``schedule(step)`` in ``[end_value, init_value]``. Compose as a multiplier: ``lr = base_lr * schedule(step)``. |
+| `optax.Schedule` |  | ``schedule(step)`` in ``[end_value, init_value]``, except during the ``"warmup_cosine"`` warmup, which starts at 0. Compose as a multiplier: ``lr = base_lr * schedule(step)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/schedules.py#L38)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/schedules.py#L37)</small>
