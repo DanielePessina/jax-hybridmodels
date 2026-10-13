@@ -31,17 +31,18 @@ from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
+    HybridModel,
     MLPPredictor,
     SolverConfig,
     make_dataset,
     make_experiment,
-    predict_dataset,
 )
 from jaxhybridmodels.penalties import select_penalty_points
 from jaxhybridmodels.trainable import trainable_mask
 from jaxhybridmodels.training.optax import (
     OptaxTrainingConfig,
     _build_training_kernels,
+    _resolve_objective,
     _run_phases,
 )
 from jaxhybridmodels.ui.base import SilentUI
@@ -88,8 +89,8 @@ def simulate_fn(predictor, ts, covariates, y0, solver):
 
     def vf(t, y, args):
         y1, y2 = y[0], y[1]
-        dy1 = -k[0] * y1 + y2
-        dy2 = -k[0] * y2 - y1
+        dy1 = -k * y1 + y2
+        dy2 = -k * y2 - y1
         return jnp.stack([dy1, dy2])
 
     return jnp.asarray(
@@ -129,36 +130,42 @@ def main():
 
     # ---- prediction ----
     t0 = time.perf_counter()
-    preds = predict_dataset(
-        predictor, dataset, simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver
+    model = HybridModel(
+        predictors=predictor,
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        output_channel_names=("y",),
+        solver=solver,
     )
-    for p in preds:
-        jax.block_until_ready(p)
+    preds = model.predict(dataset)
+    jax.block_until_ready(preds.buckets)
     t_pred_total = time.perf_counter() - t0
 
     # ---- production kernel build (warm-up + settle cycle) ----
     trainable = trainable_mask(predictor)
-    config = OptaxTrainingConfig(
-        steps=(N_STEPS_BENCH,),
-        lr=(1e-3,),
-        optimizer=(optax.adamw,),
-        reset_optimiser_state=(False,),
-    )
+    config = OptaxTrainingConfig(steps=N_STEPS_BENCH, lr=1e-3, optimizer=optax.adamw)
     ui = SilentUI()
     ui.on_run_start(total_steps=N_STEPS_BENCH, num_phases=1)
     t0 = time.perf_counter()
-    (bucket_step, penalty_step, score_bucket, optimizer, apply_update,
-     step_update, sources, extras) = _build_training_kernels(
-        predictors=predictor, dataset=dataset, config=config,
-        simulate_fn=simulate_fn, state_to_output=state_to_output,
-        solver=solver, trainable=trainable, ui=ui,
+    kernels = _build_training_kernels(
+        predictors=predictor,
+        dataset=dataset,
+        config=config,
+        resolved=_resolve_objective(None, predictor, dataset, config),
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        solver=solver,
+        trainable=trainable,
+        ui=ui,
     )
     t_build = time.perf_counter() - t0
+    bucket_step, penalty_step = kernels.bucket_step, kernels.penalty_step
+    optimizer, apply_update = kernels.optimizer, kernels.apply_update
 
     bp0 = dataset.bucket_payloads[0]
     opt_state = optimizer.init(eqx.filter(predictor, trainable))
     loss, grads = bucket_step(predictor, bp0, jnp.asarray(1.0))
-    pen_points = select_penalty_points(sources, extras, 1.0)
+    pen_points = select_penalty_points(kernels.sources, kernels.extras, 1.0)
     p, pg = penalty_step(predictor, jnp.asarray(0.0), pen_points)
     np_, os_ = apply_update(predictor, grads, opt_state)
     jax.block_until_ready((loss, p, np_))
@@ -172,34 +179,34 @@ def main():
         jax.block_until_ready(out)
         return (time.perf_counter() - t0) / n * 1000
 
-    print(f"\nprediction (compile+run, all buckets): {t_pred_total*1000:.1f} ms")
-    print(f"kernel build + warm-up + settle: {t_build*1000:.1f} ms")
-    print(f"  bucket_step steady-state: "
-          f"{bench(bucket_step, predictor, bp0, jnp.asarray(1.0)):.3f} ms")
-    print(f"  penalty_step steady-state: "
-          f"{bench(penalty_step, predictor, jnp.asarray(0.0), pen_points):.3f} ms")
-    print(f"  apply_update steady-state: "
-          f"{bench(apply_update, predictor, grads, opt_state):.3f} ms")
+    print(f"\nprediction (compile+run, all buckets): {t_pred_total * 1000:.1f} ms")
+    print(f"kernel build + warm-up + settle: {t_build * 1000:.1f} ms")
+    print(
+        f"  bucket_step steady-state: {bench(bucket_step, predictor, bp0, jnp.asarray(1.0)):.3f} ms"
+    )
+    print(
+        f"  penalty_step steady-state: "
+        f"{bench(penalty_step, predictor, jnp.asarray(0.0), pen_points):.3f} ms"
+    )
+    print(f"  apply_update steady-state: {bench(apply_update, predictor, grads, opt_state):.3f} ms")
 
     # full _run_phases loop timing (host overhead incl.) — caches pre-settled
     ui2 = SilentUI()
     t0 = time.perf_counter()
-    hist, final, fl = _run_phases(
+    _run_phases(
         predictor,
         dataset,
         config,
-        optimizer=optimizer,
-        apply_update=apply_update,
-        step_update=step_update,        bucket_step=bucket_step,
-        penalty_step=penalty_step,
-        sources=sources,
-        extras=extras,
+        kernels=kernels,
+        sources=kernels.sources,
         trainable=trainable,
         ui=ui2,
     )
     t_loop = time.perf_counter() - t0
-    print(f"\n_run_phases {N_STEPS_BENCH} steps (settled): {t_loop*1000:.1f} ms total, "
-          f"{t_loop/N_STEPS_BENCH*1000:.1f} ms/step (host+device)")
+    print(
+        f"\n_run_phases {N_STEPS_BENCH} steps (settled): {t_loop * 1000:.1f} ms total, "
+        f"{t_loop / N_STEPS_BENCH * 1000:.1f} ms/step (host+device)"
+    )
 
     floor = (
         bench(bucket_step, predictor, bp0, jnp.asarray(1.0))
@@ -207,8 +214,10 @@ def main():
         + bench(apply_update, predictor, grads, opt_state)
     )
     print(f"  sum of 3 steady-state device calls: {floor:.3f} ms/step")
-    print(f"  => host/orchestration overhead per step: "
-          f"{max(0.0, t_loop/N_STEPS_BENCH*1000 - floor):.3f} ms")
+    print(
+        f"  => host/orchestration overhead per step: "
+        f"{max(0.0, t_loop / N_STEPS_BENCH * 1000 - floor):.3f} ms"
+    )
 
 
 if __name__ == "__main__":

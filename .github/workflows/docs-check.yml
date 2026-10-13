@@ -43,5 +43,8 @@ jobs:
       - name: Check generated API reference
         run: npm --prefix docs run docs:check:api
 
+      - name: Check example code includes
+        run: npm --prefix docs run docs:check:snippets
+
       - name: Build documentation site
         run: npm --prefix docs run docs:build

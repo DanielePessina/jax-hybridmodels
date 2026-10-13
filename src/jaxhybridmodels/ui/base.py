@@ -25,6 +25,9 @@ and ``on_compile_done`` exist so a progress bar does not sit at zero
 through it and make the run look hung.
 """
 
+import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -70,7 +73,11 @@ class TrainingUI(Protocol):
     def on_phase_start(
         self, *, phase_idx: int, phase_steps: int, lr: float, optimizer: Any
     ) -> None:
-        """Fires at the start of each phase; ``phase_steps`` is the per-phase step budget."""
+        """Fires at the start of each phase; ``phase_steps`` is the per-phase step budget.
+
+        ``lr`` is the learning rate at the phase's first step. A phase with an
+        optax schedule moves it from there.
+        """
         ...
 
     def on_phase_end(self, *, phase_idx: int) -> None:
@@ -83,7 +90,7 @@ class TrainingUI(Protocol):
         """Fires after each training step. ``step_idx`` counts within the phase.
 
         ``loss`` is the data term (plus any configured trajectory penalty,
-        which is charged inside the bucket forward pass) — the series
+        which is charged inside the bucket forward pass). This is the series
         ``restore_best`` and early stopping act on; a bound-penalty weight
         that ramps between phases would make successive values
         incomparable. ``penalty`` reports the unweighted bound penalty next
@@ -107,7 +114,8 @@ class EvosaxUI(Protocol):
 
     Differs from ``TrainingUI`` because the evosax loop has no phases and
     no per-step gradient loss. Each generation reports the best and mean
-    fitness across its population instead.
+    fitness across its population instead. The run-level events use the
+    same argument names as ``TrainingUI`` (``total_steps``, ``final_loss``).
 
     Event order during a typical run::
 
@@ -117,8 +125,8 @@ class EvosaxUI(Protocol):
         on_run_end
     """
 
-    def on_run_start(self, *, num_generations: int, population_size: int) -> None:
-        """Fires once before the first generation."""
+    def on_run_start(self, *, total_steps: int, population_size: int) -> None:
+        """Fires once before the first generation. ``total_steps`` is the generation count."""
         ...
 
     def on_compile_start(self, *, bucket_idx: int, bucket_shape: tuple[int, ...]) -> None:
@@ -133,17 +141,32 @@ class EvosaxUI(Protocol):
         """The bucket finished compiling."""
         ...
 
-    def on_generation_end(self, *, gen_idx: int, best_fitness: float, mean_fitness: float) -> None:
+    def on_generation_end(self, *, gen_idx: int, best_loss: float, mean_loss: float) -> None:
         """Fires once per generation with population statistics."""
         ...
 
-    def on_run_end(self, *, best_fitness: float) -> None:
-        """Fires once after the last generation."""
+    def on_run_end(self, *, final_loss: float) -> None:
+        """Fires once after the last generation with the loss of the returned predictors."""
         ...
 
     def on_message(self, *, level: str, text: str) -> None:
         """Free-form log line; same level set as ``TrainingUI.on_message``."""
         ...
+
+
+@contextmanager
+def close_run_on_error(ui: TrainingUI | EvosaxUI) -> Iterator[None]:
+    """Fire ``on_run_end(final_loss=nan)`` if the body raises, then re-raise.
+
+    The trainers wrap everything after ``on_run_start`` in it, so a compile
+    failure, a non-finite loss or Ctrl-C does not leave a Rich Live
+    dashboard running.
+    """
+    try:
+        yield
+    except BaseException:
+        ui.on_run_end(final_loss=math.nan)
+        raise
 
 
 class SilentUI:

@@ -23,8 +23,9 @@ Lifecycle and lifetime
 ----------------------
 ``ChannelObs`` and ``Experiment`` are host-side input containers. After
 ``make_dataset``, training and prediction read only ``BucketPayload``. The
-original experiments stay on ``Dataset._experiments`` for one reason, so
-``split_dataset`` can re-bucket subsets after a permutation.
+original experiments stay on the dataset, readable through
+``Dataset.experiments``, so ``split_dataset`` can re-bucket subsets after a
+permutation and ``HybridModel.predict`` can key results by ``exp_id``.
 
 Shape conventions (used throughout the package)
 -----------------------------------------------
@@ -43,8 +44,8 @@ Shape conventions (used throughout the package)
 
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections import Counter, defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple, cast
 
 import equinox as eqx
@@ -88,12 +89,14 @@ class ChannelObs(eqx.Module):
 
     def __init__(
         self,
+        *,
         ts: Any,
         values: Any,
         variance: Any = 1.0,
     ) -> None:
         """Construct a ``ChannelObs``, broadcasting a scalar variance up front.
 
+        Keyword-only, so ``ts`` and ``values`` cannot be swapped by position.
         ``variance`` may be a scalar or a ``Tc``-shaped array. A scalar is
         broadcast to ``values.shape`` here, so downstream code can assume
         all three attributes are rank-1.
@@ -137,8 +140,9 @@ class ChannelObs(eqx.Module):
 class Experiment(eqx.Module):
     """One run of the physical system: its conditions, its starting state, its measurements.
 
-    Build these with ``make_experiment``. They are kept on
-    ``Dataset._experiments`` so ``split_dataset`` can re-bucket subsets
+    Build these with ``make_experiment``, ``experiment_from_array`` or
+    ``experiments_from_dataframe``. A dataset keeps them, readable through
+    ``Dataset.experiments``, so ``split_dataset`` can re-bucket subsets
     after a permutation.
 
     Attributes
@@ -149,7 +153,8 @@ class Experiment(eqx.Module):
         Every experiment passed to one ``make_dataset`` call must define the
         same keys and shapes.
     y0 : Float[Array, "S"]
-        Full model state at ``t=0``, of length ``S``. Built by the user's
+        Full model state at ``t0`` (or the first observation time), of length
+        ``S``. Built by the user's
         ``y0_fn`` hook when the experiment is constructed. The state may
         contain components that are never observed, so ``S`` need not equal
         the channel count. The framework never inspects ``S``.
@@ -157,14 +162,19 @@ class Experiment(eqx.Module):
         Sparse observations, one entry per measured quantity. Must contain
         every name listed in ``make_dataset(..., output_channel_names=...)``.
     exp_id : str
-        Identifier carried through for diagnostics. A static field, so it is
-        not a JAX array leaf and never reaches a compiled kernel as data.
+        Identifier, unique within a dataset; ``make_dataset`` names an empty
+        one ``experiment_<i>``. A static field, so it is not a JAX array
+        leaf and never reaches a compiled kernel as data.
+    t0 : float | None
+        Initial state time, added to the union axis as an unobserved row.
+        None means ``y0`` is the state at the first observation.
     """
 
     covariates: dict[str, Array]
     y0: Float[Array, " S"]
     channels: dict[str, ChannelObs]
     exp_id: str = eqx.field(static=True)
+    t0: float | None = eqx.field(static=True, default=None)
 
 
 class BucketPayload(NamedTuple):
@@ -224,8 +234,8 @@ class Dataset(eqx.Module):
 
     ``bucket_payloads`` is the dispatch list, one compiled kernel per bucket
     shape. The ``Dataset`` carries no model-shaped callables: it never sees
-    full simulator states, and ``state_to_output`` — a property of the model,
-    not the data — is passed to prediction and training as a parameter.
+    full simulator states, and ``state_to_output`` belongs to the model, so
+    prediction and training take it as a separate argument.
 
     Attributes
     ----------
@@ -239,9 +249,9 @@ class Dataset(eqx.Module):
         Covariate keys, sorted. Matches each ``Experiment.covariates`` key
         set. Sorting makes dict iteration deterministic.
     _experiments : tuple[Experiment, ...]
-        Source experiments, kept so ``split_dataset`` can re-bucket each
-        split. Empty when a ``Dataset`` is built by hand from raw payloads,
-        and ``split_dataset`` then raises.
+        Source experiments in input order, read through the
+        :attr:`experiments` property. Empty when a ``Dataset`` is built by
+        hand from raw payloads, and ``split_dataset`` then raises.
     """
 
     bucket_payloads: tuple[BucketPayload, ...]
@@ -249,13 +259,33 @@ class Dataset(eqx.Module):
     covariate_names: tuple[str, ...] = eqx.field(static=True)
     _experiments: tuple[Experiment, ...] = ()
 
+    @property
+    def experiments(self) -> tuple[Experiment, ...]:
+        """The source experiments in the order given to ``make_dataset``.
+
+        Every ``exp_id`` is nonempty and unique. Empty for a dataset built
+        by hand from raw payloads.
+        """
+        return self._experiments
+
+
+Data = Dataset | Sequence[Experiment]
+"""What the model-level entry points accept as data: a ``Dataset`` or a list of experiments.
+
+``HybridModel.fit``, ``fit_ensemble``, ``predict``, ``predict_ensemble``
+and the trainers in :mod:`jaxhybridmodels.training` all take either. A list
+goes through :func:`make_dataset` with the model's ``output_channel_names``.
+"""
+
 
 def make_experiment(
     *,
-    covariates: dict[str, float | Array],
     channels: dict[str, ChannelObs],
-    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array],
+    covariates: dict[str, float | Array] | None = None,
+    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
     exp_id: str = "",
+    t0: float | None = None,
+    y0: Any = None,
 ) -> Experiment:
     """Build one ``Experiment`` from raw covariates, channels, and a state-init hook.
 
@@ -268,31 +298,263 @@ def make_experiment(
 
     Parameters
     ----------
+    channels
+        Sparse observations keyed by channel name.
     covariates
         Scalar or rank-1 vector run conditions, constant in time. Values are
         converted to JAX arrays; a given key must have one consistent shape
-        across a dataset.
-    channels
-        Sparse observations keyed by channel name.
+        across a dataset. Omit when the model takes no run conditions.
     y0_fn
         Hook ``(covariates, channels) -> [S]`` building the full initial
         state, where ``S`` is the state dimension the user's ``simulate_fn``
         integrates.
     exp_id
         Optional human-readable id copied to ``Experiment.exp_id``.
+    t0
+        Initial state time, at or before the first observation. Added as an
+        unobserved integration point. None preserves the first-observation
+        convention.
+    y0
+        Direct initial state, as an alternative to y0_fn. Supply exactly one.
     """
     cov_arr: dict[str, Array] = {}
-    for key, value in covariates.items():
+    for key, value in (covariates or {}).items():
         array = jnp.asarray(value)
         if array.ndim not in (0, 1):
             raise ValueError(
                 f"Experiment covariate {key!r} must be scalar or rank-1; got shape {array.shape}"
             )
         cov_arr[key] = array
-    y0 = jnp.asarray(y0_fn(cov_arr, channels))
+    if (y0 is None) == (y0_fn is None):
+        raise ValueError("Pass exactly one of y0= or y0_fn=")
+    if t0 is not None and not np.isfinite(t0):
+        raise ValueError("Experiment t0 must be finite")
+    if y0_fn is not None:
+        y0 = jnp.asarray(y0_fn(cov_arr, channels))
+    else:
+        y0 = jnp.asarray(y0, dtype=jnp.result_type(jnp.asarray(y0).dtype, float))
     if y0.ndim != 1:
         raise ValueError(f"Experiment y0 must be rank-1; got shape {y0.shape}")
-    return Experiment(covariates=cov_arr, y0=y0, channels=channels, exp_id=exp_id)
+    return Experiment(covariates=cov_arr, y0=y0, channels=channels, exp_id=exp_id, t0=t0)
+
+
+def experiment_from_array(
+    *,
+    ts: Any,
+    values: Any,
+    channel_names: Sequence[str],
+    exp_id: str,
+    variance: Any = 1.0,
+    covariates: dict[str, float | Array] | None = None,
+    t0: float | None = None,
+    y0: Any = None,
+    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
+) -> Experiment:
+    """Build one ``Experiment`` from a shared time grid and a ``[T, D]`` table of values.
+
+    For data that arrives as a matrix, one row per sample time and one
+    column per channel. A ``NaN`` cell means "not measured at this time",
+    so each channel keeps only its own finite rows and channels may still be
+    sampled at different times.
+
+    Parameters
+    ----------
+    ts
+        Sample times ``[T]``, no repeats.
+    values
+        Observations ``[T, D]``, columns in ``channel_names`` order. A
+        rank-1 ``[T]`` array is accepted when there is one channel.
+    channel_names
+        The ``D`` channel names.
+    exp_id
+        Identifier, required so results stay traceable to the source run.
+    variance
+        A scalar for every cell, a length-``D`` sequence with one value per
+        channel, or a ``[T, D]`` array. Read only at observed cells.
+    covariates, t0, y0, y0_fn
+        As for :func:`make_experiment`. Supply exactly one of ``y0`` and
+        ``y0_fn``.
+    """
+    names = tuple(channel_names)
+    times = np.asarray(ts)
+    table = np.asarray(values, dtype=np.result_type(np.asarray(values).dtype, np.float32))
+    if table.ndim == 1 and len(names) == 1:
+        table = table[:, None]
+    if times.ndim != 1 or table.shape != (times.shape[0], len(names)):
+        raise ValueError(
+            f"experiment_from_array({exp_id!r}): values must have shape [T, D] = "
+            f"({times.shape[0] if times.ndim == 1 else '?'}, {len(names)}) to match ts "
+            f"{times.shape} and channel_names {names}; got {table.shape}"
+        )
+    var = np.asarray(variance, dtype=table.dtype)
+    if var.ndim == 1:
+        if var.shape[0] != len(names):
+            raise ValueError(
+                f"experiment_from_array({exp_id!r}): a rank-1 variance has one entry per "
+                f"channel ({len(names)}); got {var.shape[0]}"
+            )
+        var = np.broadcast_to(var[None, :], table.shape)
+    elif var.ndim == 0:
+        var = np.broadcast_to(var, table.shape)
+    elif var.shape != table.shape:
+        raise ValueError(
+            f"experiment_from_array({exp_id!r}): variance must be a scalar, one value per "
+            f"channel, or shape {table.shape}; got {var.shape}"
+        )
+    channels = {}
+    for d, name in enumerate(names):
+        observed = ~np.isnan(table[:, d])
+        try:
+            channels[name] = ChannelObs(
+                ts=times[observed], values=table[observed, d], variance=var[observed, d]
+            )
+        except ValueError as exc:
+            raise ValueError(f"Experiment {exp_id!r}, channel {name!r}: {exc}") from exc
+    return make_experiment(
+        channels=channels, covariates=covariates, y0_fn=y0_fn, exp_id=exp_id, t0=t0, y0=y0
+    )
+
+
+def _column_map(spec: Sequence[str] | Mapping[str, str]) -> dict[str, str]:
+    """``{name: column}`` from a list of columns (named after themselves) or a mapping."""
+    if isinstance(spec, str):
+        return {spec: spec}
+    if isinstance(spec, Mapping):
+        return dict(cast(Mapping[str, str], spec))
+    return {column: column for column in spec}
+
+
+def experiments_from_dataframe(
+    df: Any,
+    *,
+    time: str,
+    experiment: str,
+    channels: Sequence[str] | Mapping[str, str],
+    covariates: Sequence[str] | Mapping[str, str] = (),
+    variance: float | Mapping[str, str | float] | None = None,
+    t0: float | str | None = None,
+    y0: Any = None,
+    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
+) -> list[Experiment]:
+    """Build one ``Experiment`` per run from a wide pandas table.
+
+    The table has one row per (experiment, sample time) and one column per
+    measured channel, which is how lab spreadsheets usually look. ``NaN``
+    marks a channel that was not measured at that row, so channels may be
+    sampled at different times. A long table (one row per measurement, with
+    ``channel`` and ``value`` columns) becomes wide with
+    ``df.pivot_table(index=["run", "time"], columns="channel", values="value").reset_index()``.
+
+    Experiments come back in order of first appearance, each built by
+    :func:`experiment_from_array`.
+
+    Parameters
+    ----------
+    df
+        A ``pandas.DataFrame``. pandas itself is never imported here.
+    time
+        Column of sample times.
+    experiment
+        Column identifying the run. Its values, as strings, become ``exp_id``.
+        A missing value raises ``ValueError``.
+    channels
+        Channel columns. A list names each channel after its column; a
+        mapping ``{channel: column}`` renames.
+    covariates
+        Covariate columns, in the same two forms. Each must be constant
+        within a run.
+    variance
+        None for unit variance, one number for every cell, or a mapping
+        ``{channel: column or number}``. Channels missing from the mapping
+        get unit variance.
+    t0
+        None, one initial time for every run, or a column holding each
+        run's initial time (constant within the run).
+    y0, y0_fn
+        Exactly one. ``y0`` is either one state shared by every run or a
+        mapping ``{exp_id: state}``. ``y0_fn`` is the
+        ``(covariates, channels) -> [S]`` hook of :func:`make_experiment`.
+
+    Examples
+    --------
+    ::
+
+        experiments = hm.experiments_from_dataframe(
+            df.replace(-1.0, np.nan),
+            time="Time",
+            experiment="Exp_ID",
+            channels={"conc": "Concentration", "d43": "PS"},
+            covariates={"temperature": "Temperature", "loading": "Loading"},
+            variance={"conc": "Concentration_var", "d43": "PS_var"},
+            y0_fn=lambda cov, ch: jnp.array([ch["conc"].values[0], 0.0, 0.0]),
+        )
+    """
+    channel_cols = _column_map(channels)
+    covariate_cols = _column_map(covariates)
+    variance_spec: dict[str, str | float]
+    if variance is None:
+        variance_spec = {}
+    elif isinstance(variance, Mapping):
+        variance_spec = dict(cast(Mapping[str, str | float], variance))
+    else:
+        variance_spec = dict.fromkeys(channel_cols, variance)
+    unknown = sorted(set(variance_spec) - set(channel_cols))
+    if unknown:
+        raise ValueError(
+            f"variance names unknown channels {unknown}; channels are {list(channel_cols)}"
+        )
+    needed = [time, experiment, *channel_cols.values(), *covariate_cols.values()]
+    needed += [v for v in variance_spec.values() if isinstance(v, str)]
+    if isinstance(t0, str):
+        needed.append(t0)
+    missing = sorted({c for c in needed if c not in df.columns})
+    if missing:
+        raise KeyError(f"Columns {missing} not in the table; available: {list(df.columns)}")
+
+    def constant(group: Any, column: str, exp_id: str) -> Any:
+        values = group[column].unique()
+        if len(values) != 1:
+            raise ValueError(
+                f"Column {column!r} must be constant within experiment {exp_id!r}; "
+                f"found {list(values)}"
+            )
+        return values[0]
+
+    def channel_variance(group: Any, name: str) -> np.ndarray[Any, Any]:
+        spec = variance_spec.get(name, 1.0)
+        if isinstance(spec, str):
+            return group[spec].to_numpy(dtype=float)
+        return np.full(len(group), float(spec))
+
+    missing_ids = df[experiment].isna()
+    if missing_ids.any():
+        # groupby would drop these rows silently, and a NaN in an integer
+        # column turns every ID into a float ("1.0").
+        raise ValueError(
+            f"Column {experiment!r} has {int(missing_ids.sum())} missing experiment ID(s); "
+            "every row needs one"
+        )
+    out = []
+    for key, group in df.groupby(experiment, sort=False):
+        exp_id = str(key)
+        variances = [channel_variance(group, name) for name in channel_cols]
+        out.append(
+            experiment_from_array(
+                ts=group[time].to_numpy(dtype=float),
+                values=group[list(channel_cols.values())].to_numpy(dtype=float),
+                channel_names=tuple(channel_cols),
+                variance=np.stack(variances, axis=1),
+                covariates={
+                    name: float(constant(group, column, exp_id))
+                    for name, column in covariate_cols.items()
+                },
+                t0=float(constant(group, t0, exp_id)) if isinstance(t0, str) else t0,
+                y0=y0[exp_id] if isinstance(y0, Mapping) else y0,
+                y0_fn=y0_fn,
+                exp_id=exp_id,
+            )
+        )
+    return out
 
 
 class _ExperimentArrays(NamedTuple):
@@ -369,10 +631,21 @@ def _per_experiment_arrays(
     if float_ts_dtypes:
         key_dtype = np.dtype(f"float{min(dtype.itemsize for dtype in float_ts_dtypes) * 8}")
     else:
-        key_dtype = np.result_type(*ts_dtypes) if ts_dtypes else np.dtype(np.float32)
+        key_dtype = (
+            np.result_type(*ts_dtypes, np.float32)
+            if experiment.t0 is not None
+            else np.result_type(*ts_dtypes)
+            if ts_dtypes
+            else np.dtype(np.float32)
+        )
     for ts_np, _values_np, _variance_np in channel_arrays:
         union_ts.update(float(np.asarray(t, dtype=key_dtype)) for t in ts_np.tolist())
 
+    if experiment.t0 is not None:
+        start = float(np.asarray(experiment.t0, dtype=key_dtype))
+        if union_ts and start > min(union_ts):
+            raise ValueError(f"Experiment {experiment.exp_id!r}: t0 must precede observations")
+        union_ts.add(start)
     sorted_ts = sorted(union_ts)
     ts_to_idx = {t: i for i, t in enumerate(sorted_ts)}
 
@@ -380,7 +653,13 @@ def _per_experiment_arrays(
     D = len(output_channel_names)
     val_dtype = np.result_type(*val_dtypes) if val_dtypes else np.dtype(np.float32)
     var_dtype = np.result_type(*var_dtypes) if var_dtypes else np.dtype(np.float32)
-    ts_dtype = np.result_type(*ts_dtypes) if ts_dtypes else np.dtype(np.float32)
+    ts_dtype = (
+        np.result_type(*ts_dtypes, np.float32)
+        if experiment.t0 is not None
+        else np.result_type(*ts_dtypes)
+        if ts_dtypes
+        else np.dtype(np.float32)
+    )
 
     y_observed = np.zeros((T, D), dtype=val_dtype)
     yvar = np.ones((T, D), dtype=var_dtype)
@@ -406,6 +685,49 @@ def _per_experiment_arrays(
         yvar=jnp.asarray(yvar),
         mask=jnp.asarray(mask),
     )
+
+
+def _renamed(experiment: Experiment, exp_id: str) -> Experiment:
+    """Copy of ``experiment`` under a new ID.
+
+    ``exp_id`` is a static field, which ``eqx.tree_at`` cannot replace, so
+    the experiment is rebuilt from its fields.
+    """
+    return Experiment(
+        covariates=experiment.covariates,
+        y0=experiment.y0,
+        channels=experiment.channels,
+        exp_id=exp_id,
+        t0=experiment.t0,
+    )
+
+
+def _named_experiments(experiments: Sequence[Experiment]) -> tuple[Experiment, ...]:
+    """Name empty IDs ``experiment_<i>`` and refuse duplicates.
+
+    Naming happens here, once, so every consumer of a dataset (prediction
+    results, metrics, data frames) sees the same IDs. A generated name that
+    an explicit ID already uses gets a ``_<n>`` suffix instead, so only IDs
+    the caller wrote can be reported as duplicates.
+    """
+    taken = {exp.exp_id for exp in experiments if exp.exp_id}
+    named_list = []
+    for i, exp in enumerate(experiments):
+        if exp.exp_id:
+            named_list.append(exp)
+            continue
+        name, n = f"experiment_{i}", 1
+        while name in taken:
+            n += 1
+            name = f"experiment_{i}_{n}"
+        taken.add(name)
+        named_list.append(_renamed(exp, name))
+    named = tuple(named_list)
+    counts = Counter(exp.exp_id for exp in named)
+    duplicates = sorted(exp_id for exp_id, n in counts.items() if n > 1)
+    if duplicates:
+        raise ValueError(f"make_dataset: duplicate exp_id values {duplicates}; IDs must be unique")
+    return named
 
 
 def _validate_experiments(
@@ -501,9 +823,11 @@ def make_dataset(
 
     Three steps run in order.
 
-    1. Validation. All experiments must agree on the set of covariate keys,
-       and each must define every requested output channel. A mismatch
-       raises at once, naming the offending ``exp_id``.
+    1. Validation. Experiment IDs must be unique; an empty one is named
+       ``experiment_<i>`` after its position. All experiments must agree on
+       the set of covariate keys, and each must define every requested
+       output channel. A mismatch raises at once, naming the offending
+       ``exp_id``.
     2. Per-experiment scattering. ``_per_experiment_arrays`` builds each
        experiment's union timestamp axis and its ``[T, D]`` observation,
        variance, and mask tensors.
@@ -526,11 +850,12 @@ def make_dataset(
     Returns
     -------
     Dataset
-        ``bucket_payloads`` ordered ascending by ``T``, with
-        ``_experiments`` kept so ``split_dataset`` can re-bucket subsets.
+        ``bucket_payloads`` ordered ascending by ``T``, with the (named)
+        experiments kept on ``Dataset.experiments``.
     """
     if not experiments:
         raise ValueError("make_dataset requires at least one experiment")
+    experiments = _named_experiments(experiments)
     output_channel_names = tuple(output_channel_names)
     if not output_channel_names:
         raise ValueError("make_dataset requires at least one output channel")
@@ -623,7 +948,7 @@ def _subset(
     Bucketed from scratch rather than sliced out of the parent's buckets, so
     each split's bucket structure suits its own contents.
 
-    An empty split carries no payloads and no ``_experiments``, which is what
+    An empty split carries no payloads and no experiments, which is what
     makes it unsplittable again rather than silently splittable into nothing.
     """
     if not idxs:
@@ -651,6 +976,8 @@ def make_bootstrap_dataset(
     :func:`make_dataset`. Irregular per-channel timestamps are handled
     automatically: re-bucketing regroups by union-axis length, and a
     duplicated experiment simply contributes more ``N`` rows to its bucket.
+    Repeats are renamed ``<exp_id>#2``, ``<exp_id>#3`` and so on, since IDs
+    within a dataset must be unique.
 
     This is the data half of a bagging ensemble: each call yields one
     resampled dataset, and training on several of them produces an
@@ -659,7 +986,7 @@ def make_bootstrap_dataset(
     Parameters
     ----------
     dataset
-        Source dataset. Must carry ``_experiments`` (built by
+        Source dataset. Must carry its experiments (built by
         ``make_dataset``), or this raises.
     key
         Required ``jr.PRNGKey`` for the resample, never defaulted.
@@ -673,11 +1000,11 @@ def make_bootstrap_dataset(
         A new dataset of ``n_experiments`` experiments (some duplicated),
         re-bucketed from scratch.
     """
-    experiments = dataset._experiments
+    experiments = dataset.experiments
     if not experiments:
         raise ValueError(
             "make_bootstrap_dataset requires the source experiments; the provided "
-            "Dataset has none (was it constructed manually without _experiments?)"
+            "Dataset has none (was it built by hand rather than with make_dataset?)"
         )
     n = len(experiments)
     if n_experiments is None:
@@ -685,7 +1012,25 @@ def make_bootstrap_dataset(
     if n_experiments < 1:
         raise ValueError(f"make_bootstrap_dataset: n_experiments must be >= 1, got {n_experiments}")
     idxs = np.asarray(jr.choice(key, n, shape=(n_experiments,), replace=True)).tolist()
-    resampled = tuple(experiments[int(i)] for i in idxs)
+    # IDs must stay unique, so the k-th repeat of an experiment is renamed
+    # ``<exp_id>#<k>``; the first draw keeps its ID. Every source ID is
+    # reserved up front, and k skips any name already taken, so a source ID
+    # that itself looks like ``a#2`` cannot clash with a renamed repeat.
+    draws: dict[str, int] = defaultdict(int)
+    taken = {exp.exp_id for exp in experiments}
+    resampled = []
+    for i in idxs:
+        exp = experiments[int(i)]
+        draws[exp.exp_id] += 1
+        if draws[exp.exp_id] == 1:
+            resampled.append(exp)
+            continue
+        name = f"{exp.exp_id}#{draws[exp.exp_id]}"
+        while name in taken:
+            draws[exp.exp_id] += 1
+            name = f"{exp.exp_id}#{draws[exp.exp_id]}"
+        taken.add(name)
+        resampled.append(_renamed(exp, name))
     return make_dataset(resampled, output_channel_names=dataset.output_channel_names)
 
 
@@ -705,12 +1050,12 @@ def split_dataset(
 
     Counts use ``floor(train*n)`` and ``floor(val*n)``, with test taking the
     remainder so the sizes sum to ``n``. An empty split comes back with no
-    payloads and no ``_experiments``, so it cannot be split again.
+    payloads and no experiments, so it cannot be split again.
 
     Parameters
     ----------
     dataset
-        Source dataset. Must carry ``_experiments``, or this raises.
+        Source dataset. Must carry its experiments, or this raises.
     train, val, test
         Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``).
     key
@@ -724,11 +1069,11 @@ def split_dataset(
     """
     _validate_fractions(train, val, test)
 
-    experiments = dataset._experiments
+    experiments = dataset.experiments
     if not experiments:
         raise ValueError(
             "split_dataset requires the source experiments; the provided Dataset has none "
-            "(was it constructed manually without _experiments?)"
+            "(was it built by hand rather than with make_dataset?)"
         )
 
     n = len(experiments)

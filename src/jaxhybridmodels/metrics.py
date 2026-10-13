@@ -1,18 +1,21 @@
 """Per-channel evaluation metrics for hybrid-model predictions.
 
-Takes the tuple returned by :func:`jaxhybridmodels.prediction.predict_dataset`
-and its ``Dataset``, flattens the observed/predicted pairs under each
-bucket's mask, and reports MSE, RMSE, MAE and R^2 **per channel**.
+Takes the ``PredictionResult`` returned by ``HybridModel.predict``, which
+already carries each experiment's observed values and observation mask,
+flattens the observed/predicted pairs under the mask, and reports MSE,
+RMSE, MAE and R^2 **per channel**. The functions duck-type on that result
+rather than importing ``model.py``, so this module stays a leaf.
 
 Per channel, never aggregated: the examples observe channels with different
 units and dynamic ranges (``conc`` in mol/L, ``d43`` in micrometres), and
 one MSE across both means nothing.
 
-Everything is JAX-native, so the metrics compose with ``jax.jit`` and stay
-dtype-consistent with the training pipeline; call ``float(...)`` or
-``np.asarray(...)`` at the boundary when you need Python floats.
+The arithmetic is JAX-native and every statistic is a JAX scalar, so the
+results stay dtype-consistent with the training pipeline and
+``ChannelMetrics`` is a pytree; call ``float(...)`` at the boundary when you
+need Python floats.
 
-Only cells the bucket's ``mask`` marks as real measurements count, matching
+Only cells the observation mask marks as real measurements count, matching
 the losses' NaN discipline.
 """
 
@@ -20,14 +23,14 @@ the losses' NaN discipline.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 import jax.numpy as jnp
 import jax.tree_util as jtu
-from jaxtyping import Array, Bool, Float, Int
-
-from jaxhybridmodels.data import Dataset
+from jaxtyping import Array, Float, Int
 
 
 @partial(
@@ -42,7 +45,7 @@ class ChannelMetrics:
     Attributes
     ----------
     name : str
-        Channel name from ``dataset.output_channel_names``.
+        Channel name, one of the model's ``output_channel_names``.
     n : Int[Array, ""]
         Scalar number of observed (mask=True) cells behind the stats. It is a
         JAX scalar so the complete metrics result can pass through ``jit``.
@@ -61,67 +64,51 @@ class ChannelMetrics:
     r2: Float[Array, ""]
 
 
-def compute_metrics(
-    predictions: tuple[Float[Array, "N T D"], ...],
-    dataset: Dataset,
-) -> dict[str, ChannelMetrics]:
-    """Collapse bucketed predictions into per-channel summary stats.
+def compute_metrics(predictions: Mapping[str, Any]) -> dict[str, ChannelMetrics]:
+    """Per-channel summary stats of a prediction against the data it was made on.
 
     Parameters
     ----------
-    predictions : tuple of arrays, one per bucket
-        From :func:`jaxhybridmodels.prediction.predict_dataset`; each entry is
-        ``[N_b, T_b, D]`` matching its ``BucketPayload``.
-    dataset : Dataset
-        The dataset that produced ``predictions``. Read for masks,
-        observations, and channel names.
+    predictions : PredictionResult
+        From ``HybridModel.predict`` or ``predict_ensemble`` (which is
+        scored on its member mean), or any mapping from experiment ID to
+        a record with ``outputs``, ``observed`` and ``observation_mask``
+        dicts keyed by channel. Only cells the mask marks as measured
+        count. Channels are read from the first experiment's ``outputs``.
 
     Returns
     -------
     dict[str, ChannelMetrics]
-        Keyed by channel, in ``dataset.output_channel_names`` order.
+        Keyed by channel, in the model's ``output_channel_names`` order.
     """
-    channels = dataset.output_channel_names
-    if len(predictions) != len(dataset.bucket_payloads):
-        raise ValueError(
-            "predictions tuple length does not match dataset.bucket_payloads "
-            f"({len(predictions)} vs {len(dataset.bucket_payloads)})"
+    if not isinstance(predictions, Mapping):
+        raise TypeError(
+            "compute_metrics takes the PredictionResult from HybridModel.predict or "
+            f"predict_ensemble; got {type(predictions).__name__}."
         )
-
+    experiments = list(predictions.values())
+    if not experiments:
+        raise ValueError("compute_metrics needs at least one experiment")
+    if not experiments[0].observation_mask:
+        raise ValueError(
+            "compute_metrics needs observed values; pass the result of predict() on the "
+            "measured grid, not simulate() or predict(ts=...) / predict(n_points=...)"
+        )
     out: dict[str, ChannelMetrics] = {}
-    for d, name in enumerate(channels):
-        n = jnp.asarray(0, dtype=jnp.int32)
-        ss_res = jnp.asarray(0.0)
-        abs_error = jnp.asarray(0.0)
-        ss_tot = jnp.asarray(0.0)
-        mean_observed = jnp.asarray(0.0)
-        for pred, bp in zip(predictions, dataset.bucket_payloads, strict=True):
-            mask_d: Bool[Array, "N T"] = bp.mask[..., d]
-            obs_d: Float[Array, "N T"] = bp.y_observed[..., d]
-            pred_d: Float[Array, "N T"] = pred[..., d]
-            obs_safe = jnp.where(mask_d, obs_d, 0.0)
-            pred_safe = jnp.where(mask_d, pred_d, 0.0)
-            residuals = pred_safe - obs_safe
-            count = mask_d.sum().astype(jnp.int32)
-            count_safe = jnp.maximum(count, 1).astype(obs_safe.dtype)
-            mean_obs = obs_safe.sum() / count_safe
-            combined_count = n + count
-            combined_safe = jnp.maximum(combined_count, 1).astype(obs_safe.dtype)
-            delta = mean_obs - mean_observed
-            between = (
-                delta**2 * n.astype(obs_safe.dtype) * count.astype(obs_safe.dtype) / combined_safe
-            )
-            mean_observed = jnp.where(
-                combined_count > 0,
-                (n.astype(obs_safe.dtype) * mean_observed + count.astype(obs_safe.dtype) * mean_obs)
-                / combined_safe,
-                0.0,
-            )
-            n = n + count
-            ss_res = ss_res + jnp.sum(jnp.where(mask_d, residuals**2, 0.0))
-            abs_error = abs_error + jnp.sum(jnp.where(mask_d, jnp.abs(residuals), 0.0))
-            ss_tot = ss_tot + jnp.sum(jnp.where(mask_d, (obs_safe - mean_obs) ** 2, 0.0)) + between
-        out[name] = _stats_from_sufficient_stats(name, n, ss_res, abs_error, ss_tot)
+    for name in experiments[0].outputs:
+        mask = jnp.concatenate([jnp.ravel(e.observation_mask[name]) for e in experiments])
+        observed = jnp.concatenate([jnp.ravel(e.observed[name]) for e in experiments])
+        predicted = jnp.concatenate([jnp.ravel(e.outputs[name]) for e in experiments])
+        # Unobserved cells hold NaN; zero them before any arithmetic so a
+        # NaN never reaches a sum, even multiplied by a False mask.
+        observed = jnp.where(mask, observed, 0.0)
+        residuals = jnp.where(mask, predicted - observed, 0.0)
+        n = mask.sum().astype(jnp.int32)
+        mean_observed = observed.sum() / jnp.maximum(n, 1).astype(observed.dtype)
+        ss_tot = jnp.sum(jnp.where(mask, (observed - mean_observed) ** 2, 0.0))
+        out[name] = _stats_from_sufficient_stats(
+            name, n, jnp.sum(residuals**2), jnp.sum(jnp.abs(residuals)), ss_tot
+        )
     return out
 
 
@@ -137,18 +124,21 @@ def _stats_from_sufficient_stats(
     mse = ss_res / denom
     rmse = jnp.sqrt(mse)
     mae = abs_error / denom
-    # ss_tot == 0 means constant observed values — R^2 is undefined. It is
+    # ss_tot == 0 means constant observed values, so R^2 is undefined. It is
     # also undefined for a channel with no observations.
     r2 = jnp.where(n > 0, jnp.where(ss_tot > 0.0, 1.0 - ss_res / ss_tot, jnp.nan), jnp.nan)
     return ChannelMetrics(name, n, mse, rmse, mae, r2)
 
 
 def print_metrics(
-    metrics: dict[str, ChannelMetrics],
+    metrics: Mapping[str, Any],
     *,
     header: str | None = None,
 ) -> None:
     """Print a metrics table, one row per channel.
+
+    Takes the output of :func:`compute_metrics`, or a ``PredictionResult``,
+    which is passed through :func:`compute_metrics` first.
 
     Format::
 
@@ -161,6 +151,10 @@ def print_metrics(
     the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
     spanning nine decades.
     """
+    if not isinstance(metrics, Mapping) or not all(
+        isinstance(m, ChannelMetrics) for m in metrics.values()
+    ):
+        metrics = compute_metrics(metrics)
     if header:
         print(header)
     print(f"  {'channel':<12} {'n':>6} {'MSE':>13} {'RMSE':>13} {'MAE':>13} {'R^2':>8}")

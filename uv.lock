@@ -604,6 +604,7 @@ examples = [
 [package.dev-dependencies]
 dev = [
     { name = "hatchling" },
+    { name = "pandas" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "rlax" },
@@ -637,6 +638,7 @@ provides-extras = ["examples"]
 [package.metadata.requires-dev]
 dev = [
     { name = "hatchling", specifier = ">=1.29.0" },
+    { name = "pandas", specifier = ">=3.0.2" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "rlax", specifier = ">=0.1.9" },

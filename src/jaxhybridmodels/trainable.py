@@ -10,22 +10,23 @@ via ``eqx.filter_value_and_grad``; Evosax partitions to derive the flat
 parameter vector via ``eqx.partition(predictors, mask)``. Either way the
 mask's pytree shape is what the partitioner walks.
 
-The default predicate marks every inexact (floating-point) array leaf as
-trainable. The freezers here are free functions ``(mask, predictors) ->
-mask`` that never mutate their input, so masks compose by chaining:
+The default mask, :func:`trainable_mask`, trains inexact parameter arrays
+and freezes ``Constant`` and ``BoundScaler`` subtrees. ``fit(freeze=...)``
+covers the common case in one argument. :func:`freeze_mask` builds the
+same mask by hand, for inspection or for ``trainable=``. Every function
+here takes ``predictors`` first and never mutates its input, so masks
+chain through ``mask=``::
 
-    mask = trainable_mask(predictors)
-    mask = freeze_modules_of_type(mask, predictors, BoundScaler)
-    mask = freeze_paths(mask, ("inner.bias",))
-
-Each step returns a fresh mask of the same pytree shape.
+    mask = freeze_mask(predictors, MLPPredictor)
+    mask = freeze_mask(predictors, "rate.inner.mlp.layers.0.bias", mask=mask)
+    count_trainable_params(predictors, mask=mask)
 """
 
 from __future__ import annotations
 
 import difflib
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Collection, Sequence
+from typing import Any, cast
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -44,14 +45,29 @@ def default_trainable(leaf: Any) -> bool:
 
 def trainable_mask(
     predictors: Any,
+    *,
     predicate: Callable[[Any], bool] = default_trainable,
+    train_scalers: bool = False,
 ) -> Any:
     """Build a boolean mask matching the structure of ``predictors``.
 
-    Applies ``predicate`` to every leaf, returning a tree of the same shape
-    whose leaves are ``bool``. Both optimisers take the result unchanged.
+    Applies ``predicate`` to parameter leaves, returning a tree of the same
+    shape whose leaves are ``bool``. ``Constant`` subtrees are always
+    fixed. ``BoundScaler`` subtrees are fixed unless ``train_scalers`` is
+    set: a trainable temperature moves gradient between the scaler and the
+    inner network and tends to slow convergence. Both optimisers take the
+    result unchanged.
     """
-    return jtu.tree_map(predicate, predictors)
+    from jaxhybridmodels.predictors.base import BoundScaler, Constant
+
+    def fixed(node: Any) -> bool:
+        return isinstance(node, Constant) or (not train_scalers and isinstance(node, BoundScaler))
+
+    return jtu.tree_map(
+        lambda node: jtu.tree_map(lambda _: False, node) if fixed(node) else predicate(node),
+        predictors,
+        is_leaf=fixed,
+    )
 
 
 def _path_to_dotted(path: tuple[Any, ...]) -> str:
@@ -70,116 +86,126 @@ def _path_to_dotted(path: tuple[Any, ...]) -> str:
     return ".".join(parts)
 
 
-def freeze_paths(mask: Any, paths: tuple[str, ...]) -> Any:
-    """Return a new mask with leaves at `paths` set to ``False``.
+def _freeze_prefixes(mask: Any, prefixes: Collection[str]) -> tuple[Any, set[str]]:
+    """Set every mask leaf at or below one of ``prefixes`` to ``False``.
 
-    Path syntax is dot-joined segments addressing the mask PyTree from its root.
-    Each segment is the bare key produced by :func:`jax.tree_util.tree_flatten_with_path`:
-    attribute names for ``eqx.Module`` fields, integer indices for tuples and
-    lists, and string keys for dicts. Example: ``"inner.mlp.layers.0.weight"``
-    addresses ``mask.inner.mlp.layers[0].weight``.
-
-    A path matching nothing raises, listing the closest real paths. Ignoring
-    it quietly would leave a leaf the caller believed frozen training as
-    normal, which shows up as a wrong experiment, not a wrong program.
+    A prefix names a leaf or a whole subtree: ``"rate"`` covers
+    ``"rate.inner.mlp.layers.0.weight"`` and every other leaf under it, and
+    the empty string covers the root. Returns the new mask and the prefixes
+    that matched at least one leaf, so callers decide whether a miss is an
+    error.
     """
-    target = set(paths)
-    seen: set[str] = set()
+    matched: set[str] = set()
+
+    def _covering(dotted: str) -> list[str]:
+        return [p for p in prefixes if p in ("", dotted) or dotted.startswith(p + ".")]
 
     def _f(path: tuple[Any, ...], leaf: Any) -> Any:
-        dotted = _path_to_dotted(path)
-        seen.add(dotted)
-        return False if dotted in target else leaf
+        hits = _covering(_path_to_dotted(path))
+        matched.update(hits)
+        return False if hits else leaf
 
-    out = jtu.tree_map_with_path(_f, mask)
+    return jtu.tree_map_with_path(_f, mask), matched
 
-    missing = sorted(target - seen)
-    if missing:
-        suggestions = difflib.get_close_matches(missing[0], sorted(seen), n=3, cutoff=0.4)
-        hint = f" Closest matches: {suggestions}." if suggestions else ""
-        raise ValueError(
-            f"freeze_paths: no leaf matches {missing}.{hint} The mask has {len(seen)} leaves."
-        )
+
+def _module_paths(tree: Any, test: Callable[[Any], bool]) -> list[str]:
+    """Dotted paths of the outermost ``eqx.Module`` nodes in ``tree`` passing ``test``."""
+
+    def _is_target(node: Any) -> bool:
+        return isinstance(node, eqx.Module) and bool(test(node))
+
+    flat, _ = jtu.tree_flatten_with_path(tree, is_leaf=_is_target)
+    return [_path_to_dotted(path) for path, node in flat if _is_target(node)]
+
+
+def _no_match_error(caller: str, missing: Any, mask: Any) -> ValueError:
+    """Name the entries that matched nothing, with the closest real paths."""
+    paths = sorted(_path_to_dotted(path) for path, _ in jtu.tree_flatten_with_path(mask)[0])
+    first = missing[0] if isinstance(missing[0], str) else ""
+    suggestions = difflib.get_close_matches(first, paths, n=3, cutoff=0.4) if first else []
+    hint = f" Closest matches: {suggestions}." if suggestions else ""
+    return ValueError(
+        f"{caller}: no leaf matches {missing}.{hint} The mask has {len(paths)} leaves."
+    )
+
+
+FreezeSpec = str | type | Callable[[Any], bool]
+"""One ``freeze=`` entry: a dotted path, a module class, or a module predicate."""
+
+
+def freeze_mask(
+    predictors: Any,
+    freeze: Sequence[FreezeSpec] | FreezeSpec,
+    *,
+    mask: Any = None,
+) -> Any:
+    """The mask behind ``fit(freeze=...)``: ``mask`` with the ``freeze`` entries set to ``False``.
+
+    ``mask`` defaults to :func:`trainable_mask` of ``predictors``. Each
+    ``freeze`` entry is one of
+
+    - a dotted path naming a leaf or a whole subtree: ``"rate"`` for
+      ``predictors["rate"]``, ``"rate.inner.mlp.layers.0.weight"`` for one
+      leaf. Segments are the bare keys of
+      :func:`jax.tree_util.tree_flatten_with_path`: attribute names for
+      ``eqx.Module`` fields, integer indices for tuples and lists, and dict
+      keys;
+    - a module class, freezing every instance (``hm.Constant`` is already
+      frozen; ``hm.MLPPredictor`` is the usual one);
+    - a predicate ``(module) -> bool``, called on the real modules of
+      ``predictors``, so it may read their values.
+
+    A single entry may be passed bare. An entry that matches no leaf
+    raises, listing the closest real paths: ignoring it would leave a leaf
+    the caller believed frozen training as normal, which shows up as a
+    wrong experiment rather than a wrong program.
+
+    Examples
+    --------
+    ::
+
+        mask = freeze_mask(predictors, ("offset", hm.MLPPredictor))
+        # Chain onto a mask that also trains the scalers.
+        base = trainable_mask(predictors, train_scalers=True)
+        mask = freeze_mask(predictors, "offset", mask=base)
+    """
+    # A string is a Sequence too, so it is checked first.
+    entries = cast(
+        tuple[FreezeSpec, ...],
+        tuple(freeze)
+        if isinstance(freeze, Sequence) and not isinstance(freeze, str)
+        else (freeze,),
+    )
+    out = trainable_mask(predictors) if mask is None else mask
+    for entry in entries:
+        if isinstance(entry, str):
+            prefixes = [entry]
+        elif isinstance(entry, type):
+            prefixes = _module_paths(predictors, lambda m, cls=entry: isinstance(m, cls))
+        elif callable(entry):
+            prefixes = _module_paths(predictors, entry)
+        else:
+            raise TypeError(
+                "freeze entries must be dotted path strings, module classes, or "
+                f"predicates (module) -> bool; got {entry!r}"
+            )
+        out, matched = _freeze_prefixes(out, prefixes)
+        if not matched:
+            raise _no_match_error("freeze", [entry], out)
     return out
 
 
-def _zero_subtree(submask: Any) -> Any:
-    return jtu.tree_map(lambda _: False, submask)
+def count_trainable_params(predictors: Any, *, mask: Any = None) -> int:
+    """Number of trainable scalar parameters ``mask`` selects in ``predictors``.
 
-
-def freeze_modules_of_type(mask: Any, predictors: Any, cls: type) -> Any:
-    """Return a new mask with every leaf inside any subtree of type ``cls`` set to ``False``.
-
-    Walks ``mask`` and ``predictors`` in lockstep. When a node in
-    ``predictors`` is an instance of ``cls``, the matching sub-mask is
-    replaced wholesale by an all-``False`` subtree.
-
-    The common use is
-    ``freeze_modules_of_type(mask, predictors, BoundScaler)``, which freezes
-    every scaler's ``temperature``. The temperature sets how sharply the
-    squash saturates and is not meant to drift while the model trains.
+    ``mask`` defaults to :func:`trainable_mask` of ``predictors``. Sums the
+    sizes of every leaf the mask marks ``True``. Useful for reporting the
+    effective search dimension before a run, say to check an Evosax budget.
     """
-
-    def _is_target(node: Any) -> bool:
-        return isinstance(node, cls)
-
-    def _f(submask: Any, sub_pred: Any) -> Any:
-        if _is_target(sub_pred):
-            return _zero_subtree(submask)
-        return submask
-
-    return jtu.tree_map(_f, mask, predictors, is_leaf=_is_target)
-
-
-def freeze_where(mask: Any, predictors: Any, fn: Callable[[eqx.Module], bool]) -> Any:
-    """Return a new mask with every leaf inside any submodule satisfying ``fn`` set to ``False``.
-
-    ``fn`` must be a structural test, such as an ``isinstance`` check or a
-    look at a static field. It must not compare leaf values. The walk pairs
-    a mask node, whose leaves are booleans, with a predictors node, whose
-    leaves are arrays, so a value comparison has no defined meaning here.
-    """
-
-    def _is_target(node: Any) -> bool:
-        return isinstance(node, eqx.Module) and fn(node)
-
-    def _f(submask: Any, sub_pred: Any) -> Any:
-        if _is_target(sub_pred):
-            return _zero_subtree(submask)
-        return submask
-
-    return jtu.tree_map(_f, mask, predictors, is_leaf=_is_target)
-
-
-def frozen_default_mask(predictors: Any, *classes: type) -> Any:
-    """The default mask with every leaf of ``classes`` frozen.
-
-    Shortcut for the composition every example writes by hand::
-
+    if mask is None:
         mask = trainable_mask(predictors)
-        mask = freeze_modules_of_type(mask, predictors, BoundScaler)
-
-    Freezing ``BoundScaler`` leaves (their ``temperature``) is the common
-    case, so ``frozen_default_mask(predictors, BoundScaler)`` is the
-    conventional starting mask for a hybrid ODE fit.
-    """
-    mask = trainable_mask(predictors)
-    for cls in classes:
-        mask = freeze_modules_of_type(mask, predictors, cls)
-    return mask
-
-
-def count_trainable_params(predictors: Any, mask: Any) -> int:
-    """Number of trainable scalar parameters selected by ``mask``.
-
-    Sums the sizes of every leaf the mask marks ``True``. Useful for
-    reporting the effective search dimension before a run (e.g. to sanity
-    check an evosax budget or a phase-transition threshold).
-    """
     total = 0
-    for leaf, m in zip(
-        jtu.tree_leaves(predictors), jtu.tree_leaves(mask), strict=True
-    ):
+    for leaf, m in zip(jtu.tree_leaves(predictors), jtu.tree_leaves(mask), strict=True):
         if eqx.is_inexact_array(leaf) and bool(m):
             total += int(jnp.size(leaf))
     return total

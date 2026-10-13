@@ -22,11 +22,11 @@ Solvers are looked up by name through [`SOLVER_REGISTRY`](#solver_registry); [`r
 
 ```python
 SolverConfig(
-    solver: 'diffrax.AbstractSolver[Any]',
-    rtol: 'float',
-    atol: 'float | tuple[float, ...]',
-    max_steps: 'int',
-    dt0: 'float | None',
+    solver: 'diffrax.AbstractSolver[Any] | None' = None,
+    rtol: 'float' = 1e-05,
+    atol: 'float | tuple[float, ...]' = 1e-07,
+    max_steps: 'int' = 4096,
+    dt0: 'float | None' = None,
     adjoint: 'diffrax.AbstractAdjoint | None' = None,
     pcoeff: 'float' = 0.0,
     icoeff: 'float' = 1.0,
@@ -45,10 +45,10 @@ tolerance change must change the compiled solve.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `solver` | `diffrax.AbstractSolver` | Concrete solver instance, for example ``diffrax.Tsit5()``. Its class must appear in ``SOLVER_REGISTRY`` for ``to_dict`` to round-trip. |
-| `rtol, atol` | `float | tuple[float, ...]` | Relative and absolute error tolerances for the adaptive step-size controller. ``atol`` may be set per state component, as a tuple whose length matches ``S``, the full state dimension the user's ``simulate_fn`` integrates. |
-| `max_steps` | `int` | Upper limit on solver steps. The solve errors rather than running forever if it needs more. |
-| `dt0` | `float | None` | Initial step size. ``None`` lets diffrax pick one. |
+| `solver` | `diffrax.AbstractSolver` | Concrete solver instance, default ``diffrax.Tsit5()``. Its class must appear in ``SOLVER_REGISTRY`` for ``to_dict`` to round-trip. |
+| `rtol, atol` | `float | tuple[float, ...]` | Relative and absolute error tolerances for the adaptive step-size controller, default ``1e-5`` and ``1e-7``. ``atol`` may be set per state component, as a tuple whose length matches ``S``, the full state dimension the user's ``simulate_fn`` integrates. |
+| `max_steps` | `int` | Upper limit on solver steps, default 4096. The solve errors rather than running forever if it needs more. |
+| `dt0` | `float | None` | Initial step size. ``None`` (default) lets diffrax pick one. |
 | `adjoint` | `diffrax.AbstractAdjoint` | How gradients are taken back through the solve. See ``ADJOINT_REGISTRY`` for what each choice costs. |
 | `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See `stepsize_controller`. |
 
@@ -70,20 +70,17 @@ diffeqsolve(
 
 Run the solve this config describes, so ``simulate_fn`` stays thin.
 
-Wraps the invocation boilerplate every example hand-wrote —
-``SaveAt(ts=...)``, ``stepsize_controller()``, ``max_steps``, and —
-crucially — forwards ``self.adjoint``, which most hand-written
-examples forgot and hardcoded ``diffrax.DirectAdjoint()`` instead.
-Keeping the adjoint live means ``SolverConfig.adjoint`` is honoured
-everywhere, and the Backsolve caveat (it cannot differentiate
-through values closed over in the vector field) applies as
+Calls ``diffrax.diffeqsolve`` with this config's solver, ``dt0``,
+``stepsize_controller()``, ``max_steps`` and ``adjoint``, saving at
+``ts``. Forwarding ``adjoint`` matters: a hand-written call that
+hardcodes ``diffrax.DirectAdjoint()`` silently ignores
+``SolverConfig.adjoint``. The Backsolve caveat (it cannot
+differentiate through values closed over in the vector field) is
 documented in ``ADJOINT_REGISTRY``.
 
-The crystallisation example deliberately keeps its call manual: its
-config sets ``dt0=None`` with a live per-trajectory step fallback,
-and it coerces ``atol`` to the x64 state dtype, neither of which
-this helper encodes. For the common case — an explicit ``dt0`` and
-scalar/array tolerances — this is the whole invocation.
+Call ``diffrax.diffeqsolve`` yourself when you need something this
+helper does not pass, such as a per-trajectory ``dt0``. The
+crystallisation example does this.
 
 **Parameters**
 
@@ -98,9 +95,9 @@ scalar/array tolerances — this is the whole invocation.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `diffrax.Solution` |  | The diffrax solution; call ``.ys`` for the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
+| `diffrax.Solution` |  | The diffrax solution; ``.ys`` is the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L216)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L218)</small>
 
 <a id="solverconfigstepsize_controller"></a>
 
@@ -122,7 +119,7 @@ I-control, so this reproduces the ``PIDController(rtol, atol)`` the
 examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L194)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L196)</small>
 
 <a id="solverconfigto_dict"></a>
 
@@ -138,7 +135,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L275)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L274)</small>
 
 ---
 
@@ -146,7 +143,7 @@ than being guessed at.
 
 ### `SOLVER_REGISTRY`
 
-<small>`from jaxhybridmodels.solver import SOLVER_REGISTRY` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.SOLVER_REGISTRY`</small>
+<small>`from jaxhybridmodels.solver import SOLVER_REGISTRY`</small>
 
 ```python
 SOLVER_REGISTRY = {
@@ -174,7 +171,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_solver()`
 
-<small>`from jaxhybridmodels.solver import register_solver` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_solver`</small>
+<small>`from jaxhybridmodels.solver import register_solver`</small>
 
 ```python
 register_solver(name: 'str', cls: 'type[diffrax.AbstractSolver[Any]]') -> 'None'
@@ -195,7 +192,7 @@ owns the naming.
 
 ### `ADJOINT_REGISTRY`
 
-<small>`from jaxhybridmodels.solver import ADJOINT_REGISTRY` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.ADJOINT_REGISTRY`</small>
+<small>`from jaxhybridmodels.solver import ADJOINT_REGISTRY`</small>
 
 ```python
 ADJOINT_REGISTRY = {
@@ -223,7 +220,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_adjoint()`
 
-<small>`from jaxhybridmodels.solver import register_adjoint` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_adjoint`</small>
+<small>`from jaxhybridmodels.solver import register_adjoint`</small>
 
 ```python
 register_adjoint(name: 'str', cls: 'type[diffrax.AbstractAdjoint]') -> 'None'

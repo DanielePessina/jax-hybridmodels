@@ -30,7 +30,9 @@ Variants in this module
 
 All four accept ``channel_idx`` (which trailing-``D`` indices to keep) and
 ``channel_weights`` (per-channel multipliers, length matching
-``channel_idx`` or ``D``).
+``channel_idx`` or ``D``). Training code does not pass these by hand:
+:class:`~jaxhybridmodels.Objective` takes weights keyed by channel name and
+resolves them to this pair.
 """
 
 # ruff: noqa: F722
@@ -257,7 +259,7 @@ LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
     "bal_mse": bal_mse,
     "bal_mle": bal_mle,
 }
-"""Short name to loss function, so a training config can name its loss as a string."""
+"""Short name to loss function, so an ``Objective`` can name its loss as a string."""
 
 
 def resolve_loss_fn(
@@ -265,7 +267,7 @@ def resolve_loss_fn(
     channel_idx: tuple[int, ...] | None,
     channel_weights: tuple[float, ...] | None,
 ) -> Callable[[Array, BucketPayload], Array]:
-    """Turn a training config's ``loss`` field into a ``(pred_obs, bp) -> scalar``.
+    """Turn an ``Objective``'s ``loss`` field into a ``(pred_obs, bp) -> scalar``.
 
     ``loss`` is either a ``LOSS_REGISTRY`` key, matched case- and
     whitespace-insensitively, or a callable already in the right shape.
@@ -285,8 +287,8 @@ def resolve_loss_fn(
     - A plain ``(pred_obs, bp)`` callable is *projected* instead: the
       selected channels are sliced out of ``pred_obs`` and ``bp`` before the
       call, so any ``(pred_obs, bp)`` loss composes with ``channel_idx``.
-      ``channel_weights`` cannot be projected this way — per-channel
-      weighting must happen inside a loss's own reduction — so a plain
+      ``channel_weights`` cannot be projected this way, because per-channel
+      weighting has to happen inside a loss's own reduction. A plain
       callable combined with ``channel_weights`` raises rather than
       silently ignoring the weights.
 

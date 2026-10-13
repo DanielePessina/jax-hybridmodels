@@ -1,22 +1,23 @@
-"""Epoch-scaled schedule multipliers for custom training loops.
+"""Epoch-scaled schedule multipliers.
 
-The stock trainers express changing hyperparameters as **phases** —
-contiguous blocks of steps sharing an lr or penalty weight. When a run
-wants a smooth curve instead of blocks — a cosine-decayed learning rate,
-a penalty weight that ramps in — the loop is custom, and this factory is
-the missing piece: :func:`annealing_schedule` returns an optax-style
-callable ``(step: int) -> float`` that is already normalised to a
-multiplier, with the run length baked in.
+The stock Optax trainer changes hyperparameters per **phase**, a block of
+steps sharing an lr or penalty weight, and within a phase
+``TrainingPhase.lr`` also takes any optax schedule, counted from the phase's
+first step. :func:`annealing_schedule` returns such a callable
+``(step: int) -> float``, normalised to a multiplier with the run length
+baked in. Scale it into a learning rate for a phase, or use it to ramp a
+penalty weight in a custom loop:
 
-A library *step* is one full pass over every bucket, i.e. one epoch
-(CONTEXT.md, "step (training)"), so the schedule's ``total_epochs`` is
-the step budget of the run it scales:
-
-    lr = base_lr * annealing_schedule("cosine", total_epochs=steps)(step)
+    phase = hm.TrainingPhase(steps, lr=lambda step: 1e-2 * cosine(step))
 
     penalty_weight = 0.5 * annealing_schedule("linear", total_epochs=steps)(step)
 
-The name is deliberate: it is an *annealing* schedule — it only ever
+where ``cosine = annealing_schedule("cosine", total_epochs=steps)``. A
+library *step* is one full pass over every bucket, i.e. one epoch
+(CONTEXT.md, "step (training)"), so ``total_epochs`` is the step budget of
+the phase or run it scales.
+
+The name is deliberate: it is an *annealing* schedule, which only
 smooths a training hyperparameter. It has nothing to do with a physical
 temperature, and is distinct from ``BoundScaler.temperature``, so the
 word "temperature" is never used here (it collides with chemistry).
@@ -25,12 +26,14 @@ word "temperature" is never used here (it collides with chemistry).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import jax.numpy as jnp
 import optax
+from jax.typing import ArrayLike
+from jaxtyping import Array
 
-_SCHEDULE_KINDS: frozenset[str] = frozenset(
-    ("cosine", "linear", "warmup_cosine", "exponential")
-)
+_SCHEDULE_KINDS: frozenset[str] = frozenset(("cosine", "linear", "warmup_cosine", "exponential"))
 
 
 def annealing_schedule(
@@ -40,8 +43,8 @@ def annealing_schedule(
     init_value: float = 1.0,
     end_value: float = 0.0,
     warmup_epochs: int = 0,
-) -> optax.Schedule:
-    """Return ``schedule(step: int) -> float``, a multiplier over ``[0, total_epochs]``.
+) -> Callable[[ArrayLike], Array]:
+    """Return ``schedule(step) -> Array``, a scalar multiplier over ``[0, total_epochs]``.
 
     Built on optax's own schedule helpers, so the returned callable is a
     plain pure function of the integer step count: ``jit``-safe, usable
@@ -73,26 +76,21 @@ def annealing_schedule(
     Returns
     -------
     optax.Schedule
-        ``schedule(step)`` in ``[end_value, init_value]``. Compose as a
+        ``schedule(step)`` in ``[end_value, init_value]``, except during
+        the ``"warmup_cosine"`` warmup, which starts at 0. Compose as a
         multiplier: ``lr = base_lr * schedule(step)``.
     """
     if total_epochs < 1:
-        raise ValueError(
-            f"annealing_schedule: total_epochs must be at least 1, got {total_epochs}"
-        )
+        raise ValueError(f"annealing_schedule: total_epochs must be at least 1, got {total_epochs}")
     if kind not in _SCHEDULE_KINDS:
         raise ValueError(
-            f"annealing_schedule: unknown kind={kind!r}; "
-            f"expected one of {sorted(_SCHEDULE_KINDS)}"
+            f"annealing_schedule: unknown kind={kind!r}; expected one of {sorted(_SCHEDULE_KINDS)}"
         )
     if init_value <= 0.0:
-        raise ValueError(
-            f"annealing_schedule: init_value must be positive, got {init_value}"
-        )
+        raise ValueError(f"annealing_schedule: init_value must be positive, got {init_value}")
     if not 0.0 <= end_value <= init_value:
         raise ValueError(
-            f"annealing_schedule: end_value={end_value} must lie in "
-            f"[0, init_value={init_value}]"
+            f"annealing_schedule: end_value={end_value} must lie in [0, init_value={init_value}]"
         )
     if kind == "warmup_cosine" and not 0 <= warmup_epochs < total_epochs:
         raise ValueError(
@@ -100,6 +98,18 @@ def annealing_schedule(
             f"[0, total_epochs={total_epochs})"
         )
 
+    schedule = _optax_schedule(kind, total_epochs, init_value, end_value, warmup_epochs)
+
+    def multiplier(step: ArrayLike) -> Array:
+        return jnp.asarray(schedule(step))
+
+    return multiplier
+
+
+def _optax_schedule(
+    kind: str, total_epochs: int, init_value: float, end_value: float, warmup_epochs: int
+) -> optax.Schedule:
+    """The optax schedule behind :func:`annealing_schedule`, inputs already validated."""
     if kind == "cosine":
         # optax's cosine lands exactly on alpha * init_value at decay_steps.
         return optax.cosine_decay_schedule(
@@ -119,7 +129,7 @@ def annealing_schedule(
             init_value=0.0,
             peak_value=init_value,
             warmup_steps=warmup_epochs,
-            decay_steps=total_epochs - warmup_epochs,
+            decay_steps=total_epochs,
             end_value=end_value,
         )
     # exponential: the per-epoch geometric factor is derived from the end

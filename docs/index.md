@@ -21,87 +21,80 @@ features:
     details: Write one simulate_fn for a single experiment. The library applies batching, JIT compilation, and differentiation around it.
   - title: Irregular observations
     details: Give each channel its own timestamps. The data layer builds masks and groups experiments by timestamp-axis length.
-  - title: Bounded predictors
-    details: Declare physical input and output ranges. The predictor works in latent space and maps its output back into those ranges.
+  - title: Physical bounds
+    details: Declare a range for a parameter or a network's inputs and output. Training works on an unbounded latent and can never leave the range.
   - title: Two training loops
     details: Use Optax for gradient-based fitting or Evosax for population-based search over small parameter sets.
   - title: PyTree composition
-    details: Pass one predictor or a nested tuple, dictionary, or NamedTuple. There is no required model wrapper class.
+    details: Predictors are any PyTree of Equinox modules, usually a dict keyed by role. HybridModel binds them to the simulator; the functional layer takes them directly.
   - title: Explicit extension points
     details: Replace the predictor, loss, regulariser, solver, UI, or training loop with a callable or PyTree of your own.
 ---
 
 ## Start here
 
-From a repository checkout, run the known-answer sanity check first:
+From a repository checkout:
 
 ```bash
 uv sync --extra examples
-uv run python examples/pendulum/train_harmonic.py --no-plot
+uv run python examples/pendulum/train_harmonic.py
 ```
 
-It recovers the frequency of a synthetic harmonic oscillator from noisy
-position measurements. The [Getting started](/guide/getting-started) page
-then builds the same pipeline step by step, and the [Examples](/examples/)
-page shows where to go for a real hybrid ODE.
+It fits the frequency of a harmonic oscillator and predicts with the fitted
+model. [Getting started](/guide/getting-started) walks through the same
+code, and [Examples](/examples/) lists the larger hybrid models.
 
 ## In a nutshell
 
-`jaxhybridmodels` keeps the ODE simulation function in user code. The Python
-package is imported as `jaxhybridmodels`. The library
-adds the surrounding data, predictor, and training machinery.
+You write the ODE solve for one experiment. The library batches it over
+irregular data, differentiates through it, and trains the predictors.
 
 | Part | Responsibility |
 | --- | --- |
-| `predictors` | An Equinox PyTree of trainable functions. |
+| `predictors` | A PyTree of trainable values and networks. |
 | `simulate_fn` | Integrates one experiment and returns the full state. |
 | `state_to_output` | Selects the observed channels from the full state. |
 | `SolverConfig` | Stores the Diffrax solver and its settings. |
 | `Dataset` | Stores bucketed observations and masks. |
 
-The core training call is:
+`HybridModel` binds the first four; the data is passed per call, as a list
+of experiments or a `Dataset`:
 
 ```python
 import jaxhybridmodels as hm
 
-dataset = hm.make_dataset(experiments, output_channel_names=("value",))
-history, trained = hm.train_with_optax(
-    predictors,
-    dataset,
-    config,
+model = hm.HybridModel(
+    predictors=predictors,
     simulate_fn=simulate_fn,
     state_to_output=state_to_output,
-    solver=solver,
-    key=key,
+    output_channel_names=("conc",),
 )
+result = model.fit(experiments, hm.OptaxTrainingConfig(steps=500, lr=1e-2), key=key)
+predictions = result.model.predict(experiments)
+hm.print_metrics(predictions)
 ```
 
-The variables in this short call are defined in the complete
-[Getting started](/guide/getting-started) example. Read [Concepts](/guide/concepts)
-for the data and model interfaces.
+[Getting started](/guide/getting-started) defines every variable here.
+[Concepts](/guide/concepts) explains the data and model interfaces.
 
 ## Find your path
 
 | If you want to... | Start here | Main API |
 | --- | --- | --- |
-| Build irregular experiments and datasets | [Data and buckets](/guide/data) | [`make_experiment`](/api/data#make_experiment), [`make_dataset`](/api/data#make_dataset) |
-| Write the ODE and observation map | [Model interface](/guide/model-interface) | `simulate_fn`, `state_to_output` |
-| Choose a bounded predictor | [Predictors and bounds](/guide/predictors) | [`BoundedPredictor`](/api/predictors#boundedpredictor), [`BoundScaler`](/api/predictors#boundscaler) |
-| Train with gradients or population search | [Training](/guide/training) | [`train_with_optax`](/api/training#train_with_optax), [`train_with_evosax`](/api/training#train_with_evosax) |
+| Build irregular experiments and datasets | [Data and buckets](/guide/data) | [`make_experiment`](/api/data#make_experiment), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe) |
+| Write the ODE and observation map | [Model interface](/guide/model-interface) | [`HybridModel`](/api/model#hybridmodel) |
+| Choose parameters, networks and bounds | [Predictors and bounds](/guide/predictors) | [`Parameter`](/api/predictors#parameter), [`BoundedPredictor`](/api/predictors#boundedpredictor) |
+| Train with gradients or population search | [Training](/guide/training) | [`Objective`](/api/training#objective), [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig) |
 | Add time-varying inputs or schedules | [Profiles and schedules](/guide/profiles-and-schedules) | [`ramp_profile`](/api/profiles#ramp_profile), [`annealing_schedule`](/api/schedules#annealing_schedule) |
-| Save, evaluate, or ensemble models | [Saving and loading](/guide/serialization), [Ensembles](/guide/ensembles) | [`save_run`](/api/serialise#save_run), [`predict_dataset`](/api/prediction#predict_dataset) |
+| Save, evaluate, or ensemble models | [Saving and loading](/guide/serialization), [Ensembles](/guide/ensembles) | [`save`](/api/serialise#save), [`compute_metrics`](/api/metrics#compute_metrics) |
 
 ## Install
 
-The package requires Python 3.11 or newer and uses
-[`uv`](https://docs.astral.sh/uv/):
+Python 3.11 or newer:
 
 ```bash
 uv add jax-hybridmodels==0.2.0b1
 ```
 
-For a checkout of the repository:
-
-```bash
-uv sync --extra examples
-```
+The 0.2.0b1 release predates `HybridModel`, `Parameter` and `Constant`. Until
+the next release, use a checkout and `uv sync --extra examples`.

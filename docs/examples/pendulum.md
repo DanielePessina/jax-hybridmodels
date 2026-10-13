@@ -1,197 +1,101 @@
-# Harmonic Oscillator
+# Harmonic oscillator
 
-A synthetic counterpart to the [crystallisation example](/examples/crystallisation),
-with one unknown: the angular frequency $\omega$ of a one-dimensional
-harmonic oscillator. Because the correct answer is $\omega = 1$, this is
-the example to run when you want to know whether your pipeline is wired
-correctly rather than whether your model is any good.
+The quickstart. One unknown with a known answer, the angular frequency
+$\omega$ of a harmonic oscillator, run through the whole `HybridModel`
+workflow: build a dataset, fit, read the result, predict, simulate new
+conditions. Read it first, and come back to it when you want to check that
+your own data, ODE and training path are wired correctly.
 
-The full script lives at `examples/pendulum/train_harmonic.py`. Run it with:
+## Run it
 
 ```bash
 uv run python examples/pendulum/train_harmonic.py
+uv run python examples/pendulum/train_harmonic.py --no-plot
 ```
 
-The data is generated on every run from the closed form
-$x(t) = x_0 \cos(\omega t) + (v_0 / \omega) \sin(\omega t)$, so there is
-no file to manage.
+About 15 s on CPU. The data is generated on every run. Writes
+`figures/parity.png` and `figures/trajectories.png` next to the script
+unless `--no-plot` is given.
 
-## What we're modelling
-
-Textbook second-order ODE:
+## The model
 
 $$
-\frac{dx}{dt} = v, \qquad \frac{dv}{dt} = -\omega^2\, x
+\frac{dx}{dt} = v, \qquad \frac{dv}{dt} = -\omega^2 x - c\, v
 $$
 
-Each **experiment** is one oscillator: a true $\omega = 1.0$ and its own
-initial state $(x_0, v_0)$. Only position is measured, with light
-Gaussian noise. Velocity is part of the state the solver tracks and no
-instrument sees. The trainer has to recover $\omega$ from positions
-alone.
+$\omega$ is learned, with true value 1, starting from 1.4. The damping $c$
+is known to be zero and stays fixed. Six oscillators start from different
+$(x_0, v_0)$ at $t = 0$. Only position is measured, at twelve points from
+$t = 0.2$ to $5$, with Gaussian noise of standard deviation 0.02. Five
+time units is about 0.8 of a period, enough to pin $\omega$ without a
+second minimum at a multiple of it.
 
-## Step 1: a one-scalar custom predictor
+## Code
 
-A **predictor** is any trainable module taking an array and returning an
-array. Here it is one scalar. Wrapping it in a `BoundedPredictor`
-confines that scalar to `[0.5, 2.0]`. This is the pattern for writing
-your own: subclass [`Predictor`](/api/predictors#predictor) directly, no
-network needed.
+The model is one ODE solve, so the script writes only the vector field.
+The predictors arrive as the dict given to the model, and both kinds of
+value are read through `.value`. `state_to_output` keeps the measured
+column:
 
-```python
-import diffrax
-import jax.numpy as jnp
-import jax.random as jr
-from jax import Array
-from jaxtyping import Float
+<<< @/../examples/pendulum/train_harmonic.py#model-functions
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    ChannelObs,
-    SolverConfig,
-    evaluate_predictor,
-    make_dataset,
-    make_experiment,
-    train_with_optax,
-    OptaxTrainingConfig,
-)
-from jaxhybridmodels.predictors.base import Predictor
+Each experiment gives its initial state at `t0`, before the first
+measurement. Use `y0_fn=` instead of `y0=` when the state has to be
+computed from covariates or from the first observation:
 
-key, noise_key = jr.split(jr.PRNGKey(0))
+<<< @/../examples/pendulum/train_harmonic.py#experiment
 
-class OmegaPredictor(Predictor):
-    """One trainable scalar; ignores its input."""
-    omega_lat: Array
-    def __init__(self, omega_lat: Array | float = 0.0) -> None:
-        self.omega_lat = jnp.asarray(omega_lat, dtype=jnp.float32)
-    def __call__(self, x: Array) -> Float[Array, " 1"]:
-        return self.omega_lat[None]
-    def initialized_with_key(self, key):
-        return OmegaPredictor(jr.normal(key))
-```
+[`HybridModel.from_vector_field`](/api/model#hybridmodel) wraps the vector
+field into a `simulate_fn` that integrates one experiment and returns the
+full state. Write `simulate_fn` yourself when a model needs more than one
+plain solve, as the [hybrid ODE](/examples/hybrid-ode) does.
+`SolverConfig()` defaults to Tsit5 with `rtol=1e-5` and `atol=1e-7`; only
+the first step size is set here. A [`Parameter`](/api/predictors#parameter)
+trains on an unbounded latent and maps it into its bounds, so $\omega$
+stays inside $(0.5, 2)$ at every step without clipping. A
+[`Constant`](/api/predictors#constant) is never trained:
 
-`initialized_with_key` is what the
-[tournament](/guide/training#the-shared-tournament) calls to draw a
-fresh starting point on each attempt. Omit it and the default
-`reinitialize_with_key` resamples every floating-point leaf from
-`jr.normal`, which is worse for a module owning its own init scheme.
+<<< @/../examples/pendulum/train_harmonic.py#model
 
-Wrap it in a `BoundedPredictor`:
+Training runs two phases, a fast one to get close and a slower one to
+settle. `fit` returns a [`FitResult`](/api/model#fitresult);
+`result.model` is a new model with the fitted values and `model` is
+unchanged:
 
-```python
-from jaxhybridmodels import BoundedPredictor, BoundScaler
+<<< @/../examples/pendulum/train_harmonic.py#fit
 
-predictor = BoundedPredictor(
-    input_keys=("dummy",),                                   # at least one slot is required
-    in_scaler=BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid"),
-    inner=OmegaPredictor(jr.normal(key)),
-    out_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),  # search omega in [0.5, 2.0]
-)
-```
+`predict` runs the fitted model on each experiment's times and is indexed
+by experiment, then channel. Its `times` start at `t0`, where nothing was
+measured. `simulate` needs no dataset, only times, an initial state and
+any covariates the model reads:
 
-The `"dummy"` covariate exists only because `BoundedPredictor` requires
-at least one input, and a predictor with none has no training signal.
-`OmegaPredictor` ignores the value: every experiment shares the same true
-$\omega$, so there is nothing to condition on.
+<<< @/../examples/pendulum/train_harmonic.py#predict-simulate
 
-## Step 2: generate the experiments
-
-```python
-INITIAL_STATES = ((1.0, 0.0), (0.0, 1.0), (0.5, -0.5),
-                  (1.0, 1.0), (-0.7, 0.4), (0.3, 0.9))
-T_MAX, N_TIMESTEPS, NOISE_STD = 5.0, 12, 0.02
-
-ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-experiments = []
-for i, (x0, v0) in enumerate(INITIAL_STATES):
-    clean = x0 * jnp.cos(ts) + v0 * jnp.sin(ts)
-    noisy = clean + NOISE_STD * jr.normal(jr.fold_in(noise_key, i), ts.shape)
-    experiments.append(make_experiment(
-        covariates={"dummy": 0.0},
-        channels={"position": ChannelObs(ts=ts, values=noisy,
-                                          variance=jnp.full(ts.shape, NOISE_STD**2))},
-        y0_fn=(lambda c, ch, _y0=jnp.array([x0, v0], dtype=jnp.float32): _y0),
-        exp_id=f"osc_{i}_x0={x0}_v0={v0}",
-    ))
-```
-
-**`y0_fn`** builds one experiment's full initial state. It runs here,
-once, and never during training. The `_y0` default argument binds the
-loop variable early. In a real workflow it would derive the state from
-covariates or from the first observation.
-
-`T_MAX = 5.0` covers roughly 0.8 of one period, enough phase coverage to
-fit $\omega$ without aliasing into the wrong basin.
-
-## Step 3: state_to_output and simulate_fn
-
-```python
-def _state_to_output(state):
-    """[T, 2] -> [T, 1]. Only position is observed."""
-    return state[..., :1]
-
-def _simulate_fn(predictor, ts, covariates, y0, solver):
-    omega = predictor(covariates).reshape(())
-    omega_sq = omega * omega
-    def vector_field(t, y, args):
-        return jnp.stack([y[1], -omega_sq * y[0]])
-    term = diffrax.ODETerm(vector_field)
-    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
-```
-
-`predictor(covariates)` returns shape `[1]`; `.reshape(())` makes it a
-scalar so the multiplication broadcasts. `BoundedPredictor` always
-returns an array, so scalar problems reshape at the call site.
-
-Note also that `predictor` is called above `diffeqsolve`, not inside the
-vector field. Its inputs are all covariates, so its value cannot change
-during the trajectory, and hoisting it keeps it off the solver tape.
-
-## Step 4: train and read out $\omega$
-
-```python
-dataset = make_dataset(experiments, output_channel_names=("position",))
-
-solver = SolverConfig(solver=diffrax.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=4096, dt0=None)
-
-config = OptaxTrainingConfig(
-    steps=(300,), lr=(5e-2,), optimizer=("adamw",),
-    reset_optimiser_state=(False,), length_schedule=(1.0,),
-    loss="mse", verbose=True,
-)
-
-history, trained = train_with_optax(
-    predictor, dataset, config,
-    simulate_fn=_simulate_fn, state_to_output=_state_to_output,
-    solver=solver, key=jr.PRNGKey(1),
-)
-
-# Read out the trained omega.
-recovered = evaluate_predictor(trained, {"dummy": 0.0})
-print(f"recovered omega: {recovered:.4f}  (target: 1.0000, final loss: {history[-1]:.6f})")
-```
-
-Typical output (the exact values can vary with dependency versions):
+## Results
 
 ```
-recovered omega: 0.9995  (target: 1.0000, final loss: 0.000327)
+[fit]
+omega 1.4 -> 0.9997 (true 1.0)
+best step 186, stop reason budget_exhausted
+
+  channel           n           MSE          RMSE           MAE      R^2
+  position         72    3.5542e-04    1.8853e-02    1.5612e-02   0.9993
 ```
 
-## What this example exercises
+The MSE sits at the noise variance, $0.02^2 = 4 \times 10^{-4}$, so the
+fit has reached the noise floor. `best_step` is the step whose parameters
+were returned, and `budget_exhausted` means training ran all its steps
+without stopping early.
 
-The same pieces as the crystallisation example, on a problem with a
-known answer.
+![Predicted against observed position](assets/pendulum/parity.png)
 
-- [`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`make_dataset`](/api/data#make_dataset)
-- A custom [`Predictor`](/api/predictors#predictor) subclass wrapped in a [`BoundedPredictor`](/api/predictors#boundedpredictor)
-- A user-written `simulate_fn` matching the [mandatory signature](/guide/model-interface)
-- [`SolverConfig`](/api/solver#solverconfig) with `diffrax.Tsit5`
-- [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig) and [`train_with_optax`](/api/training#train_with_optax)
-- The [tournament re-init hook](/guide/training#the-shared-tournament),
-  through `OmegaPredictor.initialized_with_key`
+![Fitted trajectories for the first three oscillators](assets/pendulum/trajectories.png)
 
-To check a refactor of your own physics, run this and confirm the
-recovered $\omega$ lands within about 1% of `OMEGA_TRUE`. If it does not,
-the integrator and loss path has a wiring bug, usually in
-`state_to_output` or `y0_fn`.
+## Things to try
+
+- Make the damping trainable, `hm.Parameter(0.1, bounds=(0.0, 1.0))`, and
+  start $\omega$ from 1.9. With two unknowns and a far start, the same 300
+  steps reach $\omega \approx 1.03$ instead of 1.000, and `best_step` is
+  the last step: the run needs more steps, not a different model.
+- If $\omega$ comes out more than about 1% from 1.0 after you adapt this
+  script, look first at `state_to_output` and the initial states.

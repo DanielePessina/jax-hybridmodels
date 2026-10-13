@@ -114,18 +114,18 @@ class SolverConfig(eqx.Module):
     Attributes
     ----------
     solver : diffrax.AbstractSolver
-        Concrete solver instance, for example ``diffrax.Tsit5()``. Its class
+        Concrete solver instance, default ``diffrax.Tsit5()``. Its class
         must appear in ``SOLVER_REGISTRY`` for ``to_dict`` to round-trip.
     rtol, atol : float | tuple[float, ...]
         Relative and absolute error tolerances for the adaptive step-size
-        controller. ``atol`` may be set per state component, as a tuple
-        whose length matches ``S``, the full state dimension the user's
-        ``simulate_fn`` integrates.
+        controller, default ``1e-5`` and ``1e-7``. ``atol`` may be set per
+        state component, as a tuple whose length matches ``S``, the full
+        state dimension the user's ``simulate_fn`` integrates.
     max_steps : int
-        Upper limit on solver steps. The solve errors rather than running
-        forever if it needs more.
+        Upper limit on solver steps, default 4096. The solve errors rather
+        than running forever if it needs more.
     dt0 : float | None
-        Initial step size. ``None`` lets diffrax pick one.
+        Initial step size. ``None`` (default) lets diffrax pick one.
     adjoint : diffrax.AbstractAdjoint
         How gradients are taken back through the solve. See
         ``ADJOINT_REGISTRY`` for what each choice costs.
@@ -148,17 +148,22 @@ class SolverConfig(eqx.Module):
     def __init__(
         self,
         *,
-        solver: diffrax.AbstractSolver[Any],
-        rtol: float,
-        atol: float | tuple[float, ...],
-        max_steps: int,
-        dt0: float | None,
+        solver: diffrax.AbstractSolver[Any] | None = None,
+        rtol: float = 1e-5,
+        atol: float | tuple[float, ...] = 1e-7,
+        max_steps: int = 4096,
+        dt0: float | None = None,
         adjoint: diffrax.AbstractAdjoint | None = None,
         pcoeff: float = 0.0,
         icoeff: float = 1.0,
         dcoeff: float = 0.0,
     ) -> None:
-        """Construct and validate a solver configuration at the host boundary."""
+        """Construct and validate a solver configuration at the host boundary.
+
+        ``SolverConfig()`` is a usable default for non-stiff problems:
+        ``Tsit5`` at ``rtol=1e-5``, ``atol=1e-7``, at most 4096 steps, and
+        diffrax's own choice of first step.
+        """
         if not math.isfinite(float(rtol)) or float(rtol) <= 0.0:
             raise ValueError(f"SolverConfig.rtol must be finite and positive; got {rtol}")
 
@@ -166,10 +171,7 @@ class SolverConfig(eqx.Module):
         if not atol_values or any(
             not math.isfinite(float(value)) or float(value) <= 0.0 for value in atol_values
         ):
-            raise ValueError(
-                "SolverConfig.atol values must be finite and positive; "
-                f"got {atol}"
-            )
+            raise ValueError(f"SolverConfig.atol values must be finite and positive; got {atol}")
 
         try:
             valid_max_steps = int(max_steps) == max_steps and int(max_steps) > 0
@@ -181,7 +183,7 @@ class SolverConfig(eqx.Module):
         if dt0 is not None and (not math.isfinite(float(dt0)) or float(dt0) <= 0.0):
             raise ValueError(f"SolverConfig.dt0 must be finite and positive or None; got {dt0}")
 
-        self.solver = solver
+        self.solver = diffrax.Tsit5() if solver is None else solver
         self.rtol = rtol
         self.atol = atol
         self.max_steps = max_steps
@@ -222,20 +224,17 @@ class SolverConfig(eqx.Module):
     ) -> diffrax.Solution:
         """Run the solve this config describes, so ``simulate_fn`` stays thin.
 
-        Wraps the invocation boilerplate every example hand-wrote —
-        ``SaveAt(ts=...)``, ``stepsize_controller()``, ``max_steps``, and —
-        crucially — forwards ``self.adjoint``, which most hand-written
-        examples forgot and hardcoded ``diffrax.DirectAdjoint()`` instead.
-        Keeping the adjoint live means ``SolverConfig.adjoint`` is honoured
-        everywhere, and the Backsolve caveat (it cannot differentiate
-        through values closed over in the vector field) applies as
+        Calls ``diffrax.diffeqsolve`` with this config's solver, ``dt0``,
+        ``stepsize_controller()``, ``max_steps`` and ``adjoint``, saving at
+        ``ts``. Forwarding ``adjoint`` matters: a hand-written call that
+        hardcodes ``diffrax.DirectAdjoint()`` silently ignores
+        ``SolverConfig.adjoint``. The Backsolve caveat (it cannot
+        differentiate through values closed over in the vector field) is
         documented in ``ADJOINT_REGISTRY``.
 
-        The crystallisation example deliberately keeps its call manual: its
-        config sets ``dt0=None`` with a live per-trajectory step fallback,
-        and it coerces ``atol`` to the x64 state dtype, neither of which
-        this helper encodes. For the common case — an explicit ``dt0`` and
-        scalar/array tolerances — this is the whole invocation.
+        Call ``diffrax.diffeqsolve`` yourself when you need something this
+        helper does not pass, such as a per-trajectory ``dt0``. The
+        crystallisation example does this.
 
         Parameters
         ----------
@@ -255,7 +254,7 @@ class SolverConfig(eqx.Module):
         Returns
         -------
         diffrax.Solution
-            The diffrax solution; call ``.ys`` for the state trajectory
+            The diffrax solution; ``.ys`` is the state trajectory
             ``[T, S]`` ``simulate_fn`` must return.
         """
         return diffrax.diffeqsolve(
@@ -348,3 +347,23 @@ class SolverConfig(eqx.Module):
             icoeff=d.get("icoeff", 1.0),
             dcoeff=d.get("dcoeff", 0.0),
         )
+
+
+def simulation_state(result: Any) -> Array:
+    """The ``[T, S]`` state array from whatever ``simulate_fn`` returned.
+
+    ``simulate_fn`` may return the state array itself or the
+    ``diffrax.Solution`` of its solve, whose ``ys`` holds the state. A
+    solution saved with ``SaveAt(ts=...)`` has ``ys``; one saved without it
+    has none, and that is an error here rather than a ``None`` reaching
+    ``state_to_output``. Runs at trace time, so it is free under ``jit``.
+    """
+    if isinstance(result, diffrax.Solution):
+        if result.ys is None:
+            raise ValueError(
+                "simulate_fn returned a diffrax.Solution with ys=None; save the state at the "
+                "requested times (SaveAt(ts=ts), which SolverConfig.diffeqsolve does) or "
+                "return the [T, S] array"
+            )
+        return jnp.asarray(result.ys)
+    return jnp.asarray(result)

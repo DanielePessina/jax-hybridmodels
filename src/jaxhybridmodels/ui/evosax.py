@@ -6,11 +6,11 @@ per-step losses replaced by generations and population statistics. One
 and :meth:`RichEvosaxUI.on_run_end`, rendering:
 
 * a header panel with generations, population size, elapsed wall-clock,
-  and the final best fitness after the run;
+  and the final loss after the run;
 * a compile-progress panel, replaced by a generations-completed progress
   bar once a bucket has finished compiling;
 * a table of the most recent ``recent_generations`` generations
-  (``gen | best_fitness | mean_fitness | best-so-far``), throttled by
+  (``gen | best_loss | mean_loss | best-so-far``), throttled by
   ``log_every``;
 * a message-log panel with the most recent ``recent_messages`` lines.
 
@@ -66,7 +66,7 @@ class RichEvosaxUI:
         Throttle for the recent-generation table. ``log_every=k`` records
         generations where ``gen_idx % k == 0``. ``None`` (the default) defers
         the choice to :meth:`on_run_start`, which sets it to
-        ``max(1, num_generations // 5)`` so the table accumulates to exactly
+        ``max(1, total_steps // 5)`` so the table accumulates to exactly
         five rows over the run instead of sliding past a constantly-changing
         last-five window. An explicit integer always overrides the
         auto-scale.
@@ -100,7 +100,7 @@ class RichEvosaxUI:
         # off for the life of this instance.
         self._auto_log_every: bool = log_every is None
         self._log_every: int = 1 if log_every is None else int(log_every)
-        # Each row is (gen_idx, best_fitness, mean_fitness, best_so_far).
+        # Each row is (gen_idx, best_loss, mean_loss, best_so_far).
         # The deque maxlen pins visible history without unbounded growth.
         self._generations: deque[tuple[int, float, float, float]] = deque(maxlen=recent_generations)
         self._messages: deque[tuple[str, str]] = deque(maxlen=recent_messages)
@@ -109,7 +109,7 @@ class RichEvosaxUI:
         self._run_start_wallclock: float | None = None
         self._num_generations: int = 0
         self._population_size: int = 0
-        self._final_fitness: float | None = None
+        self._final_loss: float | None = None
         self._run_active: bool = False
 
         # Generation-progress state. The bar is rebuilt on every
@@ -137,16 +137,16 @@ class RichEvosaxUI:
     # EvosaxUI protocol implementation.
     # ------------------------------------------------------------------
 
-    def on_run_start(self, *, num_generations: int, population_size: int) -> None:
+    def on_run_start(self, *, total_steps: int, population_size: int) -> None:
         self._run_start_wallclock = time.monotonic()
-        self._num_generations = int(num_generations)
+        self._num_generations = int(total_steps)
         self._population_size = int(population_size)
-        self._final_fitness = None
+        self._final_loss = None
         self._run_active = True
         # Auto-scale ``log_every`` so the recent-generation table grows to
         # exactly five rows over the run rather than constantly overwriting a
         # sliding window. ``recent_generations`` is the deque cap (default 5);
-        # spacing log_every at ``num_generations // 5`` makes the deque fill
+        # spacing log_every at ``total_steps // 5`` makes the deque fill
         # exactly once across the whole run. An explicit log_every passed at
         # construction time disables this and is honoured verbatim.
         if self._auto_log_every:
@@ -206,10 +206,10 @@ class RichEvosaxUI:
         self._compile_first_done = True
         self._refresh()
 
-    def on_generation_end(self, *, gen_idx: int, best_fitness: float, mean_fitness: float) -> None:
+    def on_generation_end(self, *, gen_idx: int, best_loss: float, mean_loss: float) -> None:
         idx = int(gen_idx)
-        best = float(best_fitness)
-        mean = float(mean_fitness)
+        best = float(best_loss)
+        mean = float(mean_loss)
 
         # Best-so-far is monotone non-increasing. Update it before
         # recording the row, so the table shows the post-update value.
@@ -231,8 +231,8 @@ class RichEvosaxUI:
             self._generations.append((idx, best, mean, float(self._best_so_far)))
         self._refresh()
 
-    def on_run_end(self, *, best_fitness: float) -> None:
-        self._final_fitness = float(best_fitness)
+    def on_run_end(self, *, final_loss: float) -> None:
+        self._final_loss = float(final_loss)
         self._run_active = False
         # Push the terminal frame into Live, then stop. With a non-TTY
         # console (tests) Live's stop() flushes the renderable into the
@@ -266,7 +266,7 @@ class RichEvosaxUI:
         # The footer is only emitted post-run so the word "final" lands in
         # the trailing region of the buffer (the rendered-output test pins
         # on this ordering).
-        if self._final_fitness is not None:
+        if self._final_loss is not None:
             children.append(self._render_footer())
         return half_width(self._console, children)
 
@@ -283,10 +283,10 @@ class RichEvosaxUI:
         body.add_row("elapsed", f"{elapsed:.2f}s")
         if self._best_so_far is not None:
             body.add_row("best so far", format_value(self._best_so_far))
-        if self._final_fitness is not None:
-            # The header shows the final fitness once the run is over. The
+        if self._final_loss is not None:
+            # The header shows the final loss once the run is over. The
             # word "final" here is what the rendered-output test pins on.
-            body.add_row("final fitness", format_value(self._final_fitness))
+            body.add_row("final loss", format_value(self._final_loss))
 
         title = "evosax run" if self._run_active else "evosax run (finished)"
         return Panel(body, title=title, border_style="cyan")
@@ -320,8 +320,8 @@ class RichEvosaxUI:
     def _render_generation_table(self) -> Panel:
         table = Table(show_header=True, expand=True)
         table.add_column("gen", justify="right", no_wrap=True)
-        table.add_column("best_fitness", justify="right", no_wrap=True)
-        table.add_column("mean_fitness", justify="right", no_wrap=True)
+        table.add_column("best_loss", justify="right", no_wrap=True)
+        table.add_column("mean_loss", justify="right", no_wrap=True)
         table.add_column("best-so-far", justify="right", no_wrap=True)
         for gen_idx, best, mean, best_so_far in self._generations:
             table.add_row(
@@ -338,7 +338,7 @@ class RichEvosaxUI:
         return render_message_log(self._messages)
 
     def _render_footer(self) -> Panel:
-        return render_footer("final fitness", self._final_fitness)
+        return render_footer("final loss", self._final_loss)
 
     # Defensive cleanup: if the user discards the instance mid-run we don't
     # want the Live thread to hang the interpreter. ``__del__`` is best

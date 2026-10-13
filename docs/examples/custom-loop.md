@@ -1,48 +1,78 @@
 # Custom training loop
 
-The stock trainers — `train_with_optax`, `train_with_evosax` — are
-assembled from public pieces in `jaxhybridmodels.training.kernels`. If you
-want a loop the stock trainers do not express — a bespoke schedule,
-per-bucket weighting, a custom regulariser, a different accumulation
-rule — you compose those same kernels yourself instead of forking a
-trainer.
+`model.fit` with an `OptaxTrainingConfig` is assembled from public pieces in
+[`jaxhybridmodels.training.kernels`](/api/kernels). Read this example when
+you need a loop the stock trainer cannot express, such as a different
+accumulation rule or per-bucket weights: compose the same pieces instead of
+forking the trainer.
 
-This example recovers a harmonic oscillator's frequency `omega` from noisy
-position data using a hand-written loop built from:
-
-- `build_bucket_step` — the jitted per-bucket `(loss, grads)` kernel
-  (one trace per bucket shape);
-- `build_penalty_step` — charges a regulariser once per step, outside the
-  bucket loop. Here it is a *custom* L2 regulariser on one leaf, not the
-  default bound-saturation penalty;
-- `build_apply_update` — the single optimiser update per step.
-
-It also injects a custom masked-Huber loss and a per-bucket weight at the
-call sites, exactly where a stock trainer would not let you.
+## Run it
 
 ```bash
 uv run python examples/custom_loop/train_custom_loop.py
 ```
 
-The loop body is the library's definition of a step — one full pass over
-every bucket, accumulate gradients, then one update. Change the
-accumulation rule and you have a genuinely different trainer.
+Under a minute on CPU. Prints the loss, penalty and $\omega$ every 25
+steps, then the recovered values and metrics; writes
+`examples/custom_loop/figures/parity.png`. `--steps 5 --no-plot` is a quick
+smoke run.
 
-## The script, in full
+## The model
 
-The example is a single file with no hidden parts — what you see is what
-runs:
+The same problem as the [harmonic oscillator](/examples/pendulum): recover
+the frequency $\omega$ of $\ddot x = -\omega^2 x$ from noisy positions.
+Four oscillators sit on two time grids, so the dataset forms two buckets of
+three experiments and one.
 
-<<< ../../examples/custom_loop/train_custom_loop.py
+The custom part is the accumulation. Each bucket's loss and gradients are
+weighted by its experiment count, so the three-experiment bucket counts
+three times the one-experiment bucket. The stock trainer has no option for
+that. The loop also passes a masked Huber loss as `loss_fn` and an L2 term
+on a second [`Parameter`](/api/predictors#parameter), `scale`, as
+`penalty_fn`. [`Objective`](/guide/penalties) accepts both of those too
+(`loss=` and `penalty_fn=`); they are here to show where each hook enters
+a hand-written loop.
+
+## Code
+
+Three kernels:
+
+| Kernel | Returns | Called |
+| --- | --- | --- |
+| [`build_bucket_step`](/api/kernels#build_bucket_step) | jitted `(predictors, bp, horizon) -> (loss, grads)` | once per bucket per step |
+| [`build_penalty_step`](/api/kernels#build_penalty_step) | `(predictors, weight, points) -> (penalty, weighted_grads)` | once per step |
+| [`build_apply_update`](/api/kernels#build_apply_update) | `(predictors, grads, opt_state) -> (predictors, opt_state)` | once per step |
+
+Building them from the pieces of a `HybridModel`:
+
+<<< @/../examples/custom_loop/train_custom_loop.py#bucket-step
+
+One step of the loop:
+
+<<< @/../examples/custom_loop/train_custom_loop.py#loss
+
+After the loop, `eqx.tree_at(lambda m: m.predictors, model, predictors)`
+puts the trained predictors back into the model, so `predict` and
+`print_metrics` work as they do after `fit`.
 
 ## Results
 
-Default settings, seed 0, 150 hand-rolled steps. The masked-Huber loss and
-the per-bucket weight are the injected customisations; the L2 on `scale`
-is the custom regulariser, charged once per step outside the bucket loop.
+Seed 0, 150 steps:
+
+```
+recovered omega = 1.0020  (truth 1.0)
+final scale     = 0.070060  (regularised toward 0)
+```
 
 ![Predicted against observed position for the custom-loop model](assets/custom-loop/parity.png)
 
-The recovered `omega = 0.999` against a true `1.0` is the same accuracy
-the [pendulum example](/examples/pendulum) reaches through the stock
-trainer — the loop is different, the physics pipeline is not.
+The parity RMSE is 0.050, the noise standard deviation, so the fit has
+reached the noise floor.
+
+## Things to try
+
+- Return `1.0` from `bucket_weight` to recover the stock trainer's equal
+  weighting.
+- Swap `huber_loss` for `jaxhybridmodels.losses.masked_mse`.
+- Schedule `horizon` from 0.3 to 1.0 over the run, which is how the stock
+  trainer's `TrainingPhase.horizon` works.

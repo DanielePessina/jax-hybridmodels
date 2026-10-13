@@ -1,15 +1,18 @@
 # Hybrid ODE: keep the physics, learn the gaps
 
-One script, `examples/hybrid_ode/train_hybrid_ode.py`: a mechanistic model with two holes, both filled by trainable networks, every physical quantity held inside a declared range, and the measurements sampled irregularly per channel.
+A mechanistic model with two missing pieces, each filled by a bounded network: one above the solver and one inside the vector field. Read this after the [harmonic oscillator](/examples/pendulum) if you want to see where a network can sit, how bounds and warps behave, and why a residual protects the parameters you care about.
+
+## Run it
 
 ```bash
 uv run python examples/hybrid_ode/train_hybrid_ode.py
 ```
 
+Under a minute on CPU (about 40 s; `--inner kan` takes about 75 s). Prints the bucket layout, the losses, the saturation penalty per network, the recovered rate law and residual error, and per-channel metrics. Writes `parity_irregular_mlp.png` and `trajectories_irregular_mlp.png` to `examples/hybrid_ode/figures/` unless you pass `--no-plot`.
 
-## The problem
+## The model
 
-The system is a rotation at fixed frequency $\omega$, damped at rate $k$, with a cubic coupling:
+The data comes from a rotation at frequency $\omega$, damped at rate $k$, with a cubic coupling:
 
 $$
 \frac{dy}{dt} =
@@ -17,75 +20,26 @@ $$
 \qquad \omega = 1
 $$
 
-The model keeps the rotation and treats $\omega$ as known. Two things it does not know.
+The model keeps the rotation and knows $\omega$. It does not know two things. $k$ depends on each experiment's temperature through an Arrhenius law, from 0.0063 to 0.276 across the six temperature levels, a factor of 44. $C y^3$ is missing from the model entirely. Both are synthesised so the fit can be checked against them.
 
-$k$ depends on each experiment's temperature through an Arrhenius law, running from 0.0063 to 0.276 across the six levels in the data. A factor of 44.
-
-$C y^3$ is missing from the model entirely.
-
-In a real problem you would not know either. Here they are synthesised so the fit has something to be checked against.
-
-## Two networks, two placements
+### Where each network sits
 
 | | learns | called | on the solver tape |
 |---|---|---|---|
-| `rate_net` | $T \mapsto k$ | once per experiment | no |
-| `residual_net` | $y \mapsto$ correction | once per solver step | yes |
+| `rate` | $T \mapsto k$ | once per experiment | no |
+| `residual` | $y \mapsto$ correction | once per solver step | yes |
 
-```python
-def simulate_fn(predictors, ts, covariates, y0, solver):
-    rate_net, residual_net = predictors
+A covariate is constant along a trajectory, so anything that depends only on covariates is computed before the solve and closed over as a constant. Its cost does not grow with the step count and it never appears on the tape the backward pass walks. A term that depends on the state has to run inside. A trainable network inside a vector field is a neural ODE, which [diffrax](https://docs.kidger.site/diffrax/) and [Equinox](https://docs.kidger.site/equinox/) document.
 
-    # Outside the solve. One call per experiment.
-    k = rate_net(covariates).reshape(())
-    rotation = jnp.array([[-k, OMEGA_TRUE], [-OMEGA_TRUE, -k]])
+The library is never told which network is where. Both are ordinary calls inside `simulate_fn`.
 
-    def vector_field(t, y, args):
-        # Inside the solve. One call per solver step.
-        return rotation @ y + residual_net(y)
-    ...
-```
+### Bounds, warps and squashes
 
-A covariate does not change during a trajectory, so anything depending only on covariates is computed before `diffeqsolve` and closed over as a constant. Its cost is then independent of the step count, and it never appears on the tape the backward pass walks. A term depending on the state has to run inside.
+`rate` has an output box of $(10^{-3}, 1)$. Under a linear axis the box midpoint is 0.5, so every rate in the data sits in the bottom 3% of the range, reachable only through large negative latents. A **warp** reparameterises the axis before normalising: under `log10` the midpoint is 0.032 and the data covers the middle of the box. Which values are reachable does not change.
 
-A trainable network inside a vector field is a neural ODE. [diffrax](https://docs.kidger.site/diffrax/) and [Equinox](https://docs.kidger.site/equinox/) document that technique; this example uses it in one line rather than explaining it.
+The residual's box straddles zero, so `log10` is unusable, and a linear axis spends resolution on large corrections that should never happen. The script registers a signed-logarithmic warp, `symlog`, that is linear near zero and logarithmic in the tails. `forward(0) = 0`, so a fresh residual starts near no correction.
 
-The library is never told which is which. Both are ordinary calls, placed by writing the code. They travel as a plain tuple, unpacked at the top of `simulate_fn`, and the container is never inspected, so `--mechanistic-only` just shortens the tuple.
-
-Since the residual runs inside the solve, `SolverConfig` gets a checkpointing adjoint. `DirectAdjoint`, the library default, stores the whole forward trajectory, and with a network in the vector field that is usually the memory bottleneck.
-
-```python
-solver = SolverConfig(..., adjoint=diffrax.RecursiveCheckpointAdjoint())
-```
-
-## Rates that span decades
-
-`rate_net` maps temperature to $k$, with an output box of $(10^{-3}, 1)$:
-
-```python
-out_scaler=BoundScaler(bounds=((1e-3, 1.0),), transform="sigmoid", warp="log10")
-```
-
-Under linear normalisation that box has midpoint 0.5, so every rate in the data sits in the bottom 3% of the range, where the sigmoid is steepest and only large negative latents reach. A **warp** reparameterises the physical axis before normalising: it changes what "halfway between the bounds" means without changing which values are reachable. Under `log10` the midpoint is 0.032 and the data covers the middle of the box.
-
-The check that this worked is the fitted rate against the law it never saw:
-
-| temperature (K) | true $k$ | fitted $k$ | ratio |
-|---|---|---|---|
-| 280 | 0.00629 | 0.00885 | 1.41 |
-| 292 | 0.01516 | 0.01918 | 1.26 |
-| 304 | 0.03412 | 0.03809 | 1.12 |
-| 316 | 0.07221 | 0.07526 | 1.04 |
-| 328 | 0.14463 | 0.14932 | 1.03 |
-| 340 | 0.27583 | 0.29543 | 1.07 |
-
-Fitted on trajectories alone, and 1.6 decades of temperature dependence come back. The worst point is the coldest, where the trajectory barely decays inside the observation window and $k$ is least identifiable.
-
-## Choosing the squash
-
-Reparameterising costs gradient. The derivative of `from_latent` carries a factor $\sigma'(z/T)$, and for a logistic sigmoid in float32 that factor underflows to exactly zero past $|z/T| \approx 15$. A network pushed hard against a bound stops receiving any signal to come back.
-
-The residual is a term that visits the edge of its box early in training, so it uses `softsign`, whose gradient decays polynomially instead:
+The squash decides how fast gradient dies at a bound. The derivative of `from_latent` carries a factor $\sigma'(z/T)$, which for a sigmoid in float32 underflows to zero near $|z/T| = 17$. The residual visits the edge of its box early in training, so it uses `softsign`, whose gradient decays polynomially:
 
 | name | tail of $\lvert du/dz \rvert$ | dead at |
 |---|---|---|
@@ -93,39 +47,11 @@ The residual is a term that visits the edge of its box early in training, so it 
 | `algebraic` | $\lvert z \rvert^{-3}/2$ | $z \approx 3 \times 10^{3}$ |
 | `softsign` | $\lvert z \rvert^{-2}/2$ | $z \approx 10^{7}$ |
 
-Polynomial decay does not make saturation free. Escaping from $z = 100$ under a $c/z^2$ gradient takes $10^6$ times as long as from $z = 1$. It turns an impossible recovery into a slow one.
+Polynomial decay makes recovery slow rather than impossible: escaping from $z = 100$ under a $c/z^2$ gradient takes $10^6$ times as long as from $z = 1$.
 
-## Registering a warp of your own
+### Two data layouts
 
-The residual's box straddles zero, so `log10` is unusable, and a linear box spends resolution evenly, including on large corrections that should never happen. The script registers a signed-logarithmic axis instead, without touching the package:
-
-```python
-from jaxhybridmodels import Warp, register_warp
-
-register_warp(
-    "symlog",
-    Warp(
-        forward=lambda x: jnp.sign(x) * jnp.log1p(jnp.abs(x) / SYMLOG_EPS),
-        inverse=lambda w: jnp.sign(w) * SYMLOG_EPS * jnp.expm1(jnp.abs(w)),
-        requires_positive=False,
-    ),
-)
-```
-
-`forward(0) = 0`, so the box midpoint stays at zero and a fresh residual starts near no correction rather than at some arbitrary interior point. [`register_bound_transform`](/api/transforms) is the same idea on the squash axis.
-
-A scaler stores its warp by name, which is what keeps a saved model a small JSON sidecar plus an array file. A custom warp therefore has to be registered before a model referencing it can be loaded.
-
-## Two data layouts, one model
-
-`--data rectangular` samples every experiment on one 20-point grid with both channels measured every time:
-
-```
-1 bucket(s)
-  bucket 0: N=24 experiments, T= 20 timestamps, D=2 channels, mask 1.00 full
-```
-
-`--data irregular` gives each experiment its own end time in $[6, 9]$, its own randomly drawn sample times, and thins each channel separately to 8 or 12 samples:
+`--data irregular` (the default) gives each experiment its own end time in $[6, 9]$ and draws each channel's sample times separately, 8 or 12 per channel. The union length is `n1 + n2 - 1` (the shared $t = 0$ counts once), so three lengths and three buckets appear:
 
 ```
 3 bucket(s)
@@ -134,35 +60,31 @@ A scaler stores its warp by name, which is what keeps a saved model a small JSON
   bucket 2: N= 8 experiments, T= 23 timestamps, D=2 channels, mask 0.52 full
 ```
 
-The union length is `n1 + n2 - 1` (the shared $t = 0$ counts once), so with counts of 8 or 12 there are three possible lengths and therefore three buckets. Training compiles three times, nothing is padded to a common length, and nothing is dropped.
+`--data rectangular` puts every experiment on one 20-point grid with both channels measured every time: one bucket, full mask. The model code is identical for both. Training compiles once per bucket, and nothing is padded to a common length or dropped.
 
-The model code is identical for both. Regular data is the degenerate case of the general one, not a separate path.
+## Code
 
-## The saturation penalty
+`simulate_fn` shows both placements. The rate network runs once and its output becomes a constant; the residual runs inside `vector_field`:
 
-Bounds hold by construction, so a violation cannot be represented and there is nothing to clip. The failure that remains is the opposite one: a network pinned against a bound, where the squash derivative has decayed and the gradient that would pull it back has gone.
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#simulate-fn
 
-```python
-config = OptaxTrainingConfig(
-    ...,
-    penalty_weight=(1e-3,),   # length 1 broadcasts across phases
-    penalty_points=(rate_sweep, residual_sweep),  # per leaf, in order
-)
-```
+The two networks, with their warps and squashes:
 
-The penalty is charged on the **latent**, not the physical output. A penalty written against the physical value would inherit the same $\sigma'(z/T)$ factor on its backward pass and die exactly where saturation is worst.
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#symlog-warp
 
-It is evaluated at the **measured points** — the input vectors the loss actually sees — plus any user-supplied penalty-only points. Here the residual network reads the ODE state, which the dataset cannot resolve to measured points, so both leaves are covered with a `box_grid` sweep (the collocation-as-extension recipe). The script prints the end-of-run value per leaf:
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#predictors
 
-```
-  end-of-run saturation penalty, by leaf:
-    rate_net      3.0546e-03
-    residual_net  0.0000e+00
-```
+A scaler stores its warp by name, which keeps a saved model to a small JSON sidecar plus an array file. A custom warp therefore has to be registered before a model that uses it can be loaded. [`register_bound_transform`](/api/transforms) does the same for squashes.
 
-The residual sits at exactly zero. The rate network does not, and that is the penalty working: `rate_net` is declared valid over 270 to 350 K, the data only reaches 340 K, and the fitted network extrapolates hard enough at the warm end to press against the top of its $k$ box. The training loss cannot see that, because no experiment is there. The trade runs both ways: a trajectory-blind penalty cannot say whether one particular solve pushed an input out of range.
+The solver uses a checkpointing adjoint. `DirectAdjoint`, the default, stores the whole forward trajectory, and with a network in the vector field that is usually the memory bottleneck:
 
-Run with `--penalty-weight 0` to see the term switched off.
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#solver
+
+The saturation penalty and where it is charged go in an [`Objective`](/guide/penalties), which `fit` applies to every phase. Training fits the first 40% of each trajectory, then all of it:
+
+<<< @/../examples/hybrid_ode/train_hybrid_ode.py#fit
+
+The saturation penalty is charged on the latent, not the physical output: a penalty on the physical value would carry the same $\sigma'(z/T)$ factor and die exactly where saturation is worst. By default it is evaluated at the measured input points. The residual reads the ODE state, which the dataset cannot resolve to measured points, so both networks get a `box_grid` sweep over their declared input box instead. `penalty_points` is keyed by each network's name in the predictors dict.
 
 ## Results
 
@@ -170,24 +92,50 @@ Default settings, one CPU, seeds fixed.
 
 | run | $R^2$ (y1) | $R^2$ (y2) | worst $k$ error | residual RMS |
 |---|---|---|---|---|
-| hybrid, irregular (3 buckets) | **0.985** | **0.983** | 1.41x | 48% |
-| hybrid, rectangular (1 bucket) | 0.979 | 0.976 | 1.81x | 40% |
-| `--mechanistic-only`, irregular | 0.662 | 0.702 | **32.6x** | n/a |
-| `--inner kan`, irregular | 0.990 | 0.992 | 6.40x | 37% |
+| hybrid, irregular (3 buckets) | 0.975 | 0.973 | 1.90x | 48% |
+| hybrid, rectangular (1 bucket) | 0.978 | 0.974 | 2.00x | 40% |
+| `--mechanistic-only`, irregular | 0.662 | 0.701 | **33.5x** | n/a |
+| `--inner kan`, irregular | 0.990 | 0.992 | 6.61x | 38% |
 
-The third row is the argument for hybrid models, and it is not the $R^2$ column that makes it. Dropping the residual leaves the rate network as the only flexible thing in the model, so it absorbs the missing cubic term into $k$ and the recovered rate goes from 1.41 times the truth at 280 K to 32.6 times. An unmodelled term does not stay in its own residual; it contaminates whichever parameter is flexible enough to absorb it, usually the one you built the experiment to measure.
+The default run's rate law against the Arrhenius truth it never saw:
 
-The fourth row is the same effect running the other way. A KAN residual is more expressive, fits the trajectories slightly better, recovers the residual better, and recovers $k$ considerably worse, because it can absorb part of the damping too. If a fitted parameter is what you came for, the residual wants to be the least expressive thing that closes the gap.
+| temperature (K) | true $k$ | fitted $k$ | ratio |
+|---|---|---|---|
+| 280 | 0.00629 | 0.01195 | 1.90 |
+| 292 | 0.01516 | 0.02576 | 1.70 |
+| 304 | 0.03412 | 0.04719 | 1.38 |
+| 316 | 0.07221 | 0.08344 | 1.16 |
+| 328 | 0.14463 | 0.15206 | 1.05 |
+| 340 | 0.27583 | 0.31368 | 1.14 |
 
-Both data layouts reach the same trajectory accuracy, which is the point of the bucketing: half a mask is not a handicap. Their rate laws differ at the cold end because the irregular set draws end times up to 9 where the rectangular set stops at 8, and a cold experiment barely decays inside either window.
+From trajectories alone, 1.6 decades of temperature dependence come back within a factor of two. The coldest point is worst: that trajectory barely decays inside the observation window, so $k$ is least identifiable there.
 
-The residual RMS is measured on a grid over the data range against a true residual RMS of 0.249. It is only identifiable where trajectories went, and the grid includes corners none of them visited, so the number overstates the error the trajectory fit sees.
+The `--mechanistic-only` row is the argument for hybrid models, and the $R^2$ column is not what makes it. Without the residual, the rate network is the only flexible part left, so it absorbs the missing cubic term into $k$, and the recovered rate at 280 K goes from 1.90 times the truth to 33.5 times. An unmodelled term does not stay in its own residual. It contaminates whichever parameter can absorb it, usually the one the experiment was built to measure.
 
-The default run (irregular data, MLP inner) in pictures:
+The KAN row is the same effect the other way. A more expressive residual fits the trajectories better and recovers $k$ worse, because it absorbs part of the damping too. If a fitted parameter is what you want, use the least expressive residual that closes the gap.
+
+Both data layouts reach the same trajectory accuracy, so a half-empty mask is not a handicap. Their rate laws differ at the cold end because the irregular end times reach 9 and the rectangular grid stops at 8.
+
+The residual RMS is measured on a grid over the data range against a true RMS of 0.249. The grid includes corners no trajectory visited, where the residual is not identifiable, so the number overstates the error the trajectory fit sees.
+
+The end-of-run saturation penalty per network:
+
+```
+  end-of-run saturation penalty, by network:
+    rate      1.3467e+00
+    residual  1.8072e-02
+```
+
+The grid covers each network's whole declared box, including inputs no experiment reached (`rate` is declared over 270 to 350 K and the data spans 280 to 340 K). A non-zero value says a network is pressed against an output bound somewhere in that box, which the training loss cannot see. The loss history can rise at the phase boundary, because the second phase sees the whole trajectory; the penalty is not part of that history, so runs with different penalty weights stay comparable.
 
 ![Predicted against observed, both channels](assets/hybrid-ode/parity_irregular_mlp.png)
 
 ![Fitted trajectories on irregular masks](assets/hybrid-ode/trajectories_irregular_mlp.png)
 
-Both channels are scored only on masked-in cells; the `R^2 = 0.985 / 0.983`
-row of the table is exactly what these two figures average.
+## Things to try
+
+- `--mechanistic-only` drops the residual and shows the parameter contamination above.
+- `--inner kan` swaps both inner networks for KANs.
+- `--data rectangular` trains the same model on one full bucket.
+- `--penalty-weight 0` switches the saturation penalty off.
+- `--steps` and `--experiments` change the budget and the dataset size.

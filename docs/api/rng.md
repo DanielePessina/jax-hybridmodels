@@ -14,7 +14,7 @@ Names used internally: `"tournament"`, `"tournament_attempt_{i}"`, `"evosax_init
 
 ### `fold()`
 
-<small>`from jaxhybridmodels.rng import fold` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.fold`</small>
+<small>`from jaxhybridmodels.rng import fold`</small>
 
 ```python
 fold(root_key: 'Array', name: 'str') -> 'Array'

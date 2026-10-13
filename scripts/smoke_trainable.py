@@ -8,7 +8,6 @@ Run with:
 from __future__ import annotations
 
 import equinox as eqx
-import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 
@@ -16,26 +15,14 @@ from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     MLPPredictor,
-    freeze_modules_of_type,
-    freeze_where,
+    count_trainable_params,
     trainable_mask,
 )
+from jaxhybridmodels.trainable import freeze_mask
 
 
 def _trainable_leaf_count(mask) -> int:
     return sum(1 for leaf in jtu.tree_leaves(mask) if bool(leaf))
-
-
-def _trainable_param_count(mask, predictor) -> int:
-    total = 0
-    for m, p in zip(jtu.tree_leaves(mask), jtu.tree_leaves(predictor), strict=True):
-        if not bool(m):
-            continue
-        if hasattr(p, "shape"):
-            total += int(jnp.size(p))
-        else:
-            total += 1
-    return total
 
 
 def main() -> None:
@@ -53,21 +40,23 @@ def main() -> None:
         out_scaler=BoundScaler(bounds=((1e8, 1e14), (1e-8, 1e-4)), transform="sigmoid"),
     )
 
+    # Every helper takes the predictors first and chains through ``mask=``.
+    with_scalers = trainable_mask(bp, train_scalers=True)
+    # Freezing the scalers by class gives back the default mask.
+    no_scalers = freeze_mask(bp, BoundScaler, mask=with_scalers)
     default_mask = trainable_mask(bp)
-    no_scalers = freeze_modules_of_type(default_mask, bp, BoundScaler)
-    # CovariateSelector no longer exists -- named-input ordering folded
-    # into BoundedPredictor.input_keys, a static field with no leaves to
-    # freeze. Demonstrate freeze_where on the inner network instead.
-    frozen_inner = freeze_where(no_scalers, bp, lambda m: isinstance(m, MLPPredictor))
+    assert jtu.tree_leaves(no_scalers) == jtu.tree_leaves(default_mask)
+    # A predicate entry, on the inner network.
+    frozen_inner = freeze_mask(bp, lambda m: isinstance(m, MLPPredictor), mask=no_scalers)
 
     stages = [
-        ("default", default_mask),
-        ("freeze BoundScaler", no_scalers),
+        ("train_scalers=True", with_scalers),
+        ("freeze BoundScaler (the default)", no_scalers),
         ("+ freeze inner MLPPredictor", frozen_inner),
     ]
     for label, mask in stages:
         n_leaves = _trainable_leaf_count(mask)
-        n_params = _trainable_param_count(mask, bp)
+        n_params = count_trainable_params(bp, mask=mask)
         print(f"\n[{label}] trainable leaves: {n_leaves} | trainable parameters: {n_params}")
         bool_only = jtu.tree_map(lambda x: bool(x), mask)
         print(f"  structure: {eqx.tree_pformat(bool_only, short_arrays=True)}")

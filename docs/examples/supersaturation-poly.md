@@ -1,62 +1,72 @@
 # Neural polynomial kinetics
 
-The third predictor family alongside MLP and KAN: `NeuralNPolynomial`,
-a per-channel scalar *polynomial* in the (latented) input whose
-coefficients are produced by an inner trainable network. For
-crystallisation-style kinetics this is a physics-flavoured prior — a rate
-written as a power law in supersaturation `S - 1` — instead of a
-black-box MLP.
+Learns a nucleation rate with `NeuralNPolynomial`, which writes each output
+as a polynomial whose coefficients come from an inner network. Read it when
+you expect a power law and want that prior in place of a black-box MLP.
 
-The model is a two-moment crystallisation ODE
-
-```
-d mu0/dt =  J          (nucleation)
-d mu1/dt =  G * mu0    (growth)
-```
-
-with growth `G` a known constant and nucleation `J` the unknown rate law.
-`J` is a `NeuralNPolynomial`: polynomial in supersaturation (exponents
-`2, 3, 4` — nucleation is strongly supersaturation driven) whose
-coefficients `c_i(S)` come from an inner `MLPPredictor`. The polynomial
-is wrapped in a `BoundedPredictor` so `J` stays in a physical range.
-
-The dataset is synthetic: `J_true(S) = a * (S - 1)^4 + b`, and the fit
-must recover the rate law from noisy `mu0` time-series across several
-supersaturations.
+## Run it
 
 ```bash
 uv run python examples/supersaturation_poly/train_supersaturation_poly.py
 ```
 
-## A design fact this example surfaces
+About 10 s on CPU. Prints the buckets, metrics and the learned rate at
+each supersaturation; writes `parity.png` and `recovered_rate.png` to
+`examples/supersaturation_poly/figures/`. `--steps 5 --no-plot` is a quick
+smoke run.
 
-The polynomial basis is `sum(inner_input)` — the *latented* input — so
-`NeuralNPolynomial` cannot separate "coefficients from condition A" from
-"basis in condition B" in a single predictor. The physics-clean
-crystallisation form (`sum_i c_i(T) * (S-1)^p_i`) therefore enters either
-as one polynomial in `S-1` with `S`-conditioned coefficients (shown here),
-or by composing two predictors. If the basis and coefficient conditions are
-different physical variables, write that composition explicitly at the
-vector-field boundary.
+## The model
 
-## The script, in full
+Two moments of the crystal size distribution:
 
-The example is a single file with no hidden parts — what you see is what
-runs:
+```
+d mu0/dt = J          (nucleation)
+d mu1/dt = G * mu0    (growth)
+```
 
-<<< ../../examples/supersaturation_poly/train_supersaturation_poly.py
+Growth `G` is known. The nucleation rate `J(S)` is a polynomial with
+exponents 2, 3 and 4 whose coefficients come from a small MLP, wrapped in a
+`BoundedPredictor` so it stays inside `(0.01, 2.0)`. Only `mu0` is
+measured. The data is synthetic, `J_true = 0.02 + 0.15 (S - 1)^4` plus
+noise, at five supersaturations.
+
+The polynomial basis is latent. `NeuralNPolynomial` evaluates its
+polynomial at `sum(x)`, where `x` is the input after the
+`BoundedPredictor`'s input scaler, so the basis is a latent coordinate of
+`S - 1`, not `S - 1` itself. For a polynomial in one variable with
+coefficients conditioned on another, for example
+`sum_i c_i(T) * (S - 1)^p_i`, compose two predictors in the vector field.
+
+## Code
+
+`J` depends only on the constant supersaturation, so `simulate_fn`
+evaluates it once and integrates at that rate:
+
+<<< @/../examples/supersaturation_poly/train_supersaturation_poly.py#simulate-fn
+
+The predictor:
+
+<<< @/../examples/supersaturation_poly/train_supersaturation_poly.py#predictor
 
 ## Results
 
-Default settings, seed 0, 400 steps. The `mu0` time-series fit to the
-noise floor (`R^2 = 0.999`), and the rate law comes out close to the truth
-`J(S) = 0.02 + 0.15 (S-1)^4`.
+Seed 0, 400 steps. The `mu0` series fit to the noise floor
+(`R^2 = 0.998`).
 
 ![Predicted against observed nucleation moment](assets/supersaturation-poly/parity.png)
 
 ![Learned nucleation rate against the truth](assets/supersaturation-poly/recovered_rate.png)
 
-The recovered curve is a *polynomial in the latented input* wrapped in a
-`BoundedPredictor`'s output scaler, so the shape is the network's and the
-range is structural. The fit is best at high supersaturation, where
-nucleation actually drives the observable dynamics.
+The learned rate matches the truth at high supersaturation (within 0.5% at
+`S - 1` of 1.2 and 1.5) and drifts at low supersaturation: 0.0100 against
+0.0212 at 0.3, and 13 to 19% off at 0.6 and 0.9. There the rate is small,
+so it moves the fitted moment little and the loss barely constrains it.
+More conditions at low supersaturation, or fewer free coefficients, would
+tighten the curve.
+
+## Things to try
+
+- Change `EXPONENTS` to `(4.0,)`, the true power, and compare the curve
+  between training points.
+- Swap the polynomial for a plain `MLPPredictor` with the same bounds.
+- Add supersaturations to `SUPERSATURATIONS` and watch the gaps close.

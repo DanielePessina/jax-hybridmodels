@@ -1,6 +1,6 @@
 # Metrics: Per-Channel Evaluation
 
-Per-channel evaluation of trained predictions, mirroring the loss mask discipline: only cells the bucket mask marks as real measurements count. `compute_metrics(predictions, dataset)` returns one `ChannelMetrics` per output channel with MSE, RMSE, MAE and R^2; `print_metrics` renders them as a table.
+Per-channel evaluation of trained predictions, mirroring the loss mask discipline: only cells the bucket mask marks as real measurements count. `compute_metrics(predictions)` takes the result of `model.predict(data)` and returns one `ChannelMetrics` per output channel with MSE, RMSE, MAE and R^2; `print_metrics` renders them as a table.
 
 ## Quick links
 
@@ -33,12 +33,12 @@ Metrics for a single output channel.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | `str` | Channel name from ``dataset.output_channel_names``. |
+| `name` | `str` | Channel name, one of the model's ``output_channel_names``. |
 | `n` | `Int[Array, ""]` | Scalar number of observed (mask=True) cells behind the stats. It is a JAX scalar so the complete metrics result can pass through ``jit``. |
 | `mse, rmse, mae` | `Float[Array, ""]` | Error of ``predicted - observed`` over the masked cells. |
 | `r2` | `Float[Array, ""]` | ``1 - SS_res/SS_tot``; ``nan`` when the observations are constant and ``SS_tot`` is zero. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L33)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L36)</small>
 
 ---
 
@@ -49,28 +49,24 @@ Metrics for a single output channel.
 <small>`from jaxhybridmodels.metrics import compute_metrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.compute_metrics`</small>
 
 ```python
-compute_metrics(
-    predictions: "tuple[Float[Array, 'N T D'], ...]",
-    dataset: 'Dataset',
-) -> dict[str, ChannelMetrics]
+compute_metrics(predictions: 'Mapping[str, Any]') -> 'dict[str, ChannelMetrics]'
 ```
 
-Collapse bucketed predictions into per-channel summary stats.
+Per-channel summary stats of a prediction against the data it was made on.
 
 **Parameters**
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `predictions` | `tuple of arrays, one per bucket` | From [`predict_dataset`](/api/prediction#predict_dataset); each entry is ``[N_b, T_b, D]`` matching its ``BucketPayload``. |
-| `dataset` | `Dataset` | The dataset that produced ``predictions``. Read for masks, observations, and channel names. |
+| `predictions` | `PredictionResult` | From ``HybridModel.predict`` or ``predict_ensemble`` (which is scored on its member mean), or any mapping from experiment ID to a record with ``outputs``, ``observed`` and ``observation_mask`` dicts keyed by channel. Only cells the mask marks as measured count. Channels are read from the first experiment's ``outputs``. |
 
 **Returns**
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `dict[str, ChannelMetrics]` |  | Keyed by channel, in ``dataset.output_channel_names`` order. |
+| `dict[str, ChannelMetrics]` |  | Keyed by channel, in the model's ``output_channel_names`` order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L64)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L67)</small>
 
 ---
 
@@ -81,13 +77,13 @@ Collapse bucketed predictions into per-channel summary stats.
 <small>`from jaxhybridmodels.metrics import print_metrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.print_metrics`</small>
 
 ```python
-print_metrics(
-    metrics: 'dict[str, ChannelMetrics]',
-    header: 'str | None' = None,
-) -> None
+print_metrics(metrics: 'Mapping[str, Any]', *, header: 'str | None' = None) -> 'None'
 ```
 
 Print a metrics table, one row per channel.
+
+Takes the output of [`compute_metrics`](/api/metrics#compute_metrics), or a ``PredictionResult``,
+which is passed through [`compute_metrics`](/api/metrics#compute_metrics) first.
 
 Format::
 
@@ -100,4 +96,4 @@ Scientific notation throughout, so one template stays readable across
 the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
 spanning nine decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L146)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L133)</small>

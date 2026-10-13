@@ -37,14 +37,13 @@ export default defineConfig({
         { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         { text: 'Recommendations', link: '/guide/recommendations' },
       ],
-      // Examples are plain scripts single-sourced into the docs. The
-      // earlier marimo notebook pages were converted to scripts and the
-      // notebook-specific pages removed.
+      // One page per example; each documents a plain script in examples/.
       '/examples/': [
         { text: 'Overview', link: '/examples/' },
         { text: 'Harmonic oscillator', link: '/examples/pendulum' },
         { text: 'Crystallisation', link: '/examples/crystallisation' },
         { text: 'Hybrid ODE', link: '/examples/hybrid-ode' },
+        { text: 'Tubular reactor', link: '/examples/tubular-reactor' },
         { text: 'Batch reactor', link: '/examples/batch-reactor' },
         { text: 'Batch reactor RL', link: '/examples/batch-reactor-rl' },
         { text: 'SBML hybrid kinetics', link: '/examples/sbml-hybrid' },
@@ -55,6 +54,7 @@ export default defineConfig({
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },
+        { text: 'Models and results', link: '/api/model' },
         { text: 'Data', link: '/api/data' },
         { text: 'Predictors', link: '/api/predictors' },
         { text: 'Penalties', link: '/api/penalties' },

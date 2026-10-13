@@ -1,46 +1,49 @@
 """Writing a trained model to disk, and reading it back.
 
-The trainable part of a model is a pytree of ``eqx.Module`` leaves, by
-convention a tuple of ``BoundedPredictor``s but any shape is accepted.
-This module writes that pytree to disk with the configuration needed to
-reconstruct it, and reads it back. Two save/load pairs exist.
+``save`` / ``load``
+    The workflow pair. ``save(path, run)`` takes a ``HybridModel`` or a
+    ``FitResult`` and writes a directory holding a ``predictors.eqx``
+    binary and a ``metadata.json``: UTC ISO-8601 timestamp, package
+    version, a structural fingerprint of the predictors pytree, the output
+    channel names, the solver config, the fit history (for a
+    ``FitResult``), and the optional training config, ``Objective`` and
+    free-form ``extras``. Stable formatting (``indent=2, sort_keys=True``)
+    keeps diffs reviewable. ``load(path, like=model)`` returns a
+    :class:`~jaxhybridmodels.results.SavedRun` whose ``model`` is ``like``
+    with the saved predictors. The solver is recorded for reference and
+    checked on load, but ``like.solver`` is kept: the saved form holds
+    only class names, not constructor arguments.
 
 ``save_predictors`` / ``load_predictors``
-    A single binary file, written by ``eqx.tree_serialise_leaves`` and read
-    by its inverse. The caller picks the file extension (``save_run`` uses
-    ``.eqx``). Loading needs a *template*, a live pytree with the same
-    container shape and the same per-leaf static configuration as the one
-    that was saved. Its JAX-array leaves are overwritten from the file.
-
-``save_run`` / ``load_run``
-    A directory holding a ``predictors.eqx`` binary and a
-    ``metadata.json`` describing the run: UTC ISO-8601 timestamp, package
-    version, a structural fingerprint of the predictors pytree, the solver
-    config dict, optional Optax and Evosax training configs, an optional
-    loss history, and a free-form ``extras`` dict. Stable formatting
-    (``indent=2, sort_keys=True``) keeps diffs reviewable.
+    The predictors pytree alone, as one binary file written by
+    ``eqx.tree_serialise_leaves`` and read by its inverse, for code that
+    works with a raw predictors pytree (the custom-loop layer). ``like`` is
+    a live pytree with the same container shape and per-leaf static
+    configuration as the one saved; its array leaves are overwritten from
+    the file.
 
 The structural fingerprint exists because
 ``eqx.tree_deserialise_leaves`` raises a generic shape error when a
 template does not match. ``tree_structure`` shows a wrong container shape,
 the per-leaf list shows a wrong leaf type (``MLPPredictor`` saved,
-``KANPredictor`` in the template).
+``KANPredictor`` in the template), and ``static`` a changed static field.
 
 What is not serialised
 ----------------------
 ``simulate_fn``, ``state_to_output``, the ``Dataset``, and the trainable
 mask. The framework owns no builder registry that could re-import user
-code by name, so loading asks the caller to rebuild a same-architecture
-template and re-import their own physics functions. Dynamic imports
-inside a load helper fail in confusing ways.
+code by name, so ``load`` takes them from the ``like`` model, which the
+caller builds with the same architecture and their own physics functions.
+Dynamic imports inside a load helper fail in confusing ways.
 
-Loss-field handling
--------------------
-``OptaxTrainingConfig.loss`` and ``EvosaxTrainingConfig.loss`` accept a
-callable or a string. JSON cannot encode a callable, so ``save_run``
-writes one as ``"{module}.{qualname}"`` and ``load_run`` returns that
-string as it stands, which the ``Callable | str`` annotation accepts.
-Turning it back into a function is the caller's job.
+Callables
+---------
+JSON cannot encode a callable. A callable anywhere in a training config or
+an ``Objective`` (a custom ``loss``, a ``penalty_fn``, an optimizer factory,
+an lr schedule) is written as ``{"__callable__": "{module}.{qualname}"}``,
+and a raw ``optax.GradientTransformation`` as an ``"__opaque__"`` marker.
+``load`` returns such a section as the raw dict rather than a typed
+object: turning the name back into a function is the caller's job.
 """
 
 from __future__ import annotations
@@ -49,17 +52,23 @@ import dataclasses
 import datetime as dt
 import importlib.metadata as ilm
 import json
+import math
+import warnings
 from pathlib import Path
 from typing import Any
 
 import equinox as eqx
 import jax.tree_util as jtu
+import numpy as np
 import optax
 
+from jaxhybridmodels.model import HybridModel
+from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.predictors.base import Predictor
+from jaxhybridmodels.results import FitHistory, FitResult, SavedRun
 from jaxhybridmodels.solver import SolverConfig
 from jaxhybridmodels.training.evosax import EvosaxTrainingConfig
-from jaxhybridmodels.training.optax import OptaxTrainingConfig
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, TrainingPhase
 
 _PREDICTORS_FILENAME = "predictors.eqx"
 _METADATA_FILENAME = "metadata.json"
@@ -70,36 +79,23 @@ def save_predictors(path: str | Path, predictors: Any) -> None:
 
     ``eqx.tree_serialise_leaves`` walks the leaves the same way whatever
     the container shape, writing a flat binary stream of ``np.save``-encoded
-    leaves. The caller picks the file extension; ``save_run`` uses ``.eqx``.
+    leaves. The caller picks the file extension; ``save`` uses ``.eqx``.
     """
     path = Path(path)
     eqx.tree_serialise_leaves(path, predictors)
 
 
-def load_predictors(path: str | Path, predictors_template: Any) -> Any:
-    """Restore a ``predictors`` pytree from ``path`` using ``predictors_template`` as the skeleton.
+def load_predictors(path: str | Path, *, like: Any) -> Any:
+    """Restore a ``predictors`` pytree from ``path``, using ``like`` as the skeleton.
 
-    ``predictors_template`` must share the saved pytree's container shape
-    and per-leaf static configuration, such as the same ``in_size`` and
-    ``depth`` on every ``MLPPredictor`` leaf. The file's values overwrite
-    the template's array leaves; its static fields supply the structure
-    ``equinox`` needs. The template is not mutated.
+    ``like`` must share the saved pytree's container shape and per-leaf
+    static configuration, such as the same ``in_size`` and ``depth`` on
+    every ``MLPPredictor`` leaf. The file's values overwrite its array
+    leaves; its static fields supply the structure ``equinox`` needs.
+    ``like`` is not mutated.
     """
     path = Path(path)
-    return eqx.tree_deserialise_leaves(path, predictors_template)
-
-
-def _stringify_loss_field(value: Any) -> Any:
-    """Replace a callable with ``"{module}.{qualname}"``; pass-through otherwise.
-
-    Keeps ``loss`` JSON-friendly. Strings pass through unchanged;
-    re-importing on load is the caller's job (module docstring).
-    """
-    if isinstance(value, str):
-        return value
-    if callable(value):
-        return _callable_path(value)
-    return value
+    return eqx.tree_deserialise_leaves(path, like)
 
 
 def _callable_path(value: Any) -> str:
@@ -111,6 +107,8 @@ def _callable_path(value: Any) -> str:
 
 def _json_safe(value: Any) -> Any:
     """Convert metadata values into JSON-safe values without losing identity hints."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"__float__": str(value)}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if callable(value):
@@ -137,20 +135,63 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
 
     ``dataclasses.asdict`` deep-copies the config, turning tuples into
     lists since JSON has no tuple. Callable and opaque runtime fields are
-    represented by descriptive markers; ``loss`` keeps its historical
-    import-style string representation. See ``_json_safe``.
+    represented by descriptive markers; see ``_json_safe``.
     """
     raw_unprocessed = dataclasses.asdict(config)
-    if hasattr(config, "optimizer"):
-        raw_unprocessed["optimizer"] = [
-            _json_safe_optimizer(spec) for spec in config.optimizer
-        ]
-    raw = _json_safe(raw_unprocessed)
-    if "loss" in raw:
-        # Read ``loss`` from the live config, not the asdict'd copy, so the
-        # original identity is unambiguous.
-        raw["loss"] = _stringify_loss_field(config.loss)
-    return raw
+    for phase_raw, phase in zip(
+        raw_unprocessed.get("phases", ()), getattr(config, "phases", ()), strict=True
+    ):
+        phase_raw["optimizer"] = _json_safe_optimizer(phase.optimizer)
+    return _json_safe(raw_unprocessed)
+
+
+def _serialise_objective(objective: Objective) -> dict[str, Any]:
+    """Return a JSON-encodable view of an ``Objective``.
+
+    Each ``penalty_points`` array becomes ``{"shape": [...], "data": [...]}``.
+    The shape is kept because an empty ``[0, n_inputs]`` grid flattens to
+    ``[]`` and would reload as shape ``(0,)``. Callables become
+    ``__callable__`` markers.
+    """
+    raw: dict[str, Any] = {
+        f.name: getattr(objective, f.name) for f in dataclasses.fields(objective)
+    }
+    if objective.penalty_points is not None:
+        raw["penalty_points"] = {
+            path: {"shape": list(np.shape(points)), "data": np.asarray(points).tolist()}
+            for path, points in objective.penalty_points.items()
+        }
+    return _json_safe(raw)
+
+
+def _decode_penalty_points(raw: dict[str, Any]) -> dict[str, Any]:
+    """Turn saved ``penalty_points`` entries back into arrays of their saved shape.
+
+    A bare nested list (the format before shapes were stored) is read as is.
+    """
+    points = raw.get("penalty_points")
+    if not isinstance(points, dict):
+        return raw
+    decoded = {}
+    for path, entry in points.items():
+        if isinstance(entry, dict) and "shape" in entry:
+            decoded[path] = np.asarray(entry["data"], dtype=float).reshape(entry["shape"])
+        else:
+            decoded[path] = np.asarray(entry, dtype=float)
+    return {**raw, "penalty_points": decoded}
+
+
+def _build_objective(raw: dict[str, Any] | None) -> Objective | dict[str, Any] | None:
+    """Rebuild an ``Objective`` from its dict; a dict naming a callable comes back raw.
+
+    Penalty grids are decoded to arrays of their saved shape either way.
+    """
+    if raw is None:
+        return None
+    raw = _decode_penalty_points(raw)
+    if _contains_serialised_callable(raw):
+        return raw
+    return Objective(**_filter_dataclass_kwargs(Objective, raw))
 
 
 def _resolve_version() -> str:
@@ -240,85 +281,125 @@ def _describe_predictors(predictors: Any) -> dict[str, Any]:
     }
 
 
-def _loss_history_kind(
-    optax_config: Any, evosax_config: Any, loss_history: list[float] | None
-) -> str | None:
-    """Name the semantics of ``loss_history`` from whichever config is present.
-
-    Optax returns the raw data loss at each step, which can go up; Evosax
-    returns the best value so far, which cannot. Both are ``list[float]``,
-    so without this label a reloaded run cannot read a rise in the series.
-    """
-    if loss_history is None:
-        return None
-    if optax_config is not None and evosax_config is None:
-        return "per_step_data"
-    if evosax_config is not None and optax_config is None:
-        return "best_so_far"
-    # Both or neither means the caller composed the two runs, so the series
-    # cannot be labelled from here without guessing.
-    return "unknown"
+# The config classes ``save`` accepts, by the tag written to metadata.
+_CONFIG_TYPES: dict[str, type] = {
+    "optax": OptaxTrainingConfig,
+    "evosax": EvosaxTrainingConfig,
+}
 
 
-def save_run(
-    directory: str | Path,
+def _serialise_config(config: Any) -> dict[str, Any]:
+    """Tag a training config with its kind so ``load`` knows which class to rebuild."""
+    for kind, cls in _CONFIG_TYPES.items():
+        if isinstance(config, cls):
+            return {"kind": kind, "fields": _serialise_training_config(config)}
+    raise TypeError(
+        "save: config must be an OptaxTrainingConfig or EvosaxTrainingConfig; "
+        f"got {type(config).__name__}"
+    )
+
+
+def _serialise_history(history: FitHistory) -> dict[str, Any]:
+    """Write each ``FitHistory`` series as a JSON list, NaN and inf as markers."""
+    return {
+        f.name: _json_safe([float(v) for v in getattr(history, f.name)])
+        for f in dataclasses.fields(history)
+    }
+
+
+def _decode_float(value: Any) -> float:
+    """Inverse of ``_json_safe`` on one float: ``{"__float__": "nan"}`` back to NaN."""
+    if isinstance(value, dict) and "__float__" in value:
+        return float(value["__float__"])
+    return float(value)
+
+
+def _build_history(raw: dict[str, Any] | None) -> FitHistory:
+    """Rebuild a ``FitHistory`` from its saved series; an empty one when none was saved."""
+    if raw is None:
+        return FitHistory()
+    return FitHistory(
+        loss=tuple(_decode_float(v) for v in raw.get("loss", ())),
+        penalty=tuple(_decode_float(v) for v in raw.get("penalty", ())),
+        phase=tuple(int(v) for v in raw.get("phase", ())),
+        validation_loss=tuple(_decode_float(v) for v in raw.get("validation_loss", ())),
+    )
+
+
+def save(
+    path: str | Path,
+    run: HybridModel | FitResult,
     *,
-    predictors: Any,
-    solver: SolverConfig,
-    optax_config: OptaxTrainingConfig | None = None,
-    evosax_config: EvosaxTrainingConfig | None = None,
-    loss_history: list[float] | None = None,
+    config: OptaxTrainingConfig | EvosaxTrainingConfig | None = None,
+    objective: Objective | None = None,
     extras: dict[str, Any] | None = None,
 ) -> None:
-    """Persist a complete training run to ``directory``.
+    """Write a model, or a fit with its history, to the directory ``path``.
+
+    ``run`` is a ``HybridModel`` or the ``FitResult`` from ``fit``; a
+    ``FitResult`` also saves its ``history``, ``best_step`` and
+    ``stop_reason``. ``config`` and ``objective`` record how the model was
+    trained, and ``extras`` is any JSON-encodable dict of your own.
+    Read it back with :func:`load`.
 
     Layout written
     --------------
-    ``directory/predictors.eqx``
+    ``path/predictors.eqx``
         Binary leaves of the predictors pytree (``save_predictors`` output).
-    ``directory/metadata.json``
-        JSON dict with ``timestamp`` (UTC, ISO 8601, microsecond
-        precision), ``version`` (``importlib.metadata.version``-resolved),
-        ``predictors`` (``{tree_structure, leaves: [{path, class}, ...]}``
-        per ``_describe_predictors``), ``solver`` (``solver.to_dict()``),
-        ``optax_config`` / ``evosax_config`` (``dataclasses.asdict`` with
-        stringified ``loss``, see module docstring), ``loss_history``,
-        and ``extras``.
-
-        ``loss_history_kind``, inferred from whichever config was passed,
-        records which entry point produced ``loss_history``:
-        ``"per_step_data"`` for Optax (can go up) or ``"best_so_far"`` for
-        Evosax (monotone). The two series share a type and mean different
-        things.
+    ``path/metadata.json``
+        ``timestamp`` (UTC, ISO 8601), ``version``, ``predictors`` (the
+        structural fingerprint ``load`` checks ``like`` against),
+        ``output_channel_names``, ``solver`` (``SolverConfig.to_dict()``),
+        ``config`` (``{"kind": "optax" | "evosax", "fields": {...}}``),
+        ``objective``, ``history`` (the four ``FitHistory`` series),
+        ``best_step``, ``stop_reason`` and ``extras``. Callables are
+        described, not pickled (see the module docstring).
 
     The directory is created, parents included. Existing files are
-    overwritten: this saves rather than appends.
+    overwritten.
     """
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-
-    save_predictors(directory / _PREDICTORS_FILENAME, predictors)
-
+    if isinstance(run, FitResult):
+        model, result = run.model, run
+    elif isinstance(run, HybridModel):
+        model, result = run, None
+    else:
+        raise TypeError(f"save: run must be a HybridModel or FitResult; got {type(run).__name__}")
+    # The metadata is built before anything is written, so a value that
+    # cannot be encoded fails without leaving a half-written directory.
     metadata: dict[str, Any] = {
         # ``dt.UTC`` keeps the timestamp explicitly tz-aware, and the
         # microsecond suffix lands in the ISO string by default.
         "timestamp": dt.datetime.now(dt.UTC).isoformat(),
         "version": _resolve_version(),
-        "predictors": _describe_predictors(predictors),
-        "solver": solver.to_dict(),
-        "optax_config": (
-            _serialise_training_config(optax_config) if optax_config is not None else None
-        ),
-        "evosax_config": (
-            _serialise_training_config(evosax_config) if evosax_config is not None else None
-        ),
-        "loss_history": list(loss_history) if loss_history is not None else None,
-        "loss_history_kind": _loss_history_kind(optax_config, evosax_config, loss_history),
+        "predictors": _describe_predictors(model.predictors),
+        "output_channel_names": list(model.output_channel_names),
+        "solver": _solver_metadata(model.solver),
+        "config": _serialise_config(config) if config is not None else None,
+        "objective": _serialise_objective(objective) if objective is not None else None,
+        "history": _serialise_history(result.history) if result is not None else None,
+        "best_step": result.best_step if result is not None else None,
+        "stop_reason": result.stop_reason if result is not None else None,
         "extras": dict(extras) if extras is not None else {},
     }
+    encoded = json.dumps(metadata, indent=2, sort_keys=True)
 
-    with (directory / _METADATA_FILENAME).open("w") as f:
-        json.dump(metadata, f, indent=2, sort_keys=True)
+    directory = Path(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    save_predictors(directory / _PREDICTORS_FILENAME, model.predictors)
+    (directory / _METADATA_FILENAME).write_text(encoded)
+
+
+def _solver_metadata(solver: SolverConfig) -> dict[str, Any]:
+    """``solver.to_dict()``, or its ``repr`` when a class is unregistered.
+
+    The record is informational (``load`` keeps ``like.solver``), so a
+    solver outside the registries, such as ``diffrax.Kvaerno5``, still
+    saves instead of failing the whole run.
+    """
+    try:
+        return solver.to_dict()
+    except ValueError:
+        return {"unregistered": repr(solver)}
 
 
 def _filter_dataclass_kwargs(cls: type, raw: dict[str, Any]) -> dict[str, Any]:
@@ -326,9 +407,7 @@ def _filter_dataclass_kwargs(cls: type, raw: dict[str, Any]) -> dict[str, Any]:
     valid = {f.name for f in dataclasses.fields(cls)}
     unknown = sorted(set(raw) - valid)
     if unknown:
-        raise ValueError(
-            f"Saved {cls.__name__} contains unknown configuration fields: {unknown}"
-        )
+        raise ValueError(f"Saved {cls.__name__} contains unknown configuration fields: {unknown}")
     return {k: v for k, v in raw.items() if k in valid}
 
 
@@ -363,60 +442,46 @@ def _coerce_tuple_fields(cls: type, kwargs: dict[str, Any]) -> dict[str, Any]:
     return coerced
 
 
-def _build_training_config(cls: type | None, raw: dict[str, Any] | None) -> Any:
-    """Reconstruct a training config from its dict, or pass through if no class given.
+def _build_training_config(raw: dict[str, Any] | None) -> Any:
+    """Rebuild a training config from its tagged dict.
 
-    ``None`` when no config was saved. A populated ``raw`` with no ``cls``
-    passes through unchanged. Otherwise unknown keys are rejected and JSON
-    lists are re-tupled, so loading cannot silently change the configuration.
+    ``None`` when no config was saved. A config naming a callable comes
+    back as its raw ``fields`` dict. Otherwise unknown keys are rejected
+    and JSON lists are re-tupled, so loading cannot silently change the
+    configuration.
     """
     if raw is None:
         return None
-    if cls is None:
-        return raw
-    if _contains_serialised_callable(raw):
-        raise ValueError(
-            "Saved training config contains callable or opaque fields that cannot be "
-            "reconstructed automatically; load it without a config class and rebind "
-            "those fields explicitly."
-        )
-    kwargs = _filter_dataclass_kwargs(cls, raw)
+    fields = raw["fields"]
+    if _contains_serialised_callable(fields):
+        return fields
+    cls = _CONFIG_TYPES[raw["kind"]]
+    kwargs = _filter_dataclass_kwargs(cls, fields)
     kwargs = _coerce_tuple_fields(cls, kwargs)
+    if "phases" in kwargs:
+        kwargs["phases"] = tuple(TrainingPhase(**phase) for phase in kwargs["phases"])
     return cls(**kwargs)
 
 
-def load_run(
-    directory: str | Path,
-    *,
-    predictors_template: Any,
-    optax_cls: type[OptaxTrainingConfig] | None = None,
-    evosax_cls: type[EvosaxTrainingConfig] | None = None,
-) -> dict[str, Any]:
-    """Reconstruct a run from ``directory``.
+def load(path: str | Path, *, like: HybridModel) -> SavedRun:
+    """Read back a run written by :func:`save`.
 
-    Inverse of :func:`save_run`. ``predictors_template`` is required, since
-    the framework owns no builder registry, and must share the saved
-    pytree's container shape and per-leaf static configuration.
+    ``like`` is a model built the same way as the saved one: same
+    predictor architecture and static configuration, same
+    ``output_channel_names``. It supplies ``simulate_fn`` and
+    ``state_to_output``, which are not saved, and the solver. The returned
+    ``SavedRun.model`` is ``like`` with the saved predictors. The saved
+    solver record holds class names only (constructor arguments such as
+    ``RecursiveCheckpointAdjoint(checkpoints=7)`` are not kept), so
+    ``like.solver`` is used as is, with a ``RuntimeWarning`` when it
+    differs from the record.
 
-    Pass ``optax_cls`` / ``evosax_cls`` to get the saved config dicts
-    rebuilt as typed dataclass instances; leave them out and the raw dicts
-    come back.
-
-    A ``loss`` field that was a callable at save time arrives as the string
-    ``"{module}.{qualname}"`` and is returned as it stands. Turning it back
-    into a function is the caller's job, usually
-    ``importlib.import_module(module).qualname``.
-
-    Returns
-    -------
-    dict
-        Keys: ``predictors`` (``PyTree[eqx.Module]``), ``solver``
-        (``SolverConfig``), ``optax_config`` (``OptaxTrainingConfig`` |
-        dict | None), ``evosax_config`` (``EvosaxTrainingConfig`` | dict |
-        None), ``loss_history`` (``list[float] | None``),
-        ``loss_history_kind`` (``str | None``), ``extras`` (``dict``).
+    Raises ``ValueError`` when the saved package version differs from the
+    installed one, when ``like`` does not match the saved predictors or
+    channel names, or when a saved config has a field the current class
+    does not know.
     """
-    directory = Path(directory)
+    directory = Path(path)
     with (directory / _METADATA_FILENAME).open() as f:
         metadata: dict[str, Any] = json.load(f)
 
@@ -434,33 +499,46 @@ def load_run(
         )
 
     saved_description = metadata.get("predictors", {})
-    actual_description = _describe_predictors(predictors_template)
+    actual_description = _describe_predictors(like.predictors)
     for field in ("tree_structure", "leaves", "static"):
         if field in saved_description and saved_description[field] != actual_description[field]:
             raise ValueError(
-                "predictors_template does not match saved predictor metadata for "
-                f"{field}; rebuild the template with the original static configuration."
+                f"load: like.predictors does not match the saved predictors in {field}; "
+                "rebuild it with the original static configuration."
             )
+    saved_names = tuple(metadata["output_channel_names"])
+    if saved_names != like.output_channel_names:
+        raise ValueError(
+            f"load: saved output_channel_names {saved_names} differ from "
+            f"like.output_channel_names {like.output_channel_names}"
+        )
 
-    solver = SolverConfig.from_dict(metadata["solver"])
-    optax_config = _build_training_config(optax_cls, metadata.get("optax_config"))
-    evosax_config = _build_training_config(evosax_cls, metadata.get("evosax_config"))
-    predictors = load_predictors(directory / _PREDICTORS_FILENAME, predictors_template)
+    saved_solver = metadata.get("solver")
+    if saved_solver is not None and saved_solver != _solver_metadata(like.solver):
+        warnings.warn(
+            f"load: the run was saved with solver {saved_solver}, but like.solver is "
+            f"{_solver_metadata(like.solver)}; keeping like.solver",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
-    return {
-        "predictors": predictors,
-        "solver": solver,
-        "optax_config": optax_config,
-        "evosax_config": evosax_config,
-        "loss_history": metadata.get("loss_history"),
-        "loss_history_kind": metadata.get("loss_history_kind"),
-        "extras": metadata.get("extras", {}),
-    }
+    model = like._with_predictors(
+        load_predictors(directory / _PREDICTORS_FILENAME, like=like.predictors)
+    )
+    return SavedRun(
+        model=model,
+        history=_build_history(metadata.get("history")),
+        best_step=metadata.get("best_step"),
+        stop_reason=metadata.get("stop_reason"),
+        config=_build_training_config(metadata.get("config")),
+        objective=_build_objective(metadata.get("objective")),
+        extras=metadata.get("extras", {}),
+    )
 
 
 __all__ = [
+    "load",
     "load_predictors",
-    "load_run",
+    "save",
     "save_predictors",
-    "save_run",
 ]

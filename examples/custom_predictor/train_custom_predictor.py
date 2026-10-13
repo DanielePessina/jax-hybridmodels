@@ -1,50 +1,27 @@
 """Write your own predictor family and train it like any other.
 
-The library ships ``MLPPredictor`` and ``KANPredictor``, but a predictor
-is only an ``eqx.Module`` mapping an array to an array. This script
-writes a third family from scratch, a random-Fourier-features
-regressor, and trains it inside a hybrid ODE without the framework
-knowing or caring that it is not an MLP.
+A predictor is only an ``eqx.Module`` mapping an array to an array. This
+script writes a random-Fourier-features regressor from scratch and learns
+an Arrhenius rate ``k(T)`` inside first-order decay,
+``dy/dt = -k(T) y``, from noisy isothermal runs. The feature bank is drawn
+once and held fixed; only the output weights and bias train.
 
-The physics
------------
-First-order decay whose rate depends on temperature::
+Shows:
 
-    dy/dt = -k(T) y,     k(T) = A exp(-Ea / (R T))
-
-Each experiment is one isothermal run: a temperature, a decay curve
-sampled with Gaussian noise, and the same initial concentration. The
-Arrhenius form is the answer, not an input. The predictor sees only the
-temperature covariate and has to learn the rate.
-
-What this example is for
-------------------------
-**A predictor with a fixed part and a trained part.** Random Fourier
-features project the input through a random bank of cosines and fit
-linear weights on top. The bank is drawn once and held still; only the
-output weights and bias learn. That splits the module's arrays into two
-groups and forces every question the contract asks:
-
-- Which fields are trainable arrays, and which are static
-  hyperparameters? Static fields must be JSON-encodable, because they
-  travel in the checkpoint sidecar rather than the binary.
-- How does the module re-initialise itself? The restart tournament calls
-  ``initialized_with_key``. Without it, every float array is resampled
-  from a standard normal, which would destroy the feature bank's scale.
-- How do you keep the optimiser off the fixed arrays? With a
-  trainability mask, not a field flag. ``freeze_paths`` names the two
-  bank leaves.
-- Does it survive a save and reload? ``save_predictors`` and
-  ``load_predictors`` round-trip through a template built by the same
-  code path.
-
-The narrative walkthrough is in ``docs/guide/custom-predictors.md``.
+- a custom ``Predictor`` with static fields and ``initialized_with_key``
+- ``HybridModel.fit(freeze=...)`` with dotted paths to hold the bank
+- the restart tournament (``tournament_attempts``)
+- ``hm.save`` / ``hm.load(like=...)`` round-trip through a template model
 
 Run::
 
     uv run python examples/custom_predictor/train_custom_predictor.py
     uv run python examples/custom_predictor/train_custom_predictor.py --train-bank
-    uv run python examples/custom_predictor/train_custom_predictor.py --n-features 128
+    uv run python examples/custom_predictor/train_custom_predictor.py --steps 5 --no-plot
+
+Prints the learned rate against the truth before and after training, the
+save/load drift and metrics; writes ``figures/parity.png`` and
+``figures/trajectories.png``. About a minute on CPU.
 """
 
 # ruff: noqa: F722
@@ -55,33 +32,17 @@ import argparse
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import diffrax
 import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
+from jax.typing import ArrayLike
 from jaxtyping import Float
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    ChannelObs,
-    Experiment,
-    SolverConfig,
-    compute_metrics,
-    evaluate_predictor,
-    freeze_paths,
-    load_predictors,
-    make_dataset,
-    make_experiment,
-    predict_dataset,
-    print_metrics,
-    save_predictors,
-    trainable_mask,
-)
-from jaxhybridmodels.predictors.base import Predictor
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+import jaxhybridmodels as hm
 
 # ``examples/_shared`` is a sibling directory; put it on sys.path so the
 # helpers import without an install step.
@@ -104,8 +65,8 @@ TEMPERATURES: tuple[float, ...] = (290.0, 300.0, 310.0, 320.0, 330.0, 340.0, 350
 # The input box is wider than the sampled temperatures so the scaler stays
 # clear of its saturating ends. The output box is loose on purpose: under
 # a log10 warp, headroom costs almost no resolution.
-TEMPERATURE_BOUNDS: tuple[tuple[float, float], ...] = ((280.0, 360.0),)
-K_BOUNDS: tuple[tuple[float, float], ...] = ((1e-2, 3.0),)
+TEMPERATURE_BOUNDS: tuple[float, float] = (280.0, 360.0)
+K_BOUNDS: tuple[float, float] = (1e-2, 3.0)
 
 Y0: float = 1.0
 T_MAX: float = 25.0
@@ -113,15 +74,17 @@ N_TIMESTEPS: int = 15
 NOISE_STD: float = 0.01
 OUTPUT_CHANNELS: tuple[str, ...] = ("concentration",)
 
-# Dot-joined paths of the two fixed arrays inside the predictors pytree:
-# element 0 of the tuple, the BoundedPredictor's ``inner``, then the field.
+# region bank-paths
+# Dot-joined paths of the two fixed arrays inside the predictors dict: the
+# "rate" entry, the BoundedPredictor's ``inner``, then the field.
 BANK_PATHS: tuple[str, ...] = (
-    "0.inner.frequencies",
-    "0.inner.phases",
+    "rate.inner.frequencies",
+    "rate.inner.phases",
 )
+# endregion bank-paths
 
 
-class RandomFourierPredictor(Predictor):
+class RandomFourierPredictor(hm.Predictor):
     """Random Fourier features with a trained linear readout.
 
     Maps ``Float[Array, "in_size"] -> Float[Array, "out_size"]`` as::
@@ -133,9 +96,9 @@ class RandomFourierPredictor(Predictor):
     construction and never updated, which is what makes this random
     *features* rather than a one-hidden-layer network with a cosine
     activation. Holding them still is the caller's job, via the
-    trainability mask built in :func:`_build_mask`; a module cannot
-    declare a field untrainable, because trainability is a mask over the
-    pytree rather than a property of a class.
+    ``freeze=`` argument to ``fit`` in ``main``; a module cannot declare a field
+    untrainable, because trainability is a mask over the pytree rather
+    than a property of a class.
 
     ``bandwidth`` is the standard deviation of the frequency draw. It
     sets the length scale the features can resolve: large values fit
@@ -159,6 +122,7 @@ class RandomFourierPredictor(Predictor):
         Static frequency scale.
     """
 
+    # region predictor
     weights: Float[Array, "n_features out_size"]
     bias: Float[Array, " out_size"]
     frequencies: Float[Array, "in_size n_features"]
@@ -203,8 +167,8 @@ class RandomFourierPredictor(Predictor):
         scale and drop ``bandwidth`` on the floor. Rebuilding through
         ``__init__`` keeps the construction scheme in one place.
 
-        Shapes are unchanged, so a trainability mask built before
-        training still lines up after a restart.
+        Shapes are unchanged, so the trainability mask built from
+        ``freeze=`` still lines up after a restart.
         """
         return RandomFourierPredictor(
             in_size=self.in_size,
@@ -214,78 +178,92 @@ class RandomFourierPredictor(Predictor):
             key=key,
         )
 
+    # endregion predictor
+
 
 def true_k(temperature: float | Array) -> Array:
     """Ground-truth Arrhenius rate constant, in reciprocal time units."""
     return PREFACTOR * jnp.exp(-EA_OVER_R / jnp.asarray(temperature))
 
 
-def _build_predictor(key: Array, *, n_features: int, bandwidth: float) -> BoundedPredictor:
+def build_predictors(key: Array, *, n_features: int, bandwidth: float) -> dict[str, Any]:
     """Wrap the custom predictor so it reads a temperature and writes a rate.
 
     ``BoundedPredictor`` supplies the two things the inner module
     deliberately lacks: named inputs and physical units. The custom class
     never sees a bound.
     """
-    return BoundedPredictor(
+    # region bounds
+    rate = hm.BoundedPredictor(
         input_keys=("temperature",),
-        in_scaler=BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
+        input_bounds=TEMPERATURE_BOUNDS,  # default sigmoid input scaler
         inner=RandomFourierPredictor(
-            in_size=1,
-            out_size=1,
-            n_features=n_features,
-            bandwidth=bandwidth,
-            key=key,
+            in_size=1, out_size=1, n_features=n_features, bandwidth=bandwidth, key=key
         ),
-        out_scaler=BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
+        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
     )
+    return {"rate": rate}
+    # endregion bounds
 
 
-def _y0_fn(_cov: dict[str, Array], _channels: dict[str, ChannelObs]) -> Array:
-    """Every run starts at the same concentration."""
-    return jnp.asarray([Y0], dtype=jnp.float32)
-
-
-def _state_to_output(state: Float[Array, "T 1"]) -> Float[Array, "T 1"]:
-    """The single state component is the single observed channel."""
-    return state
-
-
-def _simulate_fn(
-    predictors: tuple[BoundedPredictor, ...],
+def simulate_fn(
+    predictors: dict[str, Any],
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 1"],
-    solver: SolverConfig,
-) -> Float[Array, "T 1"]:
-    """Integrate one isothermal run.
+    solver: hm.SolverConfig,
+) -> diffrax.Solution:
+    """Integrate one isothermal run; the framework reads the state from ``.ys``.
 
     The rate is constant along a trajectory, so the predictor is called
     once here rather than inside the vector field, and never touches the
     solver tape.
     """
-    (rate,) = predictors
-    k = rate(covariates).reshape(())
+    k = predictors["rate"](covariates)  # one output, so a scalar
 
-    def vector_field(t: Array, y: Float[Array, " 1"], args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Float[Array, " 1"], args: object) -> Array:
         return -k * y
 
-    return jnp.asarray(solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys)
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
 
 
-def _read_k(predictors: tuple[BoundedPredictor, ...], temperature: float) -> float:
-    """Evaluate the learned rate at one temperature, in physical units."""
-    (rate,) = predictors
-    return evaluate_predictor(rate, {"temperature": temperature})
+def state_to_output(state: Float[Array, "T 1"]) -> Float[Array, "T 1"]:
+    """The single state component is the single observed channel."""
+    return state
 
 
-def _print_rate_table(predictors: tuple[BoundedPredictor, ...], header: str) -> None:
+def build_dataset(key: Array) -> hm.Dataset:
+    """One noisy decay curve per temperature, from the closed form.
+
+    All runs share one time grid, so the dataset is a single fully observed
+    bucket. Irregular sampling needs no change to the model code.
+    """
+    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
+    experiments = []
+    for temperature in TEMPERATURES:
+        key, k_noise = jr.split(key)
+        clean = Y0 * jnp.exp(-true_k(temperature) * ts)
+        noisy = clean + NOISE_STD * jr.normal(k_noise, ts.shape)
+        experiments.append(
+            hm.make_experiment(
+                covariates={"temperature": temperature},
+                channels={
+                    "concentration": hm.ChannelObs(ts=ts, values=noisy, variance=NOISE_STD**2)
+                },
+                y0=[Y0],
+                exp_id=f"decay_T={temperature:.0f}",
+            )
+        )
+    return hm.make_dataset(experiments, output_channel_names=OUTPUT_CHANNELS)
+
+
+def print_rate_table(predictors: dict[str, Any], header: str) -> None:
     """Learned rate against the Arrhenius truth at every sampled temperature."""
     print(header)
     print(f"    {'T [K]':>7}  {'k_true':>9}  {'k_learned':>9}  {'rel. err':>9}")
     for temperature in TEMPERATURES:
         truth = float(true_k(temperature))
-        learned = _read_k(predictors, temperature)
+        learned = float(hm.evaluate_predictor(predictors["rate"], {"temperature": temperature}))
         rel = abs(learned - truth) / truth
         print(f"    {temperature:7.0f}  {truth:9.4f}  {learned:9.4f}  {rel:9.2%}")
 
@@ -303,152 +281,91 @@ def main() -> None:
         help="Train the frequency bank too, instead of freezing it.",
     )
     parser.add_argument(
-        "--plot-dir",
-        type=Path,
-        default=Path(__file__).resolve().parent / "figures",
-        help="Directory to write parity + trajectory PNGs into.",
+        "--plot-dir", type=Path, default=Path(__file__).resolve().parent / "figures"
     )
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip plotting (still prints diagnostics).",
-    )
+    parser.add_argument("--no-plot", action="store_true", help="Skip the figures.")
     args = parser.parse_args()
 
     apply_default_style()
+    k_data, k_init, k_train = jr.split(jr.key(args.seed), 3)
 
-    root_key = jr.PRNGKey(args.seed)
-    k_data, k_init, k_train = jr.split(root_key, 3)
-
-    print("[build] synthetic Arrhenius decay dataset")
-    # One noisy decay curve per temperature, from the closed form. All runs
-    # share the same timestamp grid, so the dataset collapses to a single
-    # fully observed bucket. Irregular sampling is the general case and
-    # needs no change to the model code.
-    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    experiments: list[Experiment] = []
-    rng = k_data
-    for temperature in TEMPERATURES:
-        rng, k_noise = jr.split(rng)
-        clean = Y0 * jnp.exp(-true_k(temperature) * ts)
-        noisy = clean + NOISE_STD * jr.normal(k_noise, ts.shape)
-        experiments.append(
-            make_experiment(
-                covariates={"temperature": temperature},
-                channels={
-                    "concentration": ChannelObs(
-                        ts=ts,
-                        values=noisy,
-                        variance=jnp.full(ts.shape, NOISE_STD**2),
-                    )
-                },
-                y0_fn=_y0_fn,
-                exp_id=f"decay_T={temperature:.0f}",
-            )
-        )
-    dataset = make_dataset(
-        experiments,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    print(f"  {len(experiments)} experiments, {len(dataset.bucket_payloads)} bucket(s)")
+    dataset = build_dataset(k_data)
+    print("[data]")
+    print(hm.describe_buckets(dataset))
     print(
-        f"  true k spans {float(true_k(TEMPERATURES[0])):.4f} to "
+        f"true k spans {float(true_k(TEMPERATURES[0])):.4f} to "
         f"{float(true_k(TEMPERATURES[-1])):.4f}"
     )
 
-    print("\n[build] solver + custom predictor")
-    solver = SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-6,
-        atol=1e-8,
-        max_steps=10_000,
-        dt0=0.1,
+    model = hm.HybridModel(
+        predictors=build_predictors(k_init, n_features=args.n_features, bandwidth=args.bandwidth),
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
+        output_channel_names=OUTPUT_CHANNELS,
+        # Tighter tolerances and a larger step budget than the defaults.
+        solver=hm.SolverConfig(rtol=1e-6, atol=1e-8, max_steps=10_000, dt0=0.1),
     )
-    predictors = (_build_predictor(k_init, n_features=args.n_features, bandwidth=args.bandwidth),)
-    # ``trainable_mask`` marks every floating-point array trainable, which
-    # includes ``frequencies`` and ``phases``. ``freeze_paths`` turns those
-    # two off by name. A path matching no leaf raises rather than passing
-    # silently, so a renamed field fails loudly instead of training an
-    # array you believed was fixed.
-    mask = trainable_mask(predictors)
-    if not args.train_bank:
-        mask = freeze_paths(mask, BANK_PATHS)
+    # region mask
+    # By default every array of the custom predictor trains, the bank
+    # included. ``fit(freeze=...)`` turns the bank off by name, and raises
+    # on a path that matches nothing, so a renamed field fails loudly
+    # instead of training an array you believed was fixed.
+    freeze = None if args.train_bank else BANK_PATHS
+    # endregion mask
     frozen = "none (--train-bank)" if args.train_bank else ", ".join(BANK_PATHS)
-    print(f"  RandomFourierPredictor: {args.n_features} features, bandwidth {args.bandwidth}")
-    print(f"  frozen leaves: {frozen}")
-    _print_rate_table(predictors, "  rates before training:")
+    print("\n[fit]")
+    print(f"RandomFourierPredictor: {args.n_features} features, bandwidth {args.bandwidth}")
+    print(f"frozen leaves: {frozen}")
+    print_rate_table(model.predictors, "rates before training:")
 
-    print("\n[train] optax, 3-attempt tournament then one phase")
-    config = OptaxTrainingConfig(
-        steps=(args.steps,),
-        lr=(args.lr,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
+    # region fit
+    # The tournament restarts the predictor three times through
+    # ``initialized_with_key`` and keeps the best start.
+    config = hm.OptaxTrainingConfig(
+        steps=args.steps,
+        lr=args.lr,
         tournament_attempts=3,
         tournament_steps=40,
         tournament_lr=args.lr,
         verbose=False,
     )
-    history, trained = train_with_optax(
-        predictors,
-        dataset,
-        config,
-        simulate_fn=_simulate_fn,
-        state_to_output=_state_to_output,
-        solver=solver,
-        trainable=mask,
-        key=k_train,
-    )
-    print(f"  {len(history)} steps; final loss {history[-1]:.6e}")
+    result = model.fit(dataset, config, key=k_train, freeze=freeze)
+    # endregion fit
+    trained = result.model.predictors
+    print("\n[results]")
+    print(f"{len(result.history.loss)} steps; final loss {result.history.loss[-1]:.6e}")
+    print_rate_table(trained, "rates after training:")
 
-    _print_rate_table(trained, "\n  rates after training:")
-
-    print("\n[serialise] save and reload the trained predictor")
-    # ``load_predictors`` needs a template with the right structure, which
-    # means building the same predictor again with any key. Every static
-    # field must be JSON-encodable for this to work, which is why
-    # ``bandwidth`` is a plain float and the shapes are plain ints.
-    template = (
-        _build_predictor(jr.PRNGKey(0), n_features=args.n_features, bandwidth=args.bandwidth),
-    )
+    # Static fields and simulate_fn are not saved. ``load`` takes them from
+    # ``like``, a model built the same way: the untrained ``model`` is one.
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "custom_predictor.eqx"
-        save_predictors(path, trained)
-        reloaded = load_predictors(path, template)
-    drift = max(
-        abs(_read_k(reloaded, temperature) - _read_k(trained, temperature))
-        for temperature in TEMPERATURES
-    )
-    print(f"  largest rate difference after round-trip: {drift:.3e}")
+        path = Path(tmp) / "custom_predictor"
+        hm.save(path, result, config=config)
+        run = hm.load(path, like=model)
+    reloaded = run.model.predictors
+    assert len(run.history.loss) == len(result.history.loss), "history should round-trip"
+    grid = {"temperature": jnp.asarray(TEMPERATURES)}
+    k_reloaded = hm.evaluate_predictor(reloaded["rate"], grid)
+    k_trained = hm.evaluate_predictor(trained["rate"], grid)
+    drift = float(jnp.max(jnp.abs(k_reloaded - k_trained)))
+    print(f"\nlargest rate difference after save and load: {drift:.3e}\n")
 
-    print("\n[diagnostics] per-channel parity stats over the training set")
-    predictions = predict_dataset(
-        trained, dataset, simulate_fn=_simulate_fn, state_to_output=_state_to_output, solver=solver
-    )
-    metrics = compute_metrics(predictions, dataset)
-    print_metrics(metrics)
+    predictions = result.model.predict(dataset)
+    hm.print_metrics(predictions)
 
     if not args.no_plot:
         args.plot_dir.mkdir(parents=True, exist_ok=True)
-        # ``compute_metrics`` keeps only summary stats; the scatter needs the
-        # raw value pairs, so re-walk the mask here.
-        parity_data = parity_diagnostics(predictions, dataset)
         parity_plot(
-            parity_data,
-            title="Custom predictor parity (trained model)",
+            parity_diagnostics(predictions),
+            title="Custom predictor parity",
             save_path=args.plot_dir / "parity.png",
         )
         trajectory_plot(
-            predictions,
+            result.model,
             dataset,
-            predictors=trained,
-            simulate_fn=_simulate_fn,
-            state_to_output=_state_to_output,
-            solver=solver,
-            max_experiments=len(experiments),
-            title="Custom predictor trajectories (trained model)",
+            predictions=predictions,
+            max_experiments=len(TEMPERATURES),
+            title="Custom predictor trajectories",
             save_path=args.plot_dir / "trajectories.png",
         )
         print(f"\n[plot] figures written to {args.plot_dir}")

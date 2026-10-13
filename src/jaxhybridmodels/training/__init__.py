@@ -1,4 +1,4 @@
-"""The training loops and ensemble helpers.
+"""The trainers behind ``HybridModel.fit``, and their configs.
 
 :func:`train_with_optax` does gradient descent through the ODE solve. It
 is the default, and the one to use for anything network-sized.
@@ -7,35 +7,24 @@ is the default, and the one to use for anything network-sized.
 for small kinetic predictors, roughly 4 to 10 trainable scalars, or when
 the adjoint through the solve is unreliable.
 
-They are separate entry points with no shared config. To combine them,
-call evosax first and then feed its result to optax, passing the same
-trainable mask to both.
+Both take a ``HybridModel`` and the keywords of ``fit``, and return a
+``FitResult``; ``model.fit(data, config, ...)`` picks one by the type of
+``config``. What is minimised is a shared
+:class:`~jaxhybridmodels.Objective`, passed to either as ``objective=``.
+To combine them, fit with Evosax first and then fit its result's model
+with Optax, passing the same objective and ``freeze`` to both.
 
-For ensembles of hybrid models:
-
-- :func:`train_seed_ensemble` reuses the tournament's cheap warm-start
-  ranking to pick which seeds deserve a full training run, then fully
-  trains the best few.
-- :func:`train_bootstrap_ensemble` trains one (or a seed-set of) model(s)
-  per bootstrap resample of the experiments, for bagging-style ensembles.
-- :func:`jaxhybridmodels.ensemble_predictions` averages the members'
-  predictions; :func:`jaxhybridmodels.make_bootstrap_dataset` is the data
-  half of the bagging recipe.
+Ensembles are ``HybridModel.fit_ensemble``; the kernels for a custom
+training loop are in :mod:`jaxhybridmodels.training.kernels`.
 """
 
 from jaxhybridmodels.training.evosax import EvosaxTrainingConfig, train_with_evosax
-from jaxhybridmodels.training.optax import (
-    OptaxTrainingConfig,
-    train_bootstrap_ensemble,
-    train_seed_ensemble,
-    train_with_optax,
-)
+from jaxhybridmodels.training.optax import OptaxTrainingConfig, TrainingPhase, train_with_optax
 
 __all__ = [
     "EvosaxTrainingConfig",
     "OptaxTrainingConfig",
-    "train_bootstrap_ensemble",
-    "train_seed_ensemble",
+    "TrainingPhase",
     "train_with_evosax",
     "train_with_optax",
 ]

@@ -1,7 +1,7 @@
 """End-to-end smoke run for losses + prediction (Phase 5).
 
 Builds a tiny harmonic-oscillator dataset, defines a SPEC §4.2-shaped
-``simulate_fn``, runs ``predict_dataset`` with a fixed scalar predictor
+``simulate_fn``, runs ``HybridModel.predict`` with a fixed scalar predictor
 (MLP -> sigmoid-bounded omega), and prints per-bucket prediction shapes
 and ``masked_mse`` losses against ``bp.y_observed``.
 
@@ -14,18 +14,19 @@ from __future__ import annotations
 import diffrax
 import jax.numpy as jnp
 import jax.random as jr
+from jax.typing import ArrayLike
 
 from jaxhybridmodels import (
     BoundedPredictor,
     BoundScaler,
     ChannelObs,
+    HybridModel,
     MLPPredictor,
     SolverConfig,
     make_dataset,
     make_experiment,
-    masked_mse,
-    predict_dataset,
 )
+from jaxhybridmodels.losses import masked_mse
 
 
 def _y0_fn(covariates: dict[str, jnp.ndarray], channels: dict[str, ChannelObs]) -> jnp.ndarray:
@@ -44,10 +45,10 @@ def _simulate_fn(
     y0: jnp.ndarray,
     solver: SolverConfig,
 ) -> jnp.ndarray:
-    omega = predictor(covariates).reshape(())
+    omega = predictor(covariates)
     omega_sq = omega * omega
 
-    def vector_field(t: jnp.ndarray, y: jnp.ndarray, args: object) -> jnp.ndarray:
+    def vector_field(t: ArrayLike, y: jnp.ndarray, args: object) -> jnp.ndarray:
         return jnp.stack([y[1], -omega_sq * y[0]])
 
     term = diffrax.ODETerm(vector_field)
@@ -59,7 +60,7 @@ def _simulate_fn(
         dt0=solver.dt0,
         y0=y0,
         saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=solver.atol),
+        stepsize_controller=diffrax.PIDController(rtol=solver.rtol, atol=jnp.asarray(solver.atol)),
         max_steps=solver.max_steps,
     )
     return sol.ys
@@ -118,18 +119,20 @@ def main() -> None:
     )
     predictor = BoundedPredictor(
         input_keys=("omega_input",),
-        in_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
+        in_scaler=BoundScaler(bounds=(0.5, 2.0), transform="sigmoid"),
         inner=mlp,
-        out_scaler=BoundScaler(bounds=((0.5, 2.0),), transform="sigmoid"),
+        out_scaler=BoundScaler(bounds=(0.5, 2.0), transform="sigmoid"),
     )
 
-    preds = predict_dataset(
-        predictor,
-        dataset,
+    model = HybridModel(
+        predictors=predictor,
         simulate_fn=_simulate_fn,
         state_to_output=_state_to_output,
+        output_channel_names=("x",),
         solver=solver,
     )
+    # ``buckets`` keeps the raw [N, T, D] arrays, aligned with the payloads.
+    preds = model.predict(dataset).buckets
 
     for i, (bp, pred) in enumerate(zip(dataset.bucket_payloads, preds, strict=True)):
         loss = masked_mse(pred, bp)

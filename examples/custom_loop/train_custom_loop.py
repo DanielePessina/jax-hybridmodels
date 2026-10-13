@@ -1,29 +1,27 @@
-"""Write your own training loop against the public gradient kernels.
+"""Write your own training loop from the public gradient kernels.
 
-The stock trainer (:func:`jaxhybridmodels.train_with_optax`) is assembled from
-public pieces in :mod:`jaxhybridmodels.training.kernels`. If you want a
-custom loop — a bespoke schedule, per-bucket weighting, a custom
-regulariser, a different accumulation rule — you compose the same kernels
-the trainer uses, instead of forking it.
+``HybridModel.fit`` with an ``OptaxTrainingConfig`` is assembled from the
+pieces in ``jaxhybridmodels.training.kernels``. When you need a loop it cannot
+express, compose the same pieces instead of forking the trainer. This
+script recovers a harmonic oscillator's frequency with a loop that weights
+each bucket's loss and gradients by its experiment count, which the stock
+trainer has no option for.
 
-This example demonstrates the pieces on a harmonic oscillator whose
-frequency ``omega`` is recovered from noisy position measurements:
+Shows:
 
-- ``build_bucket_step`` — the jitted per-bucket ``(loss, grads)`` kernel
-  (one trace per bucket shape).
-- ``build_penalty_step`` — charges a regulariser once per step, outside
-  the bucket loop. Here it is a *custom* regulariser (L2 on a leaf), not
-  the default bound-saturation penalty.
-- ``build_apply_update`` — the single optimiser update per step.
-- A **custom loss** (masked Huber) and a **per-bucket weight** are both
-  injected by the caller.
+- ``build_bucket_step``, ``build_penalty_step`` and ``build_apply_update``
+- a custom loss (masked Huber) and a custom regulariser (L2 on a second
+  ``Parameter``) entering a hand-written loop
+- ``eqx.tree_at`` to put the loop's predictors back into the model, then
+  ``predict`` and ``compute_metrics`` as after ``fit``
 
-The loop body is the "one step = one pass over every bucket, accumulate
-gradients, one update" pattern (CONTEXT.md: ``step``); write a different
-accumulation rule here and you have a genuinely different trainer.
+Run::
 
-Run:
     uv run python examples/custom_loop/train_custom_loop.py
+    uv run python examples/custom_loop/train_custom_loop.py --steps 5 --no-plot
+
+Prints the loss, penalty and ``omega`` every 25 steps, the recovered values
+and metrics; writes ``figures/parity.png``. Under a minute on CPU.
 """
 
 from __future__ import annotations
@@ -32,7 +30,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -40,9 +37,6 @@ import optax
 from jax import Array
 
 import jaxhybridmodels as hm
-from jaxhybridmodels.data import ChannelObs, make_dataset, make_experiment
-from jaxhybridmodels.predictors.base import Predictor
-from jaxhybridmodels.solver import SolverConfig
 from jaxhybridmodels.training.kernels import (
     build_apply_update,
     build_bucket_step,
@@ -56,17 +50,12 @@ from _shared import (  # noqa: E402
     parity_plot,
 )
 
-# ---------------------------------------------------------------------------
-# Physics: damped-free-oscillator with a trainable omega.
-# ---------------------------------------------------------------------------
-
 OMEGA_TRUE: float = 1.0
 NOISE_STD: float = 0.05
 
-# Two timestamp grids of different lengths, so the dataset forms two
-# buckets with different experiment counts -- which is what makes the
-# per-bucket weighting in the loop below actually do something. Bucket A
-# holds three experiments, bucket B one.
+# Two time grids of different lengths give two buckets: three experiments
+# on the short grid, one on the long grid. Unequal buckets are what give
+# the per-bucket weight below something to do.
 BUCKET_A_TS: int = 20
 BUCKET_A_MAX: float = 4.0
 BUCKET_B_TS: int = 40
@@ -79,31 +68,10 @@ INITIAL_STATES: tuple[tuple[float, float], ...] = (
 )
 
 
-class OmegaPredictor(Predictor):
-    """One trainable scalar ``omega``; the hybrid model's "physics parameter"."""
-
-    omega: Array
-    scale: Array
-
-    def __init__(self, omega: float, scale: float) -> None:
-        self.omega = jnp.asarray(omega, dtype=jnp.float32)
-        self.scale = jnp.asarray(scale, dtype=jnp.float32)
-
-    def __call__(self, x: Array) -> Array:
-        # ``scale`` is a second leaf we will pin with a custom regulariser;
-        # it does not enter the dynamics here.
-        return self.omega
-
-
-def simulate_fn(predictor, ts, covariates, y0, solver):
-    """The user-written integrator. Only the invocation is folded."""
-    omega = predictor[0].omega
-
-    def vector_field(t, y, args):
-        return jnp.stack([y[1], -(omega**2) * y[0]])
-
-    sol = solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
-    return jnp.asarray(sol.ys)
+def vector_field(t, y, predictors, covariates):
+    """Undamped oscillator. ``scale`` does not enter the dynamics."""
+    omega = predictors["omega"].value
+    return jnp.stack([y[1], -(omega**2) * y[0]])
 
 
 def state_to_output(state: Array) -> Array:
@@ -111,174 +79,140 @@ def state_to_output(state: Array) -> Array:
     return state[..., :1]
 
 
-# ---------------------------------------------------------------------------
-# Custom pieces a stock trainer could not express.
-# ---------------------------------------------------------------------------
-
-
 def huber_loss(pred_obs: Array, bp) -> Array:
-    """Masked Huber loss — any ``(pred_obs, bp) -> scalar`` callable works."""
-    residual = pred_obs - bp.y_observed
-    mask = bp.mask
-    delta = jnp.asarray(0.1)
-    abs_res = jnp.abs(residual)
+    """Masked Huber loss. Any ``(pred_obs, bp) -> scalar`` callable works."""
+    abs_res = jnp.abs(pred_obs - bp.y_observed)
+    delta = 0.1
     quadratic = jnp.minimum(abs_res, delta)
-    linear = abs_res - quadratic
-    loss = jnp.where(mask, 0.5 * quadratic**2 + delta * linear, 0.0)
-    return jnp.sum(loss) / jnp.maximum(jnp.sum(mask), 1)
+    loss = 0.5 * quadratic**2 + delta * (abs_res - quadratic)
+    return jnp.sum(jnp.where(bp.mask, loss, 0.0)) / jnp.maximum(jnp.sum(bp.mask), 1)
 
 
 def weight_decay(predictors, points):
-    """Custom regulariser: L2 on the ``scale`` leaf only.
+    """L2 on ``scale``, replacing the bound penalty.
 
-    Replaces the default bound-saturation penalty entirely — proof that
-    ``penalty_fn`` is a general hook, not a switch. The ``points``
-    argument is the per-leaf point set the bound penalty would use; a
-    custom regulariser that does not need points just ignores them.
+    ``points`` are the per-leaf penalty points the bound penalty would use.
+    A regulariser that needs none ignores them.
     """
-    return predictors[0].scale**2
+    return predictors["scale"].value ** 2
 
 
-def per_bucket_weight(bp) -> float:
-    """Weight a bucket by its experiment count (``N``).
-
-    A per-bucket weight multiplies that bucket's loss (and its gradients)
-    before accumulation, letting you down-weight sparse or noisy buckets.
-    The two buckets below hold 3 and 1 experiments, so the denser bucket
-    counts three times as much in the step.
-    """
+def bucket_weight(bp) -> float:
+    """Weight a bucket by its experiment count, so 3 experiments outweigh 1."""
     return float(bp.y_observed.shape[0])
 
 
-# ---------------------------------------------------------------------------
-# The custom loop.
-# ---------------------------------------------------------------------------
-
-
-N_STEPS: int = 150
+def build_dataset() -> hm.Dataset:
+    """Noisy positions on two time grids, so the dataset forms two buckets."""
+    ts_a = jnp.linspace(0.0, BUCKET_A_MAX, BUCKET_A_TS)
+    ts_b = jnp.linspace(0.0, BUCKET_B_MAX, BUCKET_B_TS)
+    grids = (ts_a, ts_a, ts_a, ts_b)
+    experiments = []
+    for i, ((x0, v0), ts) in enumerate(zip(INITIAL_STATES, grids, strict=True)):
+        clean = x0 * jnp.cos(OMEGA_TRUE * ts) + (v0 / OMEGA_TRUE) * jnp.sin(OMEGA_TRUE * ts)
+        noise = NOISE_STD * jax.random.normal(jax.random.key(i), ts.shape)
+        experiments.append(
+            hm.make_experiment(
+                channels={"position": hm.ChannelObs(ts=ts, values=clean + noise)},
+                y0=[x0, v0],
+                exp_id=f"osc_{i}",
+            )
+        )
+    return hm.make_dataset(experiments, output_channel_names=("position",))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--plot-dir",
-        type=Path,
-        default=Path(__file__).resolve().parent / "figures",
+        "--plot-dir", type=Path, default=Path(__file__).resolve().parent / "figures"
     )
+    parser.add_argument("--steps", type=int, default=150)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
     apply_default_style()
+    ds = build_dataset()
+    print("[data]")
+    print(hm.describe_buckets(ds))
 
-    # Noisy position observations of the oscillator on two different time
-    # grids, so the dataset forms two buckets (3 and 1 experiments) and the
-    # per-bucket weighting below has something to act on.
-    key = jax.random.PRNGKey(0)
-
-    def _experiment(i, x0, v0, ts, exp_id):
-        nonlocal key
-        key, subkey = jax.random.split(key)
-        y0 = jnp.asarray([x0, v0])
-        noise = NOISE_STD * jax.random.normal(subkey, ts.shape)
-        x_obs = x0 * jnp.cos(OMEGA_TRUE * ts) + (v0 / OMEGA_TRUE) * jnp.sin(OMEGA_TRUE * ts)
-        return make_experiment(
-            covariates={"id": float(i)},
-            channels={"position": ChannelObs(ts=ts, values=x_obs + noise)},
-            y0_fn=lambda c, ch, y0=y0: y0,
-            exp_id=exp_id,
-        )
-
-    ts_a = jnp.linspace(0.0, BUCKET_A_MAX, BUCKET_A_TS)
-    ts_b = jnp.linspace(0.0, BUCKET_B_MAX, BUCKET_B_TS)
-    experiments = [
-        _experiment(0, *INITIAL_STATES[0], ts_a, "a_0"),
-        _experiment(1, *INITIAL_STATES[1], ts_a, "a_1"),
-        _experiment(2, *INITIAL_STATES[2], ts_a, "a_2"),
-        _experiment(3, *INITIAL_STATES[3], ts_b, "b_0"),
-    ]
-    ds = make_dataset(experiments, output_channel_names=("position",))
-    predictors = (OmegaPredictor(omega=1.5, scale=1.0),)
-    solver = SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-6,
-        atol=1e-8,
-        max_steps=4096,
-        dt0=0.05,
+    # The model holds the pieces the kernels need; the loop below trains
+    # its predictors directly.
+    model = hm.HybridModel.from_vector_field(
+        vector_field=vector_field,
+        # ``scale`` exists only for the regulariser to pull toward zero.
+        predictors={
+            "omega": hm.Parameter(1.5, bounds=(0.5, 2.0)),
+            "scale": hm.Parameter(1.0),
+        },
+        state_to_output=state_to_output,
+        output_channel_names=("position",),
+        solver=hm.SolverConfig(rtol=1e-6, atol=1e-8, dt0=0.05),
     )
-
-    # Trainability: freeze nothing here, but the mask is a normal PyTree so
-    # freezing a leaf is one line (see the batch_reactor example).
+    predictors = model.predictors
+    # Every latent trains; scalers stay fixed. Freezing a leaf is a mask edit.
     mask = hm.trainable_mask(predictors)
 
-    # Build the kernels from the public API.
+    # region bucket-step
     bucket_step = build_bucket_step(
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
+        simulate_fn=model.simulate_fn,
+        state_to_output=model.state_to_output,
+        solver=model.solver,
         loss_fn=huber_loss,
         trainable=mask,
     )
-    penalty_step = build_penalty_step(
-        penalty_fn=weight_decay,
-        trainable=mask,
-    )
-
+    penalty_step = build_penalty_step(penalty_fn=weight_decay, trainable=mask)
     optimizer = optax.adamw(learning_rate=1e-2)
-    apply_update = build_apply_update(optimizer, mask)
+    apply_update = build_apply_update(optimizer=optimizer, trainable=mask)
     opt_state = optimizer.init(eqx.filter(predictors, mask))
+    # endregion bucket-step
 
-    # One step = one full pass over every bucket, accumulate gradients,
-    # then a single update. Write a different accumulation rule here and
-    # you have a different trainer.
-    full_mask = jnp.asarray(1.0)
-    for step in range(N_STEPS):
+    # The fraction of each time series the loss sees. 1.0 scores all of it;
+    # a schedule over this value is how the stock trainer's horizon works.
+    horizon = jnp.asarray(1.0)
+    penalty_weight = jnp.asarray(0.1)
+    print("\n[fit]")
+    for step in range(args.steps):
+        # Weighted mean over buckets of the loss and its gradient. Dividing
+        # by the total weight keeps the weights relative.
+        # region loss
         total_loss = jnp.asarray(0.0)
         total_weight = 0.0
-        acc_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, mask))
+        grads_sum = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, mask))
         for bp in ds.bucket_payloads:
-            loss, grads = bucket_step(predictors, bp, full_mask)
-            # Weight the bucket by its experiment count (``N``): the weight
-            # multiplies that bucket's loss *and its gradients* before
-            # accumulation, letting you down-weight sparse or noisy buckets.
-            # Both the displayed loss and the update divide by the total
-            # weight, so the weights stay relative, not absolute.
-            w = per_bucket_weight(bp)
+            loss, grads = bucket_step(predictors, bp, horizon)
+            w = bucket_weight(bp)
             total_loss = total_loss + w * loss
             total_weight += w
-            acc_grads = jax.tree.map(lambda a, g, w=w: a + w * g, acc_grads, grads)
-        denom = max(total_weight, 1e-30)
-        avg_data = total_loss / denom
-        avg_grads = jax.tree.map(lambda g, denom=denom: g / denom, acc_grads)
-        # The custom regulariser, charged once per step outside the loop. The
-        # default penalty_points=() suits a hook that ignores points.
-        penalty_value, penalty_grads = penalty_step(predictors, jnp.asarray(0.1))
-        avg_grads = jax.tree.map(jnp.add, avg_grads, penalty_grads)
+            grads_sum = jax.tree.map(lambda a, g, w=w: a + w * g, grads_sum, grads)
+        data_loss = total_loss / total_weight
+        grads = jax.tree.map(lambda g, t=total_weight: g / t, grads_sum)
 
-        predictors, opt_state = apply_update(predictors, avg_grads, opt_state)
+        # The regulariser is charged once per step, outside the bucket loop.
+        # It ignores penalty points, so none are passed.
+        penalty, penalty_grads = penalty_step(predictors, penalty_weight, ())
+        grads = jax.tree.map(jnp.add, grads, penalty_grads)
+
+        predictors, opt_state = apply_update(predictors, grads, opt_state)
+        # endregion loss
         if step % 25 == 0:
             print(
-                f"step {step:3d}  data={float(avg_data):.5f}  "
-                f"penalty={float(penalty_value):.3e}  omega={float(predictors[0].omega):.4f}"
+                f"step {step:3d}  data={float(data_loss):.5f}  penalty={float(penalty):.3e}  "
+                f"omega={float(predictors['omega'].value):.4f}"
             )
 
-    print(f"\nrecovered omega = {float(predictors[0].omega):.4f}  (truth {OMEGA_TRUE})")
-    print(f"final scale     = {float(predictors[0].scale):.6f}  (regularised toward 0)")
+    print("\n[results]")
+    print(f"recovered omega = {float(predictors['omega'].value):.4f}  (truth {OMEGA_TRUE})")
+    print(f"final scale     = {float(predictors['scale'].value):.6f}  (regularised toward 0)")
 
-    # Evaluate with the library's per-channel metrics.
-    preds = hm.predict_dataset(
-        predictors, ds, simulate_fn=simulate_fn,
-        state_to_output=state_to_output, solver=solver,
-    )
-    hm.print_metrics(hm.compute_metrics(preds, ds), header="custom-loop result")
+    fitted = eqx.tree_at(lambda m: m.predictors, model, predictors)
+    predictions = fitted.predict(ds)
+    hm.print_metrics(predictions, header="custom-loop result")
 
     if not args.no_plot:
         args.plot_dir.mkdir(parents=True, exist_ok=True)
-        # ``compute_metrics`` keeps only the summary stats; the scatter needs
-        # the raw value pairs, so re-walk the mask here.
-        parity_data = parity_diagnostics(preds, ds)
         parity_plot(
-            parity_data,
-            title="Custom loop parity (trained model)",
+            parity_diagnostics(predictions),
+            title="Custom loop parity",
             save_path=args.plot_dir / "parity.png",
         )
         print(f"\n[plot] figures written to {args.plot_dir}")

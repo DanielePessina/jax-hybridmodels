@@ -1,9 +1,8 @@
 name: examples
 
-# Smoke-tests the example scripts so the converted notebooks and the
-# "write your own loop" / SBML examples do not silently rot. Fast,
-# deterministic examples run end-to-end; every example file is at least
-# compiled and linted on every push to main.
+# Smoke-tests the example scripts so they do not silently rot. Fast
+# examples run end to end, slow ones with a short step budget, and every
+# example file is at least compiled (ci.yml lints and typechecks them).
 
 on:
   push:
@@ -26,9 +25,6 @@ jobs:
 
       - name: Install
         run: uv sync --frozen --extra examples
-
-      - name: Lint examples
-        run: uv run ruff check examples/ scripts/
 
       - name: Compile every example script
         run: |
@@ -54,5 +50,11 @@ jobs:
       - name: Run the neural polynomial kinetics example
         run: uv run python examples/supersaturation_poly/train_supersaturation_poly.py
 
-      - name: Run the hybrid_ode notebook-script
-        run: uv run python examples/hybrid_ode/notebook.py
+      - name: Run the tubular reactor example (short)
+        run: uv run python examples/tubular_reactor/train_tubular_reactor.py --steps 5 --no-plot
+
+      - name: Run the hybrid ODE example (short)
+        run: uv run python examples/hybrid_ode/train_hybrid_ode.py --steps 40 --no-plot
+
+      - name: Run the slow example tests
+        run: uv run pytest -q -m slow

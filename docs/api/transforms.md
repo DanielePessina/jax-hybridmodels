@@ -15,7 +15,7 @@
 
 ### `BoundTransform`
 
-<small>`from jaxhybridmodels.transforms import BoundTransform` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.BoundTransform`</small>
+<small>`from jaxhybridmodels.transforms import BoundTransform`</small>
 
 ```python
 BoundTransform(
@@ -45,7 +45,7 @@ A squash from the whole real line into ``(0, 1)``, with its inverse and metadata
 
 ### `BOUND_TRANSFORMS`
 
-<small>`from jaxhybridmodels.transforms import BOUND_TRANSFORMS` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.BOUND_TRANSFORMS`</small>
+<small>`from jaxhybridmodels.transforms import BOUND_TRANSFORMS`</small>
 
 ```python
 BOUND_TRANSFORMS = {
@@ -72,7 +72,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_bound_transform()`
 
-<small>`from jaxhybridmodels.transforms import register_bound_transform` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_bound_transform`</small>
+<small>`from jaxhybridmodels.transforms import register_bound_transform`</small>
 
 ```python
 register_bound_transform(name: 'str', transform: 'BoundTransform') -> 'None'
@@ -93,7 +93,7 @@ name overwrites without warning.
 
 ### `Warp`
 
-<small>`from jaxhybridmodels.transforms import Warp` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.Warp`</small>
+<small>`from jaxhybridmodels.transforms import Warp`</small>
 
 ```python
 Warp(
@@ -124,7 +124,7 @@ coordinates, then the transform's inverse takes it to the latent.
 
 ### `WARPS`
 
-<small>`from jaxhybridmodels.transforms import WARPS` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.WARPS`</small>
+<small>`from jaxhybridmodels.transforms import WARPS`</small>
 
 ```python
 WARPS = {
@@ -151,7 +151,7 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ### `register_warp()`
 
-<small>`from jaxhybridmodels.transforms import register_warp` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.register_warp`</small>
+<small>`from jaxhybridmodels.transforms import register_warp`</small>
 
 ```python
 register_warp(name: 'str', warp: 'Warp') -> 'None'

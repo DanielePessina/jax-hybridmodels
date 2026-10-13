@@ -4,10 +4,11 @@
   "scripts": {
     "docs:gen": "uv run python ../scripts/gen_api_docs.py",
     "docs:check:api": "uv run python ../scripts/gen_api_docs.py --check",
+    "docs:check:snippets": "uv run python ../scripts/check_doc_snippets.py",
     "docs:dev": "vitepress dev",
     "docs:build": "vitepress build",
     "docs:preview": "vitepress preview",
-    "docs:check": "npm run docs:check:api && npm run docs:build"
+    "docs:check": "npm run docs:check:api && npm run docs:check:snippets && npm run docs:build"
   },
   "devDependencies": {
     "markdown-it-mathjax3": "^4.3.2",

@@ -103,6 +103,8 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.12",
     "rlax>=0.1.9",
+    # tests cover experiments_from_dataframe and PredictionResult.to_dataframe
+    "pandas>=3.0.2",
 ]
 
 [tool.ruff]
@@ -112,3 +114,7 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = []
+
+[tool.pytest.ini_options]
+addopts = "-m 'not slow'"
+markers = ["slow: long-running example checks, run by the examples workflow with -m slow"]

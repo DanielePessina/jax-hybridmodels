@@ -5,10 +5,15 @@ gradients from ``bucket_step`` (jitted, one trace per bucket shape),
 accumulated and averaged, then a single ``optimizer.update``. A bucket is
 not a step, and there is no minibatching.
 
+What is minimised (loss, channel weights, penalties) is an
+:class:`~jaxhybridmodels.Objective`, passed as ``objective=``; the config
+here holds only how to minimise it.
+
 A run is a sequence of **phases**, contiguous blocks of steps sharing
-hyperparameters. Each has its own step count, learning rate, optimizer
-name, length-schedule fraction and reset flag, carried in
-``OptaxTrainingConfig`` as same-length tuples. Phases are how a run
+hyperparameters. Each is a ``TrainingPhase`` with its own step count,
+learning rate (a float or an optax schedule), optimizer, horizon, reset
+flag and optional penalty-weight override, held in
+``OptaxTrainingConfig.phases``. Phases are how a run
 changes strategy partway through, say a coarse pass at a high learning
 rate followed by a slow refinement.
 
@@ -25,11 +30,12 @@ kernels, so it adds no compilation cost.
 
 from __future__ import annotations
 
+import itertools
 import math
 import warnings
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable, Sequence
+from dataclasses import KW_ONLY, InitVar, dataclass
+from typing import TYPE_CHECKING, Any, cast
 
 import equinox as eqx
 import jax
@@ -37,36 +43,42 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array
 
-from jaxhybridmodels.data import BucketPayload, Dataset, make_bootstrap_dataset
-from jaxhybridmodels.losses import resolve_loss_fn
+from jaxhybridmodels.data import (
+    BucketPayload,
+    Data,
+    Dataset,
+    make_bootstrap_dataset,
+)
+from jaxhybridmodels.objective import Objective, ResolvedObjective, resolve_objective
 from jaxhybridmodels.penalties import (
     PenaltyPointSource,
-    bound_penalty,
     data_penalty_points,
     select_penalty_points,
-    validate_penalty_points,
 )
 from jaxhybridmodels.predictors.base import reinitialize_pytree_with_key
+from jaxhybridmodels.results import FitHistory, FitResult
 from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
-from jaxhybridmodels.trainable import trainable_mask
+from jaxhybridmodels.trainable import FreezeSpec, trainable_mask
 from jaxhybridmodels.training.kernels import (
     build_apply_update,
     build_bucket_step,
+    build_dataset_score,
     build_penalty_step,
     build_score_bucket,
 )
-from jaxhybridmodels.ui.base import SilentUI, TrainingUI
+from jaxhybridmodels.ui.base import SilentUI, TrainingUI, close_run_on_error
 from jaxhybridmodels.ui.optax import RichTrainingUI
+
+if TYPE_CHECKING:
+    from jaxhybridmodels.model import HybridModel
 
 # An optimizer entry may be a registered name ("adamw"), a factory taking
 # ``learning_rate`` and returning an ``optax.GradientTransformation``, or a
 # ready-made transformation instance. Names and factories are wrapped in
 # ``optax.inject_hyperparams`` so a phase boundary can move the learning
 # rate; a raw instance has its own state and cannot be re-hyperparametrised.
-OptimizerSpec = (
-    str | Callable[[float], optax.GradientTransformation] | optax.GradientTransformation
-)
+OptimizerSpec = str | Callable[[float], optax.GradientTransformation] | optax.GradientTransformation
 
 # R-T7 allows a tournament attempt to fail on a diffrax error or a
 # non-finite loss. Anything else is a bug in user or framework code and
@@ -77,106 +89,118 @@ _TOURNAMENT_FAILURES: tuple[type[BaseException], ...] = (
     eqx.EquinoxRuntimeError,
 )
 
-_PHASE_KEYED_FIELDS: tuple[str, ...] = (
-    "lr",
-    "optimizer",
-    "reset_optimiser_state",
-    "length_schedule",
-)
-
 
 @dataclass(frozen=True)
-class OptaxTrainingConfig:
-    """Configuration for :func:`train_with_optax`.
-
-    The first five fields are **phase-keyed**: ``steps``, ``lr``,
-    ``optimizer``, ``reset_optimiser_state`` and ``length_schedule`` carry
-    one entry per phase, must have the same length, and do not broadcast.
-    None has a defensible default, so a single-phase run spells out
-    one-element tuples::
-
-        OptaxTrainingConfig(
-            steps=(500,), lr=(1e-3,), optimizer=("adamw",),
-            reset_optimiser_state=(False,),
-        )
-
-    ``penalty_weight`` is the exception. It has an unambiguous off state,
-    so a length-1 tuple broadcasts across every phase.
+class TrainingPhase:
+    """One contiguous block of Optax steps with its own schedule settings.
 
     Attributes
     ----------
-    steps : tuple[int, ...]
-        Step budget per phase. Its length is the number of phases.
-    lr : tuple[float, ...]
-        Learning rate per phase. Applied to the live optimiser state
-        unless that phase also resets it.
-    optimizer : tuple[OptimizerSpec, ...]
-        Optimiser per phase: a registered name (``"adamw"``,
-        ``"adabelief"``), a factory taking ``learning_rate`` and returning
-        an ``optax.GradientTransformation`` (e.g. ``optax.adamw``, or
-        ``lambda learning_rate: optax.chain(optax.clip_by_global_norm(1.0),
-        optax.adamw(learning_rate))``), or a ready-made transformation instance.
-        Names and factories are wrapped in ``optax.inject_hyperparams``, so
-        a phase boundary can move the learning rate without a rebuild; a
-        raw instance cannot be re-hyperparametrised, so a phase that
-        changes ``lr`` with a raw instance must also set
-        ``reset_optimiser_state``. A phase that changes the optimiser must
-        set ``reset_optimiser_state``, because optimiser state belongs to
-        the optimiser that built it.
-    reset_optimiser_state : tuple[bool, ...]
-        Per phase, rebuild the optimiser and discard its state at that
-        boundary. Set it when switching optimiser, and when a
-        length-schedule change has made the accumulated momentum wrong.
-    length_schedule : tuple[float, ...]
-        Fraction of each experiment's timeline the loss looks at, per
-        phase, in ``(0, 1]``. It masks the **loss**, never the
-        integration: the solver still runs the full trajectory, and only
-        the first ``fraction`` of the observation times is scored, which
-        stops a long-horizon divergence from drowning the gradient. Being
-        a runtime mask rather than a shape change, a phase boundary costs
-        no recompile. Default ``(1.0,)`` scores everything.
-    penalty_weight : tuple[float, ...]
-        Weight on the bound-saturation penalty. Length 1 broadcasts to
-        every phase; any other length must match ``steps``. Entries must
-        be non-negative. ``0.0`` disables the penalty. The weight is
-        relative to the per-bucket-averaged data term: the penalty is a
-        mean over its points, charged once per step onto the averaged data
-        gradient, so the same weight means the same thing whatever the
-        dataset or point-count size.
-    penalty_points : tuple[Array, ...] | None
-        User-supplied penalty-only points for the bound penalty: one
-        ``[G, n_inputs]`` array of physical input vectors per
-        ``BoundedPredictor`` leaf, in traversal order, matching each leaf's
-        ``input_keys`` column order. No measurements are needed there;
-        saturation is charged at these points regardless of the data. When
-        ``None`` the penalty uses only the measured points gathered from
-        the dataset (leaves whose inputs do not all resolve to dataset
-        covariates must be covered by an entry here, or the run raises).
-        ``jaxhybridmodels.penalties.box_grid`` builds a warp-uniform box sweep
-        for the "police the whole box" recipe.
-    penalty_fn : Callable | None
-        The regulariser added to the data objective, defaulting to
-        :func:`jaxhybridmodels.penalties.bound_penalty` when ``None``. A
-        custom callable ``(predictors, points) -> scalar`` replaces
-        the bound penalty with e.g. weight decay on inner weights or a
-        monotonicity term; one that ignores points simply does not use them.
-    trajectory_penalty_fn : Callable | None
-        Trajectory-aware penalty for **embedded** hybrid models (the
-        predictor runs inside the vector field). Called as
-        ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]``
-        *including* any penalty accumulators carried in the ODE state; add
-        it to the data loss inside the same forward pass. ``None`` (the
-        default) disables it. See the helpers in ``jaxhybridmodels.penalties``
-        (``attach_penalty_state`` / ``penalty_vector_field`` /
-        ``strip_penalty_state`` / ``penalty_integral``).
-    trajectory_penalty_weight : float
-        Scalar weight on ``trajectory_penalty_fn``. ``0.0`` disables it
-        even if a function is set. Non-negative.
-    loss : Callable | str
-        A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``,
-        ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``.
-    channel_idx, channel_weights : tuple | None
-        Forwarded into the resolved loss. See ``jaxhybridmodels.losses``.
+    steps : int
+        Step budget for the phase. At least 1.
+    lr : float | optax.Schedule
+        Learning rate: a finite non-negative float, or an optax schedule
+        ``step -> lr`` whose step count starts at 0 at the start of this
+        phase, whatever ran before it. Chain several curves inside one
+        phase with ``optax.join_schedules``. Any callable works: one JAX
+        cannot trace, such as ``lambda s: 0.1 if s < 2 else 0.01``, is
+        evaluated step by step on the host. A float is applied to the live
+        optimiser state unless the phase also sets ``reset_optimizer``. A
+        schedule needs an optimiser name or factory; a ready-made
+        ``optax.GradientTransformation`` owns its learning rate, so pairing
+        one with a schedule raises.
+    optimizer : OptimizerSpec
+        A registered name (``"adamw"``, ``"adabelief"``), a factory taking
+        ``learning_rate`` and returning an ``optax.GradientTransformation``
+        (e.g. ``optax.adamw``, or ``lambda learning_rate: optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adamw(learning_rate))``), or
+        a ready-made transformation instance. Names and factories are
+        wrapped in ``optax.inject_hyperparams``, so a phase boundary or a
+        schedule can move the learning rate without a rebuild. A raw
+        instance cannot be re-hyperparametrised, so a phase that changes
+        ``lr`` with a raw instance must set ``reset_optimizer``. A phase
+        that changes the optimiser must set it too, because optimiser state
+        belongs to the optimiser that built it.
+    horizon : float
+        Fraction of each experiment's timeline the loss looks at, in
+        ``(0, 1]``. It masks the **loss**, never the integration: the
+        solver still runs the full trajectory, and only the first
+        ``horizon`` of the observation times is scored, which stops a
+        long-horizon divergence from drowning the gradient. Being a
+        runtime mask rather than a shape change, a phase boundary costs no
+        recompile.
+    reset_optimizer : bool
+        Rebuild the optimiser and discard its state at the start of this
+        phase. Set it when switching optimiser, and when a horizon change
+        has made the accumulated momentum wrong.
+    penalty_weight : float | None
+        Override of ``Objective.penalty_weight`` for this phase. ``None``
+        (the default) uses the objective's weight; ``0.0`` switches the
+        bound penalty off for the phase.
+    """
+
+    steps: int
+    # ``steps`` may be positional (``TrainingPhase(200, lr=1e-2)``); the rest
+    # are keyword-only so a stray positional cannot land in the wrong field.
+    _: KW_ONLY
+    lr: float | optax.Schedule = 1e-3
+    optimizer: OptimizerSpec = "adamw"
+    horizon: float = 1.0
+    reset_optimizer: bool = False
+    penalty_weight: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.steps < 1:
+            raise ValueError(f"TrainingPhase.steps must be at least 1; got {self.steps}")
+        if callable(self.lr):
+            if isinstance(self.optimizer, optax.GradientTransformation):
+                raise ValueError(
+                    "TrainingPhase.lr is a schedule but optimizer is a ready-made "
+                    "optax.GradientTransformation, which owns its learning rate. Pass an "
+                    "optimizer name or a factory taking learning_rate instead."
+                )
+        elif not math.isfinite(float(self.lr)) or float(self.lr) < 0.0:
+            raise ValueError(
+                f"TrainingPhase.lr must be a finite non-negative float or an optax "
+                f"schedule; got {self.lr}"
+            )
+        if not 0.0 < float(self.horizon) <= 1.0:
+            raise ValueError(f"TrainingPhase.horizon must lie in (0, 1]; got {self.horizon}")
+        if self.penalty_weight is not None:
+            weight = float(self.penalty_weight)
+            if not math.isfinite(weight) or weight < 0.0:
+                raise ValueError(
+                    f"TrainingPhase.penalty_weight must be finite and non-negative; got {weight}"
+                )
+
+
+@dataclass(frozen=True, kw_only=True)
+class OptaxTrainingConfig:
+    """Search settings for :func:`train_with_optax` and Optax ``HybridModel.fit``.
+
+    What is minimised (loss, channel weights, penalties) lives in
+    :class:`~jaxhybridmodels.Objective`, passed separately as
+    ``objective=``. This config says how to minimise it.
+
+    A single phase is spelled with ``steps=`` (plus optional ``lr=`` and
+    ``optimizer=``). A schedule is spelled with ``phases=``, a tuple of
+    :class:`TrainingPhase`. The two forms do not mix; either way the config
+    stores ``phases``::
+
+        OptaxTrainingConfig(steps=500, lr=1e-3)
+        OptaxTrainingConfig(steps=500, lr=optax.cosine_decay_schedule(1e-2, 500))
+        OptaxTrainingConfig(
+            phases=(
+                TrainingPhase(steps=200, lr=3e-2, horizon=0.5),
+                TrainingPhase(steps=200, lr=5e-3, reset_optimizer=True),
+            )
+        )
+
+    Attributes
+    ----------
+    phases : tuple[TrainingPhase, ...]
+        The schedule, run in order. See :class:`TrainingPhase` for the
+        per-phase settings.
     tournament_attempts, tournament_steps : int
         The tournament runs only when ``tournament_steps > 0`` and
         ``tournament_attempts > 1``. Each attempt re-initialises the
@@ -188,7 +212,7 @@ class OptaxTrainingConfig:
         predictors are used and a ``RuntimeWarning`` is raised.
     tournament_lr : float
         Learning rate for the tournament's short bursts, independent of
-        ``lr``.
+        the phase learning rates.
     patience : int
         Consecutive steps without a new best tracked loss before the current
         phase stops early. The tracked loss is the data term plus any
@@ -198,7 +222,7 @@ class OptaxTrainingConfig:
         acts. ``0`` disables early stopping.
     restore_best : bool
         Return the predictors from the lowest tracked-loss step instead of
-        the last one. The running minimum resets whenever ``length_schedule``
+        the last one. The running minimum resets whenever the horizon
         changes, since tracked losses over different horizons are not
         comparable and the shortest horizon would otherwise always own the
         minimum.
@@ -207,19 +231,12 @@ class OptaxTrainingConfig:
         explicit ``ui=...`` argument always wins.
     """
 
-    steps: tuple[int, ...]
-    lr: tuple[float, ...]
-    optimizer: tuple[OptimizerSpec, ...]
-    reset_optimiser_state: tuple[bool, ...]
-    length_schedule: tuple[float, ...] = (1.0,)
-    penalty_weight: tuple[float, ...] = (0.0,)
-    penalty_points: tuple[Array, ...] | None = None
-    penalty_fn: Callable[..., Array] | None = None
-    trajectory_penalty_fn: Callable[..., Array] | None = None
-    trajectory_penalty_weight: float = 0.0
-    loss: Callable[..., Array] | str = "mse"
-    channel_idx: tuple[int, ...] | None = None
-    channel_weights: tuple[float, ...] | None = None
+    # Single-phase shorthand. Init-only: after construction the schedule
+    # lives in ``phases`` alone, so these class attributes read as None.
+    steps: InitVar[int | None] = None
+    lr: InitVar[float | optax.Schedule | None] = None
+    optimizer: InitVar[OptimizerSpec | None] = None
+    phases: tuple[TrainingPhase, ...] = ()
     tournament_attempts: int = 1
     tournament_steps: int = 0
     tournament_lr: float = 1e-4
@@ -227,96 +244,35 @@ class OptaxTrainingConfig:
     restore_best: bool = True
     verbose: bool = True
 
-    def penalty_weight_for_phase(self, phase_idx: int) -> float:
-        """Penalty weight for ``phase_idx``, honouring the length-1 broadcast."""
-        if len(self.penalty_weight) == 1:
-            return float(self.penalty_weight[0])
-        return float(self.penalty_weight[phase_idx])
-
-    def __post_init__(self) -> None:
-        # Lengths first: every later rule indexes a phase-keyed field, and on a
-        # short tuple would raise IndexError instead of the real message.
-        _validate_phase_lengths(self)
-        _validate_penalty(self)
-        _validate_penalty_points(self)
+    def __post_init__(
+        self,
+        steps: int | None,
+        lr: float | optax.Schedule | None,
+        optimizer: OptimizerSpec | None,
+    ) -> None:
+        if steps is not None:
+            if self.phases:
+                raise ValueError("Use steps= or phases=, not both")
+            # None means "not given"; fall back to the TrainingPhase defaults.
+            default = TrainingPhase(steps)
+            phase = TrainingPhase(
+                steps,
+                lr=default.lr if lr is None else lr,
+                optimizer=default.optimizer if optimizer is None else optimizer,
+            )
+            object.__setattr__(self, "phases", (phase,))
+        elif lr is not None or optimizer is not None:
+            raise ValueError("With phases=, set lr and optimizer per TrainingPhase")
+        object.__setattr__(self, "phases", tuple(self.phases))
+        if not self.phases:
+            raise ValueError("Supply steps= for one phase or phases= for a schedule")
         _validate_optimizer_transitions(self)
-        _validate_length_schedule(self)
-        _validate_trajectory_penalty(self)
         _validate_tournament(self)
 
-
-def _validate_phase_lengths(config: OptaxTrainingConfig) -> None:
-    """Every phase-keyed field must be exactly as long as ``steps``.
-
-    These four have no defensible default, so none of them broadcasts. A
-    shorter tuple would either truncate the run or index out of range at a
-    phase boundary, both silently.
-    """
-    n = len(config.steps)
-    if n == 0:
-        raise ValueError("OptaxTrainingConfig.steps must contain at least one phase")
-    for step_count in config.steps:
-        if step_count < 1:
-            raise ValueError(
-                f"OptaxTrainingConfig.steps entries must be at least 1; got {step_count}"
-            )
-    for learning_rate in config.lr:
-        if not math.isfinite(float(learning_rate)) or float(learning_rate) < 0.0:
-            raise ValueError(
-                "OptaxTrainingConfig.lr entries must be finite and non-negative; "
-                f"got {learning_rate}"
-            )
-    for name in _PHASE_KEYED_FIELDS:
-        value = getattr(config, name)
-        if len(value) != n:
-            raise ValueError(
-                f"OptaxTrainingConfig: phase-keyed field {name!r} has length "
-                f"{len(value)}, expected {n} (matching steps)"
-            )
-
-
-def _validate_penalty(config: OptaxTrainingConfig) -> None:
-    """``penalty_weight`` broadcasts from length 1, and entries are non-negative.
-
-    It is deliberately not in ``_PHASE_KEYED_FIELDS``: those fields lack a
-    safe default, while this one has an unambiguous off state. A length-1
-    tuple broadcasts across every phase; any other length must match ``steps``
-    exactly, so a real per-phase schedule cannot be silently truncated.
-    """
-    n = len(config.steps)
-    if len(config.penalty_weight) not in (1, n):
-        raise ValueError(
-            "OptaxTrainingConfig.penalty_weight must have length 1 "
-            f"(broadcast across phases) or {n} (one per phase); "
-            f"got {len(config.penalty_weight)}"
-        )
-    for weight in config.penalty_weight:
-        if not math.isfinite(float(weight)):
-            raise ValueError(
-                "OptaxTrainingConfig.penalty_weight entries must be finite; "
-                f"got {weight}"
-            )
-        if float(weight) < 0.0:
-            raise ValueError(
-                f"OptaxTrainingConfig.penalty_weight entries must be non-negative; got {weight}"
-            )
-
-
-def _validate_penalty_points(config: OptaxTrainingConfig) -> None:
-    """User-supplied penalty points are rank-2 physical input vectors.
-
-    Length and input-column checks against the actual ``BoundedPredictor``
-    leaves need the predictors pytree, so they happen at kernel build time
-    (:func:`jaxhybridmodels.penalties.validate_penalty_points`); here only the
-    per-array shape is checkable without it.
-    """
-    for idx, points in enumerate(config.penalty_points or ()):
-        if points.ndim != 2:
-            raise ValueError(
-                "OptaxTrainingConfig.penalty_points entries must be rank-2 "
-                f"[G, n_inputs] arrays of physical input vectors; entry {idx} "
-                f"has shape {points.shape}"
-            )
+    @property
+    def total_steps(self) -> int:
+        """Step budget summed over every phase."""
+        return sum(phase.steps for phase in self.phases)
 
 
 def _validate_optimizer_transitions(config: OptaxTrainingConfig) -> None:
@@ -332,59 +288,14 @@ def _validate_optimizer_transitions(config: OptaxTrainingConfig) -> None:
     is fixed anyway, so a raw spec across an lr change needs a reset
     regardless).
     """
-    for phase_idx in range(1, len(config.steps)):
-        if (
-            config.optimizer[phase_idx] != config.optimizer[phase_idx - 1]
-            and not config.reset_optimiser_state[phase_idx]
-        ):
+    for idx, (before, phase) in enumerate(itertools.pairwise(config.phases), start=1):
+        if phase.optimizer != before.optimizer and not phase.reset_optimizer:
             raise ValueError(
-                f"OptaxTrainingConfig: phase {phase_idx} changes optimizer from "
-                f"{config.optimizer[phase_idx - 1]!r} to {config.optimizer[phase_idx]!r} "
-                f"but reset_optimiser_state[{phase_idx}] is False. Optimiser state is "
-                "specific to the optimiser that built it, so switching without a "
-                "reset would keep running the previous one. Set "
-                f"reset_optimiser_state[{phase_idx}]=True."
+                f"OptaxTrainingConfig: phase {idx} changes optimizer from "
+                f"{before.optimizer!r} to {phase.optimizer!r} without reset_optimizer=True. "
+                "Optimiser state is specific to the optimiser that built it, so switching "
+                "without a reset would keep running the previous one."
             )
-
-
-def _validate_length_schedule(config: OptaxTrainingConfig) -> None:
-    """Every fraction lies in ``(0, 1]``.
-
-    Zero would score no timestamps at all, and above one would claim more of
-    the trajectory than there is.
-    """
-    for fraction in config.length_schedule:
-        if not (0.0 < float(fraction) <= 1.0):
-            raise ValueError(
-                f"OptaxTrainingConfig.length_schedule entries must lie in (0, 1]; got {fraction}"
-            )
-
-
-def _validate_trajectory_penalty(config: OptaxTrainingConfig) -> None:
-    """The trajectory-penalty weight is non-negative, and a set weight needs a function.
-
-    ``trajectory_penalty_weight`` is a scalar (not per-phase): the
-    trajectory penalty is a regulariser on the forward pass, so a per-phase
-    schedule is a follow-up, not v1. A positive weight with no function
-    would silently do nothing, so it is refused; a function with weight
-    ``0.0`` is a no-op the user can flip on later without editing the hook.
-    """
-    if not math.isfinite(config.trajectory_penalty_weight):
-        raise ValueError(
-            "OptaxTrainingConfig.trajectory_penalty_weight must be finite; "
-            f"got {config.trajectory_penalty_weight}"
-        )
-    if config.trajectory_penalty_weight < 0.0:
-        raise ValueError(
-            "OptaxTrainingConfig.trajectory_penalty_weight must be non-negative; "
-            f"got {config.trajectory_penalty_weight}"
-        )
-    if config.trajectory_penalty_weight != 0.0 and config.trajectory_penalty_fn is None:
-        raise ValueError(
-            "OptaxTrainingConfig.trajectory_penalty_weight is non-zero but "
-            "trajectory_penalty_fn is None. Provide a "
-            "(full_state, bp) -> scalar function to charge."
-        )
 
 
 def _validate_tournament(config: OptaxTrainingConfig) -> None:
@@ -394,9 +305,7 @@ def _validate_tournament(config: OptaxTrainingConfig) -> None:
     if config.tournament_steps < 0:
         raise ValueError("OptaxTrainingConfig.tournament_steps must be non-negative")
     if not math.isfinite(config.tournament_lr) or config.tournament_lr < 0.0:
-        raise ValueError(
-            "OptaxTrainingConfig.tournament_lr must be finite and non-negative"
-        )
+        raise ValueError("OptaxTrainingConfig.tournament_lr must be finite and non-negative")
     if config.patience < 0:
         raise ValueError("OptaxTrainingConfig.patience must be non-negative")
 
@@ -406,10 +315,11 @@ def _build_optimizer(spec: OptimizerSpec, lr: float) -> optax.GradientTransforma
 
     A name string (``"adamw"``/``"adabelief"``) and a factory taking
     ``learning_rate`` are both wrapped in ``optax.inject_hyperparams``, so
-    ``_begin_phase`` can move the learning rate in the live optimiser state
-    without a rebuild. A raw ``optax.GradientTransformation`` instance is
-    returned as-is: its state is not re-hyperparametrisable, so a phase that
-    changes ``lr`` with a raw instance must also reset the optimiser.
+    ``_begin_phase`` and a scheduled phase can move the learning rate in the
+    live optimiser state without a rebuild. ``lr`` is the starting value.
+    A raw ``optax.GradientTransformation`` instance is returned as-is: its
+    state is not re-hyperparametrisable, so a phase that changes ``lr`` with
+    a raw instance must also reset the optimiser.
     """
     if isinstance(spec, str):
         norm = spec.lower().strip()
@@ -455,6 +365,45 @@ def _optimiser_state_supports_lr(opt_state: Any) -> bool:
     return hasattr(opt_state, "hyperparams")
 
 
+def _start_lr(lr: float | optax.Schedule) -> float:
+    """The learning rate a phase starts at: the float, or the schedule at step 0."""
+    if callable(lr):
+        return float(jnp.asarray(cast(optax.Schedule, lr)(0)))
+    return float(lr)
+
+
+def _scheduled_lrs(phase: TrainingPhase) -> Array | None:
+    """Every step's learning rate for a scheduled phase, ``None`` for a float one.
+
+    The schedule is evaluated once per phase, vectorised over the phase's
+    own step indices (0 at the phase start), rather than once per step on
+    the host. The loop then writes one entry into the optimiser state before
+    each step.
+    """
+    if not callable(phase.lr):
+        return None
+    schedule = cast(optax.Schedule, phase.lr)
+    try:
+        return jax.vmap(schedule)(jnp.arange(phase.steps))
+    except (jax.errors.ConcretizationTypeError, jax.errors.TracerIntegerConversionError):
+        # A plain Python schedule (``lambda s: 0.1 if s < 2 else 0.01``)
+        # branches on the step, which a traced index cannot do. Evaluate it
+        # on the host instead, once per step.
+        return jnp.stack([jnp.asarray(schedule(i)) for i in range(phase.steps)])
+
+
+def _set_lr(opt_state: Any, value: Any) -> None:
+    """Write ``value`` into an injectable optimiser state's learning rate, in place.
+
+    The new value takes the dtype of the one it replaces. ``inject_hyperparams``
+    stores a strong-typed float32, and a weak-typed replacement (what
+    ``jnp.asarray(0.1)`` gives) would change the jit cache key and retrace
+    the fused update kernel.
+    """
+    current = opt_state.hyperparams["learning_rate"]
+    opt_state.hyperparams["learning_rate"] = jnp.asarray(value, dtype=current.dtype)
+
+
 def _build_step_update(
     *,
     optimizer: optax.GradientTransformation,
@@ -463,12 +412,11 @@ def _build_step_update(
     """Fused per-step tail: average, merge the bound penalty, and optimise.
 
     One jitted ``step_update(predictors, acc_grads, penalty_grads,
-    n_buckets, opt_state) -> (predictors, opt_state)`` replacing what used
-    to be two Python tree walks (normalise by bucket count, add the
-    penalty grads) plus a separate ``apply_update`` launch every step.
+    n_buckets, opt_state) -> (predictors, opt_state)`` that normalises by
+    bucket count, adds the penalty grads and applies the optimiser update.
     Each eager per-leaf tree operation dispatches one compiled kernel per
-    parameter leaf — on CPU that measured ~2 ms per tree walk for a small
-    MLP, several times the ODE solve itself — so folding them into the
+    parameter leaf. On CPU that measured ~2 ms per tree walk for a small
+    MLP, several times the ODE solve itself, so folding them into the
     optimiser kernel removes most of the Python-side step cost without
     changing the math: the averaging and the penalty merge run in the
     same order, so the optimiser sees bit-identical gradients.
@@ -486,9 +434,7 @@ def _build_step_update(
         n_buckets: Array,
         opt_state: Any,
     ) -> tuple[Any, Any]:
-        avg_grads = jax.tree.map(
-            lambda a, p: a / n_buckets + p, acc_grads, penalty_grads
-        )
+        avg_grads = jax.tree.map(lambda a, p: a / n_buckets + p, acc_grads, penalty_grads)
         params = eqx.filter(predictors, trainable)
         updates, new_opt_state = optimizer.update(avg_grads, opt_state, params)
         return eqx.apply_updates(predictors, updates), new_opt_state
@@ -505,13 +451,13 @@ def _training_step(
 ) -> tuple[Array, Any, int]:
     """One training step: every bucket, gradients accumulated, raw sums back.
 
-    Returns ``(total_loss, acc_grads, n_buckets)`` — the **raw** sum of
+    Returns ``(total_loss, acc_grads, n_buckets)``, the **raw** sum of
     per-bucket losses and gradients, not yet divided. The caller merges
     the bound-penalty gradients and normalises inside the fused
     ``step_update`` kernel (:func:`_build_step_update`), so the per-step
     Python side never walks the parameter tree. The first bucket's
     gradients seed the accumulator directly instead of adding to a
-    ``zeros_like`` tree — one fewer pointless per-leaf pass per step.
+    ``zeros_like`` tree, which saves one per-leaf pass per step.
 
     ``total_loss`` is the data term plus any configured trajectory penalty
     (charged inside ``bucket_step``'s forward pass). The bound penalty is
@@ -553,8 +499,8 @@ def _shared_tournament(
 
     Each candidate is re-initialised from its own subkey, trained for
     ``tournament_steps`` steps at ``tournament_lr``, then scored with a
-    forward-only pass. The score is the data term — including any
-    configured trajectory penalty, which the phases also charge — and
+    forward-only pass. The score is the data term, including any
+    configured trajectory penalty (the phases charge it too) and
     *excluding* the bound penalty: that regulariser is charged
     once per step regardless of the data, so scoring on it too would let a
     candidate win by drifting where the penalty likes rather than by
@@ -576,10 +522,18 @@ def _shared_tournament(
         try:
             # One subkey per Module leaf, so identical-shape sibling
             # predictors get genuinely different fresh weights.
-            candidate: Any = reinitialize_pytree_with_key(predictors, attempt_key)
+            fresh = reinitialize_pytree_with_key(predictors, attempt_key)
+            # Re-init draws every Module leaf, frozen ones included. Put the
+            # frozen leaves back, so a frozen pre-trained subtree (or a
+            # default-frozen BoundScaler) keeps its values instead of being
+            # held fixed at random ones.
+            candidate: Any = eqx.combine(
+                eqx.filter(fresh, trainable),
+                eqx.filter(predictors, trainable, inverse=True),
+            )
             opt_state = optimizer.init(eqx.filter(candidate, trainable))
             if _optimiser_state_supports_lr(opt_state):
-                opt_state.hyperparams["learning_rate"] = jnp.asarray(tournament_lr)
+                _set_lr(opt_state, tournament_lr)
             else:
                 warnings.warn(
                     "tournament_lr has no effect: the optimiser state carries no "
@@ -646,13 +600,13 @@ def _tournament_enabled(config: OptaxTrainingConfig) -> bool:
 def _horizon_changed(config: OptaxTrainingConfig, phase_idx: int) -> bool:
     """Does this phase score a different slice of each trajectory than the last?
 
-    ``length_schedule`` masks the loss to a prefix, so a change here means
+    ``TrainingPhase.horizon`` masks the loss to a prefix, so a change here means
     the losses either side of the boundary measure different quantities.
     Phase 0 has no predecessor and so never counts as a change.
     """
     if phase_idx == 0:
         return False
-    return config.length_schedule[phase_idx] != config.length_schedule[phase_idx - 1]
+    return config.phases[phase_idx].horizon != config.phases[phase_idx - 1].horizon
 
 
 def _has_weak_scalar_trainable(predictors: Any, trainable: Any) -> bool:
@@ -663,8 +617,7 @@ def _has_weak_scalar_trainable(predictors: Any, trainable: Any) -> bool:
     (``jnp.asarray(1.0)``, the default-constructed
     ``BoundScaler.temperature``) to strong-typed and invalidates every
     kernel that reads the predictor once. Strong-typed or frozen scalars
-    never flip and never retrace (``tests/_harness.py``'s ``OmegaPredictor``
-    documents the same rule). This is the predicate that decides whether
+    never flip and never retrace. This is the predicate that decides whether
     :func:`_warmup_compile`'s settle cycle is worth paying.
     """
     for leaf in jax.tree.leaves(eqx.filter(predictors, trainable)):
@@ -704,13 +657,13 @@ def _warmup_compile(
     compiled cache keys 0-d array leaves by value *and* weak type, so the
     first optimiser update flips a weak-typed scalar leaf in the user's own
     tree (``jnp.asarray(1.0)``) to strong-typed and would retrace every
-    kernel once — seconds of ODE recompile mid-run. The framework's own
+    kernel once, costing seconds of ODE recompile mid-run. The framework's own
     scalars are strong-typed at construction
     (:class:`~jaxhybridmodels.predictors.BoundScaler`), so the stock trainer
     requests the settle only when :func:`_has_weak_scalar_trainable` finds
     a weak trainable scalar in the supplied tree; strong-typed or frozen
     trees keep the one-trace-per-shape contract exactly. Discovered and
-    verified empirically — see ``scripts/bench_hotpath.py``.
+    verified empirically; see ``scripts/bench_hotpath.py``.
     """
     total_buckets = len(bucket_payloads)
     last_grads: Any = None
@@ -723,12 +676,7 @@ def _warmup_compile(
         ui.on_compile_progress(bucket_idx=idx, total_buckets=total_buckets)
         ui.on_compile_done(bucket_idx=idx)
 
-    if (
-        step_update is None
-        or optimizer is None
-        or trainable is None
-        or penalty_step is None
-    ):
+    if step_update is None or optimizer is None or trainable is None or penalty_step is None:
         return
 
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
@@ -739,9 +687,7 @@ def _warmup_compile(
     # the warm-up pass; the values are irrelevant, only the shapes.
     warm_penalty, _ = penalty_step(predictors, zero_weight, penalty_points)
     jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
-    updated, opt_state = step_update(
-        predictors, last_grads, last_grads, n_buckets_arg, opt_state
-    )
+    updated, opt_state = step_update(predictors, last_grads, last_grads, n_buckets_arg, opt_state)
     jax.block_until_ready(updated)  # type: ignore[no-untyped-call]
     # The tournament's forward-only scorer gets its first trace here too.
     if score_bucket is not None:
@@ -759,9 +705,7 @@ def _warmup_compile(
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
     warm_penalty, _ = penalty_step(updated, zero_weight, penalty_points)
     jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
-    updated, opt_state = step_update(
-        updated, last_grads, last_grads, n_buckets_arg, opt_state
-    )
+    updated, opt_state = step_update(updated, last_grads, last_grads, n_buckets_arg, opt_state)
     jax.block_until_ready(updated)  # type: ignore[no-untyped-call]
     # The tournament's forward-only scorer reads the same post-update
     # predictors; settle it too so a scoring sweep never re-traces.
@@ -769,9 +713,7 @@ def _warmup_compile(
         for bp in bucket_payloads:
             warm_score = score_bucket(updated, bp, length_mask_fraction)
             jax.block_until_ready(warm_score)  # type: ignore[no-untyped-call]
-    ui.on_compile_progress(
-        bucket_idx=total_buckets, total_buckets=total_buckets
-    )
+    ui.on_compile_progress(bucket_idx=total_buckets, total_buckets=total_buckets)
 
 
 def _begin_phase(
@@ -797,25 +739,30 @@ def _begin_phase(
     if phase_idx == 0:
         return optimizer, opt_state
 
-    if config.reset_optimiser_state[phase_idx]:
-        optimizer = _build_optimizer(config.optimizer[phase_idx], config.lr[phase_idx])
+    phase = config.phases[phase_idx]
+    if phase.reset_optimizer:
+        optimizer = _build_optimizer(phase.optimizer, _start_lr(phase.lr))
         return optimizer, optimizer.init(eqx.filter(predictors, trainable))
+    if callable(phase.lr):
+        # A scheduled phase writes its learning rate before every step, and
+        # TrainingPhase has refused a schedule on a raw optimiser.
+        return optimizer, opt_state
 
     # No reset, so only the learning rate moves. ``__post_init__`` has already
     # refused a phase that changes the optimiser without a reset, so the live
     # state still belongs to the optimiser this phase names. A raw
     # ``optax.GradientTransformation`` has no injectable ``hyperparams``, so
     # an lr change on one is refused here rather than silently ignored.
-    if config.lr[phase_idx] != config.lr[phase_idx - 1]:
+    if phase.lr != config.phases[phase_idx - 1].lr:
         if not _optimiser_state_supports_lr(opt_state):
             raise ValueError(
                 "OptaxTrainingConfig: phase "
                 f"{phase_idx} changes lr with a raw optax.GradientTransformation "
                 "that cannot be re-hyperparametrised. Set "
-                f"reset_optimiser_state[{phase_idx}]=True to rebuild it, or pass "
+                f"reset_optimizer=True on that phase to rebuild it, or pass "
                 "an optimiser name / factory so the learning rate stays injectable."
             )
-        opt_state.hyperparams["learning_rate"] = jnp.asarray(config.lr[phase_idx])
+        _set_lr(opt_state, phase.lr)
     return optimizer, opt_state
 
 
@@ -826,16 +773,15 @@ class _BestTracker:
     would treat it as a static argument and hash it by identity, retracing
     once per instance.
 
-    It replaces three loop variables that always had to move together and
-    carried two invariants between them that previously lived only in
-    comments: the snapshot must be the parameters the loss was measured at,
-    and both the minimum and the counter are scoped to a horizon rather than
-    to the whole run.
+    Two invariants hold between the fields: the snapshot is the parameters
+    the loss was measured at, and both the minimum and the counter are
+    scoped to a horizon rather than to the whole run.
     """
 
     def __init__(self, predictors: Any) -> None:
         self.best_loss = float("inf")
         self.best_predictors = predictors
+        self.best_step: int | None = None
         self.steps_since_improvement = 0
 
     def begin_phase(self, predictors: Any, *, horizon_changed: bool) -> None:
@@ -855,17 +801,20 @@ class _BestTracker:
         if horizon_changed:
             self.best_loss = float("inf")
             self.best_predictors = predictors
+            self.best_step = None
 
-    def update(self, loss: float, predictors: Any) -> None:
+    def update(self, loss: float, predictors: Any, step: int) -> None:
         """Record ``loss``, which must have been measured at ``predictors``.
 
         Pass the **pre-update** parameters. Passing the ones the optimiser
         just produced hands back a model whose loss is not the reported
         minimum, and ``loss_history`` then describes a different model.
+        ``step`` is the run-wide index of this step in the loss history.
         """
         if loss < self.best_loss:
             self.best_loss = loss
             self.best_predictors = predictors
+            self.best_step = step
             self.steps_since_improvement = 0
         else:
             self.steps_since_improvement += 1
@@ -873,6 +822,28 @@ class _BestTracker:
     def out_of_patience(self, patience: int) -> bool:
         """``patience`` consecutive steps with no new minimum. ``0`` disables it."""
         return patience > 0 and self.steps_since_improvement >= patience
+
+
+@dataclass
+class _PhaseRun:
+    """What one pass of :func:`_run_phases` produced, step by step.
+
+    ``loss`` is the tracked loss (data term plus any trajectory penalty)
+    and ``penalty`` the weighted bound penalty, so their sum is the
+    objective the optimiser minimised. ``selection`` holds the
+    ``select_score`` values and is empty when selection follows ``loss``.
+    ``best_step`` indexes these lists. ``stopped_early`` is set when
+    patience ended the final phase before its step budget.
+    """
+
+    predictors: Any
+    final_loss: float
+    loss: list[float]
+    penalty: list[float]
+    phase: list[int]
+    selection: list[float]
+    best_step: int | None
+    stopped_early: bool
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
@@ -886,124 +857,170 @@ def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
 
 
 def train_with_optax(
+    model: HybridModel,
+    data: Data,
+    config: OptaxTrainingConfig,
+    *,
+    key: Array,
+    objective: Objective | None = None,
+    freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
+    trainable: Any = None,
+    ui: TrainingUI | None = None,
+    validation: Data | None = None,
+) -> FitResult:
+    """Train ``model``'s predictors with Optax; what ``model.fit`` runs for an Optax config.
+
+    Runs the phases described by ``config``, optionally preceded by a
+    tournament. See the module docstring for what a step, a phase, and the
+    tournament are, and :class:`OptaxTrainingConfig` for the fields. Every
+    keyword means what it does for :meth:`HybridModel.fit
+    <jaxhybridmodels.HybridModel.fit>`, and ``data`` and ``validation`` may
+    be a ``Dataset`` or a list of experiments.
+
+    ``history.loss`` is the raw per-step loss, measured before that step's
+    update, concatenated across phases. It can go up. It is the data term
+    plus any trajectory penalty; the bound penalty is in
+    ``history.penalty``, so a ramping bound weight does not move the loss
+    series. Evosax records best-so-far instead, so the two series mean
+    different things.
+
+    The returned model comes from the lowest-loss step when
+    ``config.restore_best=True``, else the final step. That minimum resets
+    whenever the phase horizon changes, so the returned model always comes
+    from the last horizon trained on.
+    """
+    if not isinstance(config, OptaxTrainingConfig):
+        raise TypeError(
+            f"train_with_optax takes an OptaxTrainingConfig; got {type(config).__name__}"
+        )
+    dataset, validation_set, mask = model._prepare_fit(
+        data, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
+    )
+    run = _train_with_optax(
+        model.predictors,
+        dataset,
+        config,
+        objective=objective,
+        simulate_fn=model.simulate_fn,
+        state_to_output=model.state_to_output,
+        solver=model.solver,
+        trainable=mask,
+        key=key,
+        ui=ui,
+        validation=validation_set,
+    )
+    return _fit_result(model, run)
+
+
+def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
+    """Wrap one phase run as the user-facing :class:`FitResult`."""
+    return FitResult(
+        model=model._with_predictors(run.predictors),
+        history=FitHistory(
+            loss=tuple(run.loss),
+            penalty=tuple(run.penalty),
+            phase=tuple(run.phase),
+            validation_loss=tuple(run.selection),
+        ),
+        best_step=run.best_step,
+        stop_reason="patience" if run.stopped_early else "budget_exhausted",
+    )
+
+
+def _train_with_optax(
     predictors: Any,
     dataset: Dataset,
     config: OptaxTrainingConfig,
     *,
+    objective: Objective | None = None,
     simulate_fn: Callable[..., Array],
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     trainable: Any = None,
     key: Array,
     ui: TrainingUI | None = None,
-) -> tuple[list[float], Any]:
-    """Train ``predictors`` against ``dataset`` with Optax.
+    validation: Dataset | None = None,
+) -> _PhaseRun:
+    """Train loose predictors and return the full per-step record.
 
-    Runs the phases described by ``config``, optionally preceded by a
-    tournament. See the module docstring for what a step, a phase, and
-    the tournament are, and :class:`OptaxTrainingConfig` for the fields.
-
-    ``predictors`` is a ``PyTree[eqx.Module]``, conventionally a tuple of
-    ``BoundedPredictor`` leaves but any shape ``eqx.partition`` can walk.
-    ``key`` is keyword-only and required, so reproducibility never rests on
-    an implicit default.
-
-    ``state_to_output`` is the pure mapping ``[T, S] -> [T, D]`` from full
-    simulator state to observed channels. It is a property of the model,
-    passed here rather than stored on the ``Dataset``.
-
-    ``trainable`` is a boolean mask matching ``predictors``. Omitting it
-    defaults to :func:`jaxhybridmodels.trainable.trainable_mask`, which marks
-    every inexact-array leaf trainable. Pass a custom mask, usually from
-    the freezers in ``jaxhybridmodels.trainable``, to hold leaves fixed;
-    freezing ``BoundScaler`` leaves is the common case.
-
-    Returns
-    -------
-    tuple[list[float], PyTree[eqx.Module]]
-        ``(loss_history, trained_predictors)``.
-
-        ``loss_history`` is the **raw per-step loss**, one entry per
-        step, concatenated across phases. It can go up. It is the data
-        term plus any configured trajectory penalty (charged inside the
-        bucket forward pass); the bound penalty is excluded, so a ramping
-        bound-penalty weight cannot move the series and runs with
-        different bound weights stay comparable, and nothing is smoothed:
-        these are the values the optimiser saw.
-
-        It differs from
-        :func:`~jaxhybridmodels.training.evosax.train_with_evosax`, whose
-        history is best-so-far and therefore monotone. Same type, same
-        position, different meaning: plotting both on one axis misleads.
-
-        ``trained_predictors`` comes from the lowest-loss step when
-        ``config.restore_best=True``, else the final step. That minimum
-        resets whenever ``length_schedule`` changes, so the returned model
-        always comes from the last horizon trained on.
+    The engine behind :func:`train_with_optax`, on the pieces of a model
+    rather than the model, after its checks have run.
     """
     if trainable is None:
         trainable = trainable_mask(predictors)
 
-    bucket_payloads = dataset.bucket_payloads
-    if not bucket_payloads:
+    if not dataset.bucket_payloads:
         raise ValueError("train_with_optax: dataset has no bucket payloads")
+    # Checked before the warm-up compile, which a mismatch would waste.
+    if validation is not None and validation.output_channel_names != dataset.output_channel_names:
+        raise ValueError(
+            f"validation channels {validation.output_channel_names} do not match the "
+            f"training channels {dataset.output_channel_names}"
+        )
 
+    # Resolved before the dashboard opens, so a bad channel name or penalty
+    # path raises without leaving a Rich Live display on the terminal.
+    resolved = _resolve_objective(objective, predictors, dataset, config)
     ui_ = _select_ui(ui, config.verbose)
-    ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
+    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+    with close_run_on_error(ui_):
+        kernels = _build_training_kernels(
+            predictors=predictors,
+            dataset=dataset,
+            config=config,
+            resolved=resolved,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
+            trainable=trainable,
+            ui=ui_,
+        )
+        select_score = (
+            None if validation is None else build_dataset_score(kernels.score_bucket, validation)
+        )
 
-    (
-        bucket_step,
-        penalty_step,
-        score_bucket,
-        optimizer,
-        apply_update,
-        step_update,
-        sources,
-        extras,
-    ) = _build_training_kernels(
-        predictors=predictors,
-        dataset=dataset,
-        config=config,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
-        ui=ui_,
-    )
+        if _tournament_enabled(config):
+            ranked = _shared_tournament(
+                predictors,
+                dataset,
+                bucket_step=kernels.bucket_step,
+                score_bucket=kernels.score_bucket,
+                apply_update=kernels.apply_update,
+                optimizer=kernels.optimizer,
+                trainable=trainable,
+                tournament_attempts=config.tournament_attempts,
+                tournament_steps=config.tournament_steps,
+                tournament_lr=config.tournament_lr,
+                key=fold(key, "tournament"),
+                length_mask_fraction=jnp.asarray(1.0),
+                top_k=1,
+            )
+            predictors = ranked[0][1]
 
-    if _tournament_enabled(config):
-        full_mask = jnp.asarray(1.0)
-        ranked = _shared_tournament(
+        return _run_phases(
             predictors,
             dataset,
-            bucket_step=bucket_step,
-            score_bucket=score_bucket,
-            apply_update=apply_update,
-            optimizer=optimizer,
+            config,
+            kernels=kernels,
+            sources=kernels.sources,
             trainable=trainable,
-            tournament_attempts=config.tournament_attempts,
-            tournament_steps=config.tournament_steps,
-            tournament_lr=config.tournament_lr,
-            key=fold(key, "tournament"),
-            length_mask_fraction=full_mask,
-            top_k=1,
+            ui=ui_,
+            select_score=select_score,
         )
-        predictors = ranked[0][1]
 
-    _history, final_predictors, _final_loss = _run_phases(
-        predictors,
-        dataset,
-        config,
-        optimizer=optimizer,
-        bucket_step=bucket_step,
-        penalty_step=penalty_step,
-        sources=sources,
-        extras=extras,
-        trainable=trainable,
-        ui=ui_,
-        step_update=step_update,
-    )
-    return _history, final_predictors
+
+def _phase_penalty_weight(phase: TrainingPhase, objective: Objective) -> float:
+    """The phase's bound-penalty weight: its own override, else the objective's."""
+    return float(objective.penalty_weight if phase.penalty_weight is None else phase.penalty_weight)
+
+
+def _resolve_objective(
+    objective: Objective | None, predictors: Any, dataset: Dataset, config: OptaxTrainingConfig
+) -> ResolvedObjective:
+    """:func:`resolve_objective` with the bound penalty on when any phase weights it."""
+    objective = Objective() if objective is None else objective
+    penalty_on = any(_phase_penalty_weight(p, objective) > 0.0 for p in config.phases)
+    return resolve_objective(objective, predictors, dataset, penalty_on=penalty_on)
 
 
 def _run_phases(
@@ -1011,51 +1028,55 @@ def _run_phases(
     dataset: Dataset,
     config: OptaxTrainingConfig,
     *,
-    optimizer: optax.GradientTransformation,
-    bucket_step: Callable[..., tuple[Array, Any]],
-    penalty_step: Callable[..., tuple[Array, Any]],
+    kernels: _Kernels,
     sources: tuple[PenaltyPointSource | None, ...],
-    extras: tuple[Array, ...],
     trainable: Any,
     ui: TrainingUI,
-    step_update: Callable[..., tuple[Any, Any]] | None = None,
-) -> tuple[list[float], Any, float]:
+    select_score: Callable[[Any], float] | None = None,
+) -> _PhaseRun:
     """Run the phase schedule from a starting ``predictors``.
 
     The shared main-loop body behind :func:`train_with_optax` and the
-    ensemble entry points. Takes the pre-built kernels and a fresh
-    optimiser; the caller owns warm-up compilation and any tournament
-    selection.
+    ensemble entry points. Takes the pre-built kernels and starts a fresh
+    optimiser state; the caller owns warm-up compilation and any tournament
+    selection. ``sources`` are the measured penalty points for ``dataset``,
+    passed separately because a bootstrap resample gathers its own.
 
     The caller is responsible for the ``on_run_start`` side of the UI
     bracket; this function fires ``on_run_end``. A caller that runs this
     body several times (the ensembles, once per member) fires
     ``on_run_start`` before each call, so every member is its own UI run.
 
-    Returns ``(losses_history, final_predictors, final_loss)`` where
-    ``final_loss`` is the loss that labels the returned predictors: the
+    Returns a :class:`_PhaseRun`. Its ``final_loss`` labels the returned
+    predictors: the
     best-step loss when ``config.restore_best`` is set (measured exactly
     at the returned parameters), else the last step's reported loss
     (measured one update before the returned parameters, as the loop
     reports it). The ensembles rank members on this labelled loss, so a
     best-step-restored member is not reported at a loss it never had.
 
-    ``step_update`` is the fused per-step tail built by
-    :func:`_build_step_update` — average + penalty merge + optimiser
-    update in one kernel. The stock callers pass the instance the
-    warm-up settled; when ``None`` (or when a phase reset rebuilds the
-    optimiser) it is rebuilt here from the live optimiser.
+    The fused ``step_update`` kernel comes from ``kernels`` and is reused
+    while the optimiser is; a phase reset that rebuilds the optimiser
+    rebuilds it too.
+
+    ``select_score``, when given, replaces the tracked loss for picking the
+    best step and for patience. It scores a fixed full-horizon target, so
+    the running minimum then survives horizon changes.
     """
+    optimizer = kernels.optimizer
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
-    if step_update is None:
-        step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
+    step_update = kernels.step_update
     step_update_optimizer = optimizer
     n_buckets_arg = jnp.asarray(len(dataset.bucket_payloads), dtype=jnp.int32)
 
     losses_history: list[float] = []
+    penalties: list[float] = []
+    phases: list[int] = []
+    selection: list[float] = []
+    stopped_early = False
     best = _BestTracker(predictors)
 
-    for phase_idx, n_steps in enumerate(config.steps):
+    for phase_idx, phase in enumerate(config.phases):
         optimizer, opt_state = _begin_phase(
             phase_idx,
             predictors,
@@ -1069,32 +1090,39 @@ def _run_phases(
             step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
             step_update_optimizer = optimizer
 
-        length_mask_fraction = jnp.asarray(config.length_schedule[phase_idx])
+        length_mask_fraction = jnp.asarray(phase.horizon)
+        weight = _phase_penalty_weight(phase, kernels.objective)
         # Traced, not closed over: a Python float that changed per phase
         # would retrace ``bucket_step`` at every phase boundary. Same reason
         # ``length_mask_fraction`` is passed rather than baked in.
-        penalty_weight = jnp.asarray(config.penalty_weight_for_phase(phase_idx))
+        penalty_weight = jnp.asarray(weight)
         # Host-side per phase: the keep-mask must be concrete to index the
         # gathered points. A shape change across phases retraces only the
         # small penalty kernel, never ``bucket_step``.
-        phase_points = select_penalty_points(
-            sources, extras, config.length_schedule[phase_idx]
-        )
+        phase_points = select_penalty_points(sources, kernels.extras, phase.horizon)
+        lrs = _scheduled_lrs(phase)
 
-        best.begin_phase(predictors, horizon_changed=_horizon_changed(config, phase_idx))
+        best.begin_phase(
+            predictors,
+            horizon_changed=select_score is None and _horizon_changed(config, phase_idx),
+        )
+        # Only the last phase decides the reported stop reason.
+        stopped_early = False
 
         ui.on_phase_start(
             phase_idx=phase_idx,
-            phase_steps=int(n_steps),
-            lr=float(config.lr[phase_idx]),
-            optimizer=config.optimizer[phase_idx],
+            phase_steps=phase.steps,
+            lr=_start_lr(phase.lr),
+            optimizer=phase.optimizer,
         )
 
-        for step in range(int(n_steps)):
+        for step in range(phase.steps):
+            if lrs is not None:
+                _set_lr(opt_state, lrs[step])
             total_loss, acc_grads, n_buckets = _training_step(
-                predictors, dataset, bucket_step, length_mask_fraction, trainable
+                predictors, dataset, kernels.bucket_step, length_mask_fraction, trainable
             )
-            avg_penalty, penalty_grads = penalty_step(
+            avg_penalty, penalty_grads = kernels.penalty_step(
                 predictors, penalty_weight, phase_points
             )
             # Dispatch the update before blocking on the loss values. Both
@@ -1115,9 +1143,15 @@ def _run_phases(
             loss_value = float(total_loss / float(max(n_buckets, 1)))
             penalty_value = float(avg_penalty)
             losses_history.append(loss_value)
+            penalties.append(weight * penalty_value)
+            phases.append(phase_idx)
+            score = loss_value
+            if select_score is not None:
+                score = select_score(previous_predictors)
+                selection.append(score)
             # ``previous_predictors``, not ``predictors``: avg_data was
             # measured before the update was applied.
-            best.update(loss_value, previous_predictors)
+            best.update(score, previous_predictors, len(losses_history) - 1)
 
             ui.on_step_end(
                 step_idx=step,
@@ -1127,6 +1161,7 @@ def _run_phases(
             )
 
             if best.out_of_patience(config.patience):
+                stopped_early = step < phase.steps - 1
                 break
 
         ui.on_phase_end(phase_idx=phase_idx)
@@ -1143,7 +1178,37 @@ def _run_phases(
     else:
         final_loss = losses_history[-1]
     ui.on_run_end(final_loss=final_loss)
-    return losses_history, final_predictors, final_loss
+    return _PhaseRun(
+        predictors=final_predictors,
+        final_loss=final_loss,
+        loss=losses_history,
+        penalty=penalties,
+        phase=phases,
+        selection=selection,
+        best_step=best.best_step if config.restore_best else None,
+        stopped_early=stopped_early,
+    )
+
+
+@dataclass(frozen=True)
+class _Kernels:
+    """The compiled pieces and resolved objective one run (or ensemble) shares.
+
+    ``sources`` are the measured penalty points of the dataset the kernels
+    were built against and ``extras`` the objective's extra points, one per
+    ``BoundedPredictor`` in traversal order. Host-side only; never passed
+    into a jitted function.
+    """
+
+    objective: Objective
+    bucket_step: Callable[..., tuple[Array, Any]]
+    penalty_step: Callable[..., tuple[Array, Any]]
+    score_bucket: Callable[..., Array]
+    optimizer: optax.GradientTransformation
+    apply_update: Callable[..., tuple[Any, Any]]
+    step_update: Callable[..., tuple[Any, Any]]
+    sources: tuple[PenaltyPointSource | None, ...]
+    extras: tuple[Array, ...]
 
 
 def _build_training_kernels(
@@ -1151,30 +1216,18 @@ def _build_training_kernels(
     predictors: Any,
     dataset: Dataset,
     config: OptaxTrainingConfig,
+    resolved: ResolvedObjective,
     simulate_fn: Callable[..., Array],
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     trainable: Any,
     ui: TrainingUI,
-) -> tuple[
-    Callable[..., tuple[Array, Any]],
-    Callable[..., tuple[Array, Any]],
-    Callable[..., Array],
-    optax.GradientTransformation,
-    Callable[..., tuple[Any, Any]],
-    Callable[..., tuple[Any, Any]],
-    tuple[PenaltyPointSource | None, ...],
-    tuple[Array, ...],
-]:
-    """Build the compiled kernels, optimiser, and warm-up the caches.
+) -> _Kernels:
+    """Build the compiled kernels and optimiser for a resolved objective, and warm the caches.
 
     Shared by :func:`train_with_optax` and the ensemble entry points so a
-    seed/bootstrap ensemble reuses the exact same kernel construction.
-    Returns ``(bucket_step, penalty_step, score_bucket, optimizer,
-    apply_update, step_update, sources, extras)`` with the jit caches
-    already populated by a warm-up pass; ``sources`` / ``extras`` are the
-    penalty point sets
-    the phases select from.
+    seed/bootstrap ensemble reuses the exact same kernel construction. The
+    jit caches come back already populated by a warm-up pass.
 
     The caller owns the ``on_run_start`` side of the UI bracket: the
     warm-up compile events below are meant to land inside a run, and the
@@ -1182,18 +1235,8 @@ def _build_training_kernels(
     the first.
     """
     bucket_payloads = dataset.bucket_payloads
-    loss_fn = resolve_loss_fn(config.loss, config.channel_idx, config.channel_weights)
-    penalty_fn = bound_penalty if config.penalty_fn is None else config.penalty_fn
-    sources = data_penalty_points(predictors, dataset)
-    extras = config.penalty_points or ()
-    validate_penalty_points(
-        predictors,
-        sources,
-        extras,
-        # Coverage is the default bound penalty's contract; a custom
-        # ``penalty_fn`` owns its points and needs no coverage check.
-        enabled=any(w > 0.0 for w in config.penalty_weight) and config.penalty_fn is None,
-    )
+    objective, loss_fn = resolved.objective, resolved.loss_fn
+    sources, extras = resolved.sources, resolved.extras
 
     bucket_step = build_bucket_step(
         simulate_fn=simulate_fn,
@@ -1201,329 +1244,178 @@ def _build_training_kernels(
         solver=solver,
         loss_fn=loss_fn,
         trainable=trainable,
-        trajectory_penalty_fn=config.trajectory_penalty_fn,
-        trajectory_penalty_weight=config.trajectory_penalty_weight,
+        trajectory_penalty_fn=objective.trajectory_penalty_fn,
+        trajectory_penalty_weight=objective.trajectory_penalty_weight,
     )
-    penalty_step = build_penalty_step(
-        penalty_fn=penalty_fn,
-        trainable=trainable,
-    )
+    penalty_step = build_penalty_step(penalty_fn=objective.bound_penalty_fn, trainable=trainable)
     score_bucket = build_score_bucket(
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
         solver=solver,
         loss_fn=loss_fn,
-        trajectory_penalty_fn=config.trajectory_penalty_fn,
-        trajectory_penalty_weight=config.trajectory_penalty_weight,
+        trajectory_penalty_fn=objective.trajectory_penalty_fn,
+        trajectory_penalty_weight=objective.trajectory_penalty_weight,
     )
-    full_mask = jnp.asarray(1.0)
     # Settle only when the run can hit the weak→strong scalar flip: a
-    # default ``trainable_mask`` treats ``BoundScaler.temperature``
-    # (``jnp.asarray(1.0)``, weak-typed) as trainable, and JAX's cache keys
+    # custom masks may train weak-typed scalar leaves, and JAX's cache keys
     # 0-d leaves by value+weak_type, so the first update would retrace
     # every kernel once (seconds-to-minutes of ODE compile) mid-run.
-    # Strong-typed or frozen scalars never flip — skip the settle entirely
+    # Strong-typed or frozen scalars never flip, so skip the settle entirely
     # and keep the "one trace per bucket shape" contract untouched.
     settle = _has_weak_scalar_trainable(predictors, trainable)
-    optimizer = _build_optimizer(config.optimizer[0], config.lr[0])
-    apply_update = build_apply_update(optimizer, trainable)
+    first = config.phases[0]
+    optimizer = _build_optimizer(first.optimizer, _start_lr(first.lr))
+    apply_update = build_apply_update(optimizer=optimizer, trainable=trainable)
     step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
-    settle_points = select_penalty_points(sources, extras, 1.0)
     _warmup_compile(
         predictors,
         bucket_payloads,
         bucket_step=bucket_step,
         ui=ui,
-        length_mask_fraction=full_mask,
+        length_mask_fraction=jnp.asarray(1.0),
         penalty_step=penalty_step,
         optimizer=optimizer,
         step_update=step_update,
         trainable=trainable,
-        penalty_points=settle_points,
+        penalty_points=select_penalty_points(sources, extras, 1.0),
         score_bucket=score_bucket if _tournament_enabled(config) else None,
         settle=settle,
     )
-    return (
-        bucket_step,
-        penalty_step,
-        score_bucket,
-        optimizer,
-        apply_update,
-        step_update,
-        sources,
-        extras,
-    )
-
-
-def train_seed_ensemble(
-    predictors: Any,
-    dataset: Dataset,
-    config: OptaxTrainingConfig,
-    *,
-    simulate_fn: Callable[..., Array],
-    state_to_output: Callable[[Array], Array],
-    solver: SolverConfig,
-    n_seeds: int,
-    k_best: int | None = None,
-    trainable: Any = None,
-    key: Array,
-    ui: TrainingUI | None = None,
-) -> list[tuple[float, Any]]:
-    """Train a seed ensemble: rank warm starts, fully train the best ``k_best``.
-
-    The **tournament** already ranks fresh initialisations cheaply (a few
-    warm-up steps each, scored forward-only). This reuses that ranking to
-    pick which seeds deserve a full training run, instead of fully training
-    every seed: with ``n_seeds`` tournament attempts it keeps the best
-    ``k_best`` (default: all ``n_seeds``) and runs the full phase schedule
-    on each.
-
-    Returns the fully trained members as a list of ``(final_loss,
-    predictors)`` ranked ascending by final loss — the same container
-    shape as the single ``predictors`` you passed in, so the result is an
-    ensemble of model pytrees ready for :func:`ensemble_predictions`.
-    ``final_loss`` labels the returned member: the best-step loss when
-    ``config.restore_best`` is set (measured exactly at the returned
-    parameters), else the last step's reported loss (measured one update
-    before, as the loop reports it).
-
-    ``config.tournament_steps`` controls how much warm-up each seed gets
-    before ranking; the default ``0`` ranks by the initialisation score
-    alone (still a valid, cheapest ranking). ``config`` is otherwise used
-    exactly as in :func:`train_with_optax`.
-
-    Each member is its own UI run: the warm-up compile and the tournament
-    land inside the first member's bracket, and ``on_run_start`` /
-    ``on_run_end`` are fired once per member, so a live dashboard shows
-    each member's phases rather than freezing after the first.
-    """
-    if trainable is None:
-        trainable = trainable_mask(predictors)
-    if k_best is None:
-        k_best = n_seeds
-    if not (0 < k_best <= n_seeds):
-        raise ValueError(
-            f"train_seed_ensemble: k_best={k_best} must satisfy 0 < k_best <= n_seeds={n_seeds}"
-        )
-
-    bucket_payloads = dataset.bucket_payloads
-    if not bucket_payloads:
-        raise ValueError("train_seed_ensemble: dataset has no bucket payloads")
-
-    ui_ = _select_ui(ui, config.verbose)
-    ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
-    (
-        bucket_step,
-        penalty_step,
-        score_bucket,
-        optimizer,
-        apply_update,
-        step_update,
-        sources,
-        extras,
-    ) = _build_training_kernels(
-        predictors=predictors,
-        dataset=dataset,
-        config=config,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
-        ui=ui_,
-    )
-
-    full_mask = jnp.asarray(1.0)
-    ranked = _shared_tournament(
-        predictors,
-        dataset,
+    return _Kernels(
+        objective=objective,
         bucket_step=bucket_step,
+        penalty_step=penalty_step,
         score_bucket=score_bucket,
-        apply_update=apply_update,
         optimizer=optimizer,
-        trainable=trainable,
-        tournament_attempts=n_seeds,
-        tournament_steps=config.tournament_steps,
-        tournament_lr=config.tournament_lr,
-        key=fold(key, "seed_ensemble_tournament"),
-        length_mask_fraction=full_mask,
-        top_k=k_best,
+        apply_update=apply_update,
+        step_update=step_update,
+        sources=sources,
+        extras=extras,
     )
 
-    trained: list[tuple[float, Any]] = []
-    for member_idx, (_seed_score, candidate) in enumerate(ranked):
-        if not math.isfinite(_seed_score):
-            continue
-        # Every member is its own UI run: each gets a fresh on_run_start
-        # (the first also brackets the warm-up compile), and _run_phases
-        # fires the matching on_run_end.
-        if member_idx > 0:
-            ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
-        _history, final, final_loss = _run_phases(
-            candidate,
-            dataset,
-            config,
-            optimizer=optimizer,
-            bucket_step=bucket_step,
-            penalty_step=penalty_step,
-            sources=sources,
-            extras=extras,
-            trainable=trainable,
-            ui=ui_,
-            step_update=step_update,
-        )
-        trained.append((final_loss, final))
 
-    if not trained:
-        warnings.warn(
-            "train_seed_ensemble: every seed failed its warm-up; returning the "
-            "input predictors as a single-member ensemble.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        # Close the run bracket opened by the per-member on_run_start
-        # above, so a live dashboard does not hang after the fallback.
-        ui_.on_run_end(final_loss=math.inf)
-        return [(math.inf, predictors)]
-
-    trained.sort(key=lambda pair: pair[0])
-    return trained
-
-
-def train_bootstrap_ensemble(
-    predictors: Any,
-    dataset: Dataset,
+def _fit_ensemble(
+    model: HybridModel,
+    data: Data,
     config: OptaxTrainingConfig,
     *,
-    simulate_fn: Callable[..., Array],
-    state_to_output: Callable[[Array], Array],
-    solver: SolverConfig,
-    n_bootstraps: int,
-    n_seeds: int = 1,
-    k_best: int | None = None,
-    trainable: Any = None,
     key: Array,
-    ui: TrainingUI | None = None,
-) -> list[tuple[float, Any]]:
-    """Train a bootstrap ensemble: one (or a seed-set of) model(s) per resample.
+    n_members: int,
+    n_seeds: int | None,
+    bootstrap: bool,
+    objective: Objective | None,
+    freeze: Sequence[FreezeSpec] | FreezeSpec | None,
+    trainable: Any,
+    ui: TrainingUI | None,
+) -> list[FitResult]:
+    """The body of :meth:`HybridModel.fit_ensemble`; see there for the two modes.
 
-    For each of ``n_bootstraps`` resampled datasets (via
-    :func:`jaxhybridmodels.make_bootstrap_dataset`), trains a model. With
-    ``n_seeds > 1`` each resample's member is itself seed-selected by
-    :func:`train_seed_ensemble` (so every member both sees different data
-    *and* is a good seed); with ``n_seeds == 1`` each resample contributes
-    one fresh re-initialisation trained via the same phase schedule as
-    :func:`train_with_optax`.
-
-    Returns the members as a list of ``(final_loss, predictors)`` ranked
-    ascending by final loss across **all** bootstrap samples. ``k_best``
-    trims the ensemble to its best members overall (default: keep
-    ``n_bootstraps * max(n_seeds, 1)``). ``final_loss`` labels the
-    returned member: the best-step loss when ``config.restore_best`` is
-    set (measured exactly at the returned parameters), else the last
-    step's reported loss (measured one update before, as the loop
-    reports it).
-
-    Every resample and every training run is folded off the one ``key``, so
-    the whole ensemble is deterministic given it. Each member is its own
-    UI run, bracketed by ``on_run_start`` / ``on_run_end``.
+    The kernels are built and warmed once and shared by every member. Each
+    member is its own UI run: the warm-up compile and the first scoring
+    sweep land inside the first member's bracket, and ``_run_phases`` fires
+    each member's ``on_run_end``.
     """
-    if n_bootstraps < 1:
-        raise ValueError(f"train_bootstrap_ensemble: n_bootstraps must be >= 1, got {n_bootstraps}")
+    for name, value in (("n_members", n_members), ("n_seeds", n_seeds)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise TypeError(f"fit_ensemble: {name} must be an int; got {value!r}")
+    if n_members < 1:
+        raise ValueError(f"fit_ensemble: n_members must be >= 1, got {n_members}")
+    if n_seeds is None:
+        n_seeds = 1 if bootstrap else n_members
     if n_seeds < 1:
-        raise ValueError(f"train_bootstrap_ensemble: n_seeds must be >= 1, got {n_seeds}")
-    if trainable is None:
-        trainable = trainable_mask(predictors)
-
-    bucket_payloads = dataset.bucket_payloads
-    if not bucket_payloads:
-        raise ValueError("train_bootstrap_ensemble: dataset has no bucket payloads")
-
-    ui_ = _select_ui(ui, config.verbose)
-    ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
-
-    (
-        bucket_step,
-        penalty_step,
-        score_bucket,
-        optimizer,
-        apply_update,
-        step_update,
-        sources,
-        extras,
-    ) = _build_training_kernels(
-        predictors=predictors,
-        dataset=dataset,
-        config=config,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=trainable,
-        ui=ui_,
+        raise ValueError(f"fit_ensemble: n_seeds must be >= 1, got {n_seeds}")
+    if not bootstrap and n_members > n_seeds:
+        raise ValueError(
+            f"fit_ensemble: n_members={n_members} exceeds n_seeds={n_seeds}; a seed "
+            "ensemble trains the best n_members of n_seeds seeds"
+        )
+    dataset, _, mask = model._prepare_fit(
+        data, validation=None, freeze=freeze, trainable=trainable, caller="fit_ensemble"
     )
+    predictors = model.predictors
 
-    all_trained: list[tuple[float, Any]] = []
-    for s in range(n_bootstraps):
-        boot = make_bootstrap_dataset(dataset, key=fold(key, f"bootstrap_{s}"))
-        sample_key = fold(key, f"bootstrap_seeds_{s}")
-        full_mask = jnp.asarray(1.0)
-        ranked = _shared_tournament(
-            predictors,
-            boot,
-            bucket_step=bucket_step,
-            score_bucket=score_bucket,
-            apply_update=apply_update,
-            optimizer=optimizer,
-            trainable=trainable,
-            tournament_attempts=n_seeds,
-            tournament_steps=config.tournament_steps,
-            tournament_lr=config.tournament_lr,
-            key=fold(sample_key, "bootstrap_sample_tournament"),
-            length_mask_fraction=full_mask,
-            top_k=n_seeds if n_seeds > 1 else 1,
+    # Resolved before the dashboard opens; see _train_with_optax.
+    resolved = _resolve_objective(objective, predictors, dataset, config)
+    ui_ = _select_ui(ui, config.verbose)
+    ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+    with close_run_on_error(ui_):
+        kernels = _build_training_kernels(
+            predictors=predictors,
+            dataset=dataset,
+            config=config,
+            resolved=resolved,
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+            trainable=mask,
+            ui=ui_,
         )
-        for member_idx, (_seed_score, candidate) in enumerate(ranked):
-            if not math.isfinite(_seed_score):
+
+        def rank(data_: Dataset, seed_key: Array, top_k: int) -> list[tuple[float, Any]]:
+            return _shared_tournament(
+                predictors,
+                data_,
+                bucket_step=kernels.bucket_step,
+                score_bucket=kernels.score_bucket,
+                apply_update=kernels.apply_update,
+                optimizer=kernels.optimizer,
+                trainable=mask,
+                tournament_attempts=n_seeds,
+                tournament_steps=config.tournament_steps,
+                tournament_lr=config.tournament_lr,
+                key=seed_key,
+                length_mask_fraction=jnp.asarray(1.0),
+                top_k=top_k,
+            )
+
+        # (training data, seed) per member. The key labels are the ones the
+        # earlier train_seed_ensemble and train_bootstrap_ensemble used, so a
+        # given key still draws the same members.
+        jobs: list[tuple[Dataset, tuple[float, Any]]]
+        if bootstrap:
+            jobs = []
+            for s in range(n_members):
+                boot = make_bootstrap_dataset(dataset, key=fold(key, f"bootstrap_{s}"))
+                sample_key = fold(key, f"bootstrap_seeds_{s}")
+                best = rank(boot, fold(sample_key, "bootstrap_sample_tournament"), 1)
+                jobs.append((boot, best[0]))
+        else:
+            ranked = rank(dataset, fold(key, "seed_ensemble_tournament"), n_members)
+            jobs = [(dataset, seed) for seed in ranked]
+
+        trained: list[FitResult] = []
+        for data_, (seed_score, candidate) in jobs:
+            if not math.isfinite(seed_score):
                 continue
-            # Every member is its own UI run: each gets a fresh
-            # on_run_start (the first also brackets the warm-up compile),
-            # and _run_phases fires the matching on_run_end.
-            if s > 0 or member_idx > 0:
-                ui_.on_run_start(total_steps=int(sum(config.steps)), num_phases=len(config.steps))
-            _history, final, final_loss = _run_phases(
+            # The first member's on_run_start is the one opened above.
+            if trained:
+                ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
+            run = _run_phases(
                 candidate,
-                boot,
+                data_,
                 config,
-                optimizer=optimizer,
-                bucket_step=bucket_step,
-                penalty_step=penalty_step,
-                # The resample changes the covariate values, so the measured
-                # points are gathered from the boot sample, not the source.
-                sources=data_penalty_points(predictors, boot),
-                extras=extras,
-                trainable=trainable,
+                kernels=kernels,
+                # A resample changes the covariate values, so its measured
+                # penalty points are gathered from the resample itself.
+                sources=data_penalty_points(predictors, data_) if bootstrap else kernels.sources,
+                trainable=mask,
                 ui=ui_,
-                step_update=step_update,
             )
-            all_trained.append((final_loss, final))
+            trained.append(_fit_result(model, run))
 
-    if not all_trained:
-        warnings.warn(
-            "train_bootstrap_ensemble: every member failed; returning the input "
-            "predictors as a single-member ensemble.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        # Close the run bracket opened by the per-member on_run_start
-        # above, so a live dashboard does not hang after the fallback.
-        ui_.on_run_end(final_loss=math.inf)
-        return [(math.inf, predictors)]
-
-    all_trained.sort(key=lambda pair: pair[0])
-    if k_best is not None:
-        if not (0 < k_best <= len(all_trained)):
-            raise ValueError(
-                f"train_bootstrap_ensemble: k_best={k_best} must satisfy "
-                f"0 < k_best <= ensemble size {len(all_trained)}"
+        if not trained:
+            raise RuntimeError(
+                "fit_ensemble: every seed failed its warm-up (a solver error or a "
+                "non-finite loss); no member was trained"
             )
-        all_trained = all_trained[:k_best]
-    return all_trained
+    # Stable, so a tie keeps the seed ranking. FitResult.final_loss is the
+    # loss _run_phases reports for the returned parameters. It is NaN when
+    # restore_best found no finite loss, and NaN breaks the ordering of the
+    # whole sort, so such a member ranks last.
+    return sorted(trained, key=_rank_key)
+
+
+def _rank_key(result: FitResult) -> float:
+    """Sort key for ensemble members: final loss, with NaN ranked as ``inf``."""
+    loss = result.final_loss
+    return loss if not math.isnan(loss) else math.inf

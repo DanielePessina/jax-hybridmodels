@@ -1,29 +1,32 @@
-"""Batch reactor: fit a parametric trunk, then learn what it cannot represent.
+"""Batch reactor: an Arrhenius trunk fitted by CMA-ES, then a residual network by AdamW.
 
-A first-order ``A -> B`` reactor whose hidden truth is
-``k(T, pH) = k_sat(pH) * exp(-Ea/R * (1/T - 1/T_ref))``, fitted in two
-phases:
+A first-order ``A -> B`` reaction whose rate constant depends on
+temperature through Arrhenius, which the model knows, and on pH through a
+saturation curve, which it does not. The model is a two-scalar Arrhenius
+trunk plus a 16-neuron residual ``Δlog10 k(T, pH)``. Each run heats along a
+temperature ramp, so ``T`` changes inside every solve.
 
-* **Phase 1, CMA-ES.** Fits a deliberately too-simple parametric trunk:
-  centred Arrhenius, pH-blind, two scalars. The residual MLP is frozen,
-  and its symmetric output bound means a fresh one contributes nothing.
-* **Phase 2, AdamW.** Freezes the trunk and unfreezes a 16-neuron MLP that
-  adds ``Δlog10(k)(T, pH)`` on top of it, picking up the pH dependence the
-  parametric cannot represent.
+Shows:
 
-The temperature is not constant in time: each experiment runs a
-flat-ramp-flat heating profile (jacket heat-up, two flat edges), whose
-parameters travel as ordinary covariates. This is the
-``jaxhybridmodels.profiles`` pattern — the model's ``simulate_fn`` evaluates
-``ramp_profile(...)(t)`` inside the vector field, so a ramp sweeps a band
-of temperatures within a single run instead of pinning one point.
+- one ``HybridModel`` fitted twice, with an ``EvosaxTrainingConfig`` and
+  then an ``OptaxTrainingConfig``
+- ``fit(freeze=...)`` with a predictor class, to switch which half of the
+  predictor tuple trains
+- a ``ramp_profile`` evaluated inside the vector field from scalar
+  covariates
+- ``FitResult.history``, ``predict``, ``simulate(experiment=...)``,
+  ``compute_metrics`` and ``evaluate_predictor``
+- ``serialise.save_predictors`` for the RL example, which loads this
+  fitted model's predictors
 
-Verification checkpoints print at each transition, with loose asserts to
-catch wiring errors. The state hooks, trunk class, vector field and
-predictor builder live in ``_model.py``, shared with
-``train_rl_deactivation.py``; data generation is local to this file.
+Run::
 
-Run: ``uv run python examples/batch_reactor/train_hybrid.py``
+    uv run python examples/batch_reactor/train_hybrid.py
+    uv run python examples/batch_reactor/train_hybrid.py --no-plot \\
+        --save-predictors examples/batch_reactor/artefacts/trunk_fresh.eqx
+
+Prints recovered parameters and metrics after each phase, and writes seven
+figures to ``figures/``. About 30 s on CPU.
 """
 
 # ruff: noqa: F722
@@ -35,7 +38,6 @@ import sys
 import warnings
 from pathlib import Path
 
-import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -43,234 +45,62 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 from jax import Array
-from jax.typing import ArrayLike
-from jaxtyping import Float
-from scipy.stats import qmc
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    ChannelObs,
-    Experiment,
-    SolverConfig,
-    compute_metrics,
-    count_trainable_params,
-    evaluate_predictor,
-    frozen_default_mask,
-    make_dataset,
-    make_experiment,
-    predict_dataset,
-    print_metrics,
-    ramp_profile,
-    save_predictors,
-)
-from jaxhybridmodels.training import (
-    EvosaxTrainingConfig,
-    OptaxTrainingConfig,
-    train_with_evosax,
-    train_with_optax,
-)
+import jaxhybridmodels as hm
+from jaxhybridmodels.serialise import save_predictors
+from jaxhybridmodels.trainable import freeze_mask
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-# ``_model`` sits in this script's own directory, so it resolves without the
-# insert above. Its docstring says why those definitions are shared.
+# ``_model`` and ``_data`` sit in this script's own directory, so they
+# resolve without the insert above, which is for ``_shared``.
+from _data import (  # noqa: E402
+    CA0,
+    K_SAT_PH50,
+    N_TIMESTEPS,
+    N_TRAIN_EXPERIMENTS,
+    NOISE_REL,
+    OUTPUT_CHANNELS,
+    PH_RANGE,
+    RAMP_HALF_WIDTH,
+    T_MAX,
+    VALIDATION_POINTS,
+    k_true,
+    lhs_design,
+    make_ramp_experiment,
+    ramp_midpoint,
+    true_ca,
+)
 from _model import (  # noqa: E402
-    R_GAS,
-    T_REF,
+    SOLVER,
     ArrheniusKinetics,
     build_predictors,
+    log10_k,
+    log10_k_trunk,
     simulate_fn,
     state_to_output,
-    y0_fn,
 )
-from _shared import (  # noqa: E402
-    apply_default_style,
-    parity_diagnostics,
-    parity_plot,
-)
-
-EA_TRUE: float = 30.0  # kJ/mol; rate doubles ~per 10 °C around T_REF
-
-# Saturation curve, the hidden pH dependence.
-K_SAT_BASELINE: float = 0.14
-K_SAT_AMPLITUDE: float = 1.05
-K_SAT_PH50: float = 5.85
-K_SAT_HILL: float = 5.0
-
-# DOE
-T_C_RANGE: tuple[float, float] = (15.0, 35.0)
-PH_RANGE: tuple[float, float] = (4.5, 7.5)
-N_TRAIN_EXPERIMENTS: int = 9
-VALIDATION_POINTS: tuple[tuple[float, float], ...] = ((20.0, 5.3), (30.0, 6.8))
-
-# Heating ramp per experiment: the reactor jacket ramps from T_lo to T_hi
-# between ramp_t0 and ramp_t1, flat on both edges. The ramp parameters are
-# the experiment covariates; the profile callable lives in
-# ``jaxhybridmodels.profiles``.
-RAMP_HALF_WIDTH: float = 3.0  # °C, each experiment sweeps T_C ± 3
-RAMP_T0: float = 0.5
-RAMP_T1: float = 4.5  # T_MAX = 5.0, so both flat edges are visible
-
-# Per-experiment observations
-T_MAX: float = 5.0
-N_TIMESTEPS: int = 12
-CA0: float = 1.0
-NOISE_REL: float = 0.03  # heteroscedastic relative-std factor
-NOISE_FLOOR: float = 0.02  # floor, so near-zero Ca still has finite noise
-
-OUTPUT_CHANNELS: tuple[str, ...] = ("Ca",)
-
-
-# Truth helpers, for data generation and plot overlays only. Never reachable
-# from the predictor code path.
-
-
-def _k_true(temperature_C: ArrayLike, pH: ArrayLike) -> Array:
-    """Ground-truth rate constant: pH saturation × Arrhenius centred at T_REF."""
-    T_K = jnp.asarray(temperature_C) + 273.15
-    arrhenius = jnp.exp(-EA_TRUE / R_GAS * (1.0 / T_K - 1.0 / T_REF))
-    # Slides' saturation curve — the hidden pH dependence.
-    pH_arr = jnp.asarray(pH)
-    k_sat = K_SAT_BASELINE + K_SAT_AMPLITUDE / (
-        1.0 + jnp.maximum(pH_arr / K_SAT_PH50, 0.0) ** K_SAT_HILL
-    )
-    return k_sat * arrhenius
-
-
-def _true_ca_trajectory(
-    ts: Float[Array, " T"],
-    *,
-    ramp_t0: float,
-    ramp_t1: float,
-    T_lo: float,
-    T_hi: float,
-    pH: float,
-) -> Float[Array, " T"]:
-    """Truth ``Ca(t)`` under the heating ramp: ``dCa/dt = -k_true(T(t), pH) · Ca``.
-
-    The rate changes as the temperature ramps, so there is no closed form;
-    the truth is integrated with diffrax at tight tolerances. ``T(t)`` is
-    the same ``ramp_profile`` the model's ``simulate_fn`` evaluates, so
-    truth and model disagree only in ``k_true`` vs the fitted rate.
-    """
-    T_profile = ramp_profile(t0=ramp_t0, t1=ramp_t1, v0=T_lo, v1=T_hi)
-
-    def field(t: Array, y: Array, args: object) -> Array:
-        return -_k_true(T_profile(t), pH) * y
-
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(field),
-        diffrax.Tsit5(),
-        t0=float(ts[0]),
-        t1=float(ts[-1]),
-        dt0=0.01,
-        y0=jnp.asarray(CA0, dtype=jnp.float32),
-        saveat=diffrax.SaveAt(ts=ts),
-        stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-10),
-        max_steps=10_000,
-    )
-    # Scalar state: ``ys`` is already ``[T]``.
-    return jnp.asarray(sol.ys)
-
-
-def _lhs_design(seed: int, n: int = N_TRAIN_EXPERIMENTS) -> list[tuple[float, float]]:
-    """Latin hypercube samples in ``(T_C, pH)``, as a list in row order.
-
-    Same ``scipy.stats.qmc.LatinHypercube`` the framework's evosax
-    ``init="lhs_box"`` mode uses.
-    """
-    sampler = qmc.LatinHypercube(d=2, seed=seed)
-    unit = sampler.random(n=n)
-    lo = np.array([T_C_RANGE[0], PH_RANGE[0]])
-    hi = np.array([T_C_RANGE[1], PH_RANGE[1]])
-    scaled = lo + (hi - lo) * unit
-    return [(float(t), float(ph)) for t, ph in scaled]
-
-
-def _make_experiment_for(
-    *,
-    ramp_t0: float,
-    ramp_t1: float,
-    T_lo: float,
-    T_hi: float,
-    pH: float,
-    noise_key: Array,
-    exp_id: str,
-) -> Experiment:
-    """Build one synthetic experiment on a heating ramp.
-
-    ``Ca(t)`` is integrated under ``k_true(T(t), pH)`` with the temperature
-    ramping from ``T_lo`` to ``T_hi`` over ``[ramp_t0, ramp_t1]``, then
-    heteroscedastic noise on top to make the observations. The ramp
-    parameters are the covariates — the same keys the model's
-    ``simulate_fn`` reads.
-    """
-    ts = jnp.linspace(0.0, T_MAX, N_TIMESTEPS)
-    clean = _true_ca_trajectory(
-        ts,
-        ramp_t0=ramp_t0,
-        ramp_t1=ramp_t1,
-        T_lo=T_lo,
-        T_hi=T_hi,
-        pH=pH,
-    )
-    # Slides' noise model: ``σ = rel · max(|values|, floor)``, clipped at 0.
-    scale = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
-    noisy = jnp.clip(clean + scale * jr.normal(noise_key, clean.shape), 0.0, None)
-    sigma = NOISE_REL * jnp.maximum(jnp.abs(clean), NOISE_FLOOR)
-    variance = sigma**2
-    channels = {"Ca": ChannelObs(ts=ts, values=noisy, variance=variance)}
-    return make_experiment(
-        covariates={
-            "ramp_t0": float(ramp_t0),
-            "ramp_t1": float(ramp_t1),
-            "T_lo": float(T_lo),
-            "T_hi": float(T_hi),
-            "pH": float(pH),
-        },
-        channels=channels,
-        y0_fn=y0_fn,
-        exp_id=exp_id,
-    )
+from _shared import apply_default_style, parity_diagnostics, parity_plot  # noqa: E402
 
 
 def _trajectory_grid_plot(
-    experiments: list[Experiment],
-    predictions_per_exp: list[np.ndarray],
+    experiments: list[hm.Experiment],
+    predictions: hm.PredictionResult,
     *,
     title: str,
     save_path: Path,
 ) -> None:
-    """3x3 grid of ``Ca(t)``: truth solid, observations scattered, prediction
-    dashed. One panel per experiment, labelled with its ramp band and pH.
-    """
-    n = len(experiments)
-    if n != 9:
-        raise ValueError(f"_trajectory_grid_plot expects 9 experiments, got {n}")
-
+    """3x3 grid of ``Ca(t)``: truth solid, observations as dots, prediction dashed."""
     fig, axes = plt.subplots(3, 3, figsize=(10.5, 9.0), sharex=True, sharey=True)
     ts_dense = np.linspace(0.0, T_MAX, 200)
-    for ax, exp, pred in zip(axes.flatten(), experiments, predictions_per_exp, strict=True):
-        cov = exp.covariates
-        T_lo = float(cov["T_lo"])
-        T_hi = float(cov["T_hi"])
-        pH = float(cov["pH"])
-        clean = np.asarray(
-            _true_ca_trajectory(
-                jnp.asarray(ts_dense),
-                ramp_t0=float(cov["ramp_t0"]),
-                ramp_t1=float(cov["ramp_t1"]),
-                T_lo=T_lo,
-                T_hi=T_hi,
-                pH=pH,
-            )
-        )
-        ts_obs = np.asarray(exp.channels["Ca"].ts)
-        ca_obs = np.asarray(exp.channels["Ca"].values)
-        ax.plot(ts_dense, clean, color="black", linewidth=1.4, label="truth")
+    for ax, exp in zip(axes.flatten(), experiments, strict=True):
+        pH = float(exp.covariates["pH"])
+        clean = true_ca(jnp.asarray(ts_dense), T_C=ramp_midpoint(exp), pH=pH)
+        obs = exp.channels["Ca"]
+        pred = predictions[exp.exp_id]
+        ax.plot(ts_dense, np.asarray(clean), color="black", linewidth=1.4, label="truth")
         ax.scatter(
-            ts_obs,
-            ca_obs,
+            np.asarray(obs.ts),
+            np.asarray(obs.values),
             s=20,
             color="C0",
             edgecolor="white",
@@ -278,7 +108,15 @@ def _trajectory_grid_plot(
             zorder=3,
             label="observed",
         )
-        ax.plot(ts_obs, pred[:, 0], color="C3", linestyle="--", linewidth=1.4, label="predicted")
+        ax.plot(
+            np.asarray(pred.times),
+            np.asarray(pred.outputs["Ca"]),
+            color="C3",
+            linestyle="--",
+            linewidth=1.4,
+            label="predicted",
+        )
+        T_lo, T_hi = float(exp.covariates["T_lo"]), float(exp.covariates["T_hi"])
         ax.set_title(f"T {T_lo:.0f}→{T_hi:.0f}°C, pH={pH:.2f}", fontsize=9)
         ax.set_ylim(-0.05, 1.1)
     for ax in axes[-1]:
@@ -297,106 +135,68 @@ def _trajectory_grid_plot(
 
 def _k_vs_ph_reveal_plot(
     *,
-    predictors_p1: tuple[ArrheniusKinetics, BoundedPredictor],
-    predictors_p2: tuple[ArrheniusKinetics, BoundedPredictor] | None,
-    train_experiments: list[Experiment],
-    val_experiments: list[Experiment],
+    predictors_p1: tuple[ArrheniusKinetics, hm.BoundedPredictor],
+    predictors_p2: tuple[ArrheniusKinetics, hm.BoundedPredictor] | None,
+    train_experiments: list[hm.Experiment],
+    val_experiments: list[hm.Experiment],
     title: str,
     save_path: Path,
 ) -> None:
-    """``log10 k(pH)`` at 15, 25 and 35°C: truth, parametric, hybrid.
+    """``log10 k(pH)`` at 15, 25 and 35 °C: truth solid, trunk dashed, hybrid dotted.
 
-    The LHS training points and the validation points are scattered at
-    their actual ``(T, pH)``.
+    Training and validation points are drawn at their ramp-midpoint
+    temperature on the truth curve.
     """
     pH_grid = jnp.linspace(PH_RANGE[0] - 0.4, PH_RANGE[1] + 0.4, 200)
     T_C_lines = (15.0, 25.0, 35.0)
-    colors = ("C0", "C1", "C2")
-
     fig, ax = plt.subplots(figsize=(7.5, 5.5))
 
-    parametric_p1, residual_p1 = predictors_p1
-    parametric_p2, residual_p2 = predictors_p2 if predictors_p2 is not None else (None, None)
-
-    for T_C, color in zip(T_C_lines, colors, strict=True):
-        log10_truth = np.log10(np.asarray(_k_true(T_C, pH_grid)))
-        ax.plot(pH_grid, log10_truth, color=color, linewidth=1.6, label=f"truth (T={T_C:.0f}°C)")
-
-        log_k_ref, Ea = parametric_p1()
-        T_K = T_C + 273.15
-        log10_k_param = float((log_k_ref - Ea / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0))
+    for T_C, color in zip(T_C_lines, ("C0", "C1", "C2"), strict=True):
+        middle = T_C == T_C_lines[1]
         ax.plot(
             pH_grid,
-            np.full_like(pH_grid, log10_k_param),
+            np.log10(np.asarray(k_true(T_C, pH_grid))),
+            color=color,
+            linewidth=1.6,
+            label=f"truth (T={T_C:.0f}°C)",
+        )
+        trunk = float(log10_k_trunk(predictors_p1[0], T_C))
+        ax.plot(
+            pH_grid,
+            np.full_like(pH_grid, trunk),
             color=color,
             linewidth=1.2,
             linestyle="--",
-            label=f"parametric (T={T_C:.0f}°C)" if T_C == T_C_lines[1] else None,
+            label=f"parametric (T={T_C:.0f}°C)" if middle else None,
         )
-
-        if predictors_p2 is not None and parametric_p2 is not None and residual_p2 is not None:
-            log_k_ref2, Ea2 = parametric_p2()
-            log10_k_param2 = float(
-                (log_k_ref2 - Ea2 / R_GAS * (1.0 / T_K - 1.0 / T_REF)) / jnp.log(10.0)
-            )
-            delta_curve = np.array(
-                [
-                    float(
-                        jnp.squeeze(
-                            residual_p2({"temperature_C": jnp.asarray(T_C), "pH": jnp.asarray(ph_)})
-                        )
-                    )
-                    for ph_ in pH_grid
-                ]
-            )
-            log10_hybrid = log10_k_param2 + delta_curve
+        if predictors_p2 is not None:
+            hybrid = log10_k(predictors_p2, T_C, pH_grid)
             ax.plot(
                 pH_grid,
-                log10_hybrid,
+                np.asarray(hybrid),
                 color=color,
                 linewidth=1.2,
                 linestyle=":",
-                label=f"hybrid (T={T_C_lines[1]:.0f}°C)" if T_C == T_C_lines[1] else None,
+                label=f"hybrid (T={T_C:.0f}°C)" if middle else None,
             )
 
-    train_T = np.array(
-        [
-            (float(e.covariates["T_lo"]) + float(e.covariates["T_hi"])) / 2.0
-            for e in train_experiments
-        ]
-    )
-    train_pH = np.array([float(e.covariates["pH"]) for e in train_experiments])
-    train_log10k = np.log10(np.asarray(_k_true(train_T, train_pH)))
-    val_T = np.array(
-        [
-            (float(e.covariates["T_lo"]) + float(e.covariates["T_hi"])) / 2.0
-            for e in val_experiments
-        ]
-    )
-    val_pH = np.array([float(e.covariates["pH"]) for e in val_experiments])
-    val_log10k = np.log10(np.asarray(_k_true(val_T, val_pH)))
-    ax.scatter(
-        train_pH,
-        train_log10k,
-        s=44,
-        color="black",
-        marker="o",
-        edgecolor="white",
-        linewidth=0.7,
-        zorder=4,
-        label="LHS train (truth)",
-    )
-    ax.scatter(
-        val_pH,
-        val_log10k,
-        s=60,
-        color="black",
-        marker="^",
-        edgecolor="white",
-        linewidth=0.7,
-        zorder=4,
-        label="validation (truth)",
-    )
+    for experiments, marker, size, label in (
+        (train_experiments, "o", 44, "LHS train (truth)"),
+        (val_experiments, "^", 60, "validation (truth)"),
+    ):
+        T_mid = np.array([ramp_midpoint(e) for e in experiments])
+        pH = np.array([float(e.covariates["pH"]) for e in experiments])
+        ax.scatter(
+            pH,
+            np.log10(np.asarray(k_true(T_mid, pH))),
+            s=size,
+            color="black",
+            marker=marker,
+            edgecolor="white",
+            linewidth=0.7,
+            zorder=4,
+            label=label,
+        )
 
     ax.set_xlabel("pH")
     ax.set_ylabel("log10 k")
@@ -408,15 +208,51 @@ def _k_vs_ph_reveal_plot(
     plt.close(fig)
 
 
-def _residual_weights_signature(residual: BoundedPredictor) -> Array:
-    """Concatenated MLP weight leaves, to check phase 1 left them untouched."""
-    leaves = jax.tree_util.tree_leaves(residual.inner)
-    return jnp.concatenate([leaf.reshape(-1) for leaf in leaves if eqx.is_inexact_array(leaf)])
+def _loss_curve_plot(history_p1: tuple[float, ...], history_p2: tuple[float, ...], path: Path):
+    """Both phases end to end: CMA-ES best-so-far per generation, then AdamW per step."""
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    n1 = len(history_p1)
+    ax.plot(
+        np.arange(n1),
+        np.log10(history_p1),
+        color="C0",
+        linewidth=1.4,
+        label="phase 1, evosax (best so far)",
+    )
+    ax.plot(
+        np.arange(n1, n1 + len(history_p2)),
+        np.log10(history_p2),
+        color="C3",
+        linewidth=1.4,
+        label="phase 2, optax (per step)",
+    )
+    ax.axvline(n1 - 0.5, color="gray", linestyle=":", linewidth=1.0)
+    ax.set_xlabel("training progress (generation, then step)")
+    ax.set_ylabel("log10 MSE loss")
+    ax.set_title("Loss across the evosax → optax pipeline")
+    ax.grid(True, alpha=0.4)
+    ax.legend(loc="best", frameon=False)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
-def _parity_diagnostics(predictions, dataset):
-    """Masked obs/pred pairs per channel for ``parity_plot``; shared helper."""
-    return parity_diagnostics(predictions, dataset)
+def _report(
+    model: hm.HybridModel, train: hm.Dataset, val: hm.Dataset, label: str
+) -> hm.PredictionResult:
+    """Print training and validation metrics and return the training predictions."""
+    train_pred = model.predict(train)
+    print(f"  training metrics ({label}):")
+    hm.print_metrics(train_pred)
+    print(f"  validation metrics ({label}):")
+    hm.print_metrics(model.predict(val))
+    return train_pred
+
+
+def _inner_weights(residual: hm.BoundedPredictor) -> Array:
+    """The residual network's weights as one vector, to check a phase left them alone."""
+    leaves = jax.tree_util.tree_leaves(eqx.filter(residual.inner, eqx.is_inexact_array))
+    return jnp.concatenate([leaf.reshape(-1) for leaf in leaves])
 
 
 def main() -> None:
@@ -424,393 +260,189 @@ def main() -> None:
     parser.add_argument("--doe-seed", type=int, default=0, help="LHS sampler seed")
     parser.add_argument("--seed", type=int, default=0, help="JAX root key")
     parser.add_argument("--population-size", type=int, default=32)
-    parser.add_argument("--num-generations", type=int, default=60)
+    parser.add_argument("--generations", type=int, default=60, help="CMA-ES generations")
     parser.add_argument("--sigma-init", type=float, default=0.5)
     parser.add_argument("--init-box-extent", type=float, default=2.0)
-    parser.add_argument("--steps", type=int, default=800)
+    parser.add_argument("--steps", type=int, default=800, help="AdamW steps")
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument(
-        "--plot-dir",
-        type=Path,
-        default=Path(__file__).resolve().parent / "figures",
+        "--plot-dir", type=Path, default=Path(__file__).resolve().parent / "figures"
     )
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument(
         "--save-predictors",
         type=Path,
         default=None,
-        help=(
-            "Write the phase-2 predictors to this path. train_rl_deactivation.py "
-            "loads the result as its frozen trunk."
-        ),
+        help="Write the phase-2 predictors here; train_rl_deactivation.py loads them.",
     )
     args = parser.parse_args()
 
     apply_default_style()
-    args.plot_dir.mkdir(parents=True, exist_ok=True)
+    k_noise, k_init, k_p1, k_p2 = jr.split(jr.PRNGKey(args.seed), 4)
 
-    root_key = jr.PRNGKey(args.seed)
-    k_noise, k_init, k_p1, k_p2 = jr.split(root_key, 4)
-
-    print("[verify §9.1] truth helper")
-    # ``_k_true`` returns sane values across ``(T, pH50)``.
-    k15 = float(_k_true(15.0, K_SAT_PH50))
-    k25 = float(_k_true(25.0, K_SAT_PH50))
-    k35 = float(_k_true(35.0, K_SAT_PH50))
-    print(f"  _k_true(T=15°C, pH=5.85) = {k15:.4f}")
-    print(f"  _k_true(T=25°C, pH=5.85) = {k25:.4f}  (expect ≈ 0.665)")
-    print(f"  _k_true(T=35°C, pH=5.85) = {k35:.4f}")
-    assert 0.6 < k25 < 0.75, f"k_true at T_REF, pH50 should be ≈0.665, got {k25}"
+    print("[data] synthetic ramp runs")
+    k15, k25, k35 = (float(k_true(T, K_SAT_PH50)) for T in (15.0, 25.0, 35.0))
+    print(f"  k_true at pH 5.85: {k15:.4f} (15°C), {k25:.4f} (25°C), {k35:.4f} (35°C)")
+    assert 0.6 < k25 < 0.75, f"k_true at T_REF and pH50 should be about 0.665, got {k25}"
     assert k15 < k25 < k35, "Arrhenius is monotone increasing in T"
 
-    print("\n[build] synthetic dataset")
-    # The LHS design is over the ramp *midpoint* ``T_C`` and ``pH``; each
-    # experiment then sweeps ``T_C ± RAMP_HALF_WIDTH`` during its run.
-    train_design = _lhs_design(seed=args.doe_seed)
-    train_experiments: list[Experiment] = []
+    # The LHS samples the ramp midpoint; each run sweeps ±RAMP_HALF_WIDTH
+    # around it. Noise keys are folded from one root so the data is
+    # reproducible.
+    train_design = lhs_design(seed=args.doe_seed)
+    train_experiments = [
+        make_ramp_experiment(
+            T_C=T_C,
+            pH=pH,
+            noise_key=jr.fold_in(k_noise, i),
+            exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}",
+        )
+        for i, (T_C, pH) in enumerate(train_design)
+    ]
+    val_experiments = [
+        make_ramp_experiment(
+            T_C=T_C,
+            pH=pH,
+            noise_key=jr.fold_in(k_noise, 1000 + j),
+            exp_id=f"val_{j:02d}_T{T_C:.1f}_pH{pH:.2f}",
+        )
+        for j, (T_C, pH) in enumerate(VALIDATION_POINTS)
+    ]
+    # Built once here so the bucket layout can be checked; fit and predict
+    # would also take the experiment lists directly.
+    train_dataset = hm.make_dataset(train_experiments, output_channel_names=OUTPUT_CHANNELS)
+    val_dataset = hm.make_dataset(val_experiments, output_channel_names=OUTPUT_CHANNELS)
     for i, (T_C, pH) in enumerate(train_design):
-        # Per-experiment noise key folded from the root, so the script stays
-        # deterministic under JAX's key discipline.
-        k_i = jr.fold_in(k_noise, i)
-        train_experiments.append(
-            _make_experiment_for(
-                ramp_t0=RAMP_T0,
-                ramp_t1=RAMP_T1,
-                T_lo=T_C - RAMP_HALF_WIDTH,
-                T_hi=T_C + RAMP_HALF_WIDTH,
-                pH=pH,
-                noise_key=k_i,
-                exp_id=f"train_{i:02d}_T{T_C:.1f}_pH{pH:.2f}",
-            )
-        )
-    val_experiments: list[Experiment] = []
+        T_lo, T_hi = T_C - RAMP_HALF_WIDTH, T_C + RAMP_HALF_WIDTH
+        print(f"  train [{i}] T {T_lo:.1f}→{T_hi:.1f}°C, pH={pH:.3f}")
     for j, (T_C, pH) in enumerate(VALIDATION_POINTS):
-        k_j = jr.fold_in(k_noise, 1000 + j)
-        val_experiments.append(
-            _make_experiment_for(
-                ramp_t0=RAMP_T0,
-                ramp_t1=RAMP_T1,
-                T_lo=T_C - RAMP_HALF_WIDTH,
-                T_hi=T_C + RAMP_HALF_WIDTH,
-                pH=pH,
-                noise_key=k_j,
-                exp_id=f"val_{j:02d}_T{T_C:.1f}_pH{pH:.2f}",
-            )
-        )
-    train_dataset = make_dataset(
-        train_experiments,
+        print(f"  val   [{j}] T={T_C:.2f}°C, pH={pH:.3f}")
+    # Every run shares one 12-point grid, so each dataset is a single bucket.
+    assert len(train_dataset.bucket_payloads) == 1
+    assert train_dataset.bucket_payloads[0].ts.shape == (N_TRAIN_EXPERIMENTS, N_TIMESTEPS)
+    assert val_dataset.bucket_payloads[0].ts.shape == (len(VALIDATION_POINTS), N_TIMESTEPS)
+
+    # region model
+    model = hm.HybridModel(
+        predictors=build_predictors(key=k_init),
+        simulate_fn=simulate_fn,
+        state_to_output=state_to_output,
         output_channel_names=OUTPUT_CHANNELS,
-    )
-    val_dataset = make_dataset(
-        val_experiments,
-        output_channel_names=OUTPUT_CHANNELS,
-    )
-    print("[verify §9.2] dataset shapes")
-    # Bucket layout and DOE coverage.
-    print(
-        f"  LHS training (T_mid, pH) samples ({len(train_design)}), "
-        f"ramp ±{RAMP_HALF_WIDTH:.0f}°C:"
-    )
-    for i, (T_C, pH) in enumerate(train_design):
-        print(
-            f"    [{i}] T={T_C:.2f}°C, pH={pH:.3f}  "
-            f"(sweeps {T_C - RAMP_HALF_WIDTH:.1f}→{T_C + RAMP_HALF_WIDTH:.1f}°C)"
-        )
-    print(f"  Validation (T, pH) samples ({len(VALIDATION_POINTS)}):")
-    for j, (T_C, pH) in enumerate(VALIDATION_POINTS):
-        print(f"    [{j}] T={T_C:.2f}°C, pH={pH:.3f}")
-    assert len(train_dataset.bucket_payloads) == 1, "training dataset should have one bucket"
-    bp_train = train_dataset.bucket_payloads[0]
-    print(f"  train bucket: ts={tuple(bp_train.ts.shape)}, n_obs={int(bp_train.n_obs)}")
-    assert bp_train.ts.shape == (N_TRAIN_EXPERIMENTS, N_TIMESTEPS)
-    assert int(bp_train.n_obs) == N_TRAIN_EXPERIMENTS * N_TIMESTEPS
-    bp_val = val_dataset.bucket_payloads[0]
-    print(f"  val   bucket: ts={tuple(bp_val.ts.shape)}, n_obs={int(bp_val.n_obs)}")
-    assert bp_val.ts.shape == (len(VALIDATION_POINTS), N_TIMESTEPS)
-
-    solver = SolverConfig(
-        solver=diffrax.Tsit5(),
-        rtol=1e-5,
-        atol=1e-7,
-        max_steps=10_000,
-        dt0=0.05,
+        solver=SOLVER,
+        # endregion model
     )
 
-    print("\n[build] predictors")
-    predictors = build_predictors(key=k_init)
-    print("[verify §9.3] predictors at init")
-    # Sigmoid-midpoint init values, residual contributing about 0 decades.
-    parametric, residual = predictors
-    log_k_ref, Ea = parametric()
-    print(f"  parametric init: log_k_ref={float(log_k_ref):.3f}, Ea={float(Ea):.2f} kJ/mol")
-    delta = evaluate_predictor(residual, {"temperature_C": 25.0, "pH": K_SAT_PH50})
-    print(f"  residual init at (T=25°C, pH=5.85): Δlog10(k)={delta:+.3f}  (expect ≈ 0)")
-    assert abs(delta) < 0.5, f"fresh-init residual should be near 0, got {delta}"
-
-    print("[verify §9.4] one sanity simulation")
-    # One ``simulate_fn`` call returns a monotone-decreasing Ca trace.
-    exp = train_experiments[0]
-    ts = exp.channels["Ca"].ts
-    cov = {k: jnp.asarray(v) for k, v in exp.covariates.items()}
-    y0 = y0_fn(cov, exp.channels)
-    sim = simulate_fn(predictors, ts, cov, y0, solver)
-    sim_ca = sim[:, 0]
-    print(
-        f"  sim Ca[0]={float(sim_ca[0]):.3f}, Ca[-1]={float(sim_ca[-1]):.3f}, "
-        f"min={float(jnp.min(sim_ca)):.3f}"
-    )
+    # Before training: the residual's symmetric output box puts a fresh
+    # network near zero decades, and one simulation should start at the
+    # first observation and decay monotonically.
+    parametric, residual = model.predictors
+    delta = hm.evaluate_predictor(residual, {"temperature_C": 25.0, "pH": K_SAT_PH50})
+    print(f"  residual at init, (25°C, pH 5.85): Δlog10 k={delta:+.3f}  (expect about 0)")
+    assert abs(delta) < 0.5, f"a fresh residual should sit near 0, got {delta}"
+    sim_ca = np.asarray(model.simulate(experiment=train_experiments[0]).outputs["Ca"])
     assert (sim_ca[1:] <= sim_ca[:-1] + 1e-6).all(), "Ca should be non-increasing"
-    # ``y0_fn`` reads the noisy first observation, so ``sim_ca[0]`` matches
-    # that, not the clean ``CA0``: exact against ``y0[0]``, loose against CA0.
-    assert abs(float(sim_ca[0]) - float(y0[0])) < 1e-6, "diffrax round-trips y0"
-    assert abs(float(sim_ca[0]) - CA0) < 5.0 * NOISE_REL, "Ca starts near CA0"
-    assert float(sim_ca[-1]) < float(sim_ca[0]), "something must have decayed"
-    # Snapshot, to confirm phase 1 left the residual MLP frozen.
-    residual_weights_pre_p1 = _residual_weights_signature(predictors[1])
+    assert abs(sim_ca[0] - CA0) < 5.0 * NOISE_REL, "Ca starts near CA0"
 
-    print("\n[phase 1] evosax — parametric trunk only (residual MLP frozen)")
-    mask_p1 = frozen_default_mask(predictors, BoundedPredictor, BoundScaler)
+    print("\n[fit] phase 1: CMA-ES on the trunk, residual frozen")
+    # freeze_mask is the mask behind fit(freeze=...), used here only to count
+    # what phase 1 will train.
+    mask_p1 = freeze_mask(model.predictors, hm.BoundedPredictor)
+    n_p1 = hm.count_trainable_params(model.predictors, mask=mask_p1)
+    print(f"  trainable scalars: {n_p1}")
+    assert n_p1 == 2, f"phase 1 should train the trunk's 2 scalars, got {n_p1}"
+    residual_before = _inner_weights(residual)
 
-    n_trainable_p1 = count_trainable_params(predictors, mask_p1)
-    print(f"  trainable scalars (Phase 1): {n_trainable_p1} (expect 2)")
-    assert n_trainable_p1 == 2, (
-        f"Phase 1 should train exactly the parametric latent (2 scalars), got {n_trainable_p1}"
-    )
-
-    config_p1 = EvosaxTrainingConfig(
+    # region phase-1
+    config_p1 = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
-        num_generations=args.num_generations,
+        steps=args.generations,
         init="lhs_box",
         init_box_extent=args.init_box_extent,
         sigma_init=args.sigma_init,
-        loss="mse",
-        verbose=True,
     )
-    history_p1, predictors_p1 = train_with_evosax(
-        predictors,
-        train_dataset,
-        config_p1,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=mask_p1,
-        key=k_p1,
-    )
-    print(f"  {len(history_p1)} generations; final best loss {history_p1[-1]:.6f}")
-
-    print("\n[verify §9.5] phase 1 transition")
-    parametric_p1, residual_p1 = predictors_p1
-    log_k_ref_p1, Ea_p1 = parametric_p1()
-    print(f"  recovered log_k_ref={float(log_k_ref_p1):.3f}, Ea={float(Ea_p1):.2f} kJ/mol")
-    assert history_p1[-1] < history_p1[0], "evosax must reduce loss across the run"
-
-    residual_weights_post_p1 = _residual_weights_signature(residual_p1)
-    if not jnp.array_equal(residual_weights_pre_p1, residual_weights_post_p1):
-        warnings.warn(
-            "residual MLP weights differ between init and phase-1 endpoint — the "
-            "trainability mask did not freeze the residual subtree.",
-            RuntimeWarning,
-            stacklevel=1,
-        )
-    else:
-        print("  residual MLP weights bit-exact unchanged across phase 1 [OK]")
-
-    if not args.no_plot:
-        print("\n[plot] phase 1 figures")
-        train_predictions_p1 = predict_dataset(
-            predictors_p1,
-            train_dataset,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
-        )
-        val_predictions_p1 = predict_dataset(
-            predictors_p1,
-            val_dataset,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
-        )
-        diag_train_p1 = compute_metrics(train_predictions_p1, train_dataset)
-        diag_val_p1 = compute_metrics(val_predictions_p1, val_dataset)
-        print("  training diagnostics (parametric only):")
-        print_metrics(diag_train_p1)
-        print("  validation diagnostics (parametric only):")
-        print_metrics(diag_val_p1)
-
-        train_pred_per_exp = [
-            np.asarray(train_predictions_p1[0][i]) for i in range(N_TRAIN_EXPERIMENTS)
-        ]
-        _trajectory_grid_plot(
-            train_experiments,
-            train_pred_per_exp,
-            title="Phase 1 (evosax) — Arrhenius parametric only",
-            save_path=args.plot_dir / "01_trajectory_grid_phase1.png",
-        )
-        parity_plot(
-            _parity_diagnostics(train_predictions_p1, train_dataset),
-            title="Phase 1 parity (training set)",
-            save_path=args.plot_dir / "02_parity_phase1.png",
-        )
-        _k_vs_ph_reveal_plot(
-            predictors_p1=predictors_p1,
-            predictors_p2=None,
-            train_experiments=train_experiments,
-            val_experiments=val_experiments,
-            title="log10 k(pH) — truth vs parametric (Phase 1)",
-            save_path=args.plot_dir / "03_k_reveal_phase1.png",
-        )
-
-    print("\n[phase 2] optax — residual MLP only (parametric frozen)")
-    mask_p2 = frozen_default_mask(predictors_p1, ArrheniusKinetics, BoundScaler)
-
-    n_trainable_p2 = count_trainable_params(predictors_p1, mask_p2)
-    print(f"  trainable scalars (Phase 2): {n_trainable_p2} (16-neuron MLP weights+biases)")
-    assert n_trainable_p2 > n_trainable_p1, (
-        "Phase 2 should train strictly more scalars than Phase 1 (parametric is frozen, "
-        "MLP is unfrozen)."
+    # The default mask already holds BoundScaler leaves fixed. Freezing every
+    # BoundedPredictor on top leaves the trunk's two latent scalars.
+    fit_p1 = model.fit(train_dataset, config_p1, key=k_p1, freeze=hm.BoundedPredictor)
+    model_p1 = fit_p1.model
+    # endregion phase-1
+    # Evosax records the best-so-far loss, one entry per generation.
+    history_p1 = fit_p1.history.loss
+    log_k_ref, Ea = model_p1.predictors[0]()
+    print(f"  {len(history_p1)} generations, best loss {history_p1[-1]:.6f}")
+    print(f"  recovered log_k_ref={float(log_k_ref):.3f}, Ea={float(Ea):.2f} kJ/mol")
+    assert history_p1[-1] <= history_p1[0], "the best-so-far loss cannot rise"
+    assert jnp.array_equal(residual_before, _inner_weights(model_p1.predictors[1])), (
+        "freeze= should have held the residual fixed during phase 1"
     )
 
-    parametric_latent_pre_p2 = predictors_p1[0].latent
+    print("\n[fit] phase 2: AdamW on the residual, trunk frozen")
+    mask_p2 = freeze_mask(model_p1.predictors, ArrheniusKinetics)
+    print(f"  trainable scalars: {hm.count_trainable_params(model_p1.predictors, mask=mask_p2)}")
+    # region phase-2
+    config_p2 = hm.OptaxTrainingConfig(steps=args.steps, lr=args.lr)
+    fit_p2 = model_p1.fit(train_dataset, config_p2, key=k_p2, freeze=ArrheniusKinetics)
+    # endregion phase-2
+    model_p2 = fit_p2.model
+    history_p2 = fit_p2.history.loss
+    print(f"  {len(history_p2)} steps, loss {history_p2[0]:.6f} → {history_p2[-1]:.6f}")
 
-    config_p2 = OptaxTrainingConfig(
-        steps=(args.steps,),
-        lr=(args.lr,),
-        optimizer=("adamw",),
-        reset_optimiser_state=(False,),
-        length_schedule=(1.0,),
-        loss="mse",
-        verbose=True,
-    )
-    history_p2, predictors_p2 = train_with_optax(
-        predictors_p1,
-        train_dataset,
-        config_p2,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        trainable=mask_p2,
-        key=k_p2,
-    )
-    print(f"  {len(history_p2)} steps; final loss {history_p2[-1]:.6f}")
-
-    print("\n[verify §9.6] phase 2 transition")
-    print(f"  history_p1[-1]={history_p1[-1]:.6f}, history_p2[0]={history_p2[0]:.6f}")
-    p1_to_p2_gap = abs(history_p2[0] - history_p1[-1])
-    if p1_to_p2_gap > 1e-3:
-        warnings.warn(
-            f"phase 1 endpoint loss ({history_p1[-1]:.6f}) and phase 2 start loss "
-            f"({history_p2[0]:.6f}) differ by {p1_to_p2_gap:.4e} — residual contribution "
-            "may not be exactly zero at init.",
-            RuntimeWarning,
-            stacklevel=1,
-        )
+    # The residual starts at zero decades, so phase 2 starts where phase 1
+    # ended and the seam is invisible in the loss curve. Both checks warn
+    # rather than fail, so short runs with --steps or --generations finish.
+    gap = abs(history_p2[0] - history_p1[-1])
+    if gap > 1e-3:
+        warnings.warn(f"phase 2 started {gap:.2e} away from the phase-1 loss", stacklevel=1)
     if not history_p2[-1] < 0.5 * history_p2[0]:
         warnings.warn(
-            f"phase 2 final loss ({history_p2[-1]:.6f}) did not halve the start "
-            f"loss ({history_p2[0]:.6f}); the MLP may be under-trained or stuck.",
-            RuntimeWarning,
-            stacklevel=1,
+            "phase 2 did not halve the loss; the residual may be undertrained", stacklevel=1
         )
-    else:
-        print(
-            f"  phase 2 reduced loss from {history_p2[0]:.6f} to "
-            f"{history_p2[-1]:.6f} ({(1 - history_p2[-1] / history_p2[0]) * 100:.1f}% drop)"
-        )
+    assert jnp.array_equal(model_p1.predictors[0].latent, model_p2.predictors[0].latent), (
+        "freeze= should have held the trunk fixed during phase 2"
+    )
 
-    parametric_latent_post_p2 = predictors_p2[0].latent
-    if not jnp.array_equal(parametric_latent_pre_p2, parametric_latent_post_p2):
-        warnings.warn(
-            "parametric latent differs between phase 1 endpoint and phase 2 endpoint — "
-            "the trainability mask did not freeze the parametric subtree.",
-            RuntimeWarning,
-            stacklevel=1,
-        )
-    else:
-        print("  parametric latent bit-exact unchanged across phase 2 [OK]")
+    print("\n[results]")
+    train_pred_p1 = _report(model_p1, train_dataset, val_dataset, "trunk only")
+    train_pred_p2 = _report(model_p2, train_dataset, val_dataset, "hybrid")
 
     if args.save_predictors is not None:
         args.save_predictors.parent.mkdir(parents=True, exist_ok=True)
-        save_predictors(args.save_predictors, predictors_p2)
-        print(f"\n[save] phase-2 predictors written to {args.save_predictors}")
+        # Predictors only: the RL example rebuilds its own simulate_fn
+        # around them, so it has no HybridModel to pass hm.load as like=.
+        save_predictors(args.save_predictors, model_p2.predictors)
+        print(f"  phase-2 predictors written to {args.save_predictors}")
 
-    if not args.no_plot:
-        print("\n[plot] phase 2 figures")
-        train_predictions_p2 = predict_dataset(
-            predictors_p2,
-            train_dataset,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
+    if args.no_plot:
+        return
+    args.plot_dir.mkdir(parents=True, exist_ok=True)
+    for phase, (title, pred, models) in enumerate(
+        (
+            ("Phase 1 (CMA-ES): Arrhenius trunk only", train_pred_p1, (model_p1, None)),
+            ("Phase 2 (AdamW): trunk plus residual", train_pred_p2, (model_p1, model_p2)),
         )
-        val_predictions_p2 = predict_dataset(
-            predictors_p2,
-            val_dataset,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
-        )
-        diag_train_p2 = compute_metrics(train_predictions_p2, train_dataset)
-        diag_val_p2 = compute_metrics(val_predictions_p2, val_dataset)
-        print("  training diagnostics (hybrid):")
-        print_metrics(diag_train_p2)
-        print("  validation diagnostics (hybrid):")
-        print_metrics(diag_val_p2)
-
-        train_pred_per_exp_p2 = [
-            np.asarray(train_predictions_p2[0][i]) for i in range(N_TRAIN_EXPERIMENTS)
-        ]
+    ):
+        offset = 3 * phase
         _trajectory_grid_plot(
             train_experiments,
-            train_pred_per_exp_p2,
-            title="Phase 2 (optax) — Arrhenius + residual MLP",
-            save_path=args.plot_dir / "04_trajectory_grid_phase2.png",
+            pred,
+            title=title,
+            save_path=args.plot_dir / f"{offset + 1:02d}_trajectory_grid_phase{phase + 1}.png",
         )
         parity_plot(
-            _parity_diagnostics(train_predictions_p2, train_dataset),
-            title="Phase 2 parity (training set)",
-            save_path=args.plot_dir / "05_parity_phase2.png",
+            parity_diagnostics(pred),
+            title=f"Phase {phase + 1} parity (training set)",
+            save_path=args.plot_dir / f"{offset + 2:02d}_parity_phase{phase + 1}.png",
         )
         _k_vs_ph_reveal_plot(
-            predictors_p1=predictors_p1,
-            predictors_p2=predictors_p2,
+            predictors_p1=models[0].predictors,
+            predictors_p2=None if models[1] is None else models[1].predictors,
             train_experiments=train_experiments,
             val_experiments=val_experiments,
-            title="log10 k(pH) — truth vs parametric vs hybrid (Phase 2)",
-            save_path=args.plot_dir / "06_k_reveal_phase2.png",
+            title=f"log10 k(pH) after phase {phase + 1}",
+            save_path=args.plot_dir / f"{offset + 3:02d}_k_reveal_phase{phase + 1}.png",
         )
-        # Concatenated phase-1 (best-loss-per-gen) + phase-2 (loss-per-step)
-        # curve.
-        fig, ax = plt.subplots(figsize=(8.5, 4.5))
-        n1 = len(history_p1)
-        n2 = len(history_p2)
-        x1 = np.arange(n1)
-        x2 = np.arange(n1, n1 + n2)
-        ax.plot(
-            x1,
-            np.log10(np.asarray(history_p1)),
-            color="C0",
-            linewidth=1.4,
-            label="phase 1 — evosax (best-of-gen)",
-        )
-        ax.plot(
-            x2,
-            np.log10(np.asarray(history_p2)),
-            color="C3",
-            linewidth=1.4,
-            label="phase 2 — optax (per-step)",
-        )
-        ax.axvline(n1 - 0.5, color="gray", linestyle=":", linewidth=1.0)
-        ax.set_xlabel("training progress (generation, then step)")
-        ax.set_ylabel("log10 MSE loss")
-        ax.set_title("Loss curve across the evosax → optax pipeline")
-        ax.grid(True, alpha=0.4)
-        ax.legend(loc="best", frameon=False)
-        fig.tight_layout()
-        fig.savefig(args.plot_dir / "07_loss_curve.png")
-        plt.close(fig)
-        print(f"\n[plot] figures written to {args.plot_dir}")
+    _loss_curve_plot(history_p1, history_p2, args.plot_dir / "07_loss_curve.png")
+    print(f"\n[plot] figures written to {args.plot_dir}")
 
 
 if __name__ == "__main__":

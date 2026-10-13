@@ -1,44 +1,40 @@
-"""A minimal, self-contained SBML -> JAX kinetic model converter.
+"""A minimal SBML to JAX kinetic model converter for the example.
 
-Reads an SBML file with python-libsbml, converts every kinetic law from
-libsbml's MathML AST to a sympy expression, and lambdifies the resulting
-species ODEs against JAX. The output is a plain callable vector field
-``(t, y, params) -> dy/dt`` suitable for use inside a ``jaxhybridmodels``
-``simulate_fn`` — no events, no function definitions, no global config
-changes (in particular, this module never calls ``jax.config.update``).
+Reads an SBML file with python-libsbml, converts each kinetic law from
+MathML to a sympy expression, and lambdifies the species ODEs against JAX.
+The result is a plain vector field ``(t, y, params) -> dy/dt`` to call
+from a ``simulate_fn``. It handles no events or function definitions and
+never touches the global JAX config.
 
 Scope: SBML Level 2/3 with mass-action or rational kinetics. Supported
 MathML: arithmetic (``+-*/^``), ``exp/ln/log/abs/min/max/floor/ceiling``,
-``piecewise``, relational/logical operators, and the constants ``pi/e``.
-Anything else raises a ``RuntimeError`` naming the unsupported node.
+``piecewise``, relational and logical operators, and the constants
+``pi/e``. Anything else raises a ``RuntimeError`` naming the node.
 
-This is deliberately an *example* module, not library code: the framework
-owns vmap/jit/grad; the user owns physics (and, here, the converter).
-
-Also includes a sympy-based structural reduction,
-:meth:`SBMLKineticModel.reduce_conservation_laws`: the left nullspace of
-the stoichiometric matrix identifies exactly conserved moieties, and the
-eliminated species are reconstructed algebraically at every vector-field
-call, so the reduced dynamics are exactly equivalent to the full system.
+This lives with the example rather than in the library: the framework
+owns vmap, jit and grad, and the user owns the physics, here including
+the converter.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import diffrax
-import jax
 import jax.numpy as jnp
 import libsbml
 import sympy as sp
 from jax import Array
+from jax.typing import ArrayLike
 
 # ---------------------------------------------------------------------------
 # MathML AST -> sympy
 # ---------------------------------------------------------------------------
 
 
-def _ast_to_sympy(node: libsbml.ASTNode) -> sp.Expr:
+def _ast_to_sympy(node: libsbml.ASTNode) -> Any:
     """Recursively convert a libsbml MathML ASTNode into a sympy expression."""
     t = node.getType()
     if t == libsbml.AST_NAME or t == libsbml.AST_NAME_AVOGADRO:
@@ -58,6 +54,8 @@ def _ast_to_sympy(node: libsbml.ASTNode) -> sp.Expr:
     if t == libsbml.AST_CONSTANT_FALSE:
         return sp.false
 
+    # Any: SBML math mixes numeric expressions and boolean conditions, and
+    # sympy types them as unrelated classes.
     children = [_ast_to_sympy(node.getChild(i)) for i in range(node.getNumChildren())]
 
     unary = {
@@ -95,12 +93,22 @@ def _ast_to_sympy(node: libsbml.ASTNode) -> sp.Expr:
         return sp.Max(*children)
     if t == libsbml.AST_FUNCTION_PIECEWISE:
         return _piecewise(children)
-    if t in (libsbml.AST_RELATIONAL_EQ, libsbml.AST_RELATIONAL_NEQ,
-             libsbml.AST_RELATIONAL_LT, libsbml.AST_RELATIONAL_LEQ,
-             libsbml.AST_RELATIONAL_GT, libsbml.AST_RELATIONAL_GEQ):
-        op = {libsbml.AST_RELATIONAL_EQ: sp.Eq, libsbml.AST_RELATIONAL_NEQ: sp.Ne,
-              libsbml.AST_RELATIONAL_LT: sp.Lt, libsbml.AST_RELATIONAL_LEQ: sp.Le,
-              libsbml.AST_RELATIONAL_GT: sp.Gt, libsbml.AST_RELATIONAL_GEQ: sp.Ge}
+    if t in (
+        libsbml.AST_RELATIONAL_EQ,
+        libsbml.AST_RELATIONAL_NEQ,
+        libsbml.AST_RELATIONAL_LT,
+        libsbml.AST_RELATIONAL_LEQ,
+        libsbml.AST_RELATIONAL_GT,
+        libsbml.AST_RELATIONAL_GEQ,
+    ):
+        op = {
+            libsbml.AST_RELATIONAL_EQ: sp.Eq,
+            libsbml.AST_RELATIONAL_NEQ: sp.Ne,
+            libsbml.AST_RELATIONAL_LT: sp.Lt,
+            libsbml.AST_RELATIONAL_LEQ: sp.Le,
+            libsbml.AST_RELATIONAL_GT: sp.Gt,
+            libsbml.AST_RELATIONAL_GEQ: sp.Ge,
+        }
         return op[t](children[0], children[1])
     if t in (libsbml.AST_LOGICAL_AND, libsbml.AST_LOGICAL_OR):
         return sp.And(*children) if t == libsbml.AST_LOGICAL_AND else sp.Or(*children)
@@ -156,7 +164,7 @@ class SBMLKineticModel:
     outputs: dict[str, sp.Expr] = field(default_factory=dict)
     _fluxes: dict[str, sp.Expr] = field(default_factory=dict)
     _flux_extras: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    _output_fn: callable | None = field(default=None, init=False)
+    _output_fn: Callable[..., Any] | None = field(default=None, init=False)
     _flux_fns: list = field(default_factory=list, init=False)
 
     # -- construction ------------------------------------------------------
@@ -188,8 +196,10 @@ class SBMLKineticModel:
         symbol = {name: sp.Symbol(name) for name in species_names}
         symbol.update({name: sp.Symbol(name) for name in params})
 
-        initial = {ia.getSymbol(): _ast_to_sympy(ia.getMath())
-                   for ia in model.getListOfInitialAssignments()}
+        initial = {
+            ia.getSymbol(): _ast_to_sympy(ia.getMath())
+            for ia in model.getListOfInitialAssignments()
+        }
         assignment_rules = {}
         outputs: dict[str, sp.Expr] = {}
         species_symbols = {sp.Symbol(name) for name in species_names}
@@ -203,11 +213,11 @@ class SBMLKineticModel:
                 assignment_rules[rule.getVariable()] = expr
 
         all_params = {**params, **assignment_rules}
-        param_values = {k: float(v) for k, v in all_params.items()
-                        if not isinstance(v, sp.Expr)}
+        param_values = {k: float(v) for k, v in all_params.items() if not isinstance(v, sp.Expr)}
         for name, expr in assignment_rules.items():
-            param_values[name] = float(expr.subs({sp.Symbol(k): v
-                                                  for k, v in param_values.items()}))
+            param_values[name] = float(
+                expr.subs({sp.Symbol(k): v for k, v in param_values.items()})
+            )
 
         y0 = []
         for name in species_names:
@@ -224,26 +234,39 @@ class SBMLKineticModel:
             r = reactions[rid]
             for ref in r.getListOfReactants():
                 if ref.getSpecies() in species_names:
-                    stoich = stoich.at[species_names.index(ref.getSpecies()), j] \
-                        .add(-float(ref.getStoichiometry()))
+                    stoich = stoich.at[species_names.index(ref.getSpecies()), j].add(
+                        -float(ref.getStoichiometry())
+                    )
             for ref in r.getListOfProducts():
                 if ref.getSpecies() in species_names:
-                    stoich = stoich.at[species_names.index(ref.getSpecies()), j] \
-                        .add(float(ref.getStoichiometry()))
+                    stoich = stoich.at[species_names.index(ref.getSpecies()), j].add(
+                        float(ref.getStoichiometry())
+                    )
 
-        fluxes = {rid: _ast_to_sympy(reactions[rid].getKineticLaw().getMath())
-                  for rid in reactions if reactions[rid].getKineticLaw() is not None}
+        fluxes = {
+            rid: _ast_to_sympy(reactions[rid].getKineticLaw().getMath())
+            for rid in reactions
+            if reactions[rid].getKineticLaw() is not None
+        }
 
         compartment_sizes = jnp.asarray(
             [compartments.get(species_compartment[name], 1.0) for name in species_names],
             dtype=jnp.float32,
         )
-        km = cls(species_names, param_values, y0, list(reactions), stoich,
-                 compartment_sizes, outputs, fluxes)
+        km = cls(
+            species_names,
+            param_values,
+            y0,
+            list(reactions),
+            stoich,
+            compartment_sizes,
+            outputs,
+            fluxes,
+        )
         km.params["Cell"] = float(compartments.get("Cell", 1.0))
         return km
 
-    def make_flux(self, expr: sp.Expr, extra_params: tuple[str, ...] = ()) -> callable:
+    def make_flux(self, expr: sp.Expr, extra_params: tuple[str, ...] = ()) -> Callable[..., Array]:
         """Lambdify a sympy rate law against the model's state/param layout.
 
         The returned callable has signature ``(t, y, params) -> Array`` with
@@ -261,8 +284,9 @@ class SBMLKineticModel:
 
         return flux
 
-    def replace_flux(self, reaction_id: str, expr: sp.Expr,
-                     extra_params: tuple[str, ...] = ()) -> None:
+    def replace_flux(
+        self, reaction_id: str, expr: sp.Expr, extra_params: tuple[str, ...] = ()
+    ) -> None:
         """Swap one reaction's rate law (e.g. for a neural rate parameter).
 
         ``extra_params`` names parameter symbols beyond ``self.params`` that
@@ -272,7 +296,7 @@ class SBMLKineticModel:
         self._flux_extras[reaction_id] = extra_params
         self._flux_fns = []
 
-    def _all_fluxes(self) -> list[callable]:
+    def _all_fluxes(self) -> list[Callable[..., Array]]:
         if not self._flux_fns:
             self._flux_fns = [
                 self.make_flux(expr, self._flux_extras.get(rid, ()))
@@ -282,55 +306,14 @@ class SBMLKineticModel:
 
     # -- simulation --------------------------------------------------------
 
-    def vector_field(self, t: Array, y: Array, args) -> Array:
-        """``(t, y, args) -> dy/dt``; ``args = (params, None, None)``."""
-        params, _boundary, _assignments = args
+    def vector_field(self, t: ArrayLike, y: Array, params: dict) -> Array:
+        """``dy/dt`` with ``params`` a dict holding every name in ``self.params``."""
         v = jnp.stack([f(t, y, params) for f in self._all_fluxes()])
         return jnp.matmul(self.stoich, v) / self.compartment_sizes
 
-    def reduce_conservation_laws(self) -> SBMLKineticModel | ReducedSBMLKineticModel:
-        """Eliminate exactly conserved species (left nullspace of S).
-
-        The stoichiometric matrix's left nullspace gives the conserved
-        moieties; any species whose value is an exact linear combination of
-        the rest can be removed from the integrated state. This shrinks the
-        state vector and removes the conserved directions from the solver's
-        step-size control, which is what makes stiff reaction networks
-        flaky. Returns ``self`` unchanged if the model has no conserved
-        moieties.
-        """
-        S = sp.Matrix(self.stoich.tolist())
-        basis = S.T.nullspace()
-        n_cons = len(basis)
-        if n_cons == 0:
-            return self
-        L = sp.Matrix.hstack(*basis).T  # n_cons x n_species
-        dep: list[int] = []
-        remaining = set(range(len(self.species_names)))
-        for _ in range(n_cons):
-            for j in sorted(remaining):
-                if L[:, dep + [j]].rank() == len(dep) + 1:
-                    dep.append(j)
-                    remaining.remove(j)
-                    break
-        indep = sorted(remaining)
-        Ld, Li = L[:, dep], L[:, indep]
-        constants = jnp.asarray([float(v) for v in (L * sp.Matrix(self.y0.tolist()))],
-                                dtype=jnp.float32)
-        return ReducedSBMLKineticModel(
-            base=self,
-            dep=dep,
-            indep=indep,
-            Ld_inv=jnp.asarray(Ld.inv().tolist(), dtype=jnp.float32),
-            Li=jnp.asarray(Li.tolist(), dtype=jnp.float32),
-            constants=constants,
-        )
-
     def integrate(self, solver, ts: Array, y0: Array, params: dict) -> Array:
         """Run the framework's diffrax solver over this model's vector field."""
-        sol = solver.diffeqsolve(diffrax.ODETerm(self.vector_field), ts, y0,
-                                 args=(params, None, None))
-        return jnp.asarray(sol.ys)
+        return solver.diffeqsolve(diffrax.ODETerm(self.vector_field), ts, y0, args=params).ys
 
     def output_fn(self, state: Array, params: dict) -> Array:
         """Evaluate the state-dependent assignment rules (e.g. scaled totals).
@@ -356,62 +339,3 @@ def _species_amount(model, species_id: str) -> float:
     if s.isSetInitialConcentration():
         return s.getInitialConcentration()
     raise RuntimeError(f"species {species_id} has no initial amount or concentration")
-
-
-@dataclass
-class ReducedSBMLKineticModel:
-    """A model with conserved species eliminated (see ``reduce_conservation_laws``).
-
-    The integrated state holds only the independent species; the eliminated
-    ones are reconstructed algebraically at every vector-field call, so the
-    dynamics are *exactly* equivalent to the full system. Fluxes and output
-    rules are delegated to the base model.
-    """
-
-    base: SBMLKineticModel
-    dep: list[int]
-    indep: list[int]
-    Ld_inv: Array
-    Li: Array
-    constants: Array
-
-    @property
-    def species_names(self) -> list[str]:
-        return [self.base.species_names[i] for i in self.indep]
-
-    @property
-    def params(self) -> dict[str, float]:
-        return self.base.params
-
-    @property
-    def y0(self) -> Array:
-        return self.base.y0[jnp.asarray(self.indep)]
-
-    @property
-    def outputs(self) -> dict[str, sp.Expr]:
-        return self.base.outputs
-
-    def replace_flux(self, reaction_id: str, expr: sp.Expr,
-                     extra_params: tuple[str, ...] = ()) -> None:
-        self.base.replace_flux(reaction_id, expr, extra_params)
-
-    def full_state(self, y: Array) -> Array:
-        """Reconstruct the full species vector from the reduced state."""
-        y_d = self.Ld_inv @ (self.constants - self.Li @ y)
-        full = jnp.zeros(len(self.base.species_names), dtype=jnp.float32)
-        full = full.at[jnp.asarray(self.dep)].set(y_d)
-        full = full.at[jnp.asarray(self.indep)].set(y)
-        return full
-
-    def vector_field(self, t: Array, y: Array, args) -> Array:
-        return self.base.vector_field(t, self.full_state(y), args)[jnp.asarray(self.indep)]
-
-    def integrate(self, solver, ts: Array, y0: Array, params: dict) -> Array:
-        sol = solver.diffeqsolve(diffrax.ODETerm(self.vector_field), ts, y0,
-                                 args=(params, None, None))
-        return jnp.asarray(sol.ys)
-
-    def output_fn(self, state: Array, params: dict) -> Array:
-        if state.ndim == 1:
-            return self.base.output_fn(self.full_state(state), params)
-        return self.base.output_fn(jax.vmap(self.full_state)(state), params)

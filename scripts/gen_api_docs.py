@@ -1,7 +1,8 @@
 """Generate VitePress API reference markdown from jaxhybridmodels docstrings.
 
-Walks ``jaxhybridmodels.__all__``, groups public symbols by their declaring
-submodule, and emits one markdown page per module under ``docs/api/``.
+Walks the symbols listed in ``PAGES`` (every top-level export plus the
+lower-level names in ``SUBMODULE_SYMBOLS``), and emits one markdown page per
+group under ``docs/api/``.
 
 Each entry contains:
 
@@ -22,6 +23,7 @@ for CI.
 from __future__ import annotations
 
 import argparse
+import importlib
 import inspect
 import re
 import sys
@@ -42,12 +44,25 @@ import jaxhybridmodels
 # tuple order of ``PAGES``.
 PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "model",
+        "Models and Results",
+        (
+            "HybridModel",
+            "FitResult",
+            "FitHistory",
+            "PredictionResult",
+            "ExperimentPrediction",
+        ),
+    ),
+    (
         "data",
         "Data: Experiments, Channels, Datasets",
         (
             "ChannelObs",
             "Experiment",
             "make_experiment",
+            "experiment_from_array",
+            "experiments_from_dataframe",
             "BucketPayload",
             "Dataset",
             "make_dataset",
@@ -63,6 +78,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "Predictor",
             "BoundScaler",
             "BoundedPredictor",
+            "Parameter",
+            "Constant",
             "MLPPredictor",
             "KANPredictor",
             "NeuralNPolynomial",
@@ -75,6 +92,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "Penalties: Gradient-Safe Bound Handling",
         (
             "PenaltyPointSource",
+            "bounded_predictor_paths",
+            "resolve_penalty_points",
             "attach_penalty_state",
             "bound_penalty",
             "box_grid",
@@ -120,10 +139,10 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "training",
         "Training: Optax & Evosax Loops",
         (
+            "Objective",
             "OptaxTrainingConfig",
+            "TrainingPhase",
             "train_with_optax",
-            "train_seed_ensemble",
-            "train_bootstrap_ensemble",
             "EvosaxTrainingConfig",
             "train_with_evosax",
             "register_algorithm",
@@ -159,10 +178,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "default_trainable",
             "trainable_mask",
-            "freeze_paths",
-            "freeze_modules_of_type",
-            "freeze_where",
-            "frozen_default_mask",
+            "freeze_mask",
             "count_trainable_params",
         ),
     ),
@@ -170,10 +186,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "prediction",
         "Prediction: Forward Simulation",
         (
-            "predict_bucket",
-            "predict_dataset",
-            "predict_dense",
-            "ensemble_predictions",
+            "predict_ensemble",
             "evaluate_predictor",
         ),
     ),
@@ -205,10 +218,11 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "serialise",
         "Serialise: Save & Load Runs",
         (
+            "save",
+            "load",
+            "SavedRun",
             "save_predictors",
             "load_predictors",
-            "save_run",
-            "load_run",
         ),
     ),
     (
@@ -229,6 +243,74 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
 )
 
+# Documented names that are not top-level exports, with the module to import
+# them from. Top-level names resolve through ``jaxhybridmodels._EXPORTS``.
+SUBMODULE_SYMBOLS: dict[str, str] = {
+    "LOSS_REGISTRY": "jaxhybridmodels.losses",
+    "bal_mle": "jaxhybridmodels.losses",
+    "bal_mse": "jaxhybridmodels.losses",
+    "masked_mle": "jaxhybridmodels.losses",
+    "masked_mse": "jaxhybridmodels.losses",
+    "resolve_loss_fn": "jaxhybridmodels.losses",
+    "PenaltyPointSource": "jaxhybridmodels.penalties",
+    "attach_penalty_state": "jaxhybridmodels.penalties",
+    "bound_penalty": "jaxhybridmodels.penalties",
+    "box_grid": "jaxhybridmodels.penalties",
+    "box_violation": "jaxhybridmodels.penalties",
+    "bounded_predictor_paths": "jaxhybridmodels.penalties",
+    "resolve_penalty_points": "jaxhybridmodels.penalties",
+    "clip_ste": "jaxhybridmodels.penalties",
+    "data_penalty_points": "jaxhybridmodels.penalties",
+    "length_mask_keep": "jaxhybridmodels.penalties",
+    "penalty_integral": "jaxhybridmodels.penalties",
+    "penalty_vector_field": "jaxhybridmodels.penalties",
+    "select_penalty_points": "jaxhybridmodels.penalties",
+    "soft_inverse": "jaxhybridmodels.penalties",
+    "soft_logit": "jaxhybridmodels.penalties",
+    "softclip": "jaxhybridmodels.penalties",
+    "strip_penalty_state": "jaxhybridmodels.penalties",
+    "trajectory_saturation_penalty": "jaxhybridmodels.penalties",
+    "validate_penalty_points": "jaxhybridmodels.penalties",
+    "reinitialize_pytree_with_key": "jaxhybridmodels.predictors",
+    "reinitialize_with_key": "jaxhybridmodels.predictors",
+    "fold": "jaxhybridmodels.rng",
+    "annealing_schedule": "jaxhybridmodels.schedules",
+    "ADJOINT_REGISTRY": "jaxhybridmodels.solver",
+    "SOLVER_REGISTRY": "jaxhybridmodels.solver",
+    "register_adjoint": "jaxhybridmodels.solver",
+    "register_solver": "jaxhybridmodels.solver",
+    "default_trainable": "jaxhybridmodels.trainable",
+    "freeze_mask": "jaxhybridmodels.trainable",
+    "load_predictors": "jaxhybridmodels.serialise",
+    "save_predictors": "jaxhybridmodels.serialise",
+    "train_with_evosax": "jaxhybridmodels.training",
+    "train_with_optax": "jaxhybridmodels.training",
+    "register_algorithm": "jaxhybridmodels.training.evosax",
+    "apply_length_mask": "jaxhybridmodels.training.kernels",
+    "build_apply_update": "jaxhybridmodels.training.kernels",
+    "build_bucket_step": "jaxhybridmodels.training.kernels",
+    "build_penalty_step": "jaxhybridmodels.training.kernels",
+    "build_score_bucket": "jaxhybridmodels.training.kernels",
+    "predict_bucket_obs": "jaxhybridmodels.training.kernels",
+    "BOUND_TRANSFORMS": "jaxhybridmodels.transforms",
+    "BoundTransform": "jaxhybridmodels.transforms",
+    "WARPS": "jaxhybridmodels.transforms",
+    "Warp": "jaxhybridmodels.transforms",
+    "register_bound_transform": "jaxhybridmodels.transforms",
+    "register_warp": "jaxhybridmodels.transforms",
+    "EvosaxUI": "jaxhybridmodels.ui",
+    "RichEvosaxUI": "jaxhybridmodels.ui",
+    "RichTrainingUI": "jaxhybridmodels.ui",
+    "SilentUI": "jaxhybridmodels.ui",
+    "TrainingUI": "jaxhybridmodels.ui",
+}
+
+
+def _module_of(name: str) -> str:
+    """Module a documented symbol is imported from."""
+    return jaxhybridmodels._EXPORTS.get(name) or SUBMODULE_SYMBOLS[name]
+
+
 # Repository GitHub URL prefix for source-code links.
 GITHUB_BLOB = "https://github.com/DanielePessina/jax-hybridmodels/blob/main"
 
@@ -247,9 +329,7 @@ _PARAM_SECTIONS = {"Parameters", "Returns", "Yields", "Attributes", "Raises", "O
 # reading the source in an IDE. VitePress does not render those roles, so the
 # generator converts them to ordinary Markdown links (when the target is a
 # public API symbol) or inline code.
-_RST_ROLE_RE = re.compile(
-    r":(?P<role>func|class|meth|attr|mod|ref):`(?P<target>~?[^`]+)`"
-)
+_RST_ROLE_RE = re.compile(r":(?P<role>func|class|meth|attr|mod|ref):`(?P<target>~?[^`]+)`")
 
 # Match a section header: a line whose next line is a row of dashes of the
 # same length. Captures the header name. Multiline / non-greedy.
@@ -496,7 +576,7 @@ def get_source_link(obj: Any) -> str | None:
 
 def render_entry(name: str, module_name: str) -> str:
     """Render a single API entry — heading, signature, parsed docstring, link."""
-    obj = getattr(jaxhybridmodels, name)
+    obj = getattr(importlib.import_module(module_name), name)
     parsed = parse_docstring(inspect.getdoc(obj))
 
     parts: list[str] = []
@@ -510,10 +590,13 @@ def render_entry(name: str, module_name: str) -> str:
         parts.append(f"### `{name}`")
 
     # Module line (so users know the canonical import path).
-    parts.append(
-        f"<small>`from {module_name} import {name}` &nbsp;·&nbsp; "
-        f"also re-exported as `jaxhybridmodels.{name}`</small>"
-    )
+    if name in jaxhybridmodels._EXPORTS:
+        parts.append(
+            f"<small>`from {module_name} import {name}` &nbsp;·&nbsp; "
+            f"also re-exported as `jaxhybridmodels.{name}`</small>"
+        )
+    else:
+        parts.append(f"<small>`from {module_name} import {name}`</small>")
 
     # Signature or value block.
     sig = render_signature(name, obj)
@@ -664,11 +747,14 @@ PAGE_INTROS: dict[str, str] = {
         "implementations so saved configs round-trip cleanly."
     ),
     "training": (
-        "Choose [`train_with_optax`](#train_with_optax) for gradient-based "
-        "fitting or [`train_with_evosax`](#train_with_evosax) for population "
-        "search over small parameter sets. Both take the same model pieces, "
-        "return `(loss_history, trained_predictors)`, and require an explicit "
-        "keyword-only `key`."
+        "`HybridModel.fit` and `HybridModel.fit_ensemble` are the entry points. "
+        "[`Objective`](#objective) says what is minimised; "
+        "[`OptaxTrainingConfig`](#optaxtrainingconfig) or "
+        "[`EvosaxTrainingConfig`](#evosaxtrainingconfig) says how to search. "
+        "[`train_with_optax`](#train_with_optax) and "
+        "[`train_with_evosax`](#train_with_evosax) are the functions `fit` "
+        "dispatches to: they take the model first, then `fit`'s arguments, "
+        "and return a `FitResult`."
     ),
     "losses": (
         "Loss functions consume a model's predicted output `[N, T, D]` and "
@@ -691,43 +777,47 @@ PAGE_INTROS: dict[str, str] = {
     "metrics": (
         "Per-channel evaluation of trained predictions, mirroring the loss "
         "mask discipline: only cells the bucket mask marks as real "
-        "measurements count. `compute_metrics(predictions, dataset)` returns "
-        "one `ChannelMetrics` per output channel with MSE, RMSE, MAE and R^2; "
+        "measurements count. `compute_metrics(predictions)` takes the result "
+        "of `model.predict(data)` and returns one `ChannelMetrics` per output "
+        "channel with MSE, RMSE, MAE and R^2; "
         "`print_metrics` renders them as a table."
     ),
     "trainable": (
-        "Trainability is encoded as a boolean PyTree mask matching the "
-        "predictors pytree's structure. The training loop calls "
-        "`eqx.partition(predictors, mask)` once at start, optimises only the "
-        "`True` leaves, and re-combines.\n\n"
-        "[`trainable_mask`](#trainable_mask) builds the default mask "
-        "(every inexact-array leaf trainable). The `freeze_*` helpers compose "
-        "to zero out subsets — by path, by module type, or by arbitrary "
-        "predicate."
+        "Trainability is a boolean pytree mask with the structure of the "
+        "predictors. Training partitions the predictors on it once and "
+        "optimises only the `True` leaves.\n\n"
+        "[`trainable_mask`](#trainable_mask) builds the default mask (every "
+        "inexact-array leaf except `Constant`s and scalers). "
+        "[`freeze_mask`](#freeze_mask) is what `fit(freeze=...)` calls: it "
+        "sets the leaves matched by paths, classes or predicates to `False`, "
+        "on top of an optional `mask=`. Pass its result as `fit(trainable=...)` "
+        "when `freeze=` is not enough."
     ),
     "prediction": (
-        "Forward-simulate trained predictors against a dataset. "
-        "[`predict_bucket`](#predict_bucket) is the single-bucket primitive "
-        "(JIT-compiled, vmapped over the bucket's `N` axis); "
-        "[`predict_dataset`](#predict_dataset) walks every bucket and returns "
-        "one `[N, T, D]` array per bucket."
+        "`HybridModel.predict` and `HybridModel.simulate` cover one model. "
+        "[`predict_ensemble`](#predict_ensemble) predicts with several and "
+        "returns the member mean as a `PredictionResult`, with the "
+        "per-channel spread in each experiment's `std` and each member's own "
+        "result in `members`. [`evaluate_predictor`](#evaluate_predictor) "
+        "calls one predictor outside any ODE."
     ),
     "serialise": (
-        "Serialisation uses Equinox's `tree_serialise_leaves` / "
-        "`tree_deserialise_leaves` under the hood. "
-        "[`save_predictors`](#save_predictors) / [`load_predictors`](#load_predictors) "
-        "round-trip a single predictor tree; [`save_run`](#save_run) / "
-        "[`load_run`](#load_run) bundle predictors, solver config, training "
-        "config, and loss history into one directory.\n\n"
-        "**Loading requires a template.** Equinox can't reconstruct module "
-        "shapes from a binary blob, so you instantiate the same predictor "
-        "structure (same shapes, same Module types) and the loader fills its "
-        "leaves."
+        "[`save`](#save) writes a `HybridModel` or a `FitResult` to a "
+        "directory, with the solver, and optionally the training config and "
+        "objective. [`load`](#load) reads it back into a "
+        "[`SavedRun`](#savedrun).\n\n"
+        "**Loading needs a template.** Equinox cannot rebuild module shapes "
+        "from the leaf file, so `load(path, like=model)` takes a model built "
+        "the same way and fills its leaves. The template also supplies "
+        "`simulate_fn` and `state_to_output`, which are code and are not "
+        "saved. [`save_predictors`](#save_predictors) / "
+        "[`load_predictors`](#load_predictors) do the same for a bare "
+        "predictor tree."
     ),
     "ui": (
         "Training UIs are protocols implemented by `RichTrainingUI` / "
         "`RichEvosaxUI` (live dashboards) and `SilentUI` (no-op). Pass via "
-        "the `ui=` keyword on `train_with_optax` / `train_with_evosax`; the "
+        "the `ui=` keyword of `fit` or `fit_ensemble`; the "
         "trainer calls lifecycle hooks (`on_phase_start`, `on_step_end`, "
         "`on_run_end`, ...) at the right points. Custom UIs implement the "
         "matching protocol — useful for piping training metrics into your "
@@ -763,10 +853,8 @@ def render_page(slug: str, title: str, symbols: tuple[str, ...]) -> str:
     parts.append("")
 
     # Resolve module path per symbol — used for the import line in each entry.
-    exports = jaxhybridmodels._EXPORTS
     for name in symbols:
-        module_name = exports.get(name, "jaxhybridmodels")
-        parts.append(render_entry(name, module_name))
+        parts.append(render_entry(name, _module_of(name)))
         parts.append("")
         parts.append("---")
         parts.append("")
@@ -782,9 +870,11 @@ def render_index() -> str:
         "# API Reference",
         "",
         "The public surface is split across the pages below, grouped by concern. "
-        "Every symbol below is also re-exported at the top level — "
-        "`from jaxhybridmodels import MLPPredictor` works exactly like "
-        "`from jaxhybridmodels.predictors import MLPPredictor`.",
+        "The modelling workflow is re-exported at the top level, so "
+        "`from jaxhybridmodels import MLPPredictor` works like "
+        "`from jaxhybridmodels.predictors import MLPPredictor`. Lower-level "
+        "pieces (kernels, penalties, losses, transforms, registries, UI) are "
+        "imported from their submodule; each entry shows its import line.",
         "",
     ]
     for slug, title, symbols in PAGES:

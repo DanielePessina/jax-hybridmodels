@@ -11,8 +11,8 @@ This loop targets small kinetic predictors, roughly 4 to 10 trainable
 scalars. Use ``jaxhybridmodels.training.optax`` for network-sized fits, or
 run this first and polish with Optax afterwards.
 
-There are no phases. The run is ``num_generations`` iterations over a
-population of ``population_size`` individuals.
+There are no phases. The run is ``steps`` generations over a population of
+``population_size`` individuals; one generation is the Evosax step.
 
 JIT boundary
 ------------
@@ -48,7 +48,10 @@ Best-ever tracking
 Each generation's ``argmin(fitness)`` is compared host-side against the
 running best. The winning flat vector is turned back into predictors only
 at run end. CMA-ES's own ``state.best_solution`` is deliberately unused,
-so the contract stays the same whichever strategy is plugged in.
+so the contract stays the same whichever strategy is plugged in. With a
+``validation=`` set, each generation's best is also scored on it, and the
+returned predictors are the generation best with the lowest validation
+score.
 """
 
 # ruff: noqa: F722
@@ -57,9 +60,9 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import equinox as eqx
 import jax
@@ -72,20 +75,23 @@ from evosax.algorithms.distribution_based.simple_es import SimpleES
 from jax import Array
 from scipy.stats import qmc
 
-from jaxhybridmodels.data import BucketPayload, Dataset
-from jaxhybridmodels.losses import resolve_loss_fn
-from jaxhybridmodels.penalties import (
-    bound_penalty,
-    data_penalty_points,
-    select_penalty_points,
-    validate_penalty_points,
-)
+from jaxhybridmodels.data import BucketPayload, Data, Dataset
+from jaxhybridmodels.objective import Objective, resolve_objective
+from jaxhybridmodels.penalties import select_penalty_points
+from jaxhybridmodels.results import FitHistory, FitResult
 from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
-from jaxhybridmodels.trainable import trainable_mask
-from jaxhybridmodels.training.kernels import simulate_bucket
-from jaxhybridmodels.ui.base import EvosaxUI, SilentUI
+from jaxhybridmodels.trainable import FreezeSpec, trainable_mask
+from jaxhybridmodels.training.kernels import (
+    build_dataset_score,
+    build_score_bucket,
+    simulate_bucket,
+)
+from jaxhybridmodels.ui.base import EvosaxUI, SilentUI, close_run_on_error
 from jaxhybridmodels.ui.evosax import RichEvosaxUI
+
+if TYPE_CHECKING:
+    from jaxhybridmodels.model import HybridModel
 
 _SUPPORTED_INIT_MODES: tuple[str, ...] = ("warm", "uniform_box", "lhs_box")
 
@@ -97,8 +103,8 @@ ALGORITHM_REGISTRY: dict[str, type] = {
 """Name → evosax strategy class. Extend via :func:`register_algorithm`.
 
 Each strategy must construct as ``cls(population_size=..., solution=flat)``
-and carry ``default_params`` with a ``std_init`` field (CMA-ES family) —
-the shipped set all do. ``SimpleES`` additionally accepts a default
+and carry ``default_params`` with a ``std_init`` field (CMA-ES family).
+The shipped set all do. ``SimpleES`` additionally accepts a default
 ``optimizer`` argument, which this loop leaves at evosax's default.
 """
 
@@ -113,13 +119,14 @@ def register_algorithm(name: str, cls: type) -> None:
     ALGORITHM_REGISTRY[name] = cls
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class EvosaxTrainingConfig:
-    """Configuration for :func:`train_with_evosax`.
+    """Search settings for :func:`train_with_evosax` and Evosax ``HybridModel.fit``.
 
-    Unlike :class:`~jaxhybridmodels.training.optax.OptaxTrainingConfig` there
-    are no phase-keyed tuples: the run is a flat loop, so every field is a
-    scalar.
+    What is minimised lives in :class:`~jaxhybridmodels.Objective`, passed
+    separately as ``objective=``. Unlike
+    :class:`~jaxhybridmodels.training.optax.OptaxTrainingConfig` there are
+    no phases: the run is a flat loop, so every field is a scalar.
 
     Attributes
     ----------
@@ -127,41 +134,14 @@ class EvosaxTrainingConfig:
         Evosax strategy name, one of the keys of ``ALGORITHM_REGISTRY``:
         ``"CMA_ES"`` (default), ``"Sep_CMA_ES"``, ``"SimpleES"``. Add
         another strategy with :func:`register_algorithm`.
-    population_size, num_generations
-        Loop dimensions. The population is evaluated in parallel through
-        ``vmap``; generations run in sequence.
+    population_size
+        Individuals per generation, evaluated in parallel through ``vmap``.
+    steps
+        Number of generations, run in sequence. Named like the Optax
+        config's ``steps``: one generation is one Evosax step.
     init
         Initial-population scheme, one of ``"warm"``, ``"uniform_box"``,
         ``"lhs_box"``. The module docstring explains the difference.
-    penalty_weight
-        Weight on the bound-saturation penalty, folded into each
-        individual's fitness. ``0.0`` disables it. Scalar, not a tuple.
-        Relative to the per-bucket-averaged data term, charged once per
-        evaluation.
-    penalty_points
-        User-supplied penalty-only points for the bound penalty: one
-        ``[G, n_inputs]`` array of physical input vectors per
-        ``BoundedPredictor`` leaf, in traversal order, matching each leaf's
-        ``input_keys`` column order. ``None`` (the default) uses only the
-        measured points gathered from the dataset; leaves whose inputs do
-        not all resolve to dataset covariates must be covered by an entry
-        here, or the run raises.
-    penalty_fn
-        The regulariser added to each individual's fitness, defaulting to
-        :func:`jaxhybridmodels.penalties.bound_penalty` when ``None``. A
-        custom callable ``(predictors, points) -> scalar`` replaces
-        the bound penalty.
-    trajectory_penalty_fn
-        Trajectory-aware penalty for **embedded** hybrid models, called as
-        ``(full_state, bp) -> scalar`` with the full state ``[N, T, S]``
-        *including* any penalty accumulators carried in the ODE state. Folded
-        into each individual's fitness. ``None`` (the default) disables it.
-        See ``jaxhybridmodels.penalties`` (``attach_penalty_state`` /
-        ``penalty_vector_field`` / ``strip_penalty_state`` /
-        ``penalty_integral``).
-    trajectory_penalty_weight
-        Scalar weight on ``trajectory_penalty_fn``. ``0.0`` disables it even
-        if a function is set. Non-negative.
     init_box_extent
         Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``.
         Ignored by ``"warm"``.
@@ -169,11 +149,6 @@ class EvosaxTrainingConfig:
         Initial CMA-ES step size. Used directly by ``"warm"`` and as the
         prior step size for the box-init modes. CMA-ES adapts it after
         the first ``tell``.
-    loss
-        A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``,
-        ``"bal_mle"``) or a callable matching ``loss(pred_obs, bp)``.
-    channel_idx, channel_weights
-        Forwarded into the resolved loss. See ``jaxhybridmodels.losses``.
     log_every
         UI heartbeat cadence. Honoured only by the Rich UIs; the silent
         and recording UIs see every generation.
@@ -184,18 +159,10 @@ class EvosaxTrainingConfig:
 
     algorithm: str = "CMA_ES"
     population_size: int = 64
-    num_generations: int = 100
+    steps: int = 100
     init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
-    penalty_weight: float = 0.0
-    penalty_points: tuple[Array, ...] | None = None
-    penalty_fn: Callable[..., Array] | None = None
-    trajectory_penalty_fn: Callable[..., Array] | None = None
-    trajectory_penalty_weight: float = 0.0
     init_box_extent: float = 2.0
     sigma_init: float = 0.1
-    loss: Callable[..., Array] | str = "mse"
-    channel_idx: tuple[int, ...] | None = None
-    channel_weights: tuple[float, ...] | None = None
     log_every: int = 1
     verbose: bool = True
 
@@ -210,37 +177,10 @@ class EvosaxTrainingConfig:
                 f"EvosaxTrainingConfig.init={self.init!r} is not supported; "
                 f"available: {list(_SUPPORTED_INIT_MODES)}"
             )
-        if self.penalty_weight < 0.0:
-            raise ValueError(
-                "EvosaxTrainingConfig.penalty_weight must be non-negative; "
-                f"got {self.penalty_weight}"
-            )
-        if not math.isfinite(self.penalty_weight):
-            raise ValueError("EvosaxTrainingConfig.penalty_weight must be finite")
-        if self.trajectory_penalty_weight < 0.0:
-            raise ValueError(
-                "EvosaxTrainingConfig.trajectory_penalty_weight must be "
-                f"non-negative; got {self.trajectory_penalty_weight}"
-            )
-        if not math.isfinite(self.trajectory_penalty_weight):
-            raise ValueError("EvosaxTrainingConfig.trajectory_penalty_weight must be finite")
-        if self.trajectory_penalty_weight != 0.0 and self.trajectory_penalty_fn is None:
-            raise ValueError(
-                "EvosaxTrainingConfig.trajectory_penalty_weight is non-zero but "
-                "trajectory_penalty_fn is None. Provide a "
-                "(full_state, bp) -> scalar function to charge."
-            )
         if self.population_size <= 0:
             raise ValueError("EvosaxTrainingConfig.population_size must be > 0")
-        if self.num_generations <= 0:
-            raise ValueError("EvosaxTrainingConfig.num_generations must be > 0")
-        for idx, points in enumerate(self.penalty_points or ()):
-            if points.ndim != 2:
-                raise ValueError(
-                    "EvosaxTrainingConfig.penalty_points entries must be rank-2 "
-                    f"[G, n_inputs] arrays of physical input vectors; entry {idx} "
-                    f"has shape {points.shape}"
-                )
+        if self.steps <= 0:
+            raise ValueError("EvosaxTrainingConfig.steps must be > 0")
         if not math.isfinite(self.init_box_extent) or self.init_box_extent < 0.0:
             raise ValueError("EvosaxTrainingConfig.init_box_extent must be finite and non-negative")
         if not math.isfinite(self.sigma_init) or self.sigma_init <= 0.0:
@@ -293,15 +233,11 @@ def _build_single_eval(
 
         total = jnp.asarray(0.0)
         for bp in bucket_payloads:
-            full_state = simulate_bucket(
-                predictor, bp, simulate_fn=simulate_fn, solver=solver
-            )
+            full_state = simulate_bucket(predictor, bp, simulate_fn=simulate_fn, solver=solver)
             pred_obs = jax.vmap(state_to_output)(full_state)
             total = total + loss_fn(pred_obs, bp)
             if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-                total = total + trajectory_penalty_weight * trajectory_penalty_fn(
-                    full_state, bp
-                )
+                total = total + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp)
         total = total / float(max(len(bucket_payloads), 1))
         if penalty_weight > 0.0:
             # The search roams the latent space with nothing holding it in
@@ -399,60 +335,109 @@ def _select_ui(ui: EvosaxUI | None, verbose: bool, log_every: int) -> EvosaxUI:
     return SilentUI()
 
 
+@dataclass
+class _EvosaxRun:
+    """What one :func:`_train_with_evosax` run produced, generation by generation.
+
+    ``loss`` is the best-so-far fitness after each generation (monotone).
+    ``validation`` holds the validation score of each generation's best
+    individual and is empty without a validation set. ``best_step`` indexes
+    both at the returned predictors.
+    """
+
+    predictors: Any
+    loss: list[float]
+    validation: list[float]
+    best_step: int
+
+
 def train_with_evosax(
+    model: HybridModel,
+    data: Data,
+    config: EvosaxTrainingConfig,
+    *,
+    key: Array,
+    objective: Objective | None = None,
+    freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
+    trainable: Any = None,
+    ui: EvosaxUI | None = None,
+    validation: Data | None = None,
+) -> FitResult:
+    """Train ``model``'s predictors with an evolutionary strategy; ``fit`` for an Evosax config.
+
+    Runs ``config.steps`` generations over a population of
+    ``config.population_size`` candidates, taking no gradient. See the
+    module docstring for the JIT boundary and the initial-population modes.
+    Every keyword means what it does for :meth:`HybridModel.fit
+    <jaxhybridmodels.HybridModel.fit>`, and ``data`` and ``validation`` may
+    be a ``Dataset`` or a list of experiments.
+
+    Each individual's fitness is the bucket-averaged data loss plus any
+    trajectory penalty plus ``objective.penalty_weight`` times the bound
+    penalty, since evosax ranks by one scalar.
+
+    ``history.loss`` is the best fitness so far after each generation, so
+    it is monotone non-increasing; Optax records the raw per-step loss
+    instead, so the two series mean different things. Without
+    ``validation`` the returned model is rebuilt from the lowest-loss
+    candidate seen in any generation, the warm-up evaluation of the input
+    included. With it, each generation's best is scored on the validation
+    set and the returned model is the one that scored lowest there.
+    """
+    if not isinstance(config, EvosaxTrainingConfig):
+        raise TypeError(
+            f"train_with_evosax takes an EvosaxTrainingConfig; got {type(config).__name__}"
+        )
+    dataset, validation_set, mask = model._prepare_fit(
+        data, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
+    )
+    run = _train_with_evosax(
+        model.predictors,
+        dataset,
+        config,
+        objective=objective,
+        simulate_fn=model.simulate_fn,
+        state_to_output=model.state_to_output,
+        solver=model.solver,
+        trainable=mask,
+        key=key,
+        ui=ui,
+        validation=validation_set,
+    )
+    return FitResult(
+        model=model._with_predictors(run.predictors),
+        history=FitHistory(loss=tuple(run.loss), validation_loss=tuple(run.validation)),
+        best_step=run.best_step,
+        stop_reason="budget_exhausted",
+    )
+
+
+def _train_with_evosax(
     predictors: Any,
     dataset: Dataset,
     config: EvosaxTrainingConfig,
     *,
+    objective: Objective | None = None,
     simulate_fn: Callable[..., Array],
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     trainable: Any = None,
     key: Array,
     ui: EvosaxUI | None = None,
-) -> tuple[list[float], Any]:
-    """Train ``predictors`` against ``dataset`` with an evolutionary strategy.
+    validation: Dataset | None = None,
+) -> _EvosaxRun:
+    """Train loose predictors and return the per-generation record.
 
-    Runs ``config.num_generations`` generations of CMA-ES over a
-    population of ``config.population_size`` candidates, taking no
-    gradient. See the module docstring for the JIT boundary and the
-    initial-population modes.
-
-    ``predictors`` is a ``PyTree[eqx.Module]`` in any shape. ``key`` is
-    keyword-only and required. ``state_to_output`` is the pure mapping
-    ``[T, S] -> [T, D]`` from full simulator state to observed channels; a
-    property of the model, passed here rather than stored on the ``Dataset``
-    ``trainable`` defaults to
-    :func:`jaxhybridmodels.trainable.trainable_mask`, and must select at
-    least one scalar.
-
-    Returns
-    -------
-    history : list[float]
-        **Best loss so far** at the end of each generation, so the series
-        is monotone non-increasing. Length ``config.num_generations``.
-
-        It differs from
-        :func:`~jaxhybridmodels.training.optax.train_with_optax`, whose
-        history is the raw per-step loss and can go up. Same type, same
-        position, different meaning: plotting both on one axis misleads.
-
-        When ``config.penalty_weight > 0`` the recorded value is the
-        combined objective, since evosax ranks by one scalar. The optax
-        history excludes its penalty.
-    best_predictors : Any
-        Predictors rebuilt from the lowest-loss flat vector seen in any
-        generation, the warm-up evaluation of the input predictors
-        included. Same container shape as the input.
+    The engine behind :func:`train_with_evosax`, on the pieces of a model
+    rather than the model, after its checks have run.
     """
+    objective = Objective() if objective is None else objective
     if trainable is None:
         trainable = trainable_mask(predictors)
 
     bucket_payloads = dataset.bucket_payloads
     if not bucket_payloads:
         raise ValueError("train_with_evosax: dataset has no bucket payloads")
-
-    loss_fn = resolve_loss_fn(config.loss, config.channel_idx, config.channel_weights)
 
     params_pytree, static_predictors = eqx.partition(predictors, trainable)
     flat0, unflatten = jfu.ravel_pytree(params_pytree)
@@ -462,96 +447,128 @@ def train_with_evosax(
             "evosax requires at least one trainable scalar."
         )
 
-    ui_ = _select_ui(ui, config.verbose, config.log_every)
-    ui_.on_run_start(
-        num_generations=int(config.num_generations),
-        population_size=int(config.population_size),
+    # Resolved before the dashboard opens, so a bad channel name or penalty
+    # path raises without leaving a Rich Live display on the terminal.
+    resolved = resolve_objective(
+        objective, predictors, dataset, penalty_on=objective.penalty_weight > 0.0
     )
+    loss_fn = resolved.loss_fn
 
-    sources = data_penalty_points(predictors, dataset)
-    extras = config.penalty_points or ()
-    validate_penalty_points(
-        predictors,
-        sources,
-        extras,
-        # Coverage is the default bound penalty's contract; a custom
-        # ``penalty_fn`` owns its points and needs no coverage check.
-        enabled=config.penalty_weight > 0.0 and config.penalty_fn is None,
-    )
-
-    single_eval = _build_single_eval(
-        static_predictor=static_predictors,
-        unflatten=unflatten,
-        bucket_payloads=bucket_payloads,
-        simulate_fn=simulate_fn,
-        state_to_output=state_to_output,
-        solver=solver,
-        loss_fn=loss_fn,
-        penalty_fn=bound_penalty if config.penalty_fn is None else config.penalty_fn,
-        penalty_points=select_penalty_points(sources, extras, 1.0),
-        penalty_weight=float(config.penalty_weight),
-        trajectory_penalty_fn=config.trajectory_penalty_fn,
-        trajectory_penalty_weight=config.trajectory_penalty_weight,
-    )
-    population_eval = eqx.filter_jit(jax.vmap(single_eval))
-
-    # ``population_eval`` is one fused vmap+jit callable across all buckets,
-    # so there is no per-bucket compile span to emit as the Optax loop does.
-    # One synthetic span over a "union" shape keeps the UI contract
-    # symmetric and the Rich progress bars rendering.
-    union_shape = (int(config.population_size), int(flat0.shape[0]))
-    ui_.on_compile_start(bucket_idx=0, bucket_shape=union_shape)
-    warm_pop = jnp.broadcast_to(flat0[None, :], (config.population_size, flat0.shape[0]))
-    warm_fitness = population_eval(warm_pop)
-    jax.block_until_ready(warm_fitness)  # type: ignore[no-untyped-call]
-    if not bool(jnp.all(jnp.isfinite(warm_fitness))):
-        raise FloatingPointError("non-finite fitness in the initial population")
-    ui_.on_compile_done(bucket_idx=0)
-
-    strategy, strat_params = _build_strategy(config=config, flat=flat0)
-    init_key = fold(key, "evosax_init")
-    state = strategy.init(init_key, flat0, strat_params)
-
-    # Best-ever bookkeeping starts from the warm-up evaluation, so an
-    # unlucky initial population cannot replace a perfectly good seed.
-    best_idx = int(jnp.argmin(warm_fitness))
-    best_loss = float(warm_fitness[best_idx])
-    best_flat = jnp.asarray(warm_pop[best_idx])
-
-    history: list[float] = []
-
-    for gen in range(int(config.num_generations)):
-        ask_key = fold(key, f"evosax_ask_{gen}")
-        if gen == 0 and config.init in ("uniform_box", "lhs_box"):
-            # Inject the box-init population directly, skipping CMA-ES's
-            # first ``ask``. ``tell`` still consumes it below, so mean and
-            # covariance update from the prescribed sample.
-            population = _box_population(
-                flat=flat0, config=config, key=fold(key, "evosax_box_init")
-            )
-        else:
-            population, state = strategy.ask(ask_key, state, strat_params)
-
-        fitness = population_eval(population)
-        if not bool(jnp.all(jnp.isfinite(fitness))):
-            raise FloatingPointError(f"non-finite fitness in generation {gen}")
-        tell_key = fold(key, f"evosax_tell_{gen}")
-        state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)
-
-        gen_best_idx = int(jnp.argmin(fitness))
-        gen_best_loss = float(fitness[gen_best_idx])
-        gen_mean_loss = float(jnp.mean(fitness))
-        if gen_best_loss < best_loss:
-            best_loss = gen_best_loss
-            best_flat = jnp.asarray(population[gen_best_idx])
-
-        history.append(best_loss)
-        ui_.on_generation_end(
-            gen_idx=gen,
-            best_fitness=gen_best_loss,
-            mean_fitness=gen_mean_loss,
+    select_score: Callable[[Any], float] | None = None
+    if validation is not None:
+        score_bucket = build_score_bucket(
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
+            loss_fn=loss_fn,
+            trajectory_penalty_fn=objective.trajectory_penalty_fn,
+            trajectory_penalty_weight=objective.trajectory_penalty_weight,
+        )
+        select_score = build_dataset_score(
+            score_bucket, validation, output_channel_names=dataset.output_channel_names
         )
 
-    best_predictors = eqx.combine(unflatten(best_flat), static_predictors)
-    ui_.on_run_end(best_fitness=best_loss)
-    return history, best_predictors
+    ui_ = _select_ui(ui, config.verbose, config.log_every)
+    ui_.on_run_start(total_steps=int(config.steps), population_size=int(config.population_size))
+    with close_run_on_error(ui_):
+        single_eval = _build_single_eval(
+            static_predictor=static_predictors,
+            unflatten=unflatten,
+            bucket_payloads=bucket_payloads,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
+            loss_fn=loss_fn,
+            penalty_fn=objective.bound_penalty_fn,
+            penalty_points=select_penalty_points(resolved.sources, resolved.extras, 1.0),
+            penalty_weight=float(objective.penalty_weight),
+            trajectory_penalty_fn=objective.trajectory_penalty_fn,
+            trajectory_penalty_weight=objective.trajectory_penalty_weight,
+        )
+        population_eval = eqx.filter_jit(jax.vmap(single_eval))
+
+        # ``population_eval`` is one fused vmap+jit callable across all buckets,
+        # so there is no per-bucket compile span to emit as the Optax loop does.
+        # One synthetic span over a "union" shape keeps the UI contract
+        # symmetric and the Rich progress bars rendering.
+        union_shape = (int(config.population_size), int(flat0.shape[0]))
+        ui_.on_compile_start(bucket_idx=0, bucket_shape=union_shape)
+        warm_pop = jnp.broadcast_to(flat0[None, :], (config.population_size, flat0.shape[0]))
+        warm_fitness = population_eval(warm_pop)
+        jax.block_until_ready(warm_fitness)  # type: ignore[no-untyped-call]
+        if not bool(jnp.all(jnp.isfinite(warm_fitness))):
+            raise FloatingPointError("non-finite fitness in the initial population")
+        ui_.on_compile_done(bucket_idx=0)
+
+        strategy, strat_params = _build_strategy(config=config, flat=flat0)
+        init_key = fold(key, "evosax_init")
+        state = strategy.init(init_key, flat0, strat_params)
+
+        def rebuild(flat: Array) -> Any:
+            return eqx.combine(unflatten(flat), static_predictors)
+
+        # Best-ever bookkeeping starts from the warm-up evaluation, so an
+        # unlucky initial population cannot replace a perfectly good seed.
+        best_idx = int(jnp.argmin(warm_fitness))
+        best_loss = float(warm_fitness[best_idx])
+        best_flat = jnp.asarray(warm_pop[best_idx])
+        best_step = 0
+        # With a validation set, selection follows the validation score of each
+        # generation's best individual instead of the training fitness.
+        best_selection = math.inf
+        selected_flat = best_flat
+
+        history: list[float] = []
+        selection: list[float] = []
+
+        for gen in range(int(config.steps)):
+            ask_key = fold(key, f"evosax_ask_{gen}")
+            if gen == 0 and config.init in ("uniform_box", "lhs_box"):
+                # Inject the box-init population directly, skipping CMA-ES's
+                # first ``ask``. ``tell`` still consumes it below, so mean and
+                # covariance update from the prescribed sample.
+                population = _box_population(
+                    flat=flat0, config=config, key=fold(key, "evosax_box_init")
+                )
+            else:
+                population, state = strategy.ask(ask_key, state, strat_params)
+
+            fitness = population_eval(population)
+            if not bool(jnp.all(jnp.isfinite(fitness))):
+                raise FloatingPointError(f"non-finite fitness in generation {gen}")
+            tell_key = fold(key, f"evosax_tell_{gen}")
+            state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)
+
+            gen_best_idx = int(jnp.argmin(fitness))
+            gen_best_loss = float(fitness[gen_best_idx])
+            gen_mean_loss = float(jnp.mean(fitness))
+            if gen_best_loss < best_loss:
+                best_loss = gen_best_loss
+                best_flat = jnp.asarray(population[gen_best_idx])
+                if select_score is None:
+                    best_step = gen
+
+            if select_score is not None:
+                gen_flat = jnp.asarray(population[gen_best_idx])
+                score = select_score(rebuild(gen_flat))
+                selection.append(score)
+                if score < best_selection:
+                    best_selection = score
+                    selected_flat = gen_flat
+                    best_step = gen
+
+            history.append(best_loss)
+            ui_.on_generation_end(
+                gen_idx=gen,
+                best_loss=gen_best_loss,
+                mean_loss=gen_mean_loss,
+            )
+
+        final_flat = best_flat if select_score is None else selected_flat
+        ui_.on_run_end(final_loss=best_loss if select_score is None else best_selection)
+        return _EvosaxRun(
+            predictors=rebuild(final_flat),
+            loss=history,
+            validation=selection,
+            best_step=best_step,
+        )

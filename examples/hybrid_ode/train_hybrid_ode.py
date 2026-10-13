@@ -1,43 +1,21 @@
-"""Hybrid ODE fit: keep the physics you know, learn the parts you do not.
+"""Hybrid ODE: keep the physics you know, learn the two parts you do not.
 
-A mechanistic model with two gaps: a rate constant that varies with an
-operating condition in a way you cannot write down, and a term missing
-from the model entirely. The ground truth is::
+A damped rotation, ``dy/dt = [[-k, w], [-w, -k]] y + C y^3``, with ``w``
+known. The damping rate ``k`` follows an Arrhenius law in temperature that
+the model is never told, and the cubic coupling ``C y^3`` is missing from
+the model entirely. One network learns ``k(T)`` from a covariate, another
+learns the missing term from trajectories alone.
 
-    dy/dt = [[-k, w], [-w, -k]] y  +  C y^3        w = 1, k = k(temperature)
+Shows:
 
-The model keeps the rotation and knows ``w``. One network learns ``k`` from
-a temperature covariate, another learns ``C y^3``.
-
-What it shows
--------------
-**Two network placements.** ``rate_net`` reads a covariate that is constant
-along a trajectory, so it runs once per experiment above ``diffeqsolve``
-and never touches the solver tape. ``residual_net`` depends on the state,
-so it runs inside the vector field, once per step (a network there is a
-neural ODE, which diffrax and Equinox document). The two travel as a plain
-tuple, unpacked at the top of ``simulate_fn``. The library never inspects
-the container, so ``--mechanistic-only`` just shortens the tuple.
-
-**Bounds that hold by construction.** ``BoundedPredictor`` means neither
-network sees a bound or can leave one. ``k`` is bounded to ``(1e-3, 1)``
-under ``warp="log10"``, since the true rates span 1.6 decades and a linear
-box would put 99% of the latent range above 0.5. The residual uses
-``softsign``, whose gradient decays polynomially, because a term that
-visits the edge of its box needs one that does not underflow.
-
-**Two data layouts, one model.** ``--data rectangular`` gives one bucket
-with a full mask, ``--data irregular`` gives three about half full. The
-model code is identical: regular data is the degenerate case, not a
-separate path.
-
-**A saturation penalty on the latent**, evaluated on a grid over each
-predictor's declared input box rather than along the trajectories, so it
-reports extrapolation trouble the training loss cannot see.
-
-The residual's box straddles zero, so ``log10`` is unusable and a linear
-box wastes resolution on corrections that should never happen. The script
-registers a signed-logarithmic warp of its own with ``register_warp``.
+- a network above the solver (``rate_net``, once per experiment) and one
+  inside the vector field (``residual_net``, once per solver step)
+- ``BoundScaler`` warps: ``log10`` for a rate spanning decades, and a
+  custom ``symlog`` warp registered with ``register_warp``
+- ``softsign`` output squash for a network that visits its bounds
+- irregular per-channel sampling (three buckets) against a rectangular grid
+- the saturation penalty on a ``box_grid`` over each network's input box
+- ``RecursiveCheckpointAdjoint`` for a network on the solver tape
 
 Run::
 
@@ -45,6 +23,11 @@ Run::
     uv run python examples/hybrid_ode/train_hybrid_ode.py --data rectangular
     uv run python examples/hybrid_ode/train_hybrid_ode.py --mechanistic-only
     uv run python examples/hybrid_ode/train_hybrid_ode.py --inner kan
+
+Prints the bucket layout, losses, per-network saturation penalty, recovered
+``k(T)`` and residual error, and per-channel metrics. Writes parity and
+trajectory figures to ``figures/`` unless ``--no-plot``. About a minute on
+CPU.
 """
 
 # ruff: noqa: F722
@@ -58,33 +41,21 @@ from pathlib import Path
 import diffrax
 import jax.numpy as jnp
 import jax.random as jr
+from jax.typing import ArrayLike
 from jaxtyping import Array, Float
 
-from jaxhybridmodels import (
-    BoundedPredictor,
-    BoundScaler,
-    MLPPredictor,
-    SolverConfig,
-    Warp,
-    compute_metrics,
-    evaluate_predictor,
-    predict_dataset,
-    print_metrics,
-    register_warp,
-)
+import jaxhybridmodels as hm
 from jaxhybridmodels.penalties import bound_penalty, box_grid
-from jaxhybridmodels.predictors.base import Predictor
-from jaxhybridmodels.training.optax import OptaxTrainingConfig, train_with_optax
+from jaxhybridmodels.transforms import Warp, register_warp
 
 # ``_data`` sits alongside this file, ``_shared`` one level up.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _data import (  # noqa: E402
+    CHANNELS,
     COUPLING,
     OMEGA_TRUE,
     TEMPERATURES,
-    build_dataset,
-    describe_buckets,
     irregular_experiments,
     rectangular_experiments,
     state_to_output,
@@ -103,13 +74,14 @@ SYMLOG_EPS: float = 0.25  # half-width of the symlog warp's linear region
 # data, so ``to_latent`` stays in its exact region at the extremes. The
 # output is three decades against true rates of 0.006 to 0.28: loose on
 # purpose, which under ``log10`` costs almost nothing in resolution.
-TEMPERATURE_BOUNDS: tuple[tuple[float, float], ...] = ((270.0, 350.0),)
-K_BOUNDS: tuple[tuple[float, float], ...] = ((1e-3, 1.0),)
+TEMPERATURE_BOUNDS: tuple[float, float] = (270.0, 350.0)
+K_BOUNDS: tuple[float, float] = (1e-3, 1.0)
 
-# Residual-network boxes. The true coupling reaches about 0.6 here, so most
-# of the output box is headroom the symlog warp deliberately under-resolves.
-STATE_BOUNDS: tuple[tuple[float, float], ...] = ((-2.0, 2.0), (-2.0, 2.0))
-RESIDUAL_BOUNDS: tuple[tuple[float, float], ...] = ((-3.0, 3.0), (-3.0, 3.0))
+# Residual-network boxes, one pair shared by both components. The true
+# coupling reaches about 0.6 here, so most of the output box is headroom
+# the symlog warp deliberately under-resolves.
+STATE_BOUNDS: tuple[float, float] = (-2.0, 2.0)
+RESIDUAL_BOUNDS: tuple[float, float] = (-3.0, 3.0)
 
 
 # A signed-logarithmic axis warp under the name ``symlog``:
@@ -119,6 +91,7 @@ RESIDUAL_BOUNDS: tuple[tuple[float, float], ...] = ((-3.0, 3.0), (-3.0, 3.0))
 # correction rather than at an arbitrary interior point. ``register_warp``
 # overwrites without warning, so prefix custom names if a collision with a
 # future package warp would matter to you.
+# region symlog-warp
 register_warp(
     "symlog",
     Warp(
@@ -127,16 +100,17 @@ register_warp(
         requires_positive=False,
     ),
 )
+# endregion symlog-warp
 
 
-def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) -> Predictor:
+def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) -> hm.Predictor:
     """Build the trainable core of a ``BoundedPredictor``.
 
     The only place that knows which architecture is in use; everything
     downstream sees a ``Predictor``.
     """
     if kind == "mlp":
-        return MLPPredictor(
+        return hm.MLPPredictor(
             in_size=in_size,
             out_size=out_size,
             width_size=width,
@@ -145,42 +119,41 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
             key=key,
         )
     if kind == "kan":
-        from jaxhybridmodels import KANPredictor
-
-        return KANPredictor(
+        return hm.KANPredictor(
             in_size=in_size, out_size=out_size, hidden_widths=(width,), grid_size=5, key=key
         )
     raise ValueError(f"--inner must be 'mlp' or 'kan'; got {kind!r}")
 
 
+# region simulate-fn
 def simulate_fn(
-    predictors: tuple[BoundedPredictor, ...],
+    predictors: dict[str, hm.BoundedPredictor],
     ts: Float[Array, " T"],
     covariates: dict[str, Array],
     y0: Float[Array, " 2"],
-    solver: SolverConfig,
-) -> Float[Array, "T 2"]:
-    """Integrate the hybrid field for one experiment.
+    solver: hm.SolverConfig,
+) -> diffrax.Solution:
+    """Integrate the hybrid field for one experiment; the state is read from ``.ys``.
 
-    Both placements are visible in the first six lines: the rate network
-    runs here once and its output is closed over as a constant, the
-    residual network runs inside ``vector_field`` once per step. Ordinary
-    calls either way; the library is never told which is which.
+    The rate network runs here once and its output is closed over as a
+    constant; the residual network runs inside ``vector_field`` once per
+    step. Ordinary calls either way: the library is never told which is
+    which. Without a ``"residual"`` entry the model is mechanistic only.
     """
-    rate_net = predictors[0]
-    residual_net = predictors[1] if len(predictors) > 1 else None
+    rate_net = predictors["rate"]
+    residual_net = predictors.get("residual")
 
-    k = rate_net(covariates).reshape(())
+    k = rate_net(covariates)  # one output, so a scalar
     rotation = jnp.array([[-k, OMEGA_TRUE], [-OMEGA_TRUE, -k]])
 
-    def vector_field(t: Array, y: Float[Array, " 2"], args: object) -> Array:
+    def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
         mechanistic = rotation @ y
         if residual_net is None:
             return mechanistic
         return mechanistic + residual_net(y)
 
-    term = diffrax.ODETerm(vector_field)
-    return jnp.asarray(solver.diffeqsolve(term, ts, y0).ys)
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
+    # endregion simulate-fn
 
 
 def main() -> None:
@@ -197,7 +170,7 @@ def main() -> None:
     parser.add_argument(
         "--mechanistic-only",
         action="store_true",
-        help="Drop the residual network. The predictors tuple becomes length one.",
+        help="Drop the residual network, leaving the rate network alone.",
     )
     parser.add_argument(
         "--penalty-weight",
@@ -211,27 +184,31 @@ def main() -> None:
     args = parser.parse_args()
 
     apply_default_style()
-    k_data, k_rate, k_res, k_train = jr.split(jr.PRNGKey(args.seed), 4)
+    k_data, k_rate, k_res, k_train = jr.split(jr.key(args.seed), 4)
 
     print(f"[data] {args.data} sampling")
     if args.data == "rectangular":
         experiments = rectangular_experiments(n_experiments=args.experiments, key=k_data)
     else:
         experiments = irregular_experiments(n_experiments=args.experiments, key=k_data)
-    dataset = build_dataset(experiments)
-    print(describe_buckets(dataset))
+    # Kept as a Dataset rather than a list of experiments so the bucket
+    # layout can be printed before training.
+    dataset = hm.make_dataset(experiments, output_channel_names=CHANNELS)
+    print(hm.describe_buckets(dataset))
 
-    solver = SolverConfig(
-        solver=diffrax.Tsit5(),
+    # region solver
+    # Tsit5 and max_steps=4096 are the defaults; the tolerances are looser
+    # than the default 1e-5 and 1e-7.
+    solver = hm.SolverConfig(
         rtol=1e-4,
         atol=1e-6,
-        max_steps=4096,
         dt0=0.1,
         # A network inside the vector field makes the forward tape the
         # memory bottleneck. RecursiveCheckpoint trades recomputation for
         # O(log n) storage; Direct, the default, keeps the lot.
         adjoint=diffrax.RecursiveCheckpointAdjoint(),
     )
+    # endregion solver
 
     # ``temperature -> k``, evaluated once per experiment above the solver.
     # ``warp="log10"`` is what makes this read well: a linear box over
@@ -239,115 +216,115 @@ def main() -> None:
     # the bottom 3% of the box, reachable only through large negative
     # latents. Under ``log10`` the midpoint is ``0.032`` and the true range
     # covers the middle of the box.
-    rate_net = BoundedPredictor(
+    # ``input_bounds`` builds the default sigmoid scaler; ``out_scaler`` is
+    # spelled out where the warp or squash differs from the default.
+    # region predictors
+    rate_net = hm.BoundedPredictor(
         input_keys=("temperature",),
-        in_scaler=BoundScaler(bounds=TEMPERATURE_BOUNDS, transform="sigmoid"),
+        input_bounds=TEMPERATURE_BOUNDS,
         inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
-        out_scaler=BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
+        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
     )
-    predictors: tuple[BoundedPredictor, ...] = (rate_net,)
+    predictors = {"rate": rate_net}
     if not args.mechanistic_only:
         # ``[y1, y2] -> correction``, evaluated once per solver step inside
-        # the vector field.
-        predictors = (
-            *predictors,
-            BoundedPredictor(
-                input_keys=("y1", "y2"),
-                in_scaler=BoundScaler(bounds=STATE_BOUNDS, transform="sigmoid"),
-                inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
-                out_scaler=BoundScaler(
-                    bounds=RESIDUAL_BOUNDS, transform="softsign", warp="symlog"
-                ),
+        # the vector field. softsign keeps a usable gradient far past the
+        # point where a sigmoid's underflows, for a term that visits the
+        # edge of its box early in training.
+        predictors["residual"] = hm.BoundedPredictor(
+            input_keys=("y1", "y2"),
+            input_bounds=STATE_BOUNDS,
+            inner=_inner(args.inner, in_size=2, out_size=2, width=32, key=k_res),
+            # A scaler on its own cannot infer its size, so the shared pair
+            # is repeated once per output.
+            out_scaler=hm.BoundScaler(
+                bounds=(RESIDUAL_BOUNDS,) * 2, transform="softsign", warp="symlog"
             ),
         )
-    print(f"\n[model] {len(predictors)} predictor(s), inner architecture {args.inner!r}")
-
-    config = OptaxTrainingConfig(
-        steps=(args.steps // 2, args.steps),
-        lr=(5e-3, 1e-3),
-        optimizer=("adamw", "adamw"),
-        reset_optimiser_state=(False, False),
-        length_schedule=(0.4, 1.0),
-        # Length-1 tuple, so the weight broadcasts across both phases. A
-        # two-element tuple would set it per phase.
-        penalty_weight=(args.penalty_weight,),
-        # The residual network reads the ODE state ("y1", "y2"), so the
-        # dataset can resolve no measured points for it; cover both leaves
-        # with a box sweep in warped space instead -- the
-        # collocation-as-extension recipe (``box_grid``).
-        penalty_points=tuple(box_grid(leaf.in_scaler, n_per_dim=7) for leaf in predictors),
-        loss="mse",
-        verbose=False,
-    )
-    print("[train] two phases, saturation penalty on")
-    history, trained = train_with_optax(
-        predictors,
-        dataset,
-        config,
+    # endregion predictors
+    model = hm.HybridModel(
+        predictors=predictors,
         simulate_fn=simulate_fn,
         state_to_output=state_to_output,
+        output_channel_names=CHANNELS,
         solver=solver,
-        key=k_train,
     )
-    print(f"  loss at phase starts: {history[0]:.4f} -> {history[args.steps // 2]:.4f}")
-    print(f"  final loss: {history[-1]:.5f}")
+
+    # region fit
+    # The residual network reads the ODE state ("y1", "y2"), so the dataset
+    # can resolve no measured points for it. Both networks are charged on a
+    # grid over their input box in warped space instead (``box_grid``),
+    # keyed by their name in the predictors dict.
+    objective = hm.Objective(
+        penalty_weight=args.penalty_weight,
+        penalty_points={
+            name: box_grid(leaf.in_scaler, n_per_dim=7) for name, leaf in predictors.items()
+        },
+    )
+    # Fit the first 40% of each trajectory, then all of it. The saturation
+    # penalty applies in both phases.
+    config = hm.OptaxTrainingConfig(
+        phases=(
+            hm.TrainingPhase(steps=args.steps // 2, lr=5e-3, horizon=0.4),
+            hm.TrainingPhase(steps=args.steps, lr=1e-3),
+        ),
+        verbose=False,
+    )
+    print(f"\n[fit] {list(predictors)} with {args.inner!r} inner networks, two phases")
+    result = model.fit(dataset, config, objective=objective, key=k_train)
+    # endregion fit
+    trained = result.model.predictors
+    loss, phase = result.history.loss, result.history.phase
+    starts = [f"{loss[phase.index(p)]:.4f}" for p in sorted(set(phase))]
+    print(f"  loss at phase starts: {' -> '.join(starts)}")
+    print(f"  final loss: {loss[-1]:.5f}; returned step {result.best_step}")
 
     # Zero means no predictor is pinned against a bound anywhere in its
     # declared input box, which is what you want to ship. Non-zero says a
     # network is leaning on its bound, which is probably in the wrong place.
-    print("  end-of-run saturation penalty, by leaf:")
-    names = ("rate_net", "residual_net")[: len(trained)]
-    for name, leaf in zip(names, trained, strict=True):
-        print(f"    {name:13s} {float(bound_penalty((leaf,), (box_grid(leaf.in_scaler),))):.4e}")
+    print("  end-of-run saturation penalty, by network:")
+    for name, leaf in trained.items():
+        print(f"    {name:9s} {float(bound_penalty((leaf,), (box_grid(leaf.in_scaler),))):.4e}")
 
-    print("\n[rate network] recovered temperature dependence")
+    print("\n[results] recovered rate law k(T)")
     # The check that matters for the outside-the-solver network: it sees only
     # trajectories, so agreeing with the Arrhenius law here means the
     # covariate dependence was recovered, not memorised per experiment.
     print("  temperature   true k     fitted k    ratio")
     for temperature in TEMPERATURES:
         truth = float(true_k(temperature))
-        fitted = evaluate_predictor(trained[0], {"temperature": temperature})
+        fitted = float(hm.evaluate_predictor(trained["rate"], {"temperature": temperature}))
         print(f"    {temperature:6.1f}    {truth:.5f}    {fitted:.5f}    {fitted / truth:5.2f}")
-    if len(trained) > 1:
-        print("\n[residual network] recovered cubic coupling")
+    if "residual" in trained:
+        print("\n[results] recovered cubic coupling")
         # Relative RMS over the grid rather than pointwise, since the residual
         # is only identifiable where trajectories actually went.
         axis = jnp.linspace(-0.8, 1.0, 9)
         grid = jnp.stack(jnp.meshgrid(axis, axis, indexing="ij"), axis=-1).reshape(-1, 2)
         truth = (COUPLING @ (grid**3).T).T
-        fitted = jnp.stack([trained[1](point) for point in grid])
+        fitted = hm.evaluate_predictor(trained["residual"], {"y1": grid[:, 0], "y2": grid[:, 1]})
         rms_error = float(jnp.sqrt(jnp.mean((fitted - truth) ** 2)))
         rms_truth = float(jnp.sqrt(jnp.mean(truth**2)))
         print(f"  residual RMS error {rms_error:.4f} against a true RMS of {rms_truth:.4f}")
         print(f"  relative {rms_error / rms_truth:.2%}")
 
-    predictions = predict_dataset(
-        trained, dataset, simulate_fn=simulate_fn, state_to_output=state_to_output, solver=solver
-    )
-    metrics = compute_metrics(predictions, dataset)
+    predictions = result.model.predict(dataset)
     print()
-    print_metrics(metrics)
+    hm.print_metrics(predictions)
 
     if not args.no_plot:
         variant = "mechanistic" if args.mechanistic_only else args.inner
         suffix = f"{args.data}_{variant}"
         args.plot_dir.mkdir(parents=True, exist_ok=True)
-        # ``compute_metrics`` keeps only the summary stats; the scatter needs
-        # the raw value pairs, so re-walk the mask here.
-        parity_data = parity_diagnostics(predictions, dataset)
         parity_plot(
-            parity_data,
+            parity_diagnostics(predictions),
             title=f"Hybrid ODE parity ({suffix})",
             save_path=args.plot_dir / f"parity_{suffix}.png",
         )
         trajectory_plot(
-            predictions,
+            result.model,
             dataset,
-            predictors=trained,
-            simulate_fn=simulate_fn,
-            state_to_output=state_to_output,
-            solver=solver,
+            predictions=predictions,
             max_experiments=4,
             title=f"Hybrid ODE trajectories ({suffix})",
             save_path=args.plot_dir / f"trajectories_{suffix}.png",

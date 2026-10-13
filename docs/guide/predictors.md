@@ -1,79 +1,125 @@
 # Predictors and bounds
 
-A predictor is a callable Equinox module. It maps an input array to an output
-array. `MLPPredictor`, `KANPredictor`, and `NeuralNPolynomial` are included;
-you can define another predictor by subclassing `Predictor`.
+A predictor is a callable Equinox module that maps an input array to an
+output array. `MLPPredictor`, `KANPredictor` and `NeuralNPolynomial` ship
+with the library. Subclass `Predictor` to add another family; see
+[Custom predictors](/guide/custom-predictors).
 
-## A bounded predictor
+Three leaf types cover most models:
 
-`BoundedPredictor` composes three parts:
+| Leaf | Holds | Trained by default |
+| --- | --- | --- |
+| `Constant` | A fixed value | No |
+| `Parameter` | A physical value with optional bounds | Yes |
+| `BoundedPredictor` | A network from named inputs to a bounded physical output | Yes, except its scalers |
 
-1. `in_scaler` maps physical inputs to latent inputs.
-2. `inner` evaluates the predictor in latent space.
-3. `out_scaler` maps the latent output to physical units.
+## Constants and parameters
+
+Read both through `.value`:
 
 ```python
-predictor = hm.BoundedPredictor(
+import jaxhybridmodels as hm
+
+omega = hm.Constant(1.0)
+omega.value                                   # Array(1.)
+
+scalar, vector = hm.Constant((1.0, [0.1, 0.2])).value
+```
+
+Lists become arrays. Tuples keep their nested structure with array leaves.
+
+```python
+rate = hm.Parameter(0.1, bounds=(0.0, None))
+offset = hm.Parameter(0.0)                    # unbounded
+kinetics = hm.Parameter([0.1, 0.02], bounds=[(0.0, None), (0.0, 1.0)])
+k_ref = hm.Parameter(1e-3, bounds=(1e-6, 1e2), warp="log10")
+```
+
+The initial value is in physical units and must lie strictly inside its
+bounds. Every bounds argument in the library (`Parameter(bounds=)`,
+`BoundedPredictor(input_bounds=, output_bounds=)`, `BoundScaler(bounds)`)
+reads the same way: one `(low, high)` pair applies to every element, and a
+sequence of pairs applies per element in flattened order. The optimiser updates an unbounded latent
+and `.value` maps it back, so the value never leaves its bounds. Tournament
+restarts draw a fresh latent.
+
+## Bounds
+
+| Bounds | Output | Input |
+| --- | --- | --- |
+| `(low, high)` | `transform` squash onto the interval | `warp`, then inverse squash |
+| `(low, None)` | `low + softplus(z / temperature)` | identity |
+| `(None, high)` | `high - softplus(z / temperature)` | identity |
+| `(None, None)` or omitted | identity | identity |
+
+`-inf` and `inf` mean the same as `None`. Finite bounds must be ordered.
+Log warps need finite positive bounds; open bounds need the linear warp.
+
+Cover the values the solver may meet, with a small margin. Use
+`warp="log10"` when a positive quantity spans decades: across
+`(1e-6, 1e2)` a linear warp puts the midpoint at 50, `log10` puts it at
+`1e-2`. An input warp must also hold at runtime, so a `log10` input needs
+strictly positive values even when they come from the ODE state.
+[Recommendations](/guide/recommendations#bounds) covers choosing the box
+and the squash.
+
+## Bounded networks
+
+`BoundedPredictor` composes three parts: `in_scaler` maps physical inputs to
+latents, `inner` evaluates the network, and `out_scaler` maps its output
+back to physical units. The short form builds both scalers from bound
+pairs:
+
+```python
+import jax.numpy as jnp
+import jax.random as jr
+
+rate = hm.BoundedPredictor(
+    inner=hm.MLPPredictor(in_size=2, out_size=1, width_size=16, depth=2, key=jr.key(0)),
     input_keys=("temperature_C", "supersaturation"),
-    in_scaler=hm.BoundScaler(
-        bounds=((0.0, 100.0), (0.0, 5.0)),
-        warp="linear",
-    ),
-    inner=hm.MLPPredictor(
-        in_size=2,
-        out_size=1,
-        width_size=16,
-        depth=2,
-        key=jr.PRNGKey(0),
-    ),
-    out_scaler=hm.BoundScaler(bounds=((0.0, 10.0),)),
+    input_bounds=((0.0, 100.0), (0.0, 5.0)),
+    output_bounds=(0.0, None),
 )
 ```
 
-The dictionary call uses `input_keys` to select and order inputs:
+Pass `in_scaler=hm.BoundScaler(...)` and `out_scaler=...` instead when you
+need a non-default `transform` or `warp`.
+
+Call it with a mapping or a rank-1 array:
 
 ```python
-rate = predictor({
-    "temperature_C": temperature,
-    "supersaturation": supersaturation,
-})
+rate({"temperature_C": 20.0, "supersaturation": 1.5})   # selects and orders by input_keys
+rate(jnp.array([20.0, 1.5]))                            # already in input_keys order
 ```
 
-The array call accepts a rank-1 array in the same order as `input_keys`.
+A mapping may carry extra keys; a missing key raises. The output is in
+physical units: a scalar when there is one output bound, as here, else a
+rank-1 array with one entry per output.
 
-## Choosing bounds
+To evaluate over a grid, pass arrays to `evaluate_predictor`. Inputs are
+broadcast against each other and the predictor is called once per point:
 
-Bounds must be finite and ordered. They should cover the values the solver may
-encounter, with a small margin. Use `warp="log"` or `warp="log10"` when a
-positive quantity spans several orders of magnitude.
+```python
+temps = jnp.linspace(0.0, 100.0, 50)
+hm.evaluate_predictor(rate, {"temperature_C": temps, "supersaturation": 1.5})   # [50]
+hm.evaluate_predictor(
+    rate, {"temperature_C": temps[:, None], "supersaturation": jnp.linspace(0.0, 5.0, 20)}
+)                                                                                # [50, 20]
+```
 
-The input warp must match the runtime domain. For example, a `log10` input
-requires strictly positive state-derived values.
+A network needs at least one input. For a trainable value with no inputs,
+use `Parameter`.
 
 ## Saturation
 
-The output squash keeps physical values inside its declared box. Its gradient
-gets small near the edges. The optional `penalty_weight` in an Optax or Evosax
-config charges saturation at the *measured points* — the input vectors the
-loss actually sees at observed cells — plus any user-supplied penalty-only
-points (`penalty_points`, one array per leaf; `box_grid` builds a warp-uniform
-box sweep if you want one).
+Near the edge of a finite box the output squash flattens and its gradient
+vanishes. `Objective(penalty_weight=...)` charges `BoundedPredictor` leaves
+for sitting there. `Parameter` leaves are not charged. See
+[Penalties](/guide/penalties).
 
-This penalty is not a feasibility mechanism. Reparameterisation enforces the
-physical bounds; the penalty keeps the predictor away from a saturated region
-where optimization becomes slow.
+## Training and saving
 
-## Initialization and freezing
-
-Construct predictors with an explicit JAX key. The default trainability mask
-selects floating-point array leaves. Freeze known non-parameter leaves with a
-mask:
-
-```python
-mask = hm.trainable_mask(predictors)
-mask = hm.freeze_modules_of_type(mask, predictors, hm.BoundScaler)
-```
-
-Every predictor must round-trip through Equinox serialization. A custom
-predictor with a special initialization scheme can implement
-`initialized_with_key(self, key)` for tournament restarts.
+The default mask trains `Parameter` latents and network weights, and
+freezes `Constant` values and every `BoundScaler`. `fit(freeze=...)`
+freezes more; see [Freezing leaves](/guide/training#freezing-leaves), and
+[Saving and loading](/guide/serialization) for checkpoints.

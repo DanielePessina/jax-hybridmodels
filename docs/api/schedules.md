@@ -10,7 +10,7 @@
 
 ### `annealing_schedule()`
 
-<small>`from jaxhybridmodels.schedules import annealing_schedule` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.annealing_schedule`</small>
+<small>`from jaxhybridmodels.schedules import annealing_schedule`</small>
 
 ```python
 annealing_schedule(
@@ -19,10 +19,10 @@ annealing_schedule(
     init_value: 'float' = 1.0,
     end_value: 'float' = 0.0,
     warmup_epochs: 'int' = 0,
-) -> optax.Schedule
+) -> Callable[[ArrayLike], Array]
 ```
 
-Return ``schedule(step: int) -> float``, a multiplier over ``[0, total_epochs]``.
+Return ``schedule(step) -> Array``, a scalar multiplier over ``[0, total_epochs]``.
 
 Built on optax's own schedule helpers, so the returned callable is a
 plain pure function of the integer step count: ``jit``-safe, usable
@@ -44,6 +44,6 @@ is genuinely baked in.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `optax.Schedule` |  | ``schedule(step)`` in ``[end_value, init_value]``. Compose as a multiplier: ``lr = base_lr * schedule(step)``. |
+| `optax.Schedule` |  | ``schedule(step)`` in ``[end_value, init_value]``, except during the ``"warmup_cosine"`` warmup, which starts at 0. Compose as a multiplier: ``lr = base_lr * schedule(step)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/schedules.py#L36)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/schedules.py#L39)</small>

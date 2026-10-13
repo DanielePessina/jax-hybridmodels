@@ -11,7 +11,7 @@ import jax.random as jr
 import numpy as np
 from jax.typing import ArrayLike
 
-from jaxhybridmodels import fold
+from jaxhybridmodels.rng import fold
 
 NAMES = ("init", "tournament", "phase_0", "phase_1", "evosax_init", "evosax_ask_0")
 

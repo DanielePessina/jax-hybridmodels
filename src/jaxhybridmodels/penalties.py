@@ -26,8 +26,8 @@ box sweep. The default points are the measured ones: the input vectors the
 loss actually sees at observed cells, gathered from the dataset by
 :func:`data_penalty_points` and following the same length-mask prefix as
 the loss (:func:`length_mask_keep`). User-supplied penalty-only points
-(no measurements needed) extend coverage where it matters — a deployment
-region, a future operating point — and :func:`box_grid` is the
+(no measurements needed) extend coverage where it matters, such as a
+deployment region or a future operating point. :func:`box_grid` is the
 collocation-as-extension recipe: a deterministic sweep of the input box,
 uniform in *warped* coordinates so a log warp covers decades evenly.
 
@@ -39,12 +39,14 @@ none of the double-``where`` guarding ``losses.py`` applies around ``log``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaxhybridmodels.data import Dataset
@@ -59,9 +61,11 @@ __all__ = (
     "clip_ste",
     "box_violation",
     "PenaltyPointSource",
+    "bounded_predictor_paths",
     "box_grid",
     "data_penalty_points",
     "length_mask_keep",
+    "resolve_penalty_points",
     "select_penalty_points",
     "validate_penalty_points",
     "bound_penalty",
@@ -76,26 +80,53 @@ __all__ = (
 def _bounded_leaves(predictors: Any) -> list[BoundedPredictor]:
     """Every ``BoundedPredictor`` in ``predictors``, outermost first.
 
+    Order is outer-then-inner, depth first; :func:`bounded_predictor_paths`
+    gives the matching paths. :func:`data_penalty_points` and every other
+    per-leaf tuple in this module follow this order.
+    """
+    return [leaf for _, leaf in _bounded_leaves_with_paths(predictors)]
+
+
+def _bounded_leaves_with_paths(
+    predictors: Any, prefix: str = ""
+) -> list[tuple[str, BoundedPredictor]]:
+    """``(dotted_path, leaf)`` for every ``BoundedPredictor``, outermost first.
+
     Recurses into each match rather than stopping at it: nesting is
     supported (``inner`` is typed ``Predictor``), and a traversal that
-    stopped at the outer match would leave the inner box unpenalised.
+    stopped at the outer match would leave the inner box unpenalised. A
+    nested predictor's path runs through ``inner`` (``"rate.inner"``).
 
-    Order is outer-then-inner, depth first. :func:`data_penalty_points`
-    relies on it to return a positional tuple.
+    Paths use the same dotted syntax as
+    :func:`~jaxhybridmodels.trainable.freeze_mask`, built by the same
+    helper, so a key that freezes a predictor's leaves also names it here.
+    A lone predictor passed as the whole tree has the empty path ``""``.
 
     ``BoundedPredictor`` is imported lazily because ``predictors.base``
     imports this module for :func:`soft_logit`.
     """
     from jaxhybridmodels.predictors import BoundedPredictor
+    from jaxhybridmodels.trainable import _path_to_dotted
 
     is_bp = lambda node: isinstance(node, BoundedPredictor)  # noqa: E731
 
-    found: list[BoundedPredictor] = []
-    for leaf in jtu.tree_leaves(predictors, is_leaf=is_bp):
+    found: list[tuple[str, BoundedPredictor]] = []
+    for path, leaf in jtu.tree_flatten_with_path(predictors, is_leaf=is_bp)[0]:
         if is_bp(leaf):
-            found.append(leaf)
-            found.extend(_bounded_leaves(leaf.inner))
+            dotted = ".".join(p for p in (prefix, _path_to_dotted(path)) if p)
+            found.append((dotted, leaf))
+            found.extend(_bounded_leaves_with_paths(leaf.inner, f"{dotted}.inner".lstrip(".")))
     return found
+
+
+def bounded_predictor_paths(predictors: Any) -> tuple[str, ...]:
+    """Dotted path of every ``BoundedPredictor`` in ``predictors``, in traversal order.
+
+    These are the keys :class:`~jaxhybridmodels.Objective` accepts in
+    ``penalty_points``: for ``{"rate": BoundedPredictor(...)}`` the path is
+    ``"rate"``.
+    """
+    return tuple(path for path, _ in _bounded_leaves_with_paths(predictors))
 
 
 def soft_inverse(
@@ -196,7 +227,7 @@ def box_violation(x: Array, lows: Array, highs: Array) -> Array:
     x : Array
         Values in physical units; broadcast against ``lows`` / ``highs``.
     lows, highs : Array
-        Per-component box edges, as produced by ``BoundScaler._lows_highs``.
+        Per-component box edges, in physical units.
 
     Returns
     -------
@@ -266,12 +297,13 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
     """
     if n_per_dim < 2:
         raise ValueError(
-            "box_grid n_per_dim must be at least 2 "
-            f"(one point per box edge); got {n_per_dim}"
+            f"box_grid n_per_dim must be at least 2 (one point per box edge); got {n_per_dim}"
         )
 
     from jaxhybridmodels.transforms import WARPS
 
+    if any(not all(map(math.isfinite, pair)) for pair in in_scaler.bounds):
+        raise ValueError("box_grid requires finite input bounds; supply explicit penalty points")
     warp = WARPS[in_scaler.warp]
     lows = jnp.asarray([b[0] for b in in_scaler.warped_bounds])
     highs = jnp.asarray([b[1] for b in in_scaler.warped_bounds])
@@ -283,15 +315,13 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
     return jnp.stack([m.reshape(-1) for m in mesh], axis=-1)
 
 
-def data_penalty_points(
-    predictors: Any, dataset: Dataset
-) -> tuple[PenaltyPointSource | None, ...]:
+def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPointSource | None, ...]:
     """Gather one :class:`PenaltyPointSource` per ``BoundedPredictor`` leaf.
 
     A leaf is *resolvable* when every ``input_keys`` name is a dataset
     covariate (in every bucket). Its measured points are then the input
-    vectors at the observed cells — the cells the loss actually charges —
-    with a ``None`` entry for an unresolvable leaf. A resolvable leaf whose
+    vectors at the observed cells, the same cells the loss charges, with
+    a ``None`` entry for an unresolvable leaf. A resolvable leaf whose
     dataset holds no observed cells (all probes) yields a source with zero
     points, which contributes nothing until extras are added.
 
@@ -370,6 +400,37 @@ def length_mask_keep(source: PenaltyPointSource, length_mask_fraction: float) ->
     return source.cell_ts < cutoff
 
 
+def resolve_penalty_points(
+    predictors: Any, points: Mapping[str, ArrayLike] | None
+) -> tuple[Array, ...]:
+    """Turn penalty points keyed by predictor path into the per-leaf tuple.
+
+    ``points`` maps the dotted path of a ``BoundedPredictor`` (see
+    :func:`bounded_predictor_paths`) to its ``[G, n_inputs]`` array. The
+    result has one entry per ``BoundedPredictor`` in traversal order, the
+    form :func:`select_penalty_points` and :func:`bound_penalty` take; a
+    predictor with no entry gets an empty ``[0, n_inputs]`` array. ``None``
+    or an empty mapping gives ``()``.
+
+    A path that names no ``BoundedPredictor`` raises, listing the valid
+    paths: silently dropping a typo would leave the region the caller meant
+    to police unpenalised.
+    """
+    if not points:
+        return ()
+    found = _bounded_leaves_with_paths(predictors)
+    valid = [path for path, _ in found]
+    unknown = sorted(set(points) - set(valid))
+    if unknown:
+        raise ValueError(
+            f"penalty_points has no BoundedPredictor at {unknown}; valid paths are {valid}"
+        )
+    return tuple(
+        jnp.asarray(points[path]) if path in points else jnp.zeros((0, len(leaf.in_scaler.bounds)))
+        for path, leaf in found
+    )
+
+
 def validate_penalty_points(
     predictors: Any,
     sources: tuple[PenaltyPointSource | None, ...],
@@ -377,15 +438,16 @@ def validate_penalty_points(
     *,
     enabled: bool,
 ) -> None:
-    """Raise when an enabled penalty has a leaf no point set reaches.
+    """Raise when an enabled penalty has a predictor no point set reaches.
 
     ``sources`` is the per-leaf output of :func:`data_penalty_points`
     (``None`` for unresolvable leaves); ``extras`` the user-supplied
-    penalty-only points, positional per leaf. ``enabled`` is whether any
-    phase charges the penalty.
+    penalty-only points, one per leaf in traversal order (the output of
+    :func:`resolve_penalty_points`). ``enabled`` is whether any phase
+    charges the penalty.
 
-    With the penalty on, every ``BoundedPredictor`` leaf must be covered by
-    measured points, extras, or both; an uncovered leaf would otherwise be
+    With the penalty on, every ``BoundedPredictor`` must be covered by
+    measured points, extras, or both; an uncovered one would otherwise be
     a silent no-penalty, the failure mode this penalty exists to prevent.
     For embedded predictors (state-derived inputs) the trajectory penalty
     is the instrument, and the error says so.
@@ -393,41 +455,41 @@ def validate_penalty_points(
     Point-shape mismatches are checked unconditionally, so a user cannot
     carry a silently-wrong extras array into a run that later enables it.
     """
-    leaves = _bounded_leaves(predictors)
-    if not leaves:
+    found = _bounded_leaves_with_paths(predictors)
+    if not found:
         return
-    if len(extras) not in (0, len(leaves)):
+    if len(extras) not in (0, len(found)):
         raise ValueError(
-            f"penalty_points has {len(extras)} entries but predictors holds "
-            f"{len(leaves)} BoundedPredictor leaves; provide one point array "
+            f"penalty points has {len(extras)} entries but predictors holds "
+            f"{len(found)} BoundedPredictor leaves; provide one point array "
             "per leaf (in traversal order)."
         )
-    for idx, leaf in enumerate(leaves):
+    for idx, (path, leaf) in enumerate(found):
         extra = extras[idx] if idx < len(extras) else None
         if extra is not None:
             if extra.ndim != 2:
                 raise ValueError(
-                    f"penalty_points[{idx}] must be a rank-2 [G, n_inputs] array "
+                    f"penalty_points[{path!r}] must be a rank-2 [G, n_inputs] array "
                     f"of physical input vectors; got shape {extra.shape}"
                 )
             n_inputs = len(leaf.in_scaler.bounds)
-            if extra.shape[-1] != n_inputs:
+            if extra.shape[0] > 0 and extra.shape[-1] != n_inputs:
                 raise ValueError(
-                    f"penalty_points[{idx}] has {extra.shape[-1]} input columns but "
-                    f"leaf {idx} (input_keys={leaf.input_keys!r}) takes {n_inputs}; "
+                    f"penalty_points[{path!r}] has {extra.shape[-1]} input columns but "
+                    f"that predictor (input_keys={leaf.input_keys!r}) takes {n_inputs}; "
                     "columns follow input_keys order."
                 )
         if not enabled:
             continue
-        covered_by_data = sources[idx] is not None and sources[idx].points.shape[0] > 0
+        source = sources[idx]
+        covered_by_data = source is not None and source.points.shape[0] > 0
         covered_by_extra = extra is not None and extra.shape[0] > 0
         if not (covered_by_data or covered_by_extra):
             raise ValueError(
-                f"penalty: leaf {idx} (input_keys={leaf.input_keys!r}) has no penalty "
-                "points: its inputs do not all resolve to dataset covariates and no "
-                "entry was given in penalty_points for it. Add penalty_points for "
-                "this leaf, or use trajectory_penalty_fn for "
-                "embedded predictors."
+                f"penalty: predictor {path!r} (input_keys={leaf.input_keys!r}) has no "
+                "penalty points: its inputs do not all resolve to dataset covariates and "
+                f"Objective.penalty_points has no entry for it. Add penalty_points="
+                f"{{{path!r}: points}}, or use trajectory_penalty_fn for embedded predictors."
             )
 
 
@@ -519,7 +581,10 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
     for leaf, leaf_points in zip(leaves, points, strict=True):
         if leaf_points.shape[0] == 0:
             continue
-        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.to_latent(x)))(leaf_points)
+        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.scale_inputs(x)))(leaf_points)
+        # A one-output inner may return () or (1,) per point; saturation
+        # reads the last axis as outputs, so restore it as [G, n_outputs].
+        latents = latents.reshape(latents.shape[0], -1)
         total = total + leaf.out_scaler.saturation(latents)
     return total
 
@@ -528,9 +593,9 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
 # Trajectory-aware penalties (embedded hybrid models).
 #
 # ``bound_penalty`` above is trajectory-blind: it evaluates saturation at
-# fixed input points, never along a solve. For an *embedded* hybrid model —
-# the predictor runs inside the user's vector field and its output feeds the
-# dynamics (a kinetic parameter, a shape factor) — what matters is whether
+# fixed input points, never along a solve. For an *embedded* hybrid model,
+# where the predictor runs inside the user's vector field and its output
+# feeds the dynamics (a kinetic parameter, a shape factor), what matters is whether
 # the model saturates along the trajectories it actually simulates. The
 # penalty then has to be collected inside the solve, as extra ODE state.
 #
@@ -545,7 +610,7 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
 #      *time-integral* of the penalty along the trajectory.
 #   3. ``strip_penalty_state(state, n)`` drops the accumulators in
 #      ``state_to_output`` so the loss sees only the physics.
-#   4. A training config's ``trajectory_penalty_fn`` reads
+#   4. An ``Objective``'s ``trajectory_penalty_fn`` reads
 #      ``penalty_integral(full_state, n)`` and returns the scalar to charge.
 #
 # Only the solver's state widens; nothing about ``simulate_fn``'s signature,
@@ -572,9 +637,9 @@ def attach_penalty_state(y0: Array, n: int = 1) -> Array:
 
 
 def penalty_vector_field(
-    base_rhs: Callable[[Array, Array, Any], Array],
-    penalty_rhs: Callable[[Array, Array, Any], Array],
-) -> Callable[[Array, Array, Any], Array]:
+    base_rhs: Callable[[ArrayLike, Array, Any], Array],
+    penalty_rhs: Callable[[ArrayLike, Array, Any], Array],
+) -> Callable[[ArrayLike, Array, Any], Array]:
     """Wrap a physics vector field with per-call penalty rates.
 
     Returns ``(t, y, args) -> [physics_dot, penalty_rates]``. ``base_rhs``
@@ -585,11 +650,11 @@ def penalty_vector_field(
     along the trajectory.
 
     The rates must read the physical components (typically ``y[:-n]``) and
-    are closed over the user's predictors — only the user knows the latent
+    are closed over the user's predictors, because only the user knows the latent
     ``z`` or input ``x`` of an embedded predictor at call time.
     """
 
-    def wrapped(t: Array, y: Array, args: Any) -> Array:
+    def wrapped(t: ArrayLike, y: Array, args: Any) -> Array:
         rates = jnp.asarray(penalty_rhs(t, y, args))
         if rates.ndim != 1:
             raise ValueError(f"penalty_rhs must return a rank-1 vector; got shape {rates.shape}")
@@ -632,8 +697,8 @@ def penalty_integral(state: Array, n: int = 1) -> Array:
 def trajectory_saturation_penalty(state: Array, out_scaler: Any) -> Array:
     """Sum over time of output saturation for a predictor whose output *is* the state.
 
-    For a **parallel** hybrid model — the predictor is outside the solver and
-    its output is a predicted channel — the full state already holds the
+    For a **parallel** hybrid model, where the predictor is outside the
+    solver and its output is a predicted channel, the full state holds the
     physical outputs. Invert them back to latents with the predictor's
     ``out_scaler`` and charge :meth:`BoundScaler.saturation` at every time
     step, summed over time. This is the trajectory-aware counterpart of
@@ -642,7 +707,11 @@ def trajectory_saturation_penalty(state: Array, out_scaler: Any) -> Array:
 
     ``state`` is ``[..., T, D]`` (or ``[..., T, S]`` projected to the
     predictor's channel); ``out_scaler`` is the ``BoundScaler`` whose
-    ``from_latent`` produced those outputs.
+    ``from_latent`` produced those outputs. For a one-output scaler a
+    trailing channel axis is optional: ``[..., T]`` reads as ``[..., T, 1]``.
     """
+    state = jnp.asarray(state)
+    if len(out_scaler.bounds) == 1 and (state.ndim == 0 or state.shape[-1] != 1):
+        state = state[..., None]
     latents = out_scaler.to_latent(state)
     return jnp.sum(out_scaler.saturation(latents))

@@ -1,18 +1,22 @@
 # API Reference
 
-The public surface is split across the pages below, grouped by concern. Every symbol below is also re-exported at the top level — `from jaxhybridmodels import MLPPredictor` works exactly like `from jaxhybridmodels.predictors import MLPPredictor`.
+The public surface is split across the pages below, grouped by concern. The modelling workflow is re-exported at the top level, so `from jaxhybridmodels import MLPPredictor` works like `from jaxhybridmodels.predictors import MLPPredictor`. Lower-level pieces (kernels, penalties, losses, transforms, registries, UI) are imported from their submodule; each entry shows its import line.
+
+## [Models and Results](/api/model)
+
+[`HybridModel`](/api/model#hybridmodel), [`FitResult`](/api/model#fitresult), [`FitHistory`](/api/model#fithistory), [`PredictionResult`](/api/model#predictionresult), [`ExperimentPrediction`](/api/model#experimentprediction)
 
 ## [Data: Experiments, Channels, Datasets](/api/data)
 
-[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
+[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`experiment_from_array`](/api/data#experiment_from_array), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
 
 ## [Predictors: Trainable Components](/api/predictors)
 
-[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
+[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 
-[`PenaltyPointSource`](/api/penalties#penaltypointsource), [`attach_penalty_state`](/api/penalties#attach_penalty_state), [`bound_penalty`](/api/penalties#bound_penalty), [`box_grid`](/api/penalties#box_grid), [`box_violation`](/api/penalties#box_violation), [`clip_ste`](/api/penalties#clip_ste), [`data_penalty_points`](/api/penalties#data_penalty_points), [`length_mask_keep`](/api/penalties#length_mask_keep), [`penalty_integral`](/api/penalties#penalty_integral), [`penalty_vector_field`](/api/penalties#penalty_vector_field), [`select_penalty_points`](/api/penalties#select_penalty_points), [`soft_inverse`](/api/penalties#soft_inverse), [`soft_logit`](/api/penalties#soft_logit), [`softclip`](/api/penalties#softclip), [`strip_penalty_state`](/api/penalties#strip_penalty_state), [`trajectory_saturation_penalty`](/api/penalties#trajectory_saturation_penalty), [`validate_penalty_points`](/api/penalties#validate_penalty_points)
+[`PenaltyPointSource`](/api/penalties#penaltypointsource), [`bounded_predictor_paths`](/api/penalties#bounded_predictor_paths), [`resolve_penalty_points`](/api/penalties#resolve_penalty_points), [`attach_penalty_state`](/api/penalties#attach_penalty_state), [`bound_penalty`](/api/penalties#bound_penalty), [`box_grid`](/api/penalties#box_grid), [`box_violation`](/api/penalties#box_violation), [`clip_ste`](/api/penalties#clip_ste), [`data_penalty_points`](/api/penalties#data_penalty_points), [`length_mask_keep`](/api/penalties#length_mask_keep), [`penalty_integral`](/api/penalties#penalty_integral), [`penalty_vector_field`](/api/penalties#penalty_vector_field), [`select_penalty_points`](/api/penalties#select_penalty_points), [`soft_inverse`](/api/penalties#soft_inverse), [`soft_logit`](/api/penalties#soft_logit), [`softclip`](/api/penalties#softclip), [`strip_penalty_state`](/api/penalties#strip_penalty_state), [`trajectory_saturation_penalty`](/api/penalties#trajectory_saturation_penalty), [`validate_penalty_points`](/api/penalties#validate_penalty_points)
 
 ## [Transforms: Squash Shapes and Axis Warps](/api/transforms)
 
@@ -24,7 +28,7 @@ The public surface is split across the pages below, grouped by concern. Every sy
 
 ## [Training: Optax & Evosax Loops](/api/training)
 
-[`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`train_with_optax`](/api/training#train_with_optax), [`train_seed_ensemble`](/api/training#train_seed_ensemble), [`train_bootstrap_ensemble`](/api/training#train_bootstrap_ensemble), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
+[`Objective`](/api/training#objective), [`OptaxTrainingConfig`](/api/training#optaxtrainingconfig), [`TrainingPhase`](/api/training#trainingphase), [`train_with_optax`](/api/training#train_with_optax), [`EvosaxTrainingConfig`](/api/training#evosaxtrainingconfig), [`train_with_evosax`](/api/training#train_with_evosax), [`register_algorithm`](/api/training#register_algorithm)
 
 ## [Training Kernels: Build Your Own Loop](/api/kernels)
 
@@ -36,11 +40,11 @@ The public surface is split across the pages below, grouped by concern. Every sy
 
 ## [Trainable Masks: Freezing Leaves](/api/trainable)
 
-[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_paths`](/api/trainable#freeze_paths), [`freeze_modules_of_type`](/api/trainable#freeze_modules_of_type), [`freeze_where`](/api/trainable#freeze_where), [`frozen_default_mask`](/api/trainable#frozen_default_mask), [`count_trainable_params`](/api/trainable#count_trainable_params)
+[`default_trainable`](/api/trainable#default_trainable), [`trainable_mask`](/api/trainable#trainable_mask), [`freeze_mask`](/api/trainable#freeze_mask), [`count_trainable_params`](/api/trainable#count_trainable_params)
 
 ## [Prediction: Forward Simulation](/api/prediction)
 
-[`predict_bucket`](/api/prediction#predict_bucket), [`predict_dataset`](/api/prediction#predict_dataset), [`predict_dense`](/api/prediction#predict_dense), [`ensemble_predictions`](/api/prediction#ensemble_predictions), [`evaluate_predictor`](/api/prediction#evaluate_predictor)
+[`predict_ensemble`](/api/prediction#predict_ensemble), [`evaluate_predictor`](/api/prediction#evaluate_predictor)
 
 ## [Metrics: Per-Channel Evaluation](/api/metrics)
 
@@ -56,7 +60,7 @@ The public surface is split across the pages below, grouped by concern. Every sy
 
 ## [Serialise: Save & Load Runs](/api/serialise)
 
-[`save_predictors`](/api/serialise#save_predictors), [`load_predictors`](/api/serialise#load_predictors), [`save_run`](/api/serialise#save_run), [`load_run`](/api/serialise#load_run)
+[`save`](/api/serialise#save), [`load`](/api/serialise#load), [`SavedRun`](/api/serialise#savedrun), [`save_predictors`](/api/serialise#save_predictors), [`load_predictors`](/api/serialise#load_predictors)
 
 ## [UI: Training Dashboards](/api/ui)
 
