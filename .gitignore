@@ -226,3 +226,11 @@ examples/*/figures_rl/
 .claude/worktrees/
 
 .DS_Store
+
+# Local agent and design notes (not part of the package)
+.claude/
+AGENTS.md
+CLAUDE.md
+CONTEXT.md
+SPEC.md
+skills-lock.json

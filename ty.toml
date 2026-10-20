@@ -10,7 +10,7 @@
 # - invalid-method-override: predictor `__call__` overrides routinely rename
 #   the positional parameter (e.g. `x` -> `covariates`); ty flags this as an
 #   LSP violation, but the codebase deliberately treats predictors as
-#   covariate-callable and the rename is documented in CONTEXT.md.
+#   covariate-callable and the rename is intentional.
 # - call-non-callable: triggers on `cast(eqx.Module, ...)` paths where ty
 #   loses sight of the underlying callable.
 #
