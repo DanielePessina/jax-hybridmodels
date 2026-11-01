@@ -4,6 +4,16 @@
 
 ### Added
 
+- `FitResult.stop_reason` gains `"diverged"`. A solver error or a non-finite
+  loss after the first step no longer loses the run: `fit` warns and returns
+  the best parameters so far. Failing on the first step still raises, and now
+  includes a non-finite loss, which used to run the whole budget on NaN.
+- `fit_ensemble(validation=)`, with the meaning it has in `fit`. Members are
+  sorted by the validation loss.
+- A `pandas` extra, `pip install jax-hybridmodels[pandas]`, for
+  `PredictionResult.to_dataframe`, which names the extra when pandas is missing.
+- An exception raised inside `simulate_fn` or `state_to_output` carries a note
+  listing the predictors, covariates and `y0` shape it was given.
 - `HybridModel` binds predictors, simulator, observation map, channel names
   and solver. It is an `eqx.Module` built with keyword arguments only, so
   `eqx.tree_at` swaps a predictor and `eqx.filter_vmap` builds a batch of
@@ -96,6 +106,13 @@
 
 ### Changed (breaking against 0.2.0b1)
 
+- **Breaking.** `fit` and `fit_ensemble` raise `TypeError` unless `key` is a JAX
+  PRNG key. `key=None` and `key=0` used to pass when no random numbers were
+  drawn.
+- **Breaking.** `tournament_attempts > 1` with `tournament_steps=0` raises
+  instead of silently running no tournament. `tournament_steps > 0` with
+  `tournament_attempts=1` warns in `fit`.
+- `repr(FitResult)` is one line instead of the whole model and history.
 - `OptaxTrainingConfig` stores `phases`, a tuple of `TrainingPhase`. The
   parallel `steps`/`lr`/`optimizer`/`reset_optimiser_state`/
   `length_schedule`/`penalty_weight` tuples are gone. `length_schedule` is

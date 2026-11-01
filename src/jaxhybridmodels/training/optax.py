@@ -56,16 +56,18 @@ from jaxhybridmodels.penalties import (
     select_penalty_points,
 )
 from jaxhybridmodels.predictors.base import reinitialize_pytree_with_key
-from jaxhybridmodels.results import FitHistory, FitResult
+from jaxhybridmodels.results import FitHistory, FitResult, StopReason
 from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
 from jaxhybridmodels.trainable import FreezeSpec, trainable_mask
 from jaxhybridmodels.training.kernels import (
+    FIT_FAILURES,
     build_apply_update,
     build_bucket_step,
     build_dataset_score,
     build_penalty_step,
     build_score_bucket,
+    failure_summary,
 )
 from jaxhybridmodels.ui.base import SilentUI, TrainingUI, close_run_on_error
 from jaxhybridmodels.ui.optax import RichTrainingUI
@@ -80,16 +82,10 @@ if TYPE_CHECKING:
 # rate; a raw instance has its own state and cannot be re-hyperparametrised.
 OptimizerSpec = str | Callable[[float], optax.GradientTransformation] | optax.GradientTransformation
 
+
 # R-T7 allows a tournament attempt to fail on a diffrax error or a
 # non-finite loss. Anything else is a bug in user or framework code and
 # must reach the user instead of being retried with a different seed.
-_TOURNAMENT_FAILURES: tuple[type[BaseException], ...] = (
-    FloatingPointError,
-    jax.errors.JaxRuntimeError,
-    eqx.EquinoxRuntimeError,
-)
-
-
 @dataclass(frozen=True)
 class TrainingPhase:
     """One contiguous block of Optax steps with its own schedule settings.
@@ -262,7 +258,9 @@ class OptaxTrainingConfig:
             )
             object.__setattr__(self, "phases", (phase,))
         elif lr is not None or optimizer is not None:
-            raise ValueError("With phases=, set lr and optimizer per TrainingPhase")
+            if self.phases:
+                raise ValueError("With phases=, set lr and optimizer per TrainingPhase")
+            raise ValueError("lr= and optimizer= need steps=, or use phases= for a schedule")
         object.__setattr__(self, "phases", tuple(self.phases))
         if not self.phases:
             raise ValueError("Supply steps= for one phase or phases= for a schedule")
@@ -304,6 +302,11 @@ def _validate_tournament(config: OptaxTrainingConfig) -> None:
         raise ValueError("OptaxTrainingConfig.tournament_attempts must be at least 1")
     if config.tournament_steps < 0:
         raise ValueError("OptaxTrainingConfig.tournament_steps must be non-negative")
+    if config.tournament_attempts > 1 and config.tournament_steps == 0:
+        raise ValueError(
+            f"tournament_attempts={config.tournament_attempts} does nothing with "
+            "tournament_steps=0: no candidate gets trained. Set tournament_steps."
+        )
     if not math.isfinite(config.tournament_lr) or config.tournament_lr < 0.0:
         raise ValueError("OptaxTrainingConfig.tournament_lr must be finite and non-negative")
     if config.patience < 0:
@@ -567,11 +570,7 @@ def _shared_tournament(
             if not math.isfinite(score_value):
                 raise FloatingPointError(f"non-finite tournament loss: {score_value}")
             scored.append((score_value, candidate))
-        except _TOURNAMENT_FAILURES as exc:
-            # Narrow on purpose: only a diffrax error and a non-finite loss
-            # are attempt failures. Catching everything also swallowed shape
-            # bugs in the user's simulate_fn and framework bugs, reporting
-            # them as one warning while training carried on unmodified.
+        except FIT_FAILURES as exc:
             last_error = exc
             continue
 
@@ -833,7 +832,9 @@ class _PhaseRun:
     objective the optimiser minimised. ``selection`` holds the
     ``select_score`` values and is empty when selection follows ``loss``.
     ``best_step`` indexes these lists. ``stopped_early`` is set when
-    patience ended the final phase before its step budget.
+    patience ended the final phase before its step budget. ``failure`` says
+    why the run ended early on a solver error or a non-finite loss, and is
+    ``None`` otherwise.
     """
 
     predictors: Any
@@ -844,6 +845,7 @@ class _PhaseRun:
     selection: list[float]
     best_step: int | None
     stopped_early: bool
+    failure: str | None = None
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
@@ -888,13 +890,26 @@ def train_with_optax(
     ``config.restore_best=True``, else the final step. That minimum resets
     whenever the phase horizon changes, so the returned model always comes
     from the last horizon trained on.
+
+    A solver error or a non-finite loss after the first step ends the run: it
+    warns and returns the best parameters so far, with ``stop_reason``
+    ``"diverged"``. On the first step there is nothing to return, so it raises.
     """
     if not isinstance(config, OptaxTrainingConfig):
         raise TypeError(
             f"train_with_optax takes an OptaxTrainingConfig; got {type(config).__name__}"
         )
+    if config.tournament_steps > 0 and config.tournament_attempts == 1:
+        # Not refused by the config, because fit_ensemble reads tournament_steps
+        # and takes the attempt count from n_seeds.
+        warnings.warn(
+            f"tournament_steps={config.tournament_steps} does nothing with "
+            "tournament_attempts=1: one candidate has nothing to compete with.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     dataset, validation_set, mask = model._prepare_fit(
-        data, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
+        data, key=key, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
     )
     run = _train_with_optax(
         model.predictors,
@@ -923,8 +938,14 @@ def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
             validation_loss=tuple(run.selection),
         ),
         best_step=run.best_step,
-        stop_reason="patience" if run.stopped_early else "budget_exhausted",
+        stop_reason=_stop_reason(run),
     )
+
+
+def _stop_reason(run: _PhaseRun) -> StopReason:
+    if run.failure is not None:
+        return "diverged"
+    return "patience" if run.stopped_early else "budget_exhausted"
 
 
 def _train_with_optax(
@@ -1075,6 +1096,10 @@ def _run_phases(
     selection: list[float] = []
     stopped_early = False
     best = _BestTracker(predictors)
+    # The parameters the last recorded loss was measured at: where a failed run
+    # falls back to, since the step that failed may have poisoned ``predictors``.
+    last_measured = predictors
+    failure: str | None = None
 
     for phase_idx, phase in enumerate(config.phases):
         optimizer, opt_state = _begin_phase(
@@ -1119,35 +1144,50 @@ def _run_phases(
         for step in range(phase.steps):
             if lrs is not None:
                 _set_lr(opt_state, lrs[step])
-            total_loss, acc_grads, n_buckets = _training_step(
-                predictors, dataset, kernels.bucket_step, length_mask_fraction, trainable
-            )
-            avg_penalty, penalty_grads = kernels.penalty_step(
-                predictors, penalty_weight, phase_points
-            )
-            # Dispatch the update before blocking on the loss values. Both
-            # float() calls are host syncs; reading them first left the
-            # accelerator idle through the Python bookkeeping every step.
-            # The fused kernel averages the accumulator, merges the penalty
-            # grads (charged once per step, not once per bucket) and runs
-            # the optimiser update in a single launch.
-            previous_predictors = predictors
-            predictors, opt_state = step_update(
-                predictors, acc_grads, penalty_grads, n_buckets_arg, opt_state
-            )
+            try:
+                total_loss, acc_grads, n_buckets = _training_step(
+                    predictors, dataset, kernels.bucket_step, length_mask_fraction, trainable
+                )
+                avg_penalty, penalty_grads = kernels.penalty_step(
+                    predictors, penalty_weight, phase_points
+                )
+                # Dispatch the update before blocking on the loss values. Both
+                # float() calls are host syncs; reading them first left the
+                # accelerator idle through the Python bookkeeping every step.
+                # The fused kernel averages the accumulator, merges the penalty
+                # grads (charged once per step, not once per bucket) and runs
+                # the optimiser update in a single launch.
+                previous_predictors = predictors
+                predictors, opt_state = step_update(
+                    predictors, acc_grads, penalty_grads, n_buckets_arg, opt_state
+                )
 
-            # History and early stopping follow the per-bucket-averaged
-            # loss (the data term plus any configured trajectory penalty):
-            # tracking the bound-penalty weight too would let "best" move
-            # when only the penalty weight changed.
-            loss_value = float(total_loss / float(max(n_buckets, 1)))
-            penalty_value = float(avg_penalty)
+                # History and early stopping follow the per-bucket-averaged
+                # loss (the data term plus any configured trajectory penalty):
+                # tracking the bound-penalty weight too would let "best" move
+                # when only the penalty weight changed.
+                loss_value = float(total_loss / float(max(n_buckets, 1)))
+                penalty_value = float(avg_penalty)
+                if not (math.isfinite(loss_value) and math.isfinite(penalty_value)):
+                    # One bad step poisons the weights through its gradient, so
+                    # every later step would be NaN too and burn the budget.
+                    raise FloatingPointError(
+                        f"non-finite loss {loss_value} or penalty {penalty_value}"
+                    )
+                score = loss_value
+                if select_score is not None:
+                    score = select_score(previous_predictors)
+            except FIT_FAILURES as exc:
+                # Nothing was measured, so there is nothing to hand back.
+                if not losses_history:
+                    raise
+                failure = failure_summary(exc)
+                break
+            last_measured = previous_predictors
             losses_history.append(loss_value)
             penalties.append(weight * penalty_value)
             phases.append(phase_idx)
-            score = loss_value
             if select_score is not None:
-                score = select_score(previous_predictors)
                 selection.append(score)
             # ``previous_predictors``, not ``predictors``: avg_data was
             # measured before the update was applied.
@@ -1165,11 +1205,29 @@ def _run_phases(
                 break
 
         ui.on_phase_end(phase_idx=phase_idx)
+        if failure is not None:
+            break
 
-    final_predictors = best.best_predictors if config.restore_best else predictors
+    if failure is not None:
+        text = (
+            f"fit failed at step {len(losses_history)} and returned the best parameters so "
+            f"far (stop_reason='diverged'): {failure}"
+        )
+        ui.on_message(level="error", text=text)
+        warnings.warn(text, RuntimeWarning, stacklevel=2)
+        # The running minimum resets on a horizon change, so a failure right
+        # after one has no measured best to return.
+        if best.best_step is None:
+            predictors = last_measured
+        else:
+            predictors = best.best_predictors if config.restore_best else last_measured
+
+    final_predictors = (
+        best.best_predictors if config.restore_best and failure is None else predictors
+    )
     if not losses_history:
         final_loss = float("nan")
-    elif config.restore_best:
+    elif config.restore_best and best.best_step is not None:
         # ``best.best_loss`` was measured at ``best.best_predictors`` (the
         # pre-update parameters of the best step), so it labels the model
         # that is about to come back. ``history[-1]`` is the last step's
@@ -1187,6 +1245,7 @@ def _run_phases(
         selection=selection,
         best_step=best.best_step if config.restore_best else None,
         stopped_early=stopped_early,
+        failure=failure,
     )
 
 
@@ -1307,6 +1366,7 @@ def _fit_ensemble(
     freeze: Sequence[FreezeSpec] | FreezeSpec | None,
     trainable: Any,
     ui: TrainingUI | None,
+    validation: Data | None = None,
 ) -> list[FitResult]:
     """The body of :meth:`HybridModel.fit_ensemble`; see there for the two modes.
 
@@ -1329,8 +1389,13 @@ def _fit_ensemble(
             f"fit_ensemble: n_members={n_members} exceeds n_seeds={n_seeds}; a seed "
             "ensemble trains the best n_members of n_seeds seeds"
         )
-    dataset, _, mask = model._prepare_fit(
-        data, validation=None, freeze=freeze, trainable=trainable, caller="fit_ensemble"
+    dataset, validation_set, mask = model._prepare_fit(
+        data,
+        key=key,
+        validation=validation,
+        freeze=freeze,
+        trainable=trainable,
+        caller="fit_ensemble",
     )
     predictors = model.predictors
 
@@ -1349,6 +1414,11 @@ def _fit_ensemble(
             solver=model.solver,
             trainable=mask,
             ui=ui_,
+        )
+        select_score = (
+            None
+            if validation_set is None
+            else build_dataset_score(kernels.score_bucket, validation_set)
         )
 
         def rank(data_: Dataset, seed_key: Array, top_k: int) -> list[tuple[float, Any]]:
@@ -1384,30 +1454,43 @@ def _fit_ensemble(
             jobs = [(dataset, seed) for seed in ranked]
 
         trained: list[FitResult] = []
+        # The first member's on_run_start is the one opened above.
+        run_open = True
         for data_, (seed_score, candidate) in jobs:
             if not math.isfinite(seed_score):
                 continue
-            # The first member's on_run_start is the one opened above.
-            if trained:
+            if not run_open:
                 ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
-            run = _run_phases(
-                candidate,
-                data_,
-                config,
-                kernels=kernels,
-                # A resample changes the covariate values, so its measured
-                # penalty points are gathered from the resample itself.
-                sources=data_penalty_points(predictors, data_) if bootstrap else kernels.sources,
-                trainable=mask,
-                ui=ui_,
-            )
+            run_open = False
+            try:
+                run = _run_phases(
+                    candidate,
+                    data_,
+                    config,
+                    kernels=kernels,
+                    # A resample changes the covariate values, so its measured
+                    # penalty points are gathered from the resample itself.
+                    sources=(
+                        data_penalty_points(predictors, data_) if bootstrap else kernels.sources
+                    ),
+                    trainable=mask,
+                    ui=ui_,
+                    select_score=select_score,
+                )
+            except FIT_FAILURES:
+                # Failed on its first step, so it is dropped like a failed seed.
+                ui_.on_run_end(final_loss=math.nan)
+                continue
             trained.append(_fit_result(model, run))
 
-        if not trained:
-            raise RuntimeError(
-                "fit_ensemble: every seed failed its warm-up (a solver error or a "
-                "non-finite loss); no member was trained"
-            )
+        if run_open:
+            ui_.on_run_end(final_loss=math.nan)
+
+    if not trained:
+        raise RuntimeError(
+            "fit_ensemble: every seed failed (a solver error or a non-finite loss); "
+            "no member was trained"
+        )
     # Stable, so a tie keeps the seed ranking. FitResult.final_loss is the
     # loss _run_phases reports for the returned parameters. It is NaN when
     # restore_best found no finite loss, and NaN breaks the ordering of the
@@ -1416,6 +1499,14 @@ def _fit_ensemble(
 
 
 def _rank_key(result: FitResult) -> float:
-    """Sort key for ensemble members: final loss, with NaN ranked as ``inf``."""
-    loss = result.final_loss
+    """Sort key for ensemble members: lower is better, with NaN ranked as ``inf``.
+
+    The validation loss at the returned parameters when there is one, else the
+    final training loss.
+    """
+    scores = result.history.validation_loss
+    if scores:
+        loss = scores[-1 if result.best_step is None else result.best_step]
+    else:
+        loss = result.final_loss
     return loss if not math.isnan(loss) else math.inf

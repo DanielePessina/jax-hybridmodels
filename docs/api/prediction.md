@@ -32,12 +32,12 @@ holds the per-channel standard deviation across members (population,
 ``ddof=0``; zero for one member), and ``members`` holds each model's
 own [`PredictionResult`](/api/model#predictionresult).
 
-``models`` holds ``HybridModel``\ s or ``FitResult``\ s, so the list
+``models`` holds ``HybridModel`` or ``FitResult`` objects, so the list
 ``fit_ensemble`` returns can be passed as is. They must share
 ``output_channel_names``. ``data``, ``ts`` and ``n_points`` are as for
 [`HybridModel.predict`](/api/model#hybridmodelpredict).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L201)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L225)</small>
 
 ---
 
@@ -73,4 +73,4 @@ has output shape ``()``, so a sweep over 50 temperatures gives ``[50]``.
 | --- | --- | --- |
 | `Array` |  | Call ``float(...)`` on a scalar result for a Python number. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L268)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L292)</small>

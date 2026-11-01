@@ -16,7 +16,8 @@ separately from any training kernel.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
@@ -33,6 +34,27 @@ from jaxhybridmodels.training.kernels import predict_bucket_obs
 
 if TYPE_CHECKING:
     from jaxhybridmodels.model import HybridModel
+
+
+@contextmanager
+def _note_user_code(
+    caller: str, predictors: Any, covariates: Mapping[str, Any], y0_shape: tuple[int, ...]
+) -> Iterator[None]:
+    """Add what the user's functions were given to an exception they raised.
+
+    A typo in ``simulate_fn`` surfaces as a bare ``KeyError: 'K'`` from deep
+    inside a trace. The note lists the names that exist, without changing the
+    exception's type or message.
+    """
+    try:
+        yield
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+        names = list(predictors) if isinstance(predictors, Mapping) else type(predictors).__name__
+        exc.add_note(
+            f"While {caller} ran simulate_fn and state_to_output: predictors are {names}, "
+            f"covariates are {sorted(covariates)}, and y0 has shape {y0_shape}."
+        )
+        raise
 
 
 @eqx.filter_jit
@@ -137,13 +159,14 @@ def _predict(
     for bp in dataset.bucket_payloads:
         grid = _bucket_grid(bp, ts, n_points)
         if grid is None:
-            values = _predict_bucket(
-                model.predictors,
-                bp,
-                simulate_fn=model.simulate_fn,
-                state_to_output=model.state_to_output,
-                solver=model.solver,
-            )
+            with _note_user_code(caller, model.predictors, bp.covariates, bp.y0.shape[1:]):
+                values = _predict_bucket(
+                    model.predictors,
+                    bp,
+                    simulate_fn=model.simulate_fn,
+                    state_to_output=model.state_to_output,
+                    solver=model.solver,
+                )
             expected = bp.y_observed.shape
         else:
             if bool(jnp.any(grid[:, 0] < bp.ts[:, 0])):
@@ -151,14 +174,15 @@ def _predict(
                     f"{caller}: ts starts at {float(grid[0, 0])}, before the start of an "
                     "experiment (its t0, or its first observation time when t0 is unset)"
                 )
-            values = _predict_grid_bucket(
-                model.predictors,
-                bp,
-                grid,
-                simulate_fn=model.simulate_fn,
-                state_to_output=model.state_to_output,
-                solver=model.solver,
-            )
+            with _note_user_code(caller, model.predictors, bp.covariates, bp.y0.shape[1:]):
+                values = _predict_grid_bucket(
+                    model.predictors,
+                    bp,
+                    grid,
+                    simulate_fn=model.simulate_fn,
+                    state_to_output=model.state_to_output,
+                    solver=model.solver,
+                )
             expected = (*grid.shape, len(names))
         if values.shape != expected:
             # Re-trace one row abstractly to say which function is at fault;
@@ -213,7 +237,7 @@ def predict_ensemble(
     ``ddof=0``; zero for one member), and ``members`` holds each model's
     own :class:`~jaxhybridmodels.PredictionResult`.
 
-    ``models`` holds ``HybridModel``\ s or ``FitResult``\ s, so the list
+    ``models`` holds ``HybridModel`` or ``FitResult`` objects, so the list
     ``fit_ensemble`` returns can be passed as is. They must share
     ``output_channel_names``. ``data``, ``ts`` and ``n_points`` are as for
     :meth:`HybridModel.predict`.

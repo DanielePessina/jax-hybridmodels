@@ -31,8 +31,9 @@ from jaxhybridmodels.data import (
     make_dataset,
 )
 from jaxhybridmodels.objective import Objective
-from jaxhybridmodels.prediction import _check_grid_args, _predict
+from jaxhybridmodels.prediction import _check_grid_args, _note_user_code, _predict
 from jaxhybridmodels.results import ExperimentPrediction, FitResult, PredictionResult
+from jaxhybridmodels.rng import check_key
 from jaxhybridmodels.solver import SolverConfig, simulation_state
 from jaxhybridmodels.trainable import (
     FreezeSpec,
@@ -190,10 +191,11 @@ class HybridModel(eqx.Module):
         def state_of(predictors: Any) -> Array:
             return simulation_state(self.simulate_fn(predictors, ts, covariates, y0, self.solver))
 
-        state = eqx.filter_eval_shape(state_of, self.predictors)
-        self._check_state_shape(state.shape, ts.shape[0], caller)
-        output = jax.eval_shape(self.state_to_output, state)
-        self._check_output_shape(output.shape, state.shape, caller)
+        with _note_user_code(caller, self.predictors, covariates, y0.shape):
+            state = eqx.filter_eval_shape(state_of, self.predictors)
+            self._check_state_shape(state.shape, ts.shape[0], caller)
+            output = jax.eval_shape(self.state_to_output, state)
+            self._check_output_shape(output.shape, state.shape, caller)
 
     def _check_state_shape(self, shape: tuple[int, ...], n_times: int, caller: str) -> None:
         if len(shape) != 2 or shape[0] != n_times:
@@ -217,16 +219,18 @@ class HybridModel(eqx.Module):
         self,
         data: Data,
         *,
+        key: Any,
         validation: Data | None,
         freeze: Sequence[FreezeSpec] | FreezeSpec | None,
         trainable: Any,
         caller: str,
     ) -> tuple[Dataset, Dataset | None, Any]:
-        """Everything the trainers check before compiling: data, mask and shapes.
+        """Everything the trainers check before compiling: key, data, mask and shapes.
 
         Returns the training ``Dataset``, the validation one (or None) and
         the trainable mask built from ``freeze`` or ``trainable``.
         """
+        check_key(key, caller)
         dataset = self._dataset(data, caller)
         validation_set = None if validation is None else self._dataset(validation, "validation")
         if freeze is not None and trainable is not None:
@@ -280,6 +284,11 @@ class HybridModel(eqx.Module):
         experiments. ``simulate_fn`` and ``state_to_output`` shapes are
         checked once on the first experiment before anything compiles.
 
+        A solver error or a non-finite loss partway through ends the run: it
+        warns and returns the best parameters so far, with ``stop_reason``
+        ``"diverged"``. If the first step fails there is nothing to return, so
+        it raises.
+
         Same as ``train_with_optax(model, ...)`` or
         ``train_with_evosax(model, ...)`` in :mod:`jaxhybridmodels.training`,
         picked by the type of ``config``.
@@ -314,6 +323,7 @@ class HybridModel(eqx.Module):
         freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
         trainable: Any = None,
         ui: Any = None,
+        validation: Data | None = None,
     ) -> list[FitResult]:
         """Train an ensemble of up to ``n_members`` models, best first.
 
@@ -337,9 +347,16 @@ class HybridModel(eqx.Module):
         place. ``objective``, ``freeze``, ``trainable`` and ``ui`` are as
         for :meth:`fit`; each member is its own UI run. The result is sorted
         by each member's final loss, the loss at its returned parameters
-        when ``config.restore_best`` is set. A seed whose warm-up fails is
-        dropped, so fewer than ``n_members`` may come back; if every seed
-        fails it raises ``RuntimeError``. Optax only. The list goes straight
+        when ``config.restore_best`` is set.
+
+        With ``validation``, each member picks its returned step and runs
+        ``patience`` on the validation loss, as in :meth:`fit`, and members are
+        sorted by that loss. Seeds are still scored on the training data.
+
+        A seed whose warm-up or first step fails is dropped, so fewer than
+        ``n_members`` may come back; if every seed fails it raises
+        ``RuntimeError``. A member that fails later comes back with
+        ``stop_reason`` ``"diverged"``. Optax only. The list goes straight
         into :func:`~jaxhybridmodels.predict_ensemble`.
         """
         if not isinstance(config, OptaxTrainingConfig):
@@ -359,6 +376,7 @@ class HybridModel(eqx.Module):
             freeze=freeze,
             trainable=trainable,
             ui=ui,
+            validation=validation,
         )
 
     def predict(
@@ -457,10 +475,13 @@ class HybridModel(eqx.Module):
         offset = int(start < float(values[0]))
         grid = jnp.concatenate((jnp.asarray([start], times.dtype), times)) if offset else times
         cov = {name: jnp.asarray(value) for name, value in (covariates or {}).items()}
-        state = simulation_state(self.simulate_fn(self.predictors, grid, cov, initial, self.solver))
-        self._check_state_shape(state.shape, grid.shape[0], "simulate")
-        state = state[offset:]
-        output = jnp.asarray(self.state_to_output(state))
+        with _note_user_code("simulate", self.predictors, cov, initial.shape):
+            state = simulation_state(
+                self.simulate_fn(self.predictors, grid, cov, initial, self.solver)
+            )
+            self._check_state_shape(state.shape, grid.shape[0], "simulate")
+            state = state[offset:]
+            output = jnp.asarray(self.state_to_output(state))
         self._check_output_shape(output.shape, state.shape, "simulate")
         return ExperimentPrediction(
             times=times,

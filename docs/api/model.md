@@ -45,7 +45,7 @@ from different keys.
 | `solver` |  | Integration settings, default ``SolverConfig()``. |
 | `Fitting returns a new model; the original is unchanged.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L71)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L72)</small>
 
 <a id="hybridmodelfit"></a>
 
@@ -87,11 +87,16 @@ validation set per step or generation.
 experiments. ``simulate_fn`` and ``state_to_output`` shapes are
 checked once on the first experiment before anything compiles.
 
+A solver error or a non-finite loss partway through ends the run: it
+warns and returns the best parameters so far, with ``stop_reason``
+``"diverged"``. If the first step fails there is nothing to return, so
+it raises.
+
 Same as ``train_with_optax(model, ...)`` or
 ``train_with_evosax(model, ...)`` in `jaxhybridmodels.training`,
 picked by the type of ``config``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L249)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L253)</small>
 
 <a id="hybridmodelfit_ensemble"></a>
 
@@ -110,6 +115,7 @@ fit_ensemble(
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'Any' = None,
+    validation: 'Data | None' = None,
 ) -> list[FitResult]
 ```
 
@@ -135,12 +141,19 @@ Bootstrap ensemble (``bootstrap=True``)
 place. ``objective``, ``freeze``, ``trainable`` and ``ui`` are as
 for `fit`; each member is its own UI run. The result is sorted
 by each member's final loss, the loss at its returned parameters
-when ``config.restore_best`` is set. A seed whose warm-up fails is
-dropped, so fewer than ``n_members`` may come back; if every seed
-fails it raises ``RuntimeError``. Optax only. The list goes straight
+when ``config.restore_best`` is set.
+
+With ``validation``, each member picks its returned step and runs
+``patience`` on the validation loss, as in `fit`, and members are
+sorted by that loss. Seeds are still scored on the training data.
+
+A seed whose warm-up or first step fails is dropped, so fewer than
+``n_members`` may come back; if every seed fails it raises
+``RuntimeError``. A member that fails later comes back with
+``stop_reason`` ``"diverged"``. Optax only. The list goes straight
 into [`predict_ensemble`](/api/prediction#predict_ensemble).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L304)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L313)</small>
 
 <a id="hybridmodelpredict"></a>
 
@@ -170,7 +183,7 @@ still integrates from its own start, so ``y0`` stays in place.
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
 experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L364)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L382)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -205,7 +218,7 @@ must be finite, strictly increasing, and not before ``t0``. When
 ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
 returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L390)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L408)</small>
 
 ---
 
@@ -229,9 +242,11 @@ The fitted model, its history, and how the run ended.
 ``best_step`` indexes the history at the returned parameters. It is
 None when ``restore_best=False`` returned the final update instead.
 ``stop_reason`` is ``"patience"`` when early stopping cut the final
-phase short, else ``"budget_exhausted"``.
+phase short, ``"diverged"`` when a solver error or a non-finite loss ended
+the run (it warned, and the model holds the best parameters so far), else
+``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L132)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L137)</small>
 
 ---
 
@@ -267,7 +282,7 @@ it. ``penalty`` and ``phase`` stay empty.
 present when one was given: per step for Optax, and for each
 generation's best individual for Evosax.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L106)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L111)</small>
 
 ---
 
@@ -307,7 +322,7 @@ Long table: one row per experiment, time and channel.
 
 Columns are ``experiment_id``, ``time``, ``channel``,
 ``prediction``, ``observed`` and ``is_observed``, plus ``std`` for
-an ensemble. Needs pandas, which the ``examples`` extra installs.
+an ensemble. Needs pandas: ``pip install jax-hybridmodels[pandas]``.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L73)</small>
 

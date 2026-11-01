@@ -17,13 +17,18 @@ result.history.loss         # data loss plus weighted trajectory penalty, per st
 result.history.penalty      # weighted bound penalty, per step
 result.history.phase        # phase index of each step
 result.best_step            # step whose parameters were returned
-result.stop_reason          # "budget_exhausted" or "patience"
+result.stop_reason          # "budget_exhausted", "patience" or "diverged"
 ```
 
 The data may be a list of experiments or a `Dataset`. Each history entry is
 measured at the parameters before that step's update, and `loss + penalty`
 is what the optimiser minimised. `key=` is keyword-only and required, so the
 seed is visible at every call.
+
+A solver error or a non-finite loss partway through a run ends it. `fit` warns
+and returns the best parameters so far, with `stop_reason="diverged"`, so a long
+run keeps its work. If the first step fails there is nothing to return, so `fit`
+raises. Errors in your own code always raise.
 
 ## The objective
 

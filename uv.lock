@@ -600,6 +600,9 @@ examples = [
     { name = "rlax" },
     { name = "sympy" },
 ]
+pandas = [
+    { name = "pandas" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -627,13 +630,14 @@ requires-dist = [
     { name = "openpyxl", marker = "extra == 'examples'", specifier = ">=3.1.5" },
     { name = "optax", specifier = ">=0.2.8" },
     { name = "pandas", marker = "extra == 'examples'", specifier = ">=3.0.2" },
+    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=3.0.2" },
     { name = "python-libsbml", marker = "extra == 'examples'", specifier = ">=5.20.4" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "rlax", marker = "extra == 'examples'", specifier = ">=0.1.9" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "sympy", marker = "extra == 'examples'", specifier = ">=1.14" },
 ]
-provides-extras = ["examples"]
+provides-extras = ["pandas", "examples"]
 
 [package.metadata.requires-dev]
 dev = [

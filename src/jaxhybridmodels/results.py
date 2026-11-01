@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from jaxhybridmodels.training.evosax import EvosaxTrainingConfig
     from jaxhybridmodels.training.optax import OptaxTrainingConfig
 
-StopReason = Literal["budget_exhausted", "patience"]
+StopReason = Literal["budget_exhausted", "patience", "diverged"]
 
 
 @dataclass(frozen=True)
@@ -75,9 +75,14 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
 
         Columns are ``experiment_id``, ``time``, ``channel``,
         ``prediction``, ``observed`` and ``is_observed``, plus ``std`` for
-        an ensemble. Needs pandas, which the ``examples`` extra installs.
+        an ensemble. Needs pandas: ``pip install jax-hybridmodels[pandas]``.
         """
-        import pandas as pd
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "to_dataframe needs pandas; install it with: pip install jax-hybridmodels[pandas]"
+            ) from exc
 
         with_std = any(experiment.std for experiment in self.values())
         columns = ["experiment_id", "time", "channel", "prediction", "observed", "is_observed"]
@@ -129,14 +134,16 @@ class FitHistory:
     validation_loss: tuple[float, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class FitResult:
     """The fitted model, its history, and how the run ended.
 
     ``best_step`` indexes the history at the returned parameters. It is
     None when ``restore_best=False`` returned the final update instead.
     ``stop_reason`` is ``"patience"`` when early stopping cut the final
-    phase short, else ``"budget_exhausted"``.
+    phase short, ``"diverged"`` when a solver error or a non-finite loss ended
+    the run (it warned, and the model holds the best parameters so far), else
+    ``"budget_exhausted"``.
     """
 
     model: HybridModel
@@ -155,6 +162,13 @@ class FitResult:
             return float("nan")
         step = -1 if self.best_step is None else self.best_step
         return self.history.loss[step]
+
+    def __repr__(self) -> str:
+        # The default would print the whole model and every history entry.
+        return (
+            f"FitResult(stop_reason={self.stop_reason!r}, best_step={self.best_step}, "
+            f"final_loss={self.final_loss:.6g}, steps={len(self.history.loss)})"
+        )
 
 
 @dataclass(frozen=True)

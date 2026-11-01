@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -83,8 +84,10 @@ from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
 from jaxhybridmodels.trainable import FreezeSpec, trainable_mask
 from jaxhybridmodels.training.kernels import (
+    FIT_FAILURES,
     build_dataset_score,
     build_score_bucket,
+    failure_summary,
     simulate_bucket,
 )
 from jaxhybridmodels.ui.base import EvosaxUI, SilentUI, close_run_on_error
@@ -342,13 +345,15 @@ class _EvosaxRun:
     ``loss`` is the best-so-far fitness after each generation (monotone).
     ``validation`` holds the validation score of each generation's best
     individual and is empty without a validation set. ``best_step`` indexes
-    both at the returned predictors.
+    both at the returned predictors. ``failure`` says why the run ended early
+    on a solver error or a non-finite fitness, and is ``None`` otherwise.
     """
 
     predictors: Any
     loss: list[float]
     validation: list[float]
     best_step: int
+    failure: str | None = None
 
 
 def train_with_evosax(
@@ -389,7 +394,7 @@ def train_with_evosax(
             f"train_with_evosax takes an EvosaxTrainingConfig; got {type(config).__name__}"
         )
     dataset, validation_set, mask = model._prepare_fit(
-        data, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
+        data, key=key, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
     )
     run = _train_with_evosax(
         model.predictors,
@@ -408,7 +413,7 @@ def train_with_evosax(
         model=model._with_predictors(run.predictors),
         history=FitHistory(loss=tuple(run.loss), validation_loss=tuple(run.validation)),
         best_step=run.best_step,
-        stop_reason="budget_exhausted",
+        stop_reason="budget_exhausted" if run.failure is None else "diverged",
     )
 
 
@@ -520,6 +525,7 @@ def _train_with_evosax(
 
         history: list[float] = []
         selection: list[float] = []
+        failure: str | None = None
 
         for gen in range(int(config.steps)):
             ask_key = fold(key, f"evosax_ask_{gen}")
@@ -533,9 +539,18 @@ def _train_with_evosax(
             else:
                 population, state = strategy.ask(ask_key, state, strat_params)
 
-            fitness = population_eval(population)
-            if not bool(jnp.all(jnp.isfinite(fitness))):
-                raise FloatingPointError(f"non-finite fitness in generation {gen}")
+            try:
+                fitness = population_eval(population)
+                if not bool(jnp.all(jnp.isfinite(fitness))):
+                    raise FloatingPointError(f"non-finite fitness in generation {gen}")
+                gen_flat = jnp.asarray(population[int(jnp.argmin(fitness))])
+                score = None if select_score is None else select_score(rebuild(gen_flat))
+            except FIT_FAILURES as exc:
+                # Nothing finished, so there is nothing to hand back.
+                if not history:
+                    raise
+                failure = failure_summary(exc)
+                break
             tell_key = fold(key, f"evosax_tell_{gen}")
             state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)
 
@@ -548,9 +563,7 @@ def _train_with_evosax(
                 if select_score is None:
                     best_step = gen
 
-            if select_score is not None:
-                gen_flat = jnp.asarray(population[gen_best_idx])
-                score = select_score(rebuild(gen_flat))
+            if score is not None:
                 selection.append(score)
                 if score < best_selection:
                     best_selection = score
@@ -564,6 +577,14 @@ def _train_with_evosax(
                 mean_loss=gen_mean_loss,
             )
 
+        if failure is not None:
+            text = (
+                f"fit failed at generation {len(history)} and returned the best parameters "
+                f"so far (stop_reason='diverged'): {failure}"
+            )
+            ui_.on_message(level="error", text=text)
+            warnings.warn(text, RuntimeWarning, stacklevel=2)
+
         final_flat = best_flat if select_score is None else selected_flat
         ui_.on_run_end(final_loss=best_loss if select_score is None else best_selection)
         return _EvosaxRun(
@@ -571,4 +592,5 @@ def _train_with_evosax(
             loss=history,
             validation=selection,
             best_step=best_step,
+            failure=failure,
         )

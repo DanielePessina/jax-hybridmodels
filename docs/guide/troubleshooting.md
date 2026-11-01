@@ -20,6 +20,14 @@ If only some seeds fail, turn on the
 try `diffrax.Kvaerno3()`, per-state `atol`, or x64. See
 [Recommendations](/guide/recommendations#solver).
 
+## A fit returns `stop_reason="diverged"`
+
+The solver failed or the loss went non-finite partway through, and the warning
+names the cause. `result.model` holds the best parameters reached before that,
+and `result.history` stops at the last good step. Lower the learning rate, add
+bounds that keep the parameters out of the bad region, or check the points in
+the first section above. If the first step fails, `fit` raises instead.
+
 ## `TracerBoolConversionError`
 
 A traced array reached a Python `if`:
