@@ -69,3 +69,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 ## [RNG: Named-Fold Keys](/api/rng)
 
 [`fold`](/api/rng#fold)
+
+## [Inference: A Log-Density for Samplers](/api/inference)
+
+[`make_problem`](/api/inference#make_problem), [`InferenceProblem`](/api/inference#inferenceproblem), [`flat_prior`](/api/inference#flat_prior)

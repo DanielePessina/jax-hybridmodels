@@ -241,11 +241,19 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "RNG: Named-Fold Keys",
         ("fold",),
     ),
+    (
+        "inference",
+        "Inference: A Log-Density for Samplers",
+        ("make_problem", "InferenceProblem", "flat_prior"),
+    ),
 )
 
 # Documented names that are not top-level exports, with the module to import
 # them from. Top-level names resolve through ``jaxhybridmodels._EXPORTS``.
 SUBMODULE_SYMBOLS: dict[str, str] = {
+    "InferenceProblem": "jaxhybridmodels.inference",
+    "flat_prior": "jaxhybridmodels.inference",
+    "make_problem": "jaxhybridmodels.inference",
     "LOSS_REGISTRY": "jaxhybridmodels.losses",
     "bal_mle": "jaxhybridmodels.losses",
     "bal_mse": "jaxhybridmodels.losses",

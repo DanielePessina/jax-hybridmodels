@@ -1,0 +1,445 @@
+"""A log-density for a hybrid model, for whichever sampler you want to run.
+
+This module does no sampling. :func:`make_problem` turns a model, its data, a
+prior and a noise model into a :class:`InferenceProblem`, whose ``log_density``
+is a pure JAX function of a pytree position. BlackJAX, NumPyro's ``potential_fn``
+or an Optimistix MAP search can all take it::
+
+    def log_prior(predictors, noise):
+        return -0.5 * jnp.log(predictors["k"].value / 0.3) ** 2
+
+    problem = hm.inference.make_problem(model, data, log_prior=log_prior, noise="data")
+    warmup = blackjax.window_adaptation(blackjax.nuts, problem.log_density)
+    (state, params), _ = warmup.run(key, problem.position, num_steps=1000)
+
+Three things make this density differ from the training loss.
+
+- It sums over buckets. The trainers average them, which tempers even the
+  ``"mle"`` loss by one over the number of buckets, and makes a posterior depend
+  on how experiments happened to be grouped.
+- The position holds latents, while priors are written on physical values, so
+  the change-of-variables term is added here for every free ``Parameter``.
+  Leaving it out would imply a prior nobody chose, with mass piled at the bounds.
+- A failed solve gives ``-inf`` and a zero gradient, so a sampler sees a rejected
+  proposal instead of an exception that ends the chain.
+
+The default target is the ``Parameter`` values. ``free=`` can name any subtree,
+such as a network's last layer. Whatever stays fixed is conditioned on, and
+``InferenceProblem.conditional_on`` lists it: a posterior over a physical
+parameter with a fitted network held fixed is a conditional posterior, and the
+network can absorb what the physics should explain.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+import warnings
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, cast
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import jax.tree_util as jtu
+from jaxtyping import Array
+
+from jaxhybridmodels.data import BucketPayload, Data, Dataset
+from jaxhybridmodels.model import HybridModel
+from jaxhybridmodels.predictors import Parameter
+from jaxhybridmodels.trainable import (
+    FreezeSpec,
+    _path_to_dotted,
+    freeze_mask,
+    trainable_mask,
+)
+from jaxhybridmodels.training.kernels import predict_bucket_obs
+
+__all__ = ("InferenceProblem", "flat_prior", "make_problem")
+
+_PREDICTORS = "predictors"
+_NOISE = "noise"
+
+
+def flat_prior(predictors: Any, noise: Mapping[str, Array]) -> Array:
+    """A prior flat in physical units, for free ``Parameter``s with finite bounds.
+
+    Proper only on a bounded box, so :func:`make_problem` refuses it when a free
+    value has an open bound or is a network weight. A flat prior is not neutral
+    under a warp: on a log-warped parameter it still favours the upper decades.
+    """
+    return jnp.asarray(0.0)
+
+
+@jax.custom_vjp
+def _finite_gradients(position: Any) -> Any:
+    """The identity, except that non-finite gradients flowing back through it become 0.
+
+    Gating a value with ``jnp.where`` cannot do this: reverse mode still
+    multiplies the failed solve's NaN sensitivities by zero, which is NaN.
+    """
+    return position
+
+
+def _finite_gradients_fwd(position: Any) -> tuple[Any, None]:
+    return position, None
+
+
+def _finite_gradients_bwd(_: None, cotangent: Any) -> tuple[Any]:
+    return (jtu.tree_map(lambda g: jnp.where(jnp.isfinite(g), g, jnp.zeros_like(g)), cotangent),)
+
+
+_finite_gradients.defvjp(_finite_gradients_fwd, _finite_gradients_bwd)
+
+
+def _log_abs_jacobian(parameter: Parameter) -> Array:
+    """``sum log|d value / d latent|`` for one free ``Parameter``.
+
+    The squash maps each latent to its own value, so a tangent of ones reads off
+    the whole diagonal in one ``jvp``. Far into a squash's tail the derivative
+    underflows to zero, and the term is held at the smallest positive float there
+    so the density stays finite and carries no gradient from this term.
+    """
+    latent = parameter.latent
+    _, derivative = jax.jvp(parameter.scaler.from_latent, (latent,), (jnp.ones_like(latent),))
+    size = jnp.abs(jnp.ravel(derivative))
+    smallest = jnp.finfo(size.dtype).tiny
+    positive = size > 0.0
+    return jnp.sum(jnp.where(positive, jnp.log(jnp.where(positive, size, 1.0)), jnp.log(smallest)))
+
+
+def _is_parameter(node: Any) -> bool:
+    return isinstance(node, Parameter)
+
+
+def _dotted(path: tuple[Any, ...]) -> str:
+    """A leaf's path in the position, without the ``predictors`` level users never wrote."""
+    dotted = _path_to_dotted(path)
+    prefix = f"{_PREDICTORS}."
+    return dotted[len(prefix) :] if dotted.startswith(prefix) else dotted
+
+
+@dataclass(frozen=True, eq=False)
+class InferenceProblem:
+    """A model, its data, a prior and a noise model, as a function of a position.
+
+    Build one with :func:`make_problem`. Identity-hashed, so bound methods such as
+    ``problem.log_density`` can be passed to ``jax.jit`` and to samplers.
+
+    Attributes
+    ----------
+    model : HybridModel
+        The model as given. Solves here run through a copy with
+        ``SolverConfig.throw`` off.
+    dataset : Dataset
+        The data the likelihood reads.
+    position : PyTree
+        The starting position: the free leaves' current values. Latents for a
+        ``Parameter``, weights for a network, and inferred noise under ``"noise"``.
+    conditional_on : tuple[str, ...]
+        Dotted paths of the trainable leaves held fixed. The posterior is
+        conditional on these values and its width does not account for them.
+    """
+
+    model: HybridModel
+    dataset: Dataset
+    position: Any
+    conditional_on: tuple[str, ...]
+    _log_prior: Callable[..., Array]
+    _log_likelihood: Callable[..., Array] | None
+    _static: Any
+    _mask: Any
+    _sampling_model: HybridModel
+
+    def _tree(self, position: Any) -> dict[str, Any]:
+        return cast(dict[str, Any], eqx.combine(position, self._static))
+
+    def _predictions(self, predictors: Any, bp: BucketPayload) -> Array:
+        return predict_bucket_obs(
+            predictors,
+            bp,
+            simulate_fn=self._sampling_model.simulate_fn,
+            state_to_output=self._sampling_model.state_to_output,
+            solver=self._sampling_model.solver,
+        )
+
+    def _whitened(self, pred_obs: Array, bp: BucketPayload, noise: Mapping[str, Array]) -> Any:
+        """``(residuals, variances)``, both ``[N, T, D]``, with benign values at masked cells."""
+        if noise:
+            sigma = jnp.stack([noise[name] for name in self.dataset.output_channel_names], axis=-1)
+            variance = jnp.broadcast_to(sigma**2, bp.yvar.shape)
+        else:
+            variance = bp.yvar
+        # Unmeasured cells hold placeholders, so they are replaced before any
+        # arithmetic and cannot reach a value or a gradient.
+        safe_variance = jnp.where(bp.mask, variance, 1.0)
+        safe_prediction = jnp.where(bp.mask, pred_obs, 0.0)
+        observed = jnp.where(bp.mask, bp.y_observed, 0.0)
+        residuals = (safe_prediction - observed) / jnp.sqrt(safe_variance)
+        return jnp.where(bp.mask, residuals, 0.0), safe_variance
+
+    def residuals(self, position: Any) -> Array:
+        """Whitened residuals ``(prediction - observed) / sigma``, flattened over buckets.
+
+        Length is every ``[N, T, D]`` cell, with zero at unmeasured cells, so the
+        shape does not depend on the data's mask and ``jax.jacfwd`` applies.
+        ``log_likelihood`` is built on the same quantity for a Gaussian.
+        """
+        tree = self._tree(position)
+        noise = self._noise_values(tree)
+        parts = [
+            self._whitened(self._predictions(tree[_PREDICTORS], bp), bp, noise)[0].ravel()
+            for bp in self.dataset.bucket_payloads
+        ]
+        return jnp.concatenate(parts)
+
+    def _noise_values(self, tree: Mapping[str, Any]) -> dict[str, Array]:
+        return {name: jnp.squeeze(p.value) for name, p in tree[_NOISE].items()}
+
+    def log_likelihood(self, position: Any) -> Array:
+        """The log-likelihood of the data, summed over every experiment.
+
+        ``-inf`` when any solve fails or any prediction is non-finite, including
+        at a row no channel measured, since a failed solve leaves such rows
+        non-finite too.
+        """
+        tree = self._tree(position)
+        predictors = tree[_PREDICTORS]
+        noise = self._noise_values(tree)
+        total = jnp.asarray(0.0)
+        finite = jnp.asarray(True)
+        for bp in self.dataset.bucket_payloads:
+            pred_obs = self._predictions(predictors, bp)
+            finite = finite & jnp.all(jnp.isfinite(pred_obs))
+            clean = jnp.where(jnp.isfinite(pred_obs), pred_obs, 0.0)
+            if self._log_likelihood is not None:
+                total = total + self._log_likelihood(clean, bp, noise)
+            else:
+                residuals, variance = self._whitened(clean, bp, noise)
+                normaliser = jnp.where(bp.mask, jnp.log(2.0 * jnp.pi * variance), 0.0)
+                total = total - 0.5 * (jnp.sum(residuals**2) + jnp.sum(normaliser))
+        return jnp.where(finite & jnp.isfinite(total), total, -jnp.inf)
+
+    def _log_jacobian(self, tree: Mapping[str, Any]) -> Array:
+        total = jnp.asarray(0.0)
+        leaves = jtu.tree_leaves(tree, is_leaf=_is_parameter)
+        flags = jtu.tree_leaves(self._mask, is_leaf=_is_parameter)
+        for leaf, flag in zip(leaves, flags, strict=True):
+            # A partly fixed Parameter cannot occur: its one latent is free or not.
+            if _is_parameter(leaf) and flag.latent:
+                total = total + _log_abs_jacobian(leaf)
+        return total
+
+    def log_density(self, position: Any) -> Array:
+        """Unnormalised log-posterior at ``position``, for a sampler to target.
+
+        Log-likelihood, plus the prior on physical values, plus the
+        change-of-variables term for free ``Parameter`` latents. It is a density
+        over the latents, so it is ``-inf`` with a zero gradient wherever a solve
+        fails, and any NaN term also becomes ``-inf``.
+        """
+        position = _finite_gradients(position)
+        tree = self._tree(position)
+        prior = self._log_prior(tree[_PREDICTORS], self._noise_values(tree))
+        total = self.log_likelihood(position) + prior + self._log_jacobian(tree)
+        return jnp.where(jnp.isfinite(total), total, -jnp.inf)
+
+    def to_model(self, position: Any) -> HybridModel:
+        """The given model with this position's values, for ``predict`` and ``save``.
+
+        It keeps the model's own solver, so its solves raise on failure as usual.
+        Inferred noise is not part of a model.
+        """
+        return eqx.tree_at(lambda m: m.predictors, self.model, self._tree(position)[_PREDICTORS])
+
+    def physical(self, position: Any) -> dict[str, Array]:
+        """The free values in physical units, keyed by dotted path.
+
+        A ``Parameter`` appears under its path with its ``.value``, a free network
+        leaf under its path as it is, and inferred noise as ``"noise.<name>"``.
+        """
+        tree = self._tree(position)
+        flat_mask = jtu.tree_leaves(self._mask, is_leaf=_is_parameter)
+        flat_tree = jtu.tree_flatten_with_path(tree, is_leaf=_is_parameter)[0]
+        out: dict[str, Array] = {}
+        for (path, leaf), flag in zip(flat_tree, flat_mask, strict=True):
+            if _is_parameter(leaf):
+                if flag.latent:
+                    out[_dotted(path)] = leaf.value
+            elif flag:
+                out[_dotted(path)] = leaf
+        return out
+
+
+def make_problem(
+    model: HybridModel,
+    data: Data,
+    *,
+    log_prior: Callable[[Any, Mapping[str, Array]], Array],
+    noise: Literal["data"] | Mapping[str, Parameter],
+    free: Sequence[FreezeSpec] | FreezeSpec | None = None,
+    log_likelihood: Callable[[Array, BucketPayload, Mapping[str, Array]], Array] | None = None,
+) -> InferenceProblem:
+    """Build the log-density for ``model`` on ``data``.
+
+    Parameters
+    ----------
+    model : HybridModel
+        Its current values are the starting position, so a fitted model starts a
+        chain near the mode.
+    data : Dataset | Sequence[Experiment]
+        The observations. Bucketing does not change the density.
+    log_prior : Callable
+        ``(predictors, noise) -> scalar``, the log-prior on physical values: read
+        ``predictors["k"].value``, and ``noise["a"]`` for inferred noise. There is
+        no default because no prior is neutral. :func:`flat_prior` is available
+        for a bounded box. A free network's weights need a prior written here.
+    noise : "data" | Mapping[str, Parameter]
+        ``"data"`` trusts the variances in the data, and warns for a channel left
+        at the default of 1.0. A mapping infers a standard deviation per channel,
+        each a ``Parameter`` naming its starting value and bounds. With
+        ``log_likelihood`` its keys are free-form, such as an AR(1) coefficient.
+    free : str | type | Callable | Sequence | None
+        What to sample, in the syntax of ``fit(freeze=...)``. ``None`` means every
+        ``Parameter``. A dotted path can name a network part, such as
+        ``"g.inner.mlp.layers.2"``.
+    log_likelihood : Callable | None
+        Replaces the Gaussian: ``(pred_obs, bp, noise) -> scalar``, called once per
+        bucket and summed. ``pred_obs`` is ``[N, T, D]``, and ``bp.mask`` says
+        which cells were measured.
+
+    Solves inside the density run with ``SolverConfig.throw`` off. A ``simulate_fn``
+    that calls ``diffrax.diffeqsolve`` itself must pass ``throw=solver.throw``, or
+    a failed solve will end the chain with an exception.
+    """
+    dataset = model._dataset(data, "make_problem")
+    model._check_shapes(dataset.bucket_payloads[0], "make_problem")
+    predictors = model.predictors
+    noise_map = _check_noise(noise, dataset, custom=log_likelihood is not None)
+
+    base = trainable_mask(predictors)
+    free_mask = _free_mask(predictors, base, free)
+    if not any(jtu.tree_leaves(free_mask)):
+        raise ValueError("make_problem: free= selects no trainable leaf; nothing to sample")
+    if log_prior is flat_prior:
+        _check_flat_prior(predictors, free_mask, noise_map)
+
+    conditional_on = tuple(
+        _path_to_dotted(path)
+        for (path, in_base), in_free in zip(
+            jtu.tree_flatten_with_path(base)[0], jtu.tree_leaves(free_mask), strict=True
+        )
+        if in_base and not in_free
+    )
+    if conditional_on:
+        shown = ", ".join(conditional_on[:4]) + (", ..." if len(conditional_on) > 4 else "")
+        warnings.warn(
+            f"make_problem: {len(conditional_on)} trainable leaves stay fixed ({shown}), so this "
+            "is a posterior conditional on their values. If a network can absorb what the free "
+            "values explain, it can be too narrow. Compare the free values across fit_ensemble "
+            "members to check.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if jnp.asarray(0.0).dtype != jnp.float64:
+        warnings.warn(
+            "make_problem: x64 is off. Single precision and solver tolerance noise can degrade "
+            "HMC energy conservation; enable x64 before importing anything else that uses JAX.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    tree = {_PREDICTORS: predictors, _NOISE: dict(noise_map)}
+    mask = {_PREDICTORS: free_mask, _NOISE: trainable_mask(dict(noise_map))}
+    position, static = eqx.partition(tree, mask)
+    sampling_solver = dataclasses.replace(model.solver, throw=False)
+    return InferenceProblem(
+        model=model,
+        dataset=dataset,
+        position=position,
+        conditional_on=conditional_on,
+        _log_prior=log_prior,
+        _log_likelihood=log_likelihood,
+        _static=static,
+        _mask=mask,
+        _sampling_model=dataclasses.replace(model, solver=sampling_solver),
+    )
+
+
+def _free_mask(predictors: Any, base: Any, free: Any) -> Any:
+    """``base`` narrowed to what ``free`` matches, reusing ``freeze_mask``'s matching."""
+    if free is None:
+        leaves = jtu.tree_leaves(predictors, is_leaf=_is_parameter)
+        if not any(_is_parameter(leaf) for leaf in leaves):
+            raise ValueError(
+                "make_problem: this model has no Parameter to sample. Name a network part with "
+                "free=, such as a last layer, or use fit_ensemble for whole-network uncertainty."
+            )
+        free = Parameter
+    try:
+        unmatched = freeze_mask(predictors, free, mask=base)
+    except ValueError as exc:
+        exc.add_note("make_problem: free= takes the same entries as fit(freeze=...).")
+        raise
+    return jtu.tree_map(lambda in_base, kept: in_base and not kept, base, unmatched)
+
+
+def _check_noise(noise: Any, dataset: Dataset, *, custom: bool) -> dict[str, Parameter]:
+    if isinstance(noise, str):
+        if noise != "data":
+            raise ValueError(f"make_problem: noise must be 'data' or a mapping; got {noise!r}")
+        if not custom:
+            _warn_on_default_variance(dataset)
+        return {}
+    if not isinstance(noise, Mapping):
+        raise TypeError(
+            f"make_problem: noise must be 'data' or a mapping; got {type(noise).__name__}"
+        )
+    for name, value in noise.items():
+        if not isinstance(value, Parameter) or value.latent.size != 1:
+            raise ValueError(f"make_problem: noise[{name!r}] must be a scalar hm.Parameter")
+    if not custom and set(noise) != set(dataset.output_channel_names):
+        raise ValueError(
+            f"make_problem: noise names {sorted(noise)} but the channels are "
+            f"{sorted(dataset.output_channel_names)}; the Gaussian needs one per channel"
+        )
+    return dict(noise)
+
+
+def _warn_on_default_variance(dataset: Dataset) -> None:
+    """Warn for channels whose every measured variance equals the unset default of 1.0."""
+    for d, name in enumerate(dataset.output_channel_names):
+        cells = [
+            bool(jnp.all(bp.yvar[..., d][bp.mask[..., d]] == 1.0)) for bp in dataset.bucket_payloads
+        ]
+        if all(cells):
+            warnings.warn(
+                f"make_problem: every variance in channel {name!r} is 1.0, the default for "
+                "unset data. If that is not the real noise, the posterior's width is wrong; "
+                "set variance= on the data, or infer it with noise={...}.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+
+def _check_flat_prior(predictors: Any, free_mask: Any, noise: Mapping[str, Parameter]) -> None:
+    """Refuse ``flat_prior`` when a free value has no bounded box, as it can be improper."""
+    leaves = jtu.tree_leaves(predictors, is_leaf=_is_parameter)
+    flags = jtu.tree_leaves(free_mask, is_leaf=_is_parameter)
+    named = [(leaf, flag) for leaf, flag in zip(leaves, flags, strict=True)]
+    named += [(value, True) for value in noise.values()]
+    for leaf, flag in named:
+        if _is_parameter(leaf):
+            open_box = any(
+                not (math.isfinite(low) and math.isfinite(high)) for low, high in leaf.scaler.bounds
+            )
+            if open_box and (flag is True or flag.latent):
+                raise ValueError(
+                    "make_problem: flat_prior on a Parameter with an open bound can be improper; "
+                    "write a log_prior or give it finite bounds"
+                )
+        elif flag:
+            raise ValueError(
+                "make_problem: flat_prior on network weights is improper; write a log_prior"
+            )

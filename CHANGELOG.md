@@ -10,6 +10,13 @@
   metrics and the worst experiment per channel.
 - `compute_metrics(predictions, by="experiment")` scores each experiment alone,
   and `print_metrics(predictions, by="experiment")` lists them worst first.
+- `jaxhybridmodels.inference.make_problem` builds a log-density for a model and
+  its data, for any sampler such as BlackJAX. It sums over buckets, adds the
+  change-of-variables term for free `Parameter`s, and turns a failed solve into
+  a rejected proposal. `free=` picks what is sampled, and what stays fixed is
+  listed in `InferenceProblem.conditional_on`.
+- `SolverConfig(throw=False)` returns non-finite states from a failed solve
+  instead of raising.
 
 ### Changed
 
