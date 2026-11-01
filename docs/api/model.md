@@ -248,6 +248,29 @@ the run (it warned, and the model holds the best parameters so far), else
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L137)</small>
 
+<a id="fitresultsummary"></a>
+
+#### `FitResult.summary()`
+
+```python
+summary(self, data: 'Any' = None) -> 'str'
+```
+
+A readable report on the run; ``print(result.summary())``.
+
+Says how the run ended, the loss by phase, each ``Parameter`` with any
+that sit near a bound, and how much of each network's input box is
+pinned against an output bound. With ``data``, a list of experiments or
+a ``Dataset``, it also predicts on them and adds the metrics and the
+worst experiment per channel.
+
+A flagged parameter is in the range where the bound penalty would
+charge it: the outer 5% of its box for the default sigmoid. The network
+figure covers the whole declared box, including inputs no experiment
+reached, so a large share can be harmless if the data never goes there.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L166)</small>
+
 ---
 
 <a id="fithistory"></a>

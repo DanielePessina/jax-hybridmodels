@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `FitResult.summary()` and `SavedRun.summary()` report how the run ended, the
+  loss by phase, each `Parameter` with any near a bound, and how much of each
+  network's input box is pinned against an output bound. Pass data to add the
+  metrics and the worst experiment per channel.
+- `compute_metrics(predictions, by="experiment")` scores each experiment alone,
+  and `print_metrics(predictions, by="experiment")` lists them worst first.
+
+### Changed
+
+- A channel with no observations now has NaN error statistics instead of 0.
+
 ## 0.3.0 — 2026-11-01
 
 ### Added

@@ -31,6 +31,14 @@ unchanged.
 `fit_ensemble` trains several members and returns a list of `FitResult`s;
 see [Ensembles](/guide/ensembles).
 
+`print(result.summary())` reports how the run ended, the loss by phase, each
+`Parameter`, and how much of each network's input box sits at an output bound.
+`result.summary(experiments)` also predicts on the data and adds the metrics
+and the worst experiment per channel. A flagged parameter is where the bound
+penalty would charge it: the outer 5% of its box for the default sigmoid. The
+network figure sweeps the whole declared box, so a large share can be harmless
+if the data never reaches those inputs.
+
 ## Predicting
 
 `predict` returns a `PredictionResult` keyed by experiment ID, in dataset
@@ -43,6 +51,10 @@ returns a long table (needs pandas: `pip install jax-hybridmodels[pandas]`), and
 
 `hm.compute_metrics(predictions)` returns per-channel statistics over the
 measured cells, and `hm.print_metrics(predictions)` prints them as a table.
+With `by="experiment"`, `compute_metrics` scores each experiment alone and
+`print_metrics` lists them per channel with the worst RMSE first, which finds
+the run a pooled number hides. Its R^2 compares against that experiment's own
+mean, so a good fit to a nearly flat run can still score low.
 
 By default each experiment is predicted on its measured times. For smooth
 plots, pick another grid:

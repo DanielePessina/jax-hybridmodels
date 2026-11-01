@@ -1296,6 +1296,16 @@ def test_model_api_rejects_bad_input(call, match):
         call()
 
 
+def test_metrics_reject_a_bad_grouping(fitted, decay_data):
+    predictions = fitted[0].model.predict(decay_data)
+    with pytest.raises(ValueError, match="by= must be"):
+        hm.compute_metrics(predictions, by="bucket")  # ty: ignore[invalid-argument-type]
+    with pytest.raises(ValueError, match="by= must be"):
+        hm.print_metrics(predictions, by="bucket")  # ty: ignore[invalid-argument-type]
+    with pytest.raises(ValueError, match="these metrics are pooled"):
+        hm.print_metrics(hm.compute_metrics(predictions), by="experiment")
+
+
 def test_compute_metrics_names_what_it_takes(fitted, decay_data):
     """Raw bucket arrays are not a result; the error names the entry points that make one."""
     buckets = fitted[0].model.predict(decay_data).buckets
