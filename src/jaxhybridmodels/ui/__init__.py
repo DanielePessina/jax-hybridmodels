@@ -12,5 +12,14 @@ Pass ``ui=`` to a training function to use your own; it overrides
 from jaxhybridmodels.ui.base import EvosaxUI, SilentUI, TrainingUI
 from jaxhybridmodels.ui.evosax import RichEvosaxUI
 from jaxhybridmodels.ui.optax import RichTrainingUI
+from jaxhybridmodels.ui.plain import PlainEvosaxUI, PlainTrainingUI
 
-__all__ = ["EvosaxUI", "RichEvosaxUI", "RichTrainingUI", "SilentUI", "TrainingUI"]
+__all__ = [
+    "EvosaxUI",
+    "PlainEvosaxUI",
+    "PlainTrainingUI",
+    "RichEvosaxUI",
+    "RichTrainingUI",
+    "SilentUI",
+    "TrainingUI",
+]

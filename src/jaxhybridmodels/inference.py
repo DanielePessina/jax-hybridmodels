@@ -394,7 +394,18 @@ class InferenceProblem:
 
         A ``Parameter`` appears under its path with its ``.value``, a free network
         leaf under its path as it is, and inferred noise as ``"noise.<name>"``.
+        ``position`` may be a sampler's output: leading axes such as
+        ``[chain, draw]`` stay on every value.
         """
+        reference = jtu.tree_leaves(self.position)[0]
+        if jtu.tree_leaves(position)[0].ndim == reference.ndim:
+            return self._physical_one(position)
+        convert = self._physical_one
+        for _ in range(self._sample_axes(position)):
+            convert = jax.vmap(convert)
+        return convert(position)
+
+    def _physical_one(self, position: Any) -> dict[str, Array]:
         tree = self._tree(position)
         return {
             _dotted(path): leaf.value if _is_parameter(leaf) else leaf

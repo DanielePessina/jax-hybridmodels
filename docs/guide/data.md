@@ -80,10 +80,19 @@ experiments = hm.experiments_from_dataframe(
 A list names each channel or covariate after its column; a mapping renames.
 `t0` may be one number or a column, and `y0` one shared state or a mapping
 `{exp_id: state}`. Experiments come back in order of first appearance, with
-the run column's values as `exp_id`. A long table (one row per measurement)
-becomes wide with
-`df.pivot_table(index=["run", "time_h"], columns="channel", values="value").reset_index()`.
-pandas is imported only by your code.
+the run column's values as `exp_id`. pandas is imported only by your code.
+
+A table with one row per measurement goes to
+[`experiments_from_long_dataframe`](/api/data#experiments_from_long_dataframe)
+instead. It takes `channel=` and `value=` columns in place of `channels=`,
+and `variance=` is a column or one number:
+
+```python
+experiments = hm.experiments_from_long_dataframe(
+    df, time="time_h", experiment="run", channel="channel", value="value",
+    variance="variance", covariates=["temp"], y0=[1.0],
+)
+```
 
 ## Union timestamps and masks
 

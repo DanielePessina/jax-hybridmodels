@@ -11,6 +11,7 @@ Build [`Experiment`](#experiment) records from sparse observations, then pass th
 - [`make_experiment`](#make_experiment)
 - [`experiment_from_array`](#experiment_from_array)
 - [`experiments_from_dataframe`](#experiments_from_dataframe)
+- [`experiments_from_long_dataframe`](#experiments_from_long_dataframe)
 - [`BucketPayload`](#bucketpayload)
 - [`Dataset`](#dataset)
 - [`make_dataset`](#make_dataset)
@@ -203,9 +204,8 @@ Build one ``Experiment`` per run from a wide pandas table.
 The table has one row per (experiment, sample time) and one column per
 measured channel, which is how lab spreadsheets usually look. ``NaN``
 marks a channel that was not measured at that row, so channels may be
-sampled at different times. A long table (one row per measurement, with
-``channel`` and ``value`` columns) becomes wide with
-``df.pivot_table(index=["run", "time"], columns="channel", values="value").reset_index()``.
+sampled at different times. For a table with one row per measurement, use
+[`experiments_from_long_dataframe`](/api/data#experiments_from_long_dataframe).
 
 Experiments come back in order of first appearance, each built by
 [`experiment_from_array`](/api/data#experiment_from_array).
@@ -238,6 +238,63 @@ Experiments come back in order of first appearance, each built by
     )
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L435)</small>
+
+---
+
+<a id="experiments_from_long_dataframe"></a>
+
+### `experiments_from_long_dataframe()`
+
+<small>`from jaxhybridmodels.data import experiments_from_long_dataframe` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.experiments_from_long_dataframe`</small>
+
+```python
+experiments_from_long_dataframe(
+    df: 'Any',
+    *,
+    time: 'str',
+    experiment: 'str',
+    channel: 'str',
+    value: 'str',
+    variance: 'float | str | None' = None,
+    covariates: 'Sequence[str] | Mapping[str, str]' = (),
+    t0: 'float | str | None' = None,
+    y0: 'Any' = None,
+    y0_fn: 'Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None' = None,
+) -> list[Experiment]
+```
+
+Build one ``Experiment`` per run from a long pandas table.
+
+The table has one row per measurement, naming its run, channel, time and
+value, so each channel keeps its own sample times. An experiment that
+never measured a channel gets it empty, so experiments still share their
+channels. Experiments come back in order of first appearance.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `df` |  | A ``pandas.DataFrame``. pandas itself is never imported here. |
+| `time, experiment, channel, value` |  | Columns holding the sample time, the run (its values, as strings, become ``exp_id``), the channel name and the measurement. A missing entry in any of them raises ``ValueError``, as does a repeated (experiment, channel, time). |
+| `variance` |  | None for unit variance, one number for every cell, or a column. |
+| `covariates, t0, y0, y0_fn` |  | As for [`experiments_from_dataframe`](/api/data#experiments_from_dataframe). |
+
+**Examples**
+
+::
+
+    experiments = hm.experiments_from_long_dataframe(
+        df,
+        time="time",
+        experiment="experiment_id",
+        channel="channel",
+        value="value",
+        variance="variance",
+        covariates=["temperature_C"],
+        y0_fn=lambda covariates, channels: jnp.array([1.0]),
+    )
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L541)</small>
 
 ---
 
@@ -402,7 +459,7 @@ the model, is passed to prediction and training separately.
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with the (named) experiments kept on ``Dataset.experiments``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L909)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1018)</small>
 
 ---
 
@@ -449,7 +506,7 @@ ensemble whose members saw different resamples.
 | --- | --- | --- |
 | `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1099)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1208)</small>
 
 ---
 
@@ -494,7 +551,7 @@ payloads and no experiments, so it cannot be split again.
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1174)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1283)</small>
 
 ---
 
@@ -515,4 +572,4 @@ debugging and example output. Each line reports the bucket's ``N``
 (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
 fraction of ``[N, T, D]`` cells the mask marks as real observations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L891)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1000)</small>

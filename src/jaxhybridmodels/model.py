@@ -19,6 +19,7 @@ import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 from jaxtyping import Array
 
@@ -32,11 +33,13 @@ from jaxhybridmodels.data import (
 )
 from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.prediction import _check_grid_args, _note_user_code, _predict
+from jaxhybridmodels.predictors import Constant, Parameter
 from jaxhybridmodels.results import ExperimentPrediction, FitResult, PredictionResult
 from jaxhybridmodels.rng import check_key
 from jaxhybridmodels.solver import SolverConfig, simulation_state
 from jaxhybridmodels.trainable import (
     FreezeSpec,
+    _path_to_dotted,
     count_trainable_params,
     freeze_mask,
     trainable_mask,
@@ -254,6 +257,32 @@ class HybridModel(eqx.Module):
             raise ValueError("Model has no trainable parameters")
         self._check_shapes(dataset.bucket_payloads[0], caller)
         return dataset, validation_set, mask
+
+    def named_values(self) -> dict[str, Any]:
+        """Every ``Parameter`` and ``Constant`` in physical units, by dotted path.
+
+        A scalar comes back as a Python number and anything larger as it is
+        stored. Networks are left out, and ``summary`` shows bounds and which
+        values sit near them.
+
+        Examples
+        --------
+        ::
+
+            result.model.named_values()
+            # {"omega": 0.9997, "damping": 0.1}
+        """
+        leaves, _ = jtu.tree_flatten_with_path(
+            self.predictors, is_leaf=lambda node: isinstance(node, Parameter | Constant)
+        )
+        values: dict[str, Any] = {}
+        for path, leaf in leaves:
+            if isinstance(leaf, Parameter | Constant):
+                value = leaf.value
+                values[_path_to_dotted(path)] = (
+                    value.item() if isinstance(value, jax.Array) and value.ndim == 0 else value
+                )
+        return values
 
     def fit(
         self,

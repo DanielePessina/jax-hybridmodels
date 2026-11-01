@@ -47,13 +47,16 @@ loop *outside* any jit.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Callable
 from typing import Any
 
+import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from jaxtyping import Array, ArrayLike
 
@@ -84,6 +87,92 @@ def failure_summary(exc: BaseException) -> str:
         if marker in line:
             return line.split(marker, 1)[1]
     return lines[0] if lines else type(exc).__name__
+
+
+# Four times the ``SolverConfig`` default. Past this, more steps rarely fix a
+# solve that keeps running out: the problem is stiffness, not the budget.
+_LARGE_STEP_BUDGET = 16384
+_MAX_NAMED_EXPERIMENTS = 5
+
+
+def _step_budget_advice(exc: BaseException, solver: SolverConfig) -> str:
+    """What to try for an exhausted step budget, since "increase it" is not always right."""
+    if "maximum number of solver steps" not in str(exc):
+        return ""
+    if solver.max_steps < _LARGE_STEP_BUDGET:
+        return f"max_steps is {solver.max_steps}; a stiff or long solve may need more."
+    if isinstance(solver.solver, diffrax.AbstractImplicitSolver):
+        return (
+            f"max_steps is already {solver.max_steps} with an implicit solver, so more steps "
+            "are unlikely to help. Try another implicit solver such as diffrax.Kvaerno3, and "
+            "tighter bounds on rates."
+        )
+    return (
+        f"max_steps is already {solver.max_steps}, so more steps are unlikely to help. This "
+        "usually means a stiff system: try an implicit solver such as diffrax.Kvaerno3, and "
+        "tighter bounds on rates."
+    )
+
+
+def _where_solves_fail(
+    predictors: Any,
+    dataset: Dataset,
+    *,
+    simulate_fn: Callable[..., Array],
+    solver: SolverConfig,
+) -> str:
+    """Re-solve every bucket without raising, and say which experiments fail.
+
+    The error from inside ``vmap`` cannot name a row, but a row whose solve
+    failed comes back non-finite once ``throw`` is off. A ``simulate_fn`` that
+    ignores ``solver.throw`` raises again, and only its bucket can be named.
+    """
+    quiet = dataclasses.replace(solver, throw=False)
+    solve = eqx.filter_jit(simulate_bucket)
+    failed: list[str] = []
+    for b, bp in enumerate(dataset.bucket_payloads):
+        try:
+            state = solve(predictors, bp, simulate_fn=simulate_fn, solver=quiet)
+        except FIT_FAILURES:
+            failed.append(f"bucket {b} (shape {tuple(bp.ts.shape)})")
+            continue
+        rows = np.asarray(jnp.isfinite(state).reshape(state.shape[0], -1).all(axis=1))
+        failed += [
+            exp.exp_id
+            for exp, (bucket, row) in zip(dataset.experiments, dataset._locations, strict=True)
+            if bucket == b and not rows[row]
+        ]
+    if not failed:
+        return ""
+    shown = ", ".join(failed[:_MAX_NAMED_EXPERIMENTS])
+    more = len(failed) - _MAX_NAMED_EXPERIMENTS
+    return f"Failing: {shown}{f' and {more} more' if more > 0 else ''}."
+
+
+def failure_details(
+    exc: BaseException,
+    predictors: Any,
+    *,
+    dataset: Dataset,
+    simulate_fn: Callable[..., Array],
+    solver: SolverConfig,
+) -> str:
+    """Where a fit failed and what to try, to follow :func:`failure_summary`.
+
+    ``predictors`` are the values that failed, or None when no single set of
+    values is known, as in a population. Runs only once a fit has failed. It
+    explains an error that is already on its way to the user, so a problem in
+    here must not replace that error.
+    """
+    parts = [_step_budget_advice(exc, solver)]
+    if predictors is not None:
+        try:
+            parts.insert(
+                0, _where_solves_fail(predictors, dataset, simulate_fn=simulate_fn, solver=solver)
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return " ".join(part for part in parts if part)
 
 
 def apply_length_mask(bp: BucketPayload, horizon: Array) -> BucketPayload:

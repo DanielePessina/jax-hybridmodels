@@ -113,7 +113,7 @@ def linear(x64):
     experiments, ts, ys = measurements()
     problem = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
     positions, divergent = run_nuts(problem, jr.key(0))
-    draws = np.asarray(jax.vmap(problem.physical)(positions)["k"]).ravel()
+    draws = np.asarray(problem.physical(positions)["k"]).ravel()
     return problem, experiments, ts, ys, draws, np.asarray(divergent)
 
 
@@ -215,7 +215,7 @@ def test_inferred_noise_matches_quadrature(x64):
     assert set(problem.physical(problem.position)) == {"k", "noise.y"}
     positions, divergent = run_nuts(problem, jr.key(4))
     assert not np.asarray(divergent).any()
-    named = jax.vmap(problem.physical)(positions)
+    named = problem.physical(positions)
     draws = np.asarray(named["noise.y"]).ravel()
 
     leaves, treedef = jax.tree_util.tree_flatten(problem.position)
@@ -322,7 +322,7 @@ def test_a_failed_solve_is_a_rejection_and_the_chain_survives(x64):
     assert all(bool(jnp.all(jnp.isfinite(g))) for g in jax.tree_util.tree_leaves(gradient))
 
     positions, _ = run_nuts(problem, jr.key(3), warmup=100, draws=200)
-    draws = np.asarray(jax.vmap(problem.physical)(positions)["k"]).ravel()
+    draws = np.asarray(problem.physical(positions)["k"]).ravel()
     assert np.isfinite(draws).all() and draws.max() <= limit
 
 
@@ -340,6 +340,9 @@ def test_mixed_models_state_what_they_condition_on(x64):
         )
     assert problem.conditional_on and all(p.startswith("net.") for p in problem.conditional_on)
     assert set(problem.physical(problem.position)) == {"k"}
+    # Leading axes stay on the values, as a [chain, draw] sampler output has them.
+    batched = jax.tree.map(lambda leaf: jnp.stack([leaf] * 3)[None], problem.position)
+    assert problem.physical(batched)["k"].shape[:2] == (1, 3)
 
     last_layer = make_problem(
         linear_model(net=network),
@@ -780,7 +783,7 @@ def test_simulation_based_calibration(x64):
             noise="data",
         )
         positions, _ = run_nuts(problem, k_chain, warmup=150, draws=kept * 4)
-        draws = np.asarray(jax.vmap(problem.physical)(positions)["k"]).ravel()[::4]
+        draws = np.asarray(problem.physical(positions)["k"]).ravel()[::4]
         ranks.append(int((draws < float(rate)).sum()))
     fraction = (np.asarray(ranks) + 0.5) / (kept + 1)
     assert scipy_stats.kstest(fraction, "uniform").pvalue > 0.01

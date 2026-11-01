@@ -844,6 +844,27 @@ def test_loss_configuration_errors(call, match):
         call()
 
 
+@pytest.mark.parametrize(
+    "rows, match",
+    [
+        pytest.param({"value": [1.0, np.nan]}, "'value' has 1 missing", id="missing-value"),
+        pytest.param({"time": [1.0, 1.0]}, "more than one row at time 1.0", id="repeated-cell"),
+        pytest.param({"run": ["a", None]}, "missing experiment ID", id="missing-id"),
+    ],
+)
+def test_experiments_from_long_dataframe_rejects_bad_rows(rows, match):
+    table = {"run": ["a", "a"], "time": [1.0, 2.0], "channel": ["x", "x"], "value": [1.0, 2.0]}
+    with pytest.raises(ValueError, match=match):
+        hm.experiments_from_long_dataframe(
+            pd.DataFrame({**table, **rows}),
+            time="time",
+            experiment="run",
+            channel="channel",
+            value="value",
+            y0=[0.0],
+        )
+
+
 def test_experiments_from_dataframe_rejects_missing_ids():
     """A row with no experiment ID raises instead of vanishing in groupby."""
     df = pd.DataFrame(
