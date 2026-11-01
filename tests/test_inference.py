@@ -17,6 +17,7 @@ import jax.random as jr
 import jax.scipy.stats as jstats
 import numpy as np
 import pytest
+from scipy import stats as scipy_stats
 
 import jaxhybridmodels as hm
 from jaxhybridmodels.inference import flat_prior, make_problem
@@ -577,3 +578,44 @@ def test_prediction_rejects_bad_input(linear, call, error, match):
     positions = jax.tree_util.tree_map(lambda leaf: leaf[None], problem.position)
     with pytest.raises(error, match=match):
         call(problem, positions)
+
+
+@pytest.mark.slow
+def test_simulation_based_calibration(x64):
+    """Draw a rate from the prior and data from the rate: its posterior rank must be uniform.
+
+    Fails if the density, the prior's change of variables or the bucket sum is wrong
+    in a way a single posterior check at one data set could miss. The parameter is
+    bounded, so the Jacobian is exercised. A prior draw is checked against thinned
+    NUTS draws, Talts et al. (2018).
+    """
+    low, high = 0.0, 2.0
+    n_replicates, kept = 60, 50
+    ranks = []
+    key = jr.key(21)
+    for _ in range(n_replicates):
+        key, k_rate, k_noise, k_chain = jr.split(key, 4)
+        rate = jr.uniform(k_rate, minval=low, maxval=high)
+        experiments = []
+        for name, grid, noise_key in zip(GRIDS, GRIDS.values(), jr.split(k_noise, 3), strict=True):
+            ts = jnp.asarray(grid)
+            ys = rate * ts + SIGMA * jr.normal(noise_key, ts.shape, dtype=ts.dtype)
+            experiments.append(
+                hm.make_experiment(
+                    channels={"y": hm.ChannelObs(ts=ts, values=ys, variance=SIGMA**2)},
+                    y0=[0.0],
+                    t0=0.0,
+                    exp_id=name,
+                )
+            )
+        problem = make_problem(
+            linear_model(hm.Parameter(1.0, bounds=(low, high))),
+            experiments,
+            log_prior=flat_prior,
+            noise="data",
+        )
+        positions, _ = run_nuts(problem, k_chain, warmup=150, draws=kept * 4)
+        draws = np.asarray(jax.vmap(problem.physical)(positions)["k"]).ravel()[::4]
+        ranks.append(int((draws < float(rate)).sum()))
+    fraction = (np.asarray(ranks) + 0.5) / (kept + 1)
+    assert scipy_stats.kstest(fraction, "uniform").pvalue > 0.01
