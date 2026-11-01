@@ -31,6 +31,7 @@ SolverConfig(
     pcoeff: 'float' = 0.0,
     icoeff: 'float' = 1.0,
     dcoeff: 'float' = 0.0,
+    throw: 'bool' = True,
 ) -> None
 ```
 
@@ -51,6 +52,7 @@ tolerance change must change the compiled solve.
 | `dt0` | `float | None` | Initial step size. ``None`` (default) lets diffrax pick one. |
 | `adjoint` | `diffrax.AbstractAdjoint` | How gradients are taken back through the solve. See ``ADJOINT_REGISTRY`` for what each choice costs. |
 | `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See `stepsize_controller`. |
+| `throw` | `bool` | Whether a failed solve raises, default ``True``. With ``False``, diffrax returns non-finite states after the failure instead, which is what a sampler needs: `jaxhybridmodels.inference` turns them into a rejected proposal. A hand-written ``diffrax.diffeqsolve`` call must forward it. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L106)</small>
 
@@ -97,7 +99,7 @@ crystallisation example does this.
 | --- | --- | --- |
 | `diffrax.Solution` |  | The diffrax solution; ``.ys`` is the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L218)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L226)</small>
 
 <a id="solverconfigstepsize_controller"></a>
 
@@ -119,7 +121,7 @@ I-control, so this reproduces the ``PIDController(rtol, atol)`` the
 examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L196)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L204)</small>
 
 <a id="solverconfigto_dict"></a>
 
@@ -135,7 +137,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L274)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L283)</small>
 
 ---
 

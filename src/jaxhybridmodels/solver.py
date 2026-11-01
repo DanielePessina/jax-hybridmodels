@@ -133,6 +133,11 @@ class SolverConfig(eqx.Module):
         Gains of the PID step-size controller. The defaults ``(0, 1, 0)``
         are diffrax's own and give plain I-control. See
         :meth:`stepsize_controller`.
+    throw : bool
+        Whether a failed solve raises, default ``True``. With ``False``, diffrax
+        returns non-finite states after the failure instead, which is what a
+        sampler needs: :mod:`jaxhybridmodels.inference` turns them into a rejected
+        proposal. A hand-written ``diffrax.diffeqsolve`` call must forward it.
     """
 
     solver: diffrax.AbstractSolver[Any] = eqx.field(static=True)
@@ -144,6 +149,7 @@ class SolverConfig(eqx.Module):
     pcoeff: float = eqx.field(static=True, default=0.0)
     icoeff: float = eqx.field(static=True, default=1.0)
     dcoeff: float = eqx.field(static=True, default=0.0)
+    throw: bool = eqx.field(static=True, default=True)
 
     def __init__(
         self,
@@ -157,6 +163,7 @@ class SolverConfig(eqx.Module):
         pcoeff: float = 0.0,
         icoeff: float = 1.0,
         dcoeff: float = 0.0,
+        throw: bool = True,
     ) -> None:
         """Construct and validate a solver configuration at the host boundary.
 
@@ -192,6 +199,7 @@ class SolverConfig(eqx.Module):
         self.pcoeff = pcoeff
         self.icoeff = icoeff
         self.dcoeff = dcoeff
+        self.throw = throw
 
     def stepsize_controller(self) -> diffrax.PIDController:
         """Build the adaptive step-size controller this config describes.
@@ -269,6 +277,7 @@ class SolverConfig(eqx.Module):
             stepsize_controller=self.stepsize_controller(),
             adjoint=self.adjoint,
             max_steps=self.max_steps,
+            throw=self.throw,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -295,7 +304,7 @@ class SolverConfig(eqx.Module):
         atol_serialised: float | list[float] = (
             list(self.atol) if isinstance(self.atol, tuple) else self.atol
         )
-        return {
+        record = {
             "solver": solver_name,
             "rtol": self.rtol,
             "atol": atol_serialised,
@@ -306,6 +315,11 @@ class SolverConfig(eqx.Module):
             "icoeff": self.icoeff,
             "dcoeff": self.dcoeff,
         }
+        # Only when off, so a default config writes the record it always did and
+        # hm.load does not warn about a solver mismatch on an older save.
+        if not self.throw:
+            record["throw"] = False
+        return record
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SolverConfig:
@@ -346,6 +360,7 @@ class SolverConfig(eqx.Module):
             pcoeff=d.get("pcoeff", 0.0),
             icoeff=d.get("icoeff", 1.0),
             dcoeff=d.get("dcoeff", 0.0),
+            throw=d.get("throw", True),
         )
 
 

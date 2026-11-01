@@ -51,6 +51,9 @@ if TYPE_CHECKING:
         data as data,
     )
     from jaxhybridmodels import (
+        inference as inference,
+    )
+    from jaxhybridmodels import (
         losses as losses,
     )
     from jaxhybridmodels import (
@@ -204,6 +207,7 @@ _EXPORTS: dict[str, str] = {
 _SUBMODULES: frozenset[str] = frozenset(
     {
         "data",
+        "inference",
         "losses",
         "metrics",
         "model",

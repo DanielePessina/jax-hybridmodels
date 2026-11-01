@@ -71,6 +71,7 @@ export default defineConfig({
         { text: 'Serialise', link: '/api/serialise' },
         { text: 'UI', link: '/api/ui' },
         { text: 'RNG', link: '/api/rng' },
+        { text: 'Inference', link: '/api/inference' },
       ],
     },
 
