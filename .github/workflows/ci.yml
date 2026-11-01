@@ -61,7 +61,7 @@ jobs:
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
       - name: Test
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=jaxhybridmodels --cov-fail-under=90
 
   package:
     name: Build and validate distributions

@@ -63,7 +63,7 @@ Run the verification checks before pushing:
 uv run ruff check .                            # lint
 uv run ruff format --check .                   # formatting
 uv run ty check src tests examples scripts     # typecheck (needs --extra examples)
-uv run pytest -q                               # test suite, about two minutes
+uv run pytest -q                               # test suite, about three minutes
 uv run pytest -q -m slow                       # slow example tests
 npm --prefix docs run docs:check               # API sync + site build
 ```
