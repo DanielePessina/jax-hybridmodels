@@ -76,3 +76,9 @@ are all copies of one model.
 For members that differ only in their initial key, `eqx.filter_vmap` over a
 function that builds the model gives one batched model; see
 [Model interface](/guide/model-interface#the-model-is-an-equinox-module).
+
+## Ensembles and posteriors
+
+Ensemble members are independent fits, not draws from a posterior. For a posterior
+over physical parameters, and how the two fit together, see
+[Uncertainty](/guide/uncertainty).

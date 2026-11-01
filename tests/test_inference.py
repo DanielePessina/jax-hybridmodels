@@ -273,6 +273,40 @@ def test_a_custom_likelihood_can_restate_the_gaussian(linear):
     )
 
 
+def test_the_documented_ar1_likelihood_is_the_multivariate_normal(x64):
+    """The recipe in the uncertainty guide, against its covariance matrix."""
+
+    def ar1(pred_obs: Any, bp: Any, noise: Any) -> Any:
+        sigma, rho = noise["sigma"], noise["rho"]
+        residual = bp.y_observed[..., 0] - pred_obs[..., 0]
+        innovation = residual[:, 1:] - rho * residual[:, :-1]
+        variance = sigma**2 * (1 - rho**2)
+        first = jstats.norm.logpdf(residual[:, 0], 0.0, sigma)
+        rest = jstats.norm.logpdf(innovation, 0.0, jnp.sqrt(variance))
+        return first.sum() + rest.sum()
+
+    ts = jnp.asarray([1.0, 2.0, 3.0, 4.0])
+    ys = 0.5 * ts + jnp.asarray([0.1, 0.05, -0.1, 0.2])
+    experiment = hm.make_experiment(
+        channels={"y": hm.ChannelObs(ts=ts, values=ys, variance=1.0)}, y0=[0.5 * 1.0], t0=1.0
+    )
+    problem = make_problem(
+        linear_model(hm.Parameter(0.5)),
+        [experiment],
+        log_prior=lambda p, n: jnp.asarray(0.0),
+        noise={
+            "sigma": hm.Parameter(0.3, bounds=(0.01, 2.0)),
+            "rho": hm.Parameter(0.6, bounds=(-0.99, 0.99)),
+        },
+        log_likelihood=ar1,
+    )
+    lags = np.abs(np.arange(4)[:, None] - np.arange(4)[None, :])
+    covariance = 0.3**2 * 0.6**lags
+    residual = np.asarray(ys - 0.5 * ts)
+    expected = np.asarray(jstats.multivariate_normal.logpdf(residual, np.zeros(4), covariance))
+    assert float(problem.log_likelihood(problem.position)) == pytest.approx(float(expected))
+
+
 def test_a_failed_solve_is_a_rejection_and_the_chain_survives(x64):
     """A rate above the threshold blows up the solve, which must not end the chain."""
     limit = 1.2
@@ -337,6 +371,64 @@ def test_to_model_predicts_at_a_draw(linear):
     assert set(model.predict(experiments)) == set(GRIDS)
 
 
+def test_forward_and_reverse_give_one_density_and_gradient(linear):
+    problem, *_ = linear
+    forward = make_problem(
+        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", gradient="forward"
+    )
+    reverse = make_problem(
+        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", gradient="reverse"
+    )
+    assert forward._forward_density is not None and reverse._forward_density is None
+    value_f, grad_f = jax.value_and_grad(forward.log_density)(forward.position)
+    value_r, grad_r = jax.value_and_grad(reverse.log_density)(reverse.position)
+    assert float(value_f) == pytest.approx(float(value_r), rel=1e-9)
+    for a, b in zip(
+        jax.tree_util.tree_leaves(grad_f), jax.tree_util.tree_leaves(grad_r), strict=True
+    ):
+        assert np.allclose(a, b, rtol=1e-5)
+
+
+def test_preconditioning_keeps_the_posterior_and_flattens_the_geometry(linear):
+    problem, _, ts, ys, *_ = linear
+    whitened = problem.preconditioned()
+    # z = 0 is the fit, and the density there is the original's, since the map is linear.
+    assert float(whitened.log_density(whitened.position)) == pytest.approx(
+        float(problem.log_density(problem.position)), rel=1e-9
+    )
+    start = float(whitened.physical(whitened.position)["k"].squeeze())
+    assert start == pytest.approx(float(problem.physical(problem.position)["k"].squeeze()))
+
+    positions, divergent = run_nuts(whitened, jr.key(7))
+    draws = np.asarray(jax.vmap(whitened.physical)(positions)["k"]).ravel()
+    mean, sd = conjugate(ts, ys)
+    assert not np.asarray(divergent).any()
+    assert draws.mean() == pytest.approx(mean, abs=4 * sd / np.sqrt(effective_size(draws)))
+    assert draws.std(ddof=1) == pytest.approx(sd, rel=0.1)
+    # A unit-scale target: the sampler's coordinates have about unit spread.
+    assert float(jnp.std(positions)) == pytest.approx(1.0, rel=0.2)
+    result = whitened.predict(positions, key=jr.key(8), n_draws=20)
+    assert len(result.members) == 20
+
+
+def test_preconditioning_rejects_what_it_cannot_use(linear):
+    problem, *_ = linear
+
+    def custom(pred_obs: Any, bp: Any, noise: Any) -> Any:
+        return jnp.asarray(0.0)
+
+    with pytest.raises(ValueError, match="already preconditioned"):
+        problem.preconditioned().preconditioned()
+    with pytest.raises(ValueError, match="must have shape"):
+        problem.preconditioned(precision=jnp.eye(3))
+    other = make_problem(
+        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", log_likelihood=custom
+    )
+    with pytest.raises(ValueError, match="pass precision="):
+        other.preconditioned()
+    assert other.preconditioned(precision=jnp.eye(1)).position.shape == (1,)
+
+
 def _bad_problem(**overrides: Any) -> Any:
     arguments: dict[str, Any] = dict(log_prior=normal_prior, noise="data")
     arguments.update(overrides)
@@ -357,6 +449,7 @@ def _bad_problem(**overrides: Any) -> Any:
             "one per channel",
             id="noise-channel",
         ),
+        pytest.param({"gradient": "fast"}, ValueError, "gradient must", id="gradient"),
         pytest.param({"free": "nope"}, ValueError, "nope", id="free-path"),
         pytest.param({"log_prior": flat_prior}, ValueError, "improper", id="flat-prior-open-bound"),
         pytest.param(

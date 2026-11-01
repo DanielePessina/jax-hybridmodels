@@ -15,6 +15,9 @@
   change-of-variables term for free `Parameter`s, and turns a failed solve into
   a rejected proposal. `free=` picks what is sampled, and what stays fixed is
   listed in `InferenceProblem.conditional_on`.
+- `InferenceProblem.preconditioned` whitens the position with the Gauss-Newton
+  curvature at the fit, and `make_problem(gradient=)` picks forward or reverse
+  mode, which together take most of the cost out of a NUTS run.
 - `InferenceProblem.predict` turns chain draws into a posterior predictive
   `PredictionResult`, with or without observation noise, and
   `InferenceProblem.to_arviz` exports them for diagnostics. The `bayes` extra
