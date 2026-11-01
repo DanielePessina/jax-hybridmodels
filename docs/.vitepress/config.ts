@@ -33,6 +33,7 @@ export default defineConfig({
         { text: 'Custom Predictors', link: '/guide/custom-predictors' },
         { text: 'Extending', link: '/guide/extending' },
         { text: 'Ensembles', link: '/guide/ensembles' },
+        { text: 'Uncertainty', link: '/guide/uncertainty' },
         { text: 'Saving and loading', link: '/guide/serialization' },
         { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         { text: 'Recommendations', link: '/guide/recommendations' },

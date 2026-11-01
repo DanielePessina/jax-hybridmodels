@@ -15,9 +15,10 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 
-from jaxhybridmodels.metrics import compute_metrics, format_metrics, worst_first
-from jaxhybridmodels.penalties import _bounded_leaves_with_paths, box_grid
+from jaxhybridmodels.metrics import _format_metrics, _worst_first, compute_metrics
+from jaxhybridmodels.penalties import _bounded_leaves_with_paths, _latents_at, box_grid
 from jaxhybridmodels.predictors import Parameter
+from jaxhybridmodels.predictors.base import _is_parameter
 from jaxhybridmodels.results import FitHistory
 from jaxhybridmodels.trainable import _path_to_dotted, count_trainable_params
 
@@ -33,21 +34,14 @@ _MAX_POINTS_PER_AXIS = 9
 _MAX_BOX_POINTS = 4096
 
 
-def format_fit_summary(
-    model: Any,
-    history: FitHistory,
-    best_step: int | None,
-    stop_reason: str | None,
-    *,
-    data: Any = None,
-) -> str:
-    """Build the report; see :meth:`jaxhybridmodels.results.FitResult.summary`."""
-    lines = _run_lines(history, best_step, stop_reason)
-    lines += _phase_lines(history)
-    lines += _parameter_lines(model.predictors)
-    lines += _network_lines(model.predictors)
+def format_fit_summary(run: Any, *, data: Any = None) -> str:
+    """Build the report for a ``FitResult`` or ``SavedRun``; see ``FitResult.summary``."""
+    lines = _run_lines(run.history, run.best_step, run.stop_reason)
+    lines += _phase_lines(run.history)
+    lines += _parameter_lines(run.model.predictors)
+    lines += _network_lines(run.model.predictors)
     if data is not None:
-        lines += _data_lines(model.predict(data))
+        lines += _data_lines(run.model.predict(data))
     return "\n".join(lines)
 
 
@@ -66,7 +60,7 @@ def _run_lines(history: FitHistory, best_step: int | None, stop_reason: str | No
     ]
     if history.validation_loss:
         lines.append(f"  validation loss {history.validation_loss[at]:.4e} at the returned point")
-    if history.penalty and any(history.penalty):
+    if any(history.penalty):
         lines.append(f"  bound penalty {history.penalty[at]:.4e} at the returned point")
     return lines
 
@@ -85,10 +79,9 @@ def _phase_lines(history: FitHistory) -> list[str]:
 
 
 def _parameter_lines(predictors: Any) -> list[str]:
-    is_parameter = lambda node: isinstance(node, Parameter)  # noqa: E731
     rows: list[tuple[str, str, str, str]] = []
-    for path, leaf in jtu.tree_flatten_with_path(predictors, is_leaf=is_parameter)[0]:
-        if is_parameter(leaf):
+    for path, leaf in jtu.tree_flatten_with_path(predictors, is_leaf=_is_parameter)[0]:
+        if _is_parameter(leaf):
             rows.extend(_parameter_rows(_path_to_dotted(path), leaf))
     if not rows:
         return []
@@ -100,23 +93,18 @@ def _parameter_lines(predictors: Any) -> list[str]:
 
 
 def _parameter_rows(path: str, parameter: Parameter) -> list[tuple[str, str, str, str]]:
-    """One row per element. ``saturation`` is read one element at a time for the flag."""
+    """One row per element, flagging an element in the range the bound penalty charges."""
     scaler = parameter.scaler
     latent = jnp.ravel(parameter.latent)
     values = jnp.ravel(scaler.from_latent(parameter.latent))
+    # The middle of the latent range decides the side, whatever the warp or squash.
     midpoints = jnp.ravel(scaler.from_latent(jnp.zeros_like(parameter.latent)))
+    pinned = scaler._saturation_terms(latent) > 0.0
     rows = []
     for i, (low, high) in enumerate(scaler.bounds):
-        alone = jnp.zeros_like(latent).at[i].set(latent[i])
-        pinned = float(scaler.saturation(alone)) > 0.0
         note = ""
-        if pinned:
-            if math.isfinite(low) and math.isfinite(high):
-                # The midpoint decides the side, whatever the warp or squash.
-                upper = float(values[i]) > float(midpoints[i])
-            else:
-                upper = math.isfinite(high)
-            note = f"  near {'upper' if upper else 'lower'} bound"
+        if pinned[i]:
+            note = f"  near {'upper' if values[i] > midpoints[i] else 'lower'} bound"
         name = path if latent.size == 1 else f"{path}[{i}]"
         rows.append((name, f"{float(values[i]):.5g}", f"({low:g}, {high:g})", note))
     return rows
@@ -140,29 +128,24 @@ def _saturated_share(leaf: Any) -> str:
     n_inputs = len(leaf.in_scaler.bounds)
     if any(not all(map(math.isfinite, pair)) for pair in leaf.in_scaler.bounds):
         return "not checked: an input box is open"
-    per_axis = _MAX_POINTS_PER_AXIS
-    while per_axis > 2 and per_axis**n_inputs > _MAX_BOX_POINTS:
-        per_axis -= 1
-    if per_axis**n_inputs > _MAX_BOX_POINTS:
+    per_axis = next(
+        (p for p in range(_MAX_POINTS_PER_AXIS, 1, -1) if p**n_inputs <= _MAX_BOX_POINTS), None
+    )
+    if per_axis is None:
         return f"not checked: {n_inputs} inputs is too many to sweep"
-    points = box_grid(leaf.in_scaler, n_per_dim=per_axis)
-
-    def saturated(x: Any) -> Any:
-        latent = jnp.reshape(leaf.inner(leaf.in_scaler.scale_inputs(x)), (-1,))
-        return leaf.out_scaler.saturation(latent) > 0.0
-
-    share = float(jnp.mean(jax.vmap(saturated)(points)))
+    latents = _latents_at(leaf, box_grid(leaf.in_scaler, n_per_dim=per_axis))
+    share = float(jnp.mean(jax.vmap(leaf.out_scaler.saturation)(latents) > 0.0))
     return f"{share:.1%} of the input box"
 
 
 def _data_lines(predictions: Any) -> list[str]:
-    lines = ["Metrics", *format_metrics(compute_metrics(predictions))]
+    lines = ["Metrics", *_format_metrics(compute_metrics(predictions))]
     if len(predictions) < 2:
         return lines
     by_experiment = compute_metrics(predictions, by="experiment")
     lines.append("Worst experiment per channel, by RMSE")
     for channel in next(iter(by_experiment.values())):
-        rows = worst_first(by_experiment, channel)
+        rows = _worst_first(by_experiment, channel)
         if rows:
             exp_id, worst = rows[0]
             lines.append(f"  {channel}: {exp_id} ({float(worst.rmse):.4e})")

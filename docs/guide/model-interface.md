@@ -51,9 +51,9 @@ returns a long table (needs pandas: `pip install jax-hybridmodels[pandas]`), and
 
 `hm.compute_metrics(predictions)` returns per-channel statistics over the
 measured cells, and `hm.print_metrics(predictions)` prints them as a table.
-With `by="experiment"`, `compute_metrics` scores each experiment alone and
-`print_metrics` lists them per channel with the worst RMSE first, which finds
-the run a pooled number hides. Its R^2 compares against that experiment's own
+`hm.print_metrics(hm.compute_metrics(predictions, by="experiment"))` scores
+each experiment alone and lists them per channel with the worst RMSE first,
+which finds the run a pooled number hides. Its R^2 compares against that experiment's own
 mean, so a good fit to a nearly flat run can still score low.
 
 By default each experiment is predicted on its measured times. For smooth

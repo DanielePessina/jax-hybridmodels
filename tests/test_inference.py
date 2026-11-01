@@ -17,6 +17,9 @@ import jax.random as jr
 import jax.scipy.stats as jstats
 import numpy as np
 import pytest
+from _models import identity
+from blackjax.diagnostics import effective_sample_size
+from scipy import stats as scipy_stats
 
 import jaxhybridmodels as hm
 from jaxhybridmodels.inference import flat_prior, make_problem
@@ -33,28 +36,26 @@ def field(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
     return predictors["k"].value * jnp.ones_like(y)
 
 
-def state_to_output(state: Any) -> Any:
-    return state
-
-
 def linear_model(k: Any = None, solver: hm.SolverConfig = SOLVER, **extra: Any) -> hm.HybridModel:
     return hm.HybridModel.from_vector_field(
         vector_field=field,
         predictors={"k": hm.Parameter(0.5) if k is None else k, **extra},
-        state_to_output=state_to_output,
+        state_to_output=identity,
         output_channel_names=("y",),
         solver=solver,
     )
 
 
-def measurements() -> tuple[list[hm.Experiment], np.ndarray, np.ndarray]:
-    """Noisy data from a fixed key, returning the times and values for the oracles."""
+def measurements(
+    rate: Any = TRUE_RATE, key: Any = None
+) -> tuple[list[hm.Experiment], np.ndarray, np.ndarray]:
+    """Noisy data, returning the times and values for the oracles."""
     experiments, all_ts, all_ys = [], [], []
-    key = jr.key(11)
+    key = jr.key(11) if key is None else key
     for name, grid in GRIDS.items():
         key, sub = jr.split(key)
         ts = jnp.asarray(grid)
-        ys = TRUE_RATE * ts + SIGMA * jr.normal(sub, ts.shape, dtype=ts.dtype)
+        ys = rate * ts + SIGMA * jr.normal(sub, ts.shape, dtype=ts.dtype)
         experiments.append(
             hm.make_experiment(
                 channels={"y": hm.ChannelObs(ts=ts, values=ys, variance=SIGMA**2)},
@@ -94,20 +95,11 @@ def run_nuts(problem: Any, key: Any, warmup: int = 300, draws: int = 1500) -> tu
     return positions, divergent
 
 
-def effective_size(chain: np.ndarray) -> float:
-    """Geyer's initial positive sequence, enough to set a Monte Carlo tolerance."""
-    centred = chain - chain.mean()
-    n = centred.size
-    spectrum = np.fft.rfft(centred, 2 * n)
-    autocovariance = np.fft.irfft(spectrum * np.conj(spectrum))[:n]
-    rho = autocovariance / autocovariance[0]
-    total = 0.0
-    for i in range(0, n - 1, 2):
-        pair = rho[i] + rho[i + 1]
-        if pair < 0:
-            break
-        total += pair
-    return n / max(2 * total - 1, 1.0)
+def assert_matches_conjugate(draws: np.ndarray, ts: np.ndarray, ys: np.ndarray) -> None:
+    mean, sd = conjugate(ts, ys)
+    ess = float(effective_sample_size(jnp.asarray(draws)[None]))
+    assert draws.mean() == pytest.approx(mean, abs=4 * sd / np.sqrt(ess))
+    assert draws.std(ddof=1) == pytest.approx(sd, rel=0.1)
 
 
 @pytest.fixture(scope="module")
@@ -143,11 +135,8 @@ def test_density_is_the_written_out_log_posterior(linear):
 
 def test_nuts_recovers_the_conjugate_posterior(linear):
     _, _, ts, ys, draws, divergent = linear
-    mean, sd = conjugate(ts, ys)
-    tolerance = 4 * sd / np.sqrt(effective_size(draws))
     assert not divergent.any()
-    assert draws.mean() == pytest.approx(mean, abs=tolerance)
-    assert draws.std(ddof=1) == pytest.approx(sd, rel=0.1)
+    assert_matches_conjugate(draws, ts, ys)
 
 
 def test_density_does_not_depend_on_the_bucketing(linear):
@@ -246,7 +235,8 @@ def test_inferred_noise_matches_quadrature(x64):
     weights /= weights.sum()
     mean = float((weights * np.asarray(sigmas)).sum())
     sd = float(np.sqrt((weights * (np.asarray(sigmas) - mean) ** 2).sum()))
-    assert draws.mean() == pytest.approx(mean, abs=4 * sd / np.sqrt(effective_size(draws)))
+    ess = float(effective_sample_size(jnp.asarray(draws)[None]))
+    assert draws.mean() == pytest.approx(mean, abs=4 * sd / np.sqrt(ess))
     assert draws.std(ddof=1) == pytest.approx(sd, rel=0.15)
 
 
@@ -273,6 +263,40 @@ def test_a_custom_likelihood_can_restate_the_gaussian(linear):
     )
 
 
+def test_the_documented_ar1_likelihood_is_the_multivariate_normal(x64):
+    """The recipe in the uncertainty guide, against its covariance matrix."""
+
+    def ar1(pred_obs: Any, bp: Any, noise: Any) -> Any:
+        sigma, rho = noise["sigma"], noise["rho"]
+        residual = bp.y_observed[..., 0] - pred_obs[..., 0]
+        innovation = residual[:, 1:] - rho * residual[:, :-1]
+        variance = sigma**2 * (1 - rho**2)
+        first = jstats.norm.logpdf(residual[:, 0], 0.0, sigma)
+        rest = jstats.norm.logpdf(innovation, 0.0, jnp.sqrt(variance))
+        return first.sum() + rest.sum()
+
+    ts = jnp.asarray([1.0, 2.0, 3.0, 4.0])
+    ys = 0.5 * ts + jnp.asarray([0.1, 0.05, -0.1, 0.2])
+    experiment = hm.make_experiment(
+        channels={"y": hm.ChannelObs(ts=ts, values=ys, variance=1.0)}, y0=[0.5 * 1.0], t0=1.0
+    )
+    problem = make_problem(
+        linear_model(hm.Parameter(0.5)),
+        [experiment],
+        log_prior=lambda p, n: jnp.asarray(0.0),
+        noise={
+            "sigma": hm.Parameter(0.3, bounds=(0.01, 2.0)),
+            "rho": hm.Parameter(0.6, bounds=(-0.99, 0.99)),
+        },
+        log_likelihood=ar1,
+    )
+    lags = np.abs(np.arange(4)[:, None] - np.arange(4)[None, :])
+    covariance = 0.3**2 * 0.6**lags
+    residual = np.asarray(ys - 0.5 * ts)
+    expected = np.asarray(jstats.multivariate_normal.logpdf(residual, np.zeros(4), covariance))
+    assert float(problem.log_likelihood(problem.position)) == pytest.approx(float(expected))
+
+
 def test_a_failed_solve_is_a_rejection_and_the_chain_survives(x64):
     """A rate above the threshold blows up the solve, which must not end the chain."""
     limit = 1.2
@@ -285,7 +309,7 @@ def test_a_failed_solve_is_a_rejection_and_the_chain_survives(x64):
     model = hm.HybridModel.from_vector_field(
         vector_field=stiff_field,
         predictors={"k": hm.Parameter(0.7)},
-        state_to_output=state_to_output,
+        state_to_output=identity,
         output_channel_names=("y",),
         solver=SOLVER,
     )
@@ -337,6 +361,252 @@ def test_to_model_predicts_at_a_draw(linear):
     assert set(model.predict(experiments)) == set(GRIDS)
 
 
+def test_forward_and_reverse_give_one_density_and_gradient(linear):
+    problem, *_ = linear
+    forward = make_problem(
+        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", gradient="forward"
+    )
+    reverse = make_problem(
+        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", gradient="reverse"
+    )
+    assert (forward.gradient, reverse.gradient) == ("forward", "reverse")
+    value_f, grad_f = jax.value_and_grad(forward.log_density)(forward.position)
+    value_r, grad_r = jax.value_and_grad(reverse.log_density)(reverse.position)
+    assert float(value_f) == pytest.approx(float(value_r), rel=1e-9)
+    for a, b in zip(
+        jax.tree_util.tree_leaves(grad_f), jax.tree_util.tree_leaves(grad_r), strict=True
+    ):
+        assert np.allclose(a, b, rtol=1e-5)
+
+
+def test_preconditioning_keeps_the_posterior_and_flattens_the_geometry(linear):
+    problem, _, ts, ys, *_ = linear
+    whitened = problem.preconditioned()
+    # z = 0 is the fit, and the density there is the original's, since the map is linear.
+    assert float(whitened.log_density(whitened.position)) == pytest.approx(
+        float(problem.log_density(problem.position)), rel=1e-9
+    )
+    start = float(whitened.physical(whitened.position)["k"].squeeze())
+    assert start == pytest.approx(float(problem.physical(problem.position)["k"].squeeze()))
+
+    positions, divergent = run_nuts(whitened, jr.key(7))
+    draws = np.asarray(jax.vmap(whitened.physical)(positions)["k"]).ravel()
+    assert not np.asarray(divergent).any()
+    assert_matches_conjugate(draws, ts, ys)
+    # A unit-scale target: the sampler's coordinates have about unit spread.
+    assert float(jnp.std(positions)) == pytest.approx(1.0, rel=0.2)
+    result = whitened.predict(positions, key=jr.key(8), n_draws=20)
+    assert len(result.members) == 20
+
+
+def test_preconditioning_rejects_what_it_cannot_use(linear):
+    problem, *_ = linear
+
+    def custom(pred_obs: Any, bp: Any, noise: Any) -> Any:
+        return jnp.asarray(0.0)
+
+    with pytest.raises(ValueError, match="already preconditioned"):
+        problem.preconditioned().preconditioned()
+    with pytest.raises(ValueError, match="must have shape"):
+        problem.preconditioned(precision=jnp.eye(3))
+    other = make_problem(
+        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", log_likelihood=custom
+    )
+    with pytest.raises(ValueError, match="pass precision="):
+        other.preconditioned()
+    assert other.preconditioned(precision=jnp.eye(1)).position.shape == (1,)
+
+
+def test_a_simulator_without_forward_mode_still_preconditions(x64):
+    """A hand-written solve keeps diffrax's reverse-only adjoint, so auto falls back."""
+
+    def simulate(predictors: Any, ts: Any, covariates: Any, y0: Any, solver: Any) -> Any:
+        rate = predictors["k"].value
+
+        def rhs(t: Any, y: Any, args: Any) -> Any:
+            return rate * jnp.ones_like(y)
+
+        return diffrax.diffeqsolve(
+            diffrax.ODETerm(rhs),
+            solver.solver,
+            t0=ts[0],
+            t1=ts[-1],
+            dt0=solver.dt0,
+            y0=y0,
+            saveat=diffrax.SaveAt(ts=ts),
+            stepsize_controller=solver.stepsize_controller(),
+            throw=solver.throw,
+        ).ys
+
+    experiments, ts, ys = measurements()
+    model = hm.HybridModel(
+        predictors={"k": hm.Parameter(0.5)},
+        simulate_fn=simulate,
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(model, experiments, log_prior=normal_prior, noise="data")
+    assert problem.gradient == "reverse"
+    whitened = problem.preconditioned()
+    # In the whitened coordinate the likelihood's curvature is about one.
+    assert whitened._whitening is not None
+    assert float(jnp.abs(whitened._whitening[1]).squeeze()) == pytest.approx(
+        conjugate(ts, ys)[1], rel=0.01
+    )
+    positions, _ = run_nuts(whitened, jr.key(9), warmup=100, draws=300)
+    assert_matches_conjugate(
+        np.asarray(jax.vmap(whitened.physical)(positions)["k"]).ravel(), ts, ys
+    )
+
+
+def test_a_bad_prior_raises_when_the_problem_is_built():
+    experiments, *_ = measurements()
+
+    def bad(predictors: Any, noise: Any) -> Any:
+        return predictors["missing"].value
+
+    with pytest.raises(KeyError, match="missing"):
+        make_problem(linear_model(), experiments, log_prior=bad, noise="data")
+
+
+def test_a_nan_gradient_at_a_finite_density_stays_visible(x64):
+    """Zeroing it would silently run the sampler with the wrong dynamics.
+
+    Reverse mode multiplies the dead branch's NaN slope by zero, which is NaN, so the
+    density is finite and its gradient is not. Forward mode never visits that branch.
+    """
+    experiments, *_ = measurements()
+
+    def nan_slope(predictors: Any, noise: Any) -> Any:
+        k = jnp.squeeze(predictors["k"].value)
+        return jnp.where(k > 1e6, jnp.sqrt(-k), 0.0)
+
+    problem = make_problem(
+        linear_model(), experiments, log_prior=nan_slope, noise="data", gradient="reverse"
+    )
+    value, gradient = jax.value_and_grad(problem.log_density)(problem.position)
+    assert np.isfinite(float(value))
+    assert np.isnan(np.asarray(jax.tree_util.tree_leaves(gradient)[0])).any()
+
+
+def test_a_bad_input_to_a_warped_scaler_rejects_the_proposal(x64):
+    """A proposal that drives a log-warped input non-positive must not end the chain."""
+
+    def field_with_network(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+        unused = hm.evaluate_predictor(predictors["net"], {"y": y[0]})
+        return (predictors["k"].value - 0.5) * jnp.ones_like(y) + 0.0 * unused
+
+    network = hm.BoundedPredictor(
+        input_keys=("y",),
+        in_scaler=hm.BoundScaler(bounds=(1e-3, 10.0), warp="log"),
+        inner=hm.MLPPredictor(in_size=1, out_size=1, width_size=4, depth=1, key=jr.key(0)),
+        out_scaler=hm.BoundScaler(bounds=(0.0, 1.0)),
+    )
+    ts = jnp.asarray([0.5, 1.0, 2.0])
+    experiment = hm.make_experiment(
+        channels={"y": hm.ChannelObs(ts=ts, values=jnp.ones_like(ts), variance=0.01)},
+        y0=[1.0],
+        t0=0.0,
+    )
+    model = hm.HybridModel.from_vector_field(
+        vector_field=field_with_network,
+        predictors={"k": hm.Parameter(0.5), "net": network},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=hm.SolverConfig(dt0=0.05, max_steps=256),
+    )
+    problem = make_problem(
+        model, [experiment], log_prior=normal_prior, noise="data", gradient="reverse"
+    )
+    beyond = jax.tree_util.tree_map(lambda leaf: leaf - 3.0, problem.position)
+    value, gradient = jax.value_and_grad(problem.log_density)(beyond)
+    assert float(value) == -np.inf
+    assert all(np.all(np.isfinite(g)) for g in jax.tree_util.tree_leaves(gradient))
+    # Outside the density the guard is still on.
+    broken = problem.to_model(beyond)
+    with pytest.raises(Exception, match="strictly positive"):
+        broken.predict([experiment])
+
+
+def test_predict_drops_a_draw_that_fails_to_solve(x64):
+    limit = 1.2
+
+    def failing_field(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+        k = predictors["k"].value
+        return jnp.where(k > limit, jnp.nan, k) * jnp.ones_like(y)
+
+    experiments, *_ = measurements()
+    model = hm.HybridModel.from_vector_field(
+        vector_field=failing_field,
+        predictors={"k": hm.Parameter(0.7)},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(model, experiments, log_prior=normal_prior, noise="data")
+    good = jax.tree_util.tree_map(lambda leaf: leaf[None], problem.position)
+    bad = jax.tree_util.tree_map(lambda leaf: leaf + 5.0, good)
+    mixed = jax.tree_util.tree_map(lambda *leaf: jnp.concatenate(leaf), good, bad, good)
+    with pytest.warns(RuntimeWarning, match="dropped 1 of 3"):
+        result = problem.predict(mixed, key=jr.key(0))
+    assert len(result.members) == 2 and np.all(np.isfinite(result["long"].outputs["y"]))
+    with pytest.raises(ValueError, match="every draw failed"):
+        problem.predict(bad, key=jr.key(0))
+
+
+def test_preconditioning_scales_inferred_noise_from_a_poor_start(x64):
+    """A noise guess 5 times too large must not leave its direction far too wide."""
+    experiments, *_ = measurements()
+
+    def prior(predictors: Any, noise: Any) -> Any:
+        return normal_prior(predictors, noise) + jstats.norm.logpdf(jnp.log(noise["y"]), -1.5, 1.0)
+
+    problem = make_problem(
+        linear_model(hm.Parameter(TRUE_RATE)),
+        experiments,
+        log_prior=prior,
+        noise={"y": hm.Parameter(SIGMA * 5, bounds=(1e-3, 10.0), warp="log10")},
+    ).preconditioned()
+    positions, divergent = run_nuts(problem, jr.key(10), warmup=200, draws=400)
+    assert not np.asarray(divergent).any()
+    # The position flattens "noise" before "predictors". The rate's own spread is about
+    # 1/5 here: its curvature scales with 1/sigma^2, so a poor guess shrinks it, and the
+    # sampler's mass adaptation rescales that. Only the noise needs the Fisher term.
+    noise_spread = float(np.std(np.asarray(positions)[:, 0]))
+    assert noise_spread == pytest.approx(1.0, rel=0.3)
+
+
+def test_explicit_forward_mode_fails_when_the_problem_is_built(x64):
+    def simulate(predictors: Any, ts: Any, covariates: Any, y0: Any, solver: Any) -> Any:
+        rate = predictors["k"].value
+
+        def rhs(t: Any, y: Any, args: Any) -> Any:
+            return rate * jnp.ones_like(y)
+
+        return diffrax.diffeqsolve(
+            diffrax.ODETerm(rhs),
+            solver.solver,
+            t0=ts[0],
+            t1=ts[-1],
+            dt0=solver.dt0,
+            y0=y0,
+            saveat=diffrax.SaveAt(ts=ts),
+            stepsize_controller=solver.stepsize_controller(),
+        ).ys
+
+    experiments, *_ = measurements()
+    model = hm.HybridModel(
+        predictors={"k": hm.Parameter(0.5)},
+        simulate_fn=simulate,
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    with pytest.raises(TypeError):
+        make_problem(model, experiments, log_prior=normal_prior, noise="data", gradient="forward")
+
+
 def _bad_problem(**overrides: Any) -> Any:
     arguments: dict[str, Any] = dict(log_prior=normal_prior, noise="data")
     arguments.update(overrides)
@@ -357,6 +627,8 @@ def _bad_problem(**overrides: Any) -> Any:
             "one per channel",
             id="noise-channel",
         ),
+        pytest.param({"gradient": "fast"}, ValueError, "gradient must", id="gradient"),
+        pytest.param({"noise": {"y": hm.Parameter(0.1)}}, ValueError, "positive", id="noise-sign"),
         pytest.param({"free": "nope"}, ValueError, "nope", id="free-path"),
         pytest.param({"log_prior": flat_prior}, ValueError, "improper", id="flat-prior-open-bound"),
         pytest.param(
@@ -414,13 +686,10 @@ def test_posterior_predictive_matches_the_closed_form(linear):
 def test_observation_noise_widens_the_interval_by_the_noise(x64):
     experiments, ts, ys = measurements()
 
-    def prior(predictors: Any, noise: Any) -> Any:
-        return normal_prior(predictors, noise)
-
     problem = make_problem(
         linear_model(hm.Parameter(0.7)),
         experiments,
-        log_prior=prior,
+        log_prior=normal_prior,
         noise={"y": hm.Parameter(0.2, bounds=(0.01, 1.0))},
     )
     positions = jax.tree_util.tree_map(
@@ -445,6 +714,9 @@ def test_arviz_export_names_physical_values_and_records_the_conditioning(linear)
     assert tree["posterior"]["k"].sizes["draw"] == 5
     assert "diverging" in tree["sample_stats"]
     assert tree["posterior"].attrs["conditional_on"] == ""
+    one_axis = jax.tree_util.tree_map(lambda leaf: leaf[None], problem.position)
+    with pytest.raises(ValueError, match="chain"):
+        problem.to_arviz(one_axis)
 
 
 @pytest.mark.parametrize(
@@ -475,12 +747,40 @@ def test_arviz_export_names_physical_values_and_records_the_conditioning(linear)
             "inferred",
             id="noise-from-data",
         ),
-        pytest.param(lambda p, x: p.to_arviz(x), ValueError, "chain", id="arviz-axes"),
     ],
 )
 def test_prediction_rejects_bad_input(linear, call, error, match):
-    pytest.importorskip("arviz_base")
     problem, *_ = linear
     positions = jax.tree_util.tree_map(lambda leaf: leaf[None], problem.position)
     with pytest.raises(error, match=match):
         call(problem, positions)
+
+
+@pytest.mark.slow
+def test_simulation_based_calibration(x64):
+    """Draw a rate from the prior and data from the rate: its posterior rank must be uniform.
+
+    Fails if the density, the prior's change of variables or the bucket sum is wrong
+    in a way a single posterior check at one data set could miss. The parameter is
+    bounded, so the Jacobian is exercised. A prior draw is checked against thinned
+    NUTS draws, Talts et al. (2018).
+    """
+    low, high = 0.0, 2.0
+    n_replicates, kept = 60, 50
+    ranks = []
+    key = jr.key(21)
+    for _ in range(n_replicates):
+        key, k_rate, k_noise, k_chain = jr.split(key, 4)
+        rate = jr.uniform(k_rate, minval=low, maxval=high)
+        experiments, *_ = measurements(rate, k_noise)
+        problem = make_problem(
+            linear_model(hm.Parameter(1.0, bounds=(low, high))),
+            experiments,
+            log_prior=flat_prior,
+            noise="data",
+        )
+        positions, _ = run_nuts(problem, k_chain, warmup=150, draws=kept * 4)
+        draws = np.asarray(jax.vmap(problem.physical)(positions)["k"]).ravel()[::4]
+        ranks.append(int((draws < float(rate)).sum()))
+    fraction = (np.asarray(ranks) + 0.5) / (kept + 1)
+    assert scipy_stats.kstest(fraction, "uniform").pvalue > 0.01

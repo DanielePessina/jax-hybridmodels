@@ -53,6 +53,7 @@ from jaxhybridmodels.losses import (
     masked_mse,
     resolve_loss_fn,
 )
+from jaxhybridmodels.metrics import _worst_first
 from jaxhybridmodels.penalties import (
     _bounded_leaves,
     attach_penalty_state,
@@ -1354,6 +1355,14 @@ def test_metrics_read_a_prediction_result_and_pool_experiments(capsys):
     hm.print_metrics(metrics, header="RESULTS")
     assert capsys.readouterr().out == from_result
     assert "RESULTS" in from_result and "5.0000e+00" in from_result
+
+
+def test_a_failed_experiment_is_listed_as_the_worst():
+    result = _prediction(
+        {"a": [1.0], "b": [1.0], "c": [1.0]}, {"a": [2.0], "b": [jnp.nan], "c": [6.0]}
+    )
+    rows = _worst_first(hm.compute_metrics(result, by="experiment"), "x")
+    assert [exp_id for exp_id, _ in rows] == ["b", "c", "a"]
 
 
 @pytest.mark.parametrize("loss_fn", ALL_LOSSES)

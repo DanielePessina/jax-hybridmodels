@@ -101,7 +101,7 @@ temperatures. The save and reload changes the learned rate by `0.000e+00`.
 
 | run | final data loss | $R^2$ | worst rate error |
 |---|---|---|---|
-| default: 64 features, bandwidth 1, bank frozen | 8.55e-05 | 0.9992 | 3.92% |
+| default: 64 features, bandwidth 1, bank frozen | 8.53e-05 | 0.9992 | 3.84% |
 | `--n-features 16` | 8.63e-05 | 0.9992 | 4.25% |
 | `--train-bank` | 8.46e-05 | 0.9993 | 3.34% |
 | `--bandwidth 8` | 8.44e-05 | 0.9993 | 3.35% |

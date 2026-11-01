@@ -40,7 +40,7 @@ Metrics for a single output channel.
 | `With ``n == 0`` every statistic is ``nan``, so a channel nobody measured` |  |  |
 | `cannot read as a perfect fit.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L37)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L38)</small>
 
 ---
 
@@ -72,7 +72,7 @@ Per-channel summary stats of a prediction against the data it was made on.
 | --- | --- | --- |
 | `dict` |  | For ``"channel"``, ``{channel: ChannelMetrics}`` in the model's ``output_channel_names`` order. For ``"experiment"``, ``{exp_id: {channel: ChannelMetrics}}`` in experiment order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L71)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L84)</small>
 
 ---
 
@@ -83,17 +83,13 @@ Per-channel summary stats of a prediction against the data it was made on.
 <small>`from jaxhybridmodels.metrics import print_metrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.print_metrics`</small>
 
 ```python
-print_metrics(
-    metrics: 'Mapping[str, Any]',
-    header: 'str | None' = None,
-    by: "Literal['channel', 'experiment']" = 'channel',
-) -> None
+print_metrics(metrics: 'Mapping[str, Any]', *, header: 'str | None' = None) -> 'None'
 ```
 
 Print a metrics table.
 
 Takes the output of [`compute_metrics`](/api/metrics#compute_metrics), or a ``PredictionResult``,
-which is passed through [`compute_metrics`](/api/metrics#compute_metrics) with ``by`` first.
+which is passed through [`compute_metrics`](/api/metrics#compute_metrics) first.
 
 Format::
 
@@ -106,8 +102,8 @@ Scientific notation throughout, so one template stays readable across
 the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
 spanning nine decades.
 
-``by="experiment"``, or metrics computed that way, prints one table per
-channel with the worst RMSE first and leaves out experiments that did not
-measure the channel.
+``print_metrics(compute_metrics(predictions, by="experiment"))`` prints one
+table per channel with the worst RMSE first, leaving out experiments that did
+not measure the channel.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L161)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L174)</small>

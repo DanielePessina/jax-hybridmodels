@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-01
 
 ### Added
 
@@ -9,29 +9,25 @@
   network's input box is pinned against an output bound. Pass data to add the
   metrics and the worst experiment per channel.
 - `compute_metrics(predictions, by="experiment")` scores each experiment alone,
-  and `print_metrics(predictions, by="experiment")` lists them worst first.
+  and `print_metrics` lists those worst first.
 - `jaxhybridmodels.inference.make_problem` builds a log-density for a model and
   its data, for any sampler such as BlackJAX. It sums over buckets, adds the
   change-of-variables term for free `Parameter`s, and turns a failed solve into
   a rejected proposal. `free=` picks what is sampled, and what stays fixed is
   listed in `InferenceProblem.conditional_on`.
+- `InferenceProblem.preconditioned` whitens the position with the Gauss-Newton
+  curvature at the fit, and `make_problem(gradient=)` picks forward or reverse
+  mode, which together take most of the cost out of a NUTS run.
 - `InferenceProblem.predict` turns chain draws into a posterior predictive
   `PredictionResult`, with or without observation noise, and
   `InferenceProblem.to_arviz` exports them for diagnostics. The `bayes` extra
   installs BlackJAX and `arviz-base`.
 - `predict_ensemble(quantiles=)` adds quantiles across members, also in
   `to_dataframe`.
+- `InferenceProblem.predict` drops a draw whose solve fails on the requested grid,
+  with a warning.
 - `SolverConfig(throw=False)` returns non-finite states from a failed solve
   instead of raising.
-
-### Changed
-
-- A channel with no observations now has NaN error statistics instead of 0.
-
-## 0.3.0 — 2026-11-01
-
-### Added
-
 - `make_dataset(max_buckets=)` caps the number of compiled bucket shapes by
   padding shorter experiments with unobserved rows. Off by default, because it
   reweights the loss.
@@ -137,6 +133,7 @@
 
 ### Changed (breaking against 0.2.0b1)
 
+- A channel with no observations now has NaN error statistics instead of 0.
 - **Breaking.** `fit` and `fit_ensemble` raise `TypeError` unless `key` is a JAX
   PRNG key. `key=None` and `key=0` used to pass when no random numbers were
   drawn.
