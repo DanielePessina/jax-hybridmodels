@@ -24,6 +24,8 @@
   installs BlackJAX and `arviz-base`.
 - `predict_ensemble(quantiles=)` adds quantiles across members, also in
   `to_dataframe`.
+- `InferenceProblem.predict` drops a draw whose solve fails on the requested grid,
+  with a warning.
 - `SolverConfig(throw=False)` returns non-finite states from a failed solve
   instead of raising.
 

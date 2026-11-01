@@ -80,7 +80,7 @@ jobs:
       - name: Install
         run: |
           uv venv --python 3.12
-          uv pip install --resolution lowest-direct -e . 'pytest>=9.0.3' 'pytest-cov>=7.1.0' 'pandas>=2.2.3' 'rlax>=0.1.9'
+          uv pip install --resolution lowest-direct -e . 'pytest>=9.0.3' 'pytest-cov>=7.1.0' 'pandas>=2.2.3' 'rlax>=0.1.9' 'blackjax>=1.7.1'
 
       - name: Test
         run: .venv/bin/python -m pytest -q

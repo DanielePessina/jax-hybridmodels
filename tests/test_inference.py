@@ -490,6 +490,123 @@ def test_a_nan_gradient_at_a_finite_density_stays_visible(x64):
     assert np.isnan(np.asarray(jax.tree_util.tree_leaves(gradient)[0])).any()
 
 
+def test_a_bad_input_to_a_warped_scaler_rejects_the_proposal(x64):
+    """A proposal that drives a log-warped input non-positive must not end the chain."""
+
+    def field_with_network(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+        unused = hm.evaluate_predictor(predictors["net"], {"y": y[0]})
+        return (predictors["k"].value - 0.5) * jnp.ones_like(y) + 0.0 * unused
+
+    network = hm.BoundedPredictor(
+        input_keys=("y",),
+        in_scaler=hm.BoundScaler(bounds=(1e-3, 10.0), warp="log"),
+        inner=hm.MLPPredictor(in_size=1, out_size=1, width_size=4, depth=1, key=jr.key(0)),
+        out_scaler=hm.BoundScaler(bounds=(0.0, 1.0)),
+    )
+    ts = jnp.asarray([0.5, 1.0, 2.0])
+    experiment = hm.make_experiment(
+        channels={"y": hm.ChannelObs(ts=ts, values=jnp.ones_like(ts), variance=0.01)},
+        y0=[1.0],
+        t0=0.0,
+    )
+    model = hm.HybridModel.from_vector_field(
+        vector_field=field_with_network,
+        predictors={"k": hm.Parameter(0.5), "net": network},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=hm.SolverConfig(dt0=0.05, max_steps=256),
+    )
+    problem = make_problem(
+        model, [experiment], log_prior=normal_prior, noise="data", gradient="reverse"
+    )
+    beyond = jax.tree_util.tree_map(lambda leaf: leaf - 3.0, problem.position)
+    value, gradient = jax.value_and_grad(problem.log_density)(beyond)
+    assert float(value) == -np.inf
+    assert all(np.all(np.isfinite(g)) for g in jax.tree_util.tree_leaves(gradient))
+    # Outside the density the guard is still on.
+    broken = problem.to_model(beyond)
+    with pytest.raises(Exception, match="strictly positive"):
+        broken.predict([experiment])
+
+
+def test_predict_drops_a_draw_that_fails_to_solve(x64):
+    limit = 1.2
+
+    def failing_field(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+        k = predictors["k"].value
+        return jnp.where(k > limit, jnp.nan, k) * jnp.ones_like(y)
+
+    experiments, *_ = measurements()
+    model = hm.HybridModel.from_vector_field(
+        vector_field=failing_field,
+        predictors={"k": hm.Parameter(0.7)},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(model, experiments, log_prior=normal_prior, noise="data")
+    good = jax.tree_util.tree_map(lambda leaf: leaf[None], problem.position)
+    bad = jax.tree_util.tree_map(lambda leaf: leaf + 5.0, good)
+    mixed = jax.tree_util.tree_map(lambda *leaf: jnp.concatenate(leaf), good, bad, good)
+    with pytest.warns(RuntimeWarning, match="dropped 1 of 3"):
+        result = problem.predict(mixed, key=jr.key(0))
+    assert len(result.members) == 2 and np.all(np.isfinite(result["long"].outputs["y"]))
+    with pytest.raises(ValueError, match="every draw failed"):
+        problem.predict(bad, key=jr.key(0))
+
+
+def test_preconditioning_scales_inferred_noise_from_a_poor_start(x64):
+    """A noise guess 5 times too large must not leave its direction far too wide."""
+    experiments, *_ = measurements()
+
+    def prior(predictors: Any, noise: Any) -> Any:
+        return normal_prior(predictors, noise) + jstats.norm.logpdf(jnp.log(noise["y"]), -1.5, 1.0)
+
+    problem = make_problem(
+        linear_model(hm.Parameter(TRUE_RATE)),
+        experiments,
+        log_prior=prior,
+        noise={"y": hm.Parameter(SIGMA * 5, bounds=(1e-3, 10.0), warp="log10")},
+    ).preconditioned()
+    positions, divergent = run_nuts(problem, jr.key(10), warmup=200, draws=400)
+    assert not np.asarray(divergent).any()
+    # The position flattens "noise" before "predictors". The rate's own spread is about
+    # 1/5 here: its curvature scales with 1/sigma^2, so a poor guess shrinks it, and the
+    # sampler's mass adaptation rescales that. Only the noise needs the Fisher term.
+    noise_spread = float(np.std(np.asarray(positions)[:, 0]))
+    assert noise_spread == pytest.approx(1.0, rel=0.3)
+
+
+def test_explicit_forward_mode_fails_when_the_problem_is_built(x64):
+    def simulate(predictors: Any, ts: Any, covariates: Any, y0: Any, solver: Any) -> Any:
+        rate = predictors["k"].value
+
+        def rhs(t: Any, y: Any, args: Any) -> Any:
+            return rate * jnp.ones_like(y)
+
+        return diffrax.diffeqsolve(
+            diffrax.ODETerm(rhs),
+            solver.solver,
+            t0=ts[0],
+            t1=ts[-1],
+            dt0=solver.dt0,
+            y0=y0,
+            saveat=diffrax.SaveAt(ts=ts),
+            stepsize_controller=solver.stepsize_controller(),
+        ).ys
+
+    experiments, *_ = measurements()
+    model = hm.HybridModel(
+        predictors={"k": hm.Parameter(0.5)},
+        simulate_fn=simulate,
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    with pytest.raises(TypeError):
+        make_problem(model, experiments, log_prior=normal_prior, noise="data", gradient="forward")
+
+
 def _bad_problem(**overrides: Any) -> Any:
     arguments: dict[str, Any] = dict(log_prior=normal_prior, noise="data")
     arguments.update(overrides)
@@ -511,6 +628,7 @@ def _bad_problem(**overrides: Any) -> Any:
             id="noise-channel",
         ),
         pytest.param({"gradient": "fast"}, ValueError, "gradient must", id="gradient"),
+        pytest.param({"noise": {"y": hm.Parameter(0.1)}}, ValueError, "positive", id="noise-sign"),
         pytest.param({"free": "nope"}, ValueError, "nope", id="free-path"),
         pytest.param({"log_prior": flat_prior}, ValueError, "improper", id="flat-prior-open-bound"),
         pytest.param(

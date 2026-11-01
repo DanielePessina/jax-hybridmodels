@@ -27,8 +27,9 @@ Start from a fitted model, because `problem.position` holds its current values.
   experiments does not change the posterior, and `max_buckets` is safe here;
 - it adds the change-of-variables term for free `Parameter`s, so the prior you
   wrote is the prior you get, although the sampler moves in latent space;
-- a failed solve gives `-inf` with a zero gradient, which a sampler counts as a
-  rejected proposal, instead of an exception that ends the chain.
+- a failed solve, or a non-positive input to a log-warped scaler, gives `-inf` with a
+  zero gradient, which a sampler counts as a rejected proposal, instead of an
+  exception that ends the chain.
 
 A `simulate_fn` that calls `diffrax.diffeqsolve` itself must pass
 `throw=solver.throw`, or a failed solve still raises.
@@ -110,7 +111,8 @@ def ar1(pred_obs, bp, noise):
 ## Predictions
 
 `problem.predict` takes the sampler's output, chooses `n_draws` at random, and
-reuses `predict_ensemble`. `to_model` gives one draw as an ordinary model.
+reuses `predict_ensemble`. A draw whose solve fails on your grid is dropped with a
+warning. `to_model` gives one draw as an ordinary model.
 
 <<< @/../examples/tubular_reactor/sample_tubular_reactor.py#predict
 
@@ -149,7 +151,7 @@ the number to reduce is the count. In order of effect on the tubular reactor:
   (`pcoeff=0.3, icoeff=0.4`) saved about 12% of each gradient by rejecting fewer steps.
 
 Together these took the two-parameter posterior from 527 s to 18 s on 8 CPU cores,
-with a larger effective sample size. The 17-parameter last layer took 559 s for 4
+with a larger effective sample size. The 17-parameter last layer took 593 s for 4
 chains of 450 iterations each, with R-hat below 1.01.
 
 ## Precision and solver tolerance

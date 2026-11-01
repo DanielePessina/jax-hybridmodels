@@ -38,8 +38,10 @@ siblings get different fresh weights when the tournament restarts a run.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from numbers import Real
 from typing import Any, cast
 
@@ -165,6 +167,23 @@ class Constant(eqx.Module):
     def initialized_with_key(self, key: Array) -> Constant:
         """Keep fixed values unchanged when restarting a model."""
         return self
+
+
+# Read while tracing. A sampler's proposal can push a warped input non-positive, which
+# should reject that proposal, not raise and lose every draw in a compiled scan.
+_BAD_INPUT_RAISES: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "bad_input_raises", default=True
+)
+
+
+@contextlib.contextmanager
+def _nan_on_bad_input() -> Iterator[None]:
+    """Trace with a non-positive input to a warped scaler giving NaN, not a runtime error."""
+    token = _BAD_INPUT_RAISES.set(False)
+    try:
+        yield
+    finally:
+        _BAD_INPUT_RAISES.reset(token)
 
 
 class BoundScaler(eqx.Module):
@@ -454,11 +473,14 @@ class BoundScaler(eqx.Module):
                         f"BoundScaler warp={self.warp!r} requires strictly positive runtime inputs"
                     )
             except jax.errors.TracerBoolConversionError:
-                x = eqx.error_if(
-                    x,
-                    nonpositive,
-                    f"BoundScaler warp={self.warp!r} requires strictly positive runtime inputs",
-                )
+                if _BAD_INPUT_RAISES.get():
+                    x = eqx.error_if(
+                        x,
+                        nonpositive,
+                        f"BoundScaler warp={self.warp!r} requires strictly positive runtime inputs",
+                    )
+                else:
+                    x = jnp.where(nonpositive, jnp.nan, x)
         return self._map(x, inverse=True)
 
     def input_violation(self, x: Array) -> Array:

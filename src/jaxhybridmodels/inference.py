@@ -62,7 +62,7 @@ from jaxhybridmodels.losses import _gaussian_nll_terms, _masked_safe
 from jaxhybridmodels.model import HybridModel
 from jaxhybridmodels.prediction import _check_quantiles, _member_quantiles, predict_ensemble
 from jaxhybridmodels.predictors import Parameter
-from jaxhybridmodels.predictors.base import _is_parameter
+from jaxhybridmodels.predictors.base import _is_parameter, _nan_on_bad_input
 from jaxhybridmodels.results import PredictionResult
 from jaxhybridmodels.rng import check_key
 from jaxhybridmodels.solver import SolverConfig
@@ -282,8 +282,28 @@ class InferenceProblem:
     def _density(self, position: Any) -> Array:
         tree = self._tree(position)
         prior = self._log_prior(tree[_PREDICTORS], self._noise_values(tree))
-        total = self.log_likelihood(position) + prior + self._log_jacobian(tree)
+        with _nan_on_bad_input():
+            likelihood = self.log_likelihood(position)
+        total = likelihood + prior + self._log_jacobian(tree)
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
+
+    def _curvature_residuals(self, position: Any) -> Array:
+        """``residuals``, plus the terms that make ``J^T J`` the Fisher information.
+
+        A Gaussian's Fisher information has ``0.5 (d log var)^2`` per cell on top of
+        the mean's ``J^T J``, which is the Jacobian of ``log var / sqrt(2)``. It is
+        what gives inferred noise a curvature, however far its start is from its mode.
+        """
+        parts = [self.residuals(position)]
+        noise = self._noise_values(self._tree(position))
+        if noise:
+            parts += [
+                (
+                    jnp.where(bp.mask, jnp.log(self._variance(bp, noise)), 0.0) / jnp.sqrt(2.0)
+                ).ravel()
+                for bp in self.dataset.bucket_payloads
+            ]
+        return jnp.concatenate(parts)
 
     def log_density(self, position: Any) -> Array:
         """Unnormalised log-posterior at ``position``, for a sampler to target.
@@ -309,14 +329,17 @@ class InferenceProblem:
         at the current position. It is a constant linear map, so the posterior over
         the physical values is unchanged and only the sampler's geometry improves.
         Start from a fitted model: far from a mode the curvature says little, and
-        sampling is then no better but still correct.
+        sampling is then no better but still correct. A fit does not set inferred noise,
+        and the other values' curvature scales with ``1 / sigma^2``, so a good starting
+        guess for the noise helps too.
 
         Parameters
         ----------
         precision : Array | None
             The ``[P, P]`` curvature to use, for a custom likelihood or a better
             estimate. ``None`` computes the Gauss-Newton ``J^T J + ridge I`` from
-            the whitened residuals, which needs the Gaussian likelihood.
+            the whitened residuals and any inferred noise, which needs the Gaussian
+            likelihood.
         ridge : float
             Added to the diagonal of the Gauss-Newton curvature in latent units,
             standing in for the prior so an unidentified direction keeps a finite
@@ -334,10 +357,10 @@ class InferenceProblem:
             # P + 1 solves in forward mode, against one reverse pass per cell. Reverse
             # is for a simulate_fn whose own adjoint has no forward rule.
             if self.gradient == "forward" or _supports_forward(self):
-                residuals = self._forward_view().residuals
+                residuals = self._forward_view()._curvature_residuals
                 jacobian = jax.jacfwd(lambda x: residuals(unravel(x)))(flat)
             else:
-                jacobian = jax.jacrev(lambda x: self.residuals(unravel(x)))(flat)
+                jacobian = jax.jacrev(lambda x: self._curvature_residuals(unravel(x)))(flat)
             precision = jacobian.T @ jacobian + ridge * jnp.eye(flat.size, dtype=flat.dtype)
         precision = jnp.asarray(precision, dtype=flat.dtype)
         if precision.shape != (flat.size, flat.size):
@@ -403,6 +426,9 @@ class InferenceProblem:
         ``observation_noise``, they include measurement noise instead, an interval
         for a new measurement. That needs a standard deviation inferred for each
         channel, since the variances in data exist only at measured cells.
+
+        A draw whose solve fails on this grid is dropped with a warning, so one bad
+        draw on new data or a longer grid does not cost the others.
         """
         check_key(key, "InferenceProblem.predict")
         levels = _check_quantiles(quantiles, "InferenceProblem.predict")
@@ -416,14 +442,31 @@ class InferenceProblem:
             )
         choice_key, noise_key = jr.split(key)
         draws = self._unstack(positions, n_draws, choice_key)
-        result = predict_ensemble(
-            [self.to_model(draw) for draw in draws],
-            self.dataset if data is None else data,
-            ts=ts,
-            n_points=n_points,
-            # Noise replaces the spread below, so it would go unread.
-            quantiles=() if observation_noise else levels,
-        )
+        members = [dataclasses.replace(self.to_model(draw), solver=self._solver) for draw in draws]
+
+        def run(models: Sequence[HybridModel]) -> PredictionResult:
+            return predict_ensemble(
+                models,
+                self.dataset if data is None else data,
+                ts=ts,
+                n_points=n_points,
+                # Noise replaces the spread below, so it would go unread.
+                quantiles=() if observation_noise else levels,
+            )
+
+        result = run(members)
+        solved = [_is_finite(member) for member in result.members]
+        if not all(solved):
+            if not any(solved):
+                raise ValueError("InferenceProblem.predict: every draw failed to solve")
+            warnings.warn(
+                f"InferenceProblem.predict: dropped {solved.count(False)} of {len(solved)} draws "
+                "whose solve failed on this grid",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            draws = [draw for draw, kept in zip(draws, solved, strict=True) if kept]
+            result = run([model for model, kept in zip(members, solved, strict=True) if kept])
         if not observation_noise:
             return result
         sigmas = [self._noise_values(self._tree(draw)) for draw in draws]
@@ -478,6 +521,15 @@ class InferenceProblem:
         # A string, as a NetCDF attribute cannot hold an empty list.
         conditioning = ", ".join(self.conditional_on)
         return from_dict(groups, attrs={"posterior": {"conditional_on": conditioning}})
+
+
+def _is_finite(prediction: PredictionResult) -> bool:
+    """Whether every output of one member's prediction is finite."""
+    return all(
+        bool(jnp.all(jnp.isfinite(values)))
+        for experiment in prediction.values()
+        for values in experiment.outputs.values()
+    )
 
 
 def _supports_forward(problem: InferenceProblem) -> bool:
@@ -535,6 +587,10 @@ def make_problem(
 ) -> InferenceProblem:
     """Build the log-density for ``model`` on ``data``.
 
+    Solves inside the density run with ``SolverConfig.throw`` off. A ``simulate_fn``
+    that calls ``diffrax.diffeqsolve`` itself must pass ``throw=solver.throw``, or
+    a failed solve will end the chain with an exception.
+
     Parameters
     ----------
     model : HybridModel
@@ -550,8 +606,10 @@ def make_problem(
     noise : "data" | Mapping[str, Parameter]
         ``"data"`` trusts the variances in the data, and warns for a channel left
         at the default of 1.0. A mapping infers a standard deviation per channel,
-        each a ``Parameter`` naming its starting value and bounds. With
-        ``log_likelihood`` its keys are free-form, such as an AR(1) coefficient.
+        each a ``Parameter`` naming its starting value and bounds, which must keep it
+        positive. Below about 1e-6 the likelihood's variance floor flattens the density,
+        so keep the lower bound above that. With ``log_likelihood`` its keys are
+        free-form, such as an AR(1) coefficient.
     free : str | type | Callable | Sequence | None
         What to sample, in the syntax of ``fit(freeze=...)``. ``None`` means every
         ``Parameter``. A dotted path can name a network part, such as
@@ -565,11 +623,7 @@ def make_problem(
         free values when the model allows it, and otherwise reverse mode with the
         model's own adjoint. Forward mode replaces the adjoint with
         ``diffrax.ForwardMode``, so a ``simulate_fn`` must use ``solver.diffeqsolve``
-        or pass ``adjoint=solver.adjoint``.
-
-    Solves inside the density run with ``SolverConfig.throw`` off. A ``simulate_fn``
-    that calls ``diffrax.diffeqsolve`` itself must pass ``throw=solver.throw``, or
-    a failed solve will end the chain with an exception.
+        or pass ``adjoint=solver.adjoint``. ``problem.gradient`` says which was used.
     """
     if gradient not in ("auto", "forward", "reverse"):
         raise ValueError(
@@ -629,6 +683,8 @@ def make_problem(
     )
     # A bug in simulate_fn or log_prior raises here, not at the sampler's first step.
     eqx.filter_eval_shape(problem._density, position)
+    if gradient == "forward":
+        eqx.filter_eval_shape(jax.jacfwd(problem._forward_view()._density), position)
     few = ravel_pytree(position)[0].size <= _FORWARD_MODE_LIMIT
     if gradient == "auto" and few and _supports_forward(problem):
         return dataclasses.replace(problem, gradient="forward")
@@ -667,6 +723,13 @@ def _check_noise(noise: Any, dataset: Dataset, *, custom: bool) -> dict[str, Par
     for name, value in noise.items():
         if not isinstance(value, Parameter) or value.latent.size != 1:
             raise ValueError(f"make_problem: noise[{name!r}] must be a scalar hm.Parameter")
+    if not custom:
+        for name, value in noise.items():
+            if value.scaler.bounds[0][0] < 0.0:
+                raise ValueError(
+                    f"make_problem: noise[{name!r}] is a standard deviation, so its bounds must "
+                    f"keep it positive, as in bounds=(1e-4, 1.0); got {value.scaler.bounds[0]}"
+                )
     if not custom and set(noise) != set(dataset.output_channel_names):
         raise ValueError(
             f"make_problem: noise names {sorted(noise)} but the channels are "
@@ -686,7 +749,7 @@ def _warn_on_default_variance(dataset: Dataset) -> None:
                 "unset data. If that is not the real noise, the posterior's width is wrong; "
                 "set variance= on the data, or infer it with noise={...}.",
                 UserWarning,
-                stacklevel=3,
+                stacklevel=4,
             )
 
 

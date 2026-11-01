@@ -31,6 +31,7 @@ from typing import Any, Literal, overload
 
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import numpy as np
 from jaxtyping import Array, Float, Int
 
 
@@ -247,4 +248,5 @@ def _worst_first(
         for exp_id, per_channel in by_experiment.items()
         if int(per_channel[channel].n) > 0
     ]
-    return sorted(rows, key=lambda row: -float(row[1].rmse))
+    # A NaN never compares true, so it would scatter the order; it is the worst of all.
+    return sorted(rows, key=lambda row: (not np.isnan(row[1].rmse), -float(row[1].rmse)))

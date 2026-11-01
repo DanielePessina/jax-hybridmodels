@@ -19,7 +19,7 @@ Shows:
 - ``InferenceProblem.predict`` for a posterior predictive band
 - ``free=`` naming a network layer, and ``conditional_on`` saying what stayed fixed
 
-Needs ``pip install jax-hybridmodels[bayes]``. Run::
+Needs ``pip install jax-hybridmodels[bayes,examples]``. Run::
 
     uv run python examples/tubular_reactor/sample_tubular_reactor.py
     uv run python examples/tubular_reactor/sample_tubular_reactor.py --last-layer

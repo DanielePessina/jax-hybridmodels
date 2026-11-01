@@ -40,7 +40,7 @@ Metrics for a single output channel.
 | `With ``n == 0`` every statistic is ``nan``, so a channel nobody measured` |  |  |
 | `cannot read as a perfect fit.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L37)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L38)</small>
 
 ---
 
@@ -72,7 +72,7 @@ Per-channel summary stats of a prediction against the data it was made on.
 | --- | --- | --- |
 | `dict` |  | For ``"channel"``, ``{channel: ChannelMetrics}`` in the model's ``output_channel_names`` order. For ``"experiment"``, ``{exp_id: {channel: ChannelMetrics}}`` in experiment order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L83)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L84)</small>
 
 ---
 
@@ -106,4 +106,4 @@ spanning nine decades.
 table per channel with the worst RMSE first, leaving out experiments that did
 not measure the channel.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L173)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L174)</small>
