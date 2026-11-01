@@ -295,6 +295,71 @@ def test_a_fit_result_prints_as_one_line(mechanistic):
     assert "stop_reason='budget_exhausted'" in printed and "steps=100" in printed
 
 
+def test_metrics_by_experiment_add_up_to_the_pooled_ones(mechanistic, mechanistic_data, capsys):
+    _, result, _ = mechanistic
+    predictions = result.model.predict(mechanistic_data)
+    pooled = hm.compute_metrics(predictions)
+    by_experiment = hm.compute_metrics(predictions, by="experiment")
+    assert list(by_experiment) == list(predictions)
+    for channel, overall in pooled.items():
+        parts = [per_channel[channel] for per_channel in by_experiment.values()]
+        assert sum(int(m.n) for m in parts) == int(overall.n)
+        # Each experiment's squared error, weighted by its cells, is the pool's.
+        total = sum(float(m.mse) * int(m.n) for m in parts if int(m.n) > 0)
+        assert total == pytest.approx(float(overall.mse) * int(overall.n), rel=1e-5)
+
+    hm.print_metrics(predictions, by="experiment")
+    from_result = capsys.readouterr().out
+    hm.print_metrics(by_experiment)
+    assert capsys.readouterr().out == from_result
+    rows = [line.split() for line in from_result.splitlines() if line.startswith("    ")]
+    rmse = [float(row[3]) for row in rows if row[0] != "experiment"][: len(by_experiment)]
+    assert rmse == sorted(rmse, reverse=True), "the worst experiment is listed first"
+
+
+def test_summary_reports_the_run_and_its_parameters(mechanistic, mechanistic_data):
+    _, result, _ = mechanistic
+    text = result.summary()
+    assert "ran its full budget" in text and "100 steps recorded" in text
+    assert "rate" in text and f"{fitted_rate(result):.5g}" in text
+    assert "near" not in text, "a rate in the middle of its box is not flagged"
+    assert "Metrics" not in text, "no data, no prediction"
+
+    with_data = result.summary(mechanistic_data)
+    assert with_data.startswith(text)
+    assert "Metrics" in with_data and "Worst experiment per channel" in with_data
+
+
+def test_summary_flags_a_parameter_at_either_bound():
+    predictors = {
+        "low": hm.Parameter(0.001, bounds=(0.0, 1.0)),
+        "high": hm.Parameter(0.999, bounds=(0.0, 1.0)),
+        "open_side": hm.Parameter(1e-4, bounds=(0.0, None)),
+        "log_high": hm.Parameter(9e2, bounds=(1e-3, 1e3), warp="log10"),
+        "pair": hm.Parameter([0.5, 0.999], bounds=(0.0, 1.0)),
+        "middle": hm.Parameter(0.5, bounds=(0.0, 1.0)),
+    }
+    model = eqx.tree_at(lambda m: m.predictors, mechanistic_model(), predictors)
+    run = hm.FitResult(model=model, history=hm.FitHistory(), best_step=None, stop_reason="patience")
+    rows = {line.split()[0]: line for line in run.summary().splitlines() if "(" in line}
+    assert "near lower bound" in rows["low"]
+    assert "near upper bound" in rows["high"]
+    assert "near lower bound" in rows["open_side"]
+    assert "near upper bound" in rows["log_high"], "the side is judged in warped coordinates"
+    assert "near" not in rows["pair[0]"] and "near upper bound" in rows["pair[1]"]
+    assert "near" not in rows["middle"]
+    assert "no fit recorded" in run.summary()
+
+
+def test_summary_of_generations_has_no_phase_table():
+    history = hm.FitHistory(loss=(2.0, 1.0, 1.0))
+    run = hm.FitResult(
+        model=mechanistic_model(), history=history, best_step=1, stop_reason="budget_exhausted"
+    )
+    text = run.summary()
+    assert "3 generations recorded; returned generation 1" in text and "Phases" not in text
+
+
 def test_dataframe_has_one_row_per_cell(mechanistic, mechanistic_data):
     _, result, _ = mechanistic
     frame = result.model.predict(mechanistic_data).to_dataframe()
@@ -532,6 +597,18 @@ def saturated_fit(network_splits, network_objective):
     )
     result = pinned.fit(network_splits[0], config, objective=objective, key=jr.key(2), ui=ui)
     return result, ui
+
+
+def test_summary_shows_how_much_of_a_network_is_pinned(network, saturated_fit):
+    def pinned_share(result: hm.FitResult) -> float:
+        lines = result.summary().splitlines()
+        row = next(line for line in lines if line.lstrip().startswith("rate "))
+        return float(row.split("%")[0].split()[-1])
+
+    assert pinned_share(saturated_fit[0]) > 10.0
+    assert pinned_share(network[1] if isinstance(network, tuple) else network) == 0.0
+    text = saturated_fit[0].summary()
+    assert "Phases" in text and "bound penalty" in text
 
 
 def test_the_bound_penalty_follows_each_phases_weight(saturated_fit):

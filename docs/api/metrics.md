@@ -37,8 +37,10 @@ Metrics for a single output channel.
 | `n` | `Int[Array, ""]` | Scalar number of observed (mask=True) cells behind the stats. It is a JAX scalar so the complete metrics result can pass through ``jit``. |
 | `mse, rmse, mae` | `Float[Array, ""]` | Error of ``predicted - observed`` over the masked cells. |
 | `r2` | `Float[Array, ""]` | ``1 - SS_res/SS_tot``; ``nan`` when the observations are constant and ``SS_tot`` is zero. |
+| `With ``n == 0`` every statistic is ``nan``, so a channel nobody measured` |  |  |
+| `cannot read as a perfect fit.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L36)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L37)</small>
 
 ---
 
@@ -49,7 +51,10 @@ Metrics for a single output channel.
 <small>`from jaxhybridmodels.metrics import compute_metrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.compute_metrics`</small>
 
 ```python
-compute_metrics(predictions: 'Mapping[str, Any]') -> 'dict[str, ChannelMetrics]'
+compute_metrics(
+    predictions: 'Mapping[str, Any]',
+    by: "Literal['channel', 'experiment']" = 'channel',
+) -> dict[str, Any]
 ```
 
 Per-channel summary stats of a prediction against the data it was made on.
@@ -59,14 +64,15 @@ Per-channel summary stats of a prediction against the data it was made on.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `predictions` | `PredictionResult` | From ``HybridModel.predict`` or ``predict_ensemble`` (which is scored on its member mean), or any mapping from experiment ID to a record with ``outputs``, ``observed`` and ``observation_mask`` dicts keyed by channel. Only cells the mask marks as measured count. Channels are read from the first experiment's ``outputs``. |
+| `by` | `{"channel", "experiment"}` | ``"channel"`` pools every experiment. ``"experiment"`` scores each one alone, which is how to find the run a pooled number hides. Its R^2 compares against that experiment's own mean, so a good fit to a nearly flat run can still score low. A channel an experiment did not measure has ``n == 0`` and NaN statistics. |
 
 **Returns**
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `dict[str, ChannelMetrics]` |  | Keyed by channel, in the model's ``output_channel_names`` order. |
+| `dict` |  | For ``"channel"``, ``{channel: ChannelMetrics}`` in the model's ``output_channel_names`` order. For ``"experiment"``, ``{exp_id: {channel: ChannelMetrics}}`` in experiment order. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L67)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L71)</small>
 
 ---
 
@@ -77,13 +83,17 @@ Per-channel summary stats of a prediction against the data it was made on.
 <small>`from jaxhybridmodels.metrics import print_metrics` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.print_metrics`</small>
 
 ```python
-print_metrics(metrics: 'Mapping[str, Any]', *, header: 'str | None' = None) -> 'None'
+print_metrics(
+    metrics: 'Mapping[str, Any]',
+    header: 'str | None' = None,
+    by: "Literal['channel', 'experiment']" = 'channel',
+) -> None
 ```
 
-Print a metrics table, one row per channel.
+Print a metrics table.
 
 Takes the output of [`compute_metrics`](/api/metrics#compute_metrics), or a ``PredictionResult``,
-which is passed through [`compute_metrics`](/api/metrics#compute_metrics) first.
+which is passed through [`compute_metrics`](/api/metrics#compute_metrics) with ``by`` first.
 
 Format::
 
@@ -96,4 +106,8 @@ Scientific notation throughout, so one template stays readable across
 the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
 spanning nine decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L133)</small>
+``by="experiment"``, or metrics computed that way, prints one table per
+channel with the worst RMSE first and leaves out experiments that did not
+measure the channel.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/metrics.py#L161)</small>

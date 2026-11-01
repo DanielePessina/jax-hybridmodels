@@ -163,6 +163,26 @@ class FitResult:
         step = -1 if self.best_step is None else self.best_step
         return self.history.loss[step]
 
+    def summary(self, data: Any = None) -> str:
+        """A readable report on the run; ``print(result.summary())``.
+
+        Says how the run ended, the loss by phase, each ``Parameter`` with any
+        that sit near a bound, and how much of each network's input box is
+        pinned against an output bound. With ``data``, a list of experiments or
+        a ``Dataset``, it also predicts on them and adds the metrics and the
+        worst experiment per channel.
+
+        A flagged parameter is in the range where the bound penalty would
+        charge it: the outer 5% of its box for the default sigmoid. The network
+        figure covers the whole declared box, including inputs no experiment
+        reached, so a large share can be harmless if the data never goes there.
+        """
+        from jaxhybridmodels._fit_summary import format_fit_summary
+
+        return format_fit_summary(
+            self.model, self.history, self.best_step, self.stop_reason, data=data
+        )
+
     def __repr__(self) -> str:
         # The default would print the whole model and every history entry.
         return (
@@ -195,3 +215,11 @@ class SavedRun:
     config: OptaxTrainingConfig | EvosaxTrainingConfig | dict[str, Any] | None
     objective: Objective | dict[str, Any] | None
     extras: dict[str, Any]
+
+    def summary(self, data: Any = None) -> str:
+        """The report :meth:`FitResult.summary` gives, for a run read back from disk."""
+        from jaxhybridmodels._fit_summary import format_fit_summary
+
+        return format_fit_summary(
+            self.model, self.history, self.best_step, self.stop_reason, data=data
+        )
