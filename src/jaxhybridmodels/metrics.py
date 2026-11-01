@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -66,6 +66,18 @@ class ChannelMetrics:
     rmse: Float[Array, ""]
     mae: Float[Array, ""]
     r2: Float[Array, ""]
+
+
+@overload
+def compute_metrics(
+    predictions: Mapping[str, Any], *, by: Literal["channel"] = "channel"
+) -> dict[str, ChannelMetrics]: ...
+
+
+@overload
+def compute_metrics(
+    predictions: Mapping[str, Any], *, by: Literal["experiment"]
+) -> dict[str, dict[str, ChannelMetrics]]: ...
 
 
 def compute_metrics(
@@ -162,12 +174,11 @@ def print_metrics(
     metrics: Mapping[str, Any],
     *,
     header: str | None = None,
-    by: Literal["channel", "experiment"] = "channel",
 ) -> None:
     """Print a metrics table.
 
     Takes the output of :func:`compute_metrics`, or a ``PredictionResult``,
-    which is passed through :func:`compute_metrics` with ``by`` first.
+    which is passed through :func:`compute_metrics` first.
 
     Format::
 
@@ -180,33 +191,22 @@ def print_metrics(
     the example suite's scales, from ``omega ~ O(1)`` to nucleation rates
     spanning nine decades.
 
-    ``by="experiment"``, or metrics computed that way, prints one table per
-    channel with the worst RMSE first and leaves out experiments that did not
-    measure the channel.
+    ``print_metrics(compute_metrics(predictions, by="experiment"))`` prints one
+    table per channel with the worst RMSE first, leaving out experiments that did
+    not measure the channel.
     """
-    if by not in ("channel", "experiment"):
-        raise ValueError(f"print_metrics by= must be 'channel' or 'experiment'; got {by!r}")
-    values = list(metrics.values()) if isinstance(metrics, Mapping) else []
-    if values and all(isinstance(m, ChannelMetrics) for m in values):
-        if by == "experiment":
-            raise ValueError(
-                "print_metrics by='experiment' needs compute_metrics(predictions, "
-                "by='experiment') or a PredictionResult; these metrics are pooled"
-            )
-    elif not (values and all(_is_per_channel(m) for m in values)):
-        metrics = compute_metrics(metrics, by=by)
+    if not _is_metrics(metrics):
+        metrics = compute_metrics(metrics)
     if header:
         print(header)
-    print("\n".join(format_metrics(metrics)))
+    print("\n".join(_format_metrics(metrics)))
 
 
-def _is_per_channel(value: Any) -> bool:
-    """Whether ``value`` is one experiment's ``{channel: ChannelMetrics}``."""
-    return (
-        isinstance(value, Mapping)
-        and bool(value)
-        and all(isinstance(m, ChannelMetrics) for m in value.values())
-    )
+def _is_metrics(value: Any) -> bool:
+    """Whether ``value`` came from :func:`compute_metrics`, pooled or per experiment."""
+    if not isinstance(value, Mapping) or not value:
+        return False
+    return all(isinstance(m, ChannelMetrics) or _is_metrics(m) for m in value.values())
 
 
 def _metric_columns(m: ChannelMetrics) -> str:
@@ -221,7 +221,7 @@ def _metric_columns(m: ChannelMetrics) -> str:
 _COLUMN_TITLES = f"{'n':>6} {'MSE':>13} {'RMSE':>13} {'MAE':>13} {'R^2':>8}"
 
 
-def format_metrics(metrics: Mapping[str, Any]) -> list[str]:
+def _format_metrics(metrics: Mapping[str, Any]) -> list[str]:
     """The lines of :func:`print_metrics`, for pooled or per-experiment metrics."""
     first = next(iter(metrics.values()), None)
     if isinstance(first, ChannelMetrics):
@@ -230,7 +230,7 @@ def format_metrics(metrics: Mapping[str, Any]) -> list[str]:
         ]
     lines: list[str] = []
     for channel in first or ():
-        rows = worst_first(metrics, channel)
+        rows = _worst_first(metrics, channel)
         width = max([len("experiment"), *(len(exp_id) for exp_id, _ in rows)])
         lines.append(f"  {channel}")
         lines.append(f"    {'experiment':<{width}} {_COLUMN_TITLES}")
@@ -238,7 +238,7 @@ def format_metrics(metrics: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def worst_first(
+def _worst_first(
     by_experiment: Mapping[str, Mapping[str, ChannelMetrics]], channel: str
 ) -> list[tuple[str, ChannelMetrics]]:
     """``(exp_id, metrics)`` for experiments that measured ``channel``, worst RMSE first."""

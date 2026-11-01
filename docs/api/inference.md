@@ -43,7 +43,7 @@ Build the log-density for ``model`` on ``data``.
 | `that calls ``diffrax.diffeqsolve`` itself must pass ``throw=solver.throw``, or` |  |  |
 | `a failed solve will end the chain with an exception.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L540)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L526)</small>
 
 ---
 
@@ -59,14 +59,12 @@ InferenceProblem(
     dataset: 'Dataset',
     position: 'Any',
     conditional_on: 'tuple[str, ...]',
+    gradient: 'str',
     _log_prior: 'Callable[..., Array]',
     _log_likelihood: 'Callable[..., Array] | None',
     _static: 'Any',
     _mask: 'Any',
-    _sampling_model: 'HybridModel',
-    _forward_model: 'HybridModel',
-    _gradient: 'str',
-    _forward_density: 'Callable[[Any], Array] | None' = None,
+    _solver: 'SolverConfig',
     _whitening: 'tuple[Array, Array, Callable[[Array], Any]] | None' = None,
 ) -> None
 ```
@@ -80,12 +78,13 @@ Build one with [`make_problem`](/api/inference#make_problem). Identity-hashed, s
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `model` | `HybridModel` | The model as given. Solves here run through a copy with ``SolverConfig.throw`` off. |
+| `model` | `HybridModel` | The model as given. Solves in the density run with ``SolverConfig.throw`` off. |
 | `dataset` | `Dataset` | The data the likelihood reads. |
 | `position` | `PyTree` | The starting position: the free leaves' current values. Latents for a ``Parameter``, weights for a network, and inferred noise under ``"noise"``. After `preconditioned`, a flat array of zeros instead. ``physical``, ``to_model``, ``predict`` and ``to_arviz`` read either form. |
 | `conditional_on` | `tuple[str, ...]` | Dotted paths of the trainable leaves held fixed. The posterior is conditional on these values and its width does not account for them. |
+| `gradient` | `str` | The mode in use, ``"forward"`` or ``"reverse"``, after ``"auto"`` chose. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L169)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L166)</small>
 
 <a id="inferenceproblemlog_density"></a>
 
@@ -106,7 +105,7 @@ Take its gradient with ``jax.grad``, as samplers do. Its custom gradient
 rule rules out ``jax.jvp`` and ``jax.jacfwd`` on this method, so use them on
 ``log_likelihood`` or ``residuals``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L295)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L288)</small>
 
 <a id="inferenceproblemlog_likelihood"></a>
 
@@ -122,7 +121,7 @@ The log-likelihood of the data, summed over every experiment.
 at a row no channel measured, since a failed solve leaves such rows
 non-finite too.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L255)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L251)</small>
 
 <a id="inferenceproblemphysical"></a>
 
@@ -137,7 +136,7 @@ The free values in physical units, keyed by dotted path.
 A ``Parameter`` appears under its path with its ``.value``, a free network
 leaf under its path as it is, and inferred noise as ``"noise.<name>"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L374)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L369)</small>
 
 <a id="inferenceproblempreconditioned"></a>
 
@@ -166,7 +165,7 @@ sampling is then no better but still correct.
 | `precision` | `Array | None` | The ``[P, P]`` curvature to use, for a custom likelihood or a better estimate. ``None`` computes the Gauss-Newton ``J^T J + ridge I`` from the whitened residuals, which needs the Gaussian likelihood. |
 | `ridge` | `float` | Added to the diagonal of the Gauss-Newton curvature in latent units, standing in for the prior so an unidentified direction keeps a finite scale. Ignored with ``precision``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L311)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L305)</small>
 
 <a id="inferenceproblempredict"></a>
 
@@ -200,7 +199,7 @@ model's uncertainty, a credible band for the noiseless trajectory. With
 for a new measurement. That needs a standard deviation inferred for each
 channel, since the variances in data exist only at measured cells.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L392)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L381)</small>
 
 <a id="inferenceproblemresiduals"></a>
 
@@ -213,10 +212,10 @@ residuals(self, position: 'Any') -> 'Array'
 Whitened residuals ``(prediction - observed) / sigma``, flattened over buckets.
 
 Length is every ``[N, T, D]`` cell, with zero at unmeasured cells, so the
-shape does not depend on the data's mask and ``jax.jacfwd`` applies.
-``log_likelihood`` is built on the same quantity for a Gaussian.
+shape does not depend on the data's mask. ``jax.jacfwd`` applies when the
+model's adjoint supports forward mode.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L237)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L230)</small>
 
 <a id="inferenceproblemto_arviz"></a>
 
@@ -239,7 +238,7 @@ sampler output with the same axes, such as ``{"diverging": ...}``.
 ``conditional_on`` is recorded in the attributes. Needs
 ``pip install jax-hybridmodels[bayes]``, and ArviZ needs Python 3.12.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L460)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L455)</small>
 
 <a id="inferenceproblemto_model"></a>
 
@@ -254,7 +253,7 @@ The given model with this position's values, for ``predict`` and ``save``.
 It keeps the model's own solver, so its solves raise on failure as usual.
 Inferred noise is not part of a model.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L366)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L361)</small>
 
 ---
 
@@ -274,4 +273,4 @@ Proper only on a bounded box, so [`make_problem`](/api/inference#make_problem) r
 value has an open bound or is a network weight. A flat prior is not neutral
 under a warp: on a log-warped parameter it still favours the upper decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L85)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L88)</small>

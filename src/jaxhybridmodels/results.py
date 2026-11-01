@@ -193,9 +193,7 @@ class FitResult:
         """
         from jaxhybridmodels._fit_summary import format_fit_summary
 
-        return format_fit_summary(
-            self.model, self.history, self.best_step, self.stop_reason, data=data
-        )
+        return format_fit_summary(self, data=data)
 
     def __repr__(self) -> str:
         # The default would print the whole model and every history entry.
@@ -234,6 +232,4 @@ class SavedRun:
         """The report :meth:`FitResult.summary` gives, for a run read back from disk."""
         from jaxhybridmodels._fit_summary import format_fit_summary
 
-        return format_fit_summary(
-            self.model, self.history, self.best_step, self.stop_reason, data=data
-        )
+        return format_fit_summary(self, data=data)

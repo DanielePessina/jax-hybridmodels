@@ -308,11 +308,9 @@ def test_metrics_by_experiment_add_up_to_the_pooled_ones(mechanistic, mechanisti
         total = sum(float(m.mse) * int(m.n) for m in parts if int(m.n) > 0)
         assert total == pytest.approx(float(overall.mse) * int(overall.n), rel=1e-5)
 
-    hm.print_metrics(predictions, by="experiment")
-    from_result = capsys.readouterr().out
     hm.print_metrics(by_experiment)
-    assert capsys.readouterr().out == from_result
-    rows = [line.split() for line in from_result.splitlines() if line.startswith("    ")]
+    printed = capsys.readouterr().out
+    rows = [line.split() for line in printed.splitlines() if line.startswith("    ")]
     rmse = [float(row[3]) for row in rows if row[0] != "experiment"][: len(by_experiment)]
     assert rmse == sorted(rmse, reverse=True), "the worst experiment is listed first"
 
@@ -333,6 +331,7 @@ def test_summary_reports_the_run_and_its_parameters(mechanistic, mechanistic_dat
 def test_summary_flags_a_parameter_at_either_bound():
     predictors = {
         "low": hm.Parameter(0.001, bounds=(0.0, 1.0)),
+        "open_low": hm.Parameter(0.999, bounds=(None, 1.0)),
         "high": hm.Parameter(0.999, bounds=(0.0, 1.0)),
         "open_side": hm.Parameter(1e-4, bounds=(0.0, None)),
         "log_high": hm.Parameter(9e2, bounds=(1e-3, 1e3), warp="log10"),
@@ -343,6 +342,7 @@ def test_summary_flags_a_parameter_at_either_bound():
     run = hm.FitResult(model=model, history=hm.FitHistory(), best_step=None, stop_reason="patience")
     rows = {line.split()[0]: line for line in run.summary().splitlines() if "(" in line}
     assert "near lower bound" in rows["low"]
+    assert "near upper bound" in rows["open_low"], "a one-sided box can only near its one bound"
     assert "near upper bound" in rows["high"]
     assert "near lower bound" in rows["open_side"]
     assert "near upper bound" in rows["log_high"], "the side is judged in warped coordinates"

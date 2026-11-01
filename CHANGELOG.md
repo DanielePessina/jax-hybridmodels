@@ -9,7 +9,7 @@
   network's input box is pinned against an output bound. Pass data to add the
   metrics and the worst experiment per channel.
 - `compute_metrics(predictions, by="experiment")` scores each experiment alone,
-  and `print_metrics(predictions, by="experiment")` lists them worst first.
+  and `print_metrics` lists those worst first.
 - `jaxhybridmodels.inference.make_problem` builds a log-density for a model and
   its data, for any sampler such as BlackJAX. It sums over buckets, adds the
   change-of-variables term for free `Parameter`s, and turns a failed solve into

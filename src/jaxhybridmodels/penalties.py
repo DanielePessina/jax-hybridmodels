@@ -527,6 +527,14 @@ def select_penalty_points(
     return tuple(built)
 
 
+def _latents_at(leaf: BoundedPredictor, points: Array) -> Array:
+    """The inner network's ``[G, n_outputs]`` latents at ``[G, n_inputs]`` physical points."""
+    latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.scale_inputs(x)))(points)
+    # A one-output inner may return () or (1,) per point; saturation reads the
+    # last axis as outputs, so restore it.
+    return latents.reshape(latents.shape[0], -1)
+
+
 def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
     """Mean output-squash saturation over every ``BoundedPredictor`` in a pytree.
 
@@ -581,11 +589,7 @@ def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
     for leaf, leaf_points in zip(leaves, points, strict=True):
         if leaf_points.shape[0] == 0:
             continue
-        latents = jax.vmap(lambda x, _l=leaf: _l.inner(_l.in_scaler.scale_inputs(x)))(leaf_points)
-        # A one-output inner may return () or (1,) per point; saturation
-        # reads the last axis as outputs, so restore it as [G, n_outputs].
-        latents = latents.reshape(latents.shape[0], -1)
-        total = total + leaf.out_scaler.saturation(latents)
+        total = total + leaf.out_scaler.saturation(_latents_at(leaf, leaf_points))
     return total
 
 

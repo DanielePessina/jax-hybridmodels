@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import diffrax
 import jax.numpy as jnp
@@ -123,11 +124,16 @@ def state_to_output(state: Array) -> Array:
     # endregion simulate
 
 
+def arrhenius_g(k_ref: Any, ea_over_r: Any, c: Any, temp: Any) -> Array:
+    """The first-order Arrhenius law the mechanistic model assumes, ``r = g c``."""
+    return k_ref * jnp.exp(-ea_over_r * (1.0 / temp - 1.0 / T_REF)) * jnp.ones_like(c)
+
+
 def simulate_mechanistic(predictors, ts, covariates, y0, solver):
     k_ref, ea_over_r = predictors["k_ref"].value, predictors["Ea_over_R"].value
 
     def g_fn(c, temp):
-        return k_ref * jnp.exp(-ea_over_r * (1.0 / temp - 1.0 / T_REF)) * jnp.ones_like(c)
+        return arrhenius_g(k_ref, ea_over_r, c, temp)
 
     return solve_tube(g_fn, ts, covariates, y0, solver)
 
@@ -136,11 +142,11 @@ def exp_name(temp: float, feed: float) -> str:
     return f"T{temp:.0f}_c{feed:g}"
 
 
-def make_data(key: Array) -> hm.Dataset:
+def make_data(key: Array, rate_law=true_g, variance: float = 1.0) -> hm.Dataset:
     """Each sensor samples 8 random times per experiment, so no two grids match."""
     truth = hm.HybridModel(
         predictors={},
-        simulate_fn=lambda p, ts, cov, y0, s: solve_tube(true_g, ts, cov, y0, s),
+        simulate_fn=lambda p, ts, cov, y0, s: solve_tube(rate_law, ts, cov, y0, s),
         state_to_output=state_to_output,
         output_channel_names=CHANNELS,
         solver=SOLVER,
@@ -156,7 +162,9 @@ def make_data(key: Array) -> hm.Dataset:
             clean = truth.simulate(
                 ts=times[i], y0=jnp.zeros(N_CELLS), covariates=covariates, t0=0.0
             )
-            channels[name] = hm.ChannelObs(ts=times[i], values=clean.outputs[name] + noise[i])
+            channels[name] = hm.ChannelObs(
+                ts=times[i], values=clean.outputs[name] + noise[i], variance=variance
+            )
         experiments.append(
             hm.make_experiment(
                 channels=channels,

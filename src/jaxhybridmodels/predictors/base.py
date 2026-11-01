@@ -508,6 +508,11 @@ class BoundScaler(eqx.Module):
         Reduced with ``mean``, not ``sum``, so one weight means the same for
         a one-output and a six-output predictor.
         """
+        terms = self._saturation_terms(z)
+        return jnp.mean(terms) if terms.size else jnp.asarray(0.0)
+
+    def _saturation_terms(self, z: Array) -> Array:
+        """The squared overshoot per component, ``saturation`` before its mean."""
         z = self._components_last(z)
         terms = []
         for i, (low, high) in enumerate(self.bounds):
@@ -519,7 +524,7 @@ class BoundScaler(eqx.Module):
                 terms.append(jnp.maximum(-u - self.z_knee, 0.0) ** 2)
             else:
                 terms.append(jnp.zeros_like(u))
-        return jnp.mean(jnp.stack(terms, axis=-1)) if terms else jnp.asarray(0.0)
+        return jnp.stack(terms, axis=-1) if terms else jnp.zeros((*z.shape[:-1], 0))
 
     def from_latent(self, z: Array) -> Array:
         """Map a latent value back into the physical box ``[low, high]``.
@@ -614,6 +619,11 @@ class Parameter(eqx.Module):
         """Draw a fresh standard-normal latent; the scaler is left untouched."""
         fresh = jr.normal(key, self.latent.shape, dtype=self.latent.dtype)
         return eqx.tree_at(lambda p: p.latent, self, fresh)
+
+
+def _is_parameter(node: Any) -> bool:
+    """For ``is_leaf=``, so a walk stops at a ``Parameter`` rather than its fields."""
+    return isinstance(node, Parameter)
 
 
 class BoundedPredictor(Predictor):

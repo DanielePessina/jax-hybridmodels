@@ -53,15 +53,11 @@ from blackjax.diagnostics import effective_sample_size, potential_scale_reductio
 from train_tubular_reactor import (  # noqa: E402
     CHANNELS,
     CONDITIONS,
-    N_CELLS,
     NOISE_STD,
-    SOLVER,
-    T_END,
-    T_REF,
+    arrhenius_g,
     build_models,
     exp_name,
-    solve_tube,
-    state_to_output,
+    make_data,
     true_g,
 )
 
@@ -78,42 +74,7 @@ def damped(model: hm.HybridModel) -> hm.HybridModel:
 
 def first_order_g(c: Any, temp: Any) -> Any:
     """The law the mechanistic model assumes, so this data set is well specified."""
-    return TRUE_K_REF * jnp.exp(-TRUE_EA * (1.0 / temp - 1.0 / T_REF)) * jnp.ones_like(c)
-
-
-def noisy_data(rate_law: Any, key: Any) -> hm.Dataset:
-    """Sensor data with its variance stated, since the posterior's width depends on it."""
-    truth = hm.HybridModel(
-        predictors={},
-        simulate_fn=lambda p, ts, cov, y0, s: solve_tube(rate_law, ts, cov, y0, s),
-        state_to_output=state_to_output,
-        output_channel_names=CHANNELS,
-        solver=SOLVER,
-    )
-    experiments = []
-    for (temp, feed), k in zip(CONDITIONS, jr.split(key, len(CONDITIONS)), strict=True):
-        k_times, k_noise = jr.split(k)
-        times = jnp.sort(jr.uniform(k_times, (len(CHANNELS), 8), minval=0.1, maxval=T_END), axis=1)
-        noise = NOISE_STD * jr.normal(k_noise, times.shape)
-        covariates: dict[str, float | jax.Array] = {"T": temp, "c_feed": feed}
-        channels = {}
-        for i, name in enumerate(CHANNELS):
-            clean = truth.simulate(
-                ts=times[i], y0=jnp.zeros(N_CELLS), covariates=covariates, t0=0.0
-            )
-            channels[name] = hm.ChannelObs(
-                ts=times[i], values=clean.outputs[name] + noise[i], variance=NOISE_STD**2
-            )
-        experiments.append(
-            hm.make_experiment(
-                channels=channels,
-                covariates=covariates,
-                y0=jnp.zeros(N_CELLS),
-                t0=0.0,
-                exp_id=exp_name(temp, feed),
-            )
-        )
-    return hm.make_dataset(experiments, output_channel_names=CHANNELS)
+    return arrhenius_g(TRUE_K_REF, TRUE_EA, c, temp)
 
 
 # region sample
@@ -147,38 +108,30 @@ def sample(problem: hm.inference.InferenceProblem, key: Any, args: Any) -> tuple
     # endregion sample
 
 
-def report(problem: Any, positions: Any, divergent: Any, truth: dict[str, float]) -> None:
-    named = jax.vmap(jax.vmap(problem.physical))(positions)
+def report(named: dict[str, Any], divergent: Any, truth: dict[str, float]) -> None:
     print(f"  divergences: {int(np.asarray(divergent).sum())}")
     print(f"  {'value':<12} {'mean':>10} {'sd':>10} {'5%':>10} {'95%':>10} {'R-hat':>7} {'ESS':>7}")
     for name, value in named.items():
         chains = jnp.squeeze(value)
-        if chains.ndim != 2:
-            continue
         low, high = np.quantile(np.asarray(chains), [0.05, 0.95])
         rhat = float(potential_scale_reduction(chains))
         ess = float(effective_sample_size(chains))
-        line = (
+        print(
             f"  {name:<12} {float(chains.mean()):>10.4g} {float(chains.std()):>10.3g} "
-            f"{low:>10.4g} {high:>10.4g} {rhat:>7.3f} {ess:>7.0f}"
+            f"{low:>10.4g} {high:>10.4g} {rhat:>7.3f} {ess:>7.0f}  truth {truth[name]:g}"
         )
-        print(line + (f"  truth {truth[name]:g}" if name in truth else ""))
 
 
 def rhat_range(positions: Any) -> tuple[float, float]:
     """The smallest and largest R-hat over every sampled element."""
-    leaves = jax.tree_util.tree_leaves(positions)
-    values = []
-    for leaf in leaves:
-        flat = leaf.reshape(*leaf.shape[:2], -1)
-        values.extend(float(potential_scale_reduction(flat[..., i])) for i in range(flat.shape[-1]))
-    return min(values), max(values)
+    values = jnp.ravel(potential_scale_reduction(positions))
+    return float(values.min()), float(values.max())
 
 
 def mechanistic_posterior(args: Any, key: Any) -> None:
     k_data, k_fit, k_chain, k_predict = jr.split(key, 4)
     print("[mechanistic] data from a first-order law, full posterior")
-    dataset = noisy_data(first_order_g, k_data)
+    dataset = make_data(k_data, first_order_g, NOISE_STD**2)
     _, mechanistic = build_models(k_fit)
     config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2, verbose=False)
     result = mechanistic.fit(dataset, config, objective=hm.Objective(loss="mle"), key=k_fit)
@@ -197,8 +150,8 @@ def mechanistic_posterior(args: Any, key: Any) -> None:
     start = time.perf_counter()
     positions, divergent = jax.block_until_ready(sample(problem, k_chain, args))
     print(f"\n  {args.chains} chains in {time.perf_counter() - start:.0f} s")
-    report(problem, positions, divergent, {"k_ref": TRUE_K_REF, "Ea_over_R": TRUE_EA})
     named = jax.vmap(jax.vmap(problem.physical))(positions)
+    report(named, divergent, {"k_ref": TRUE_K_REF, "Ea_over_R": TRUE_EA})
     correlation = np.corrcoef(
         np.asarray(named["k_ref"]).ravel(), np.asarray(named["Ea_over_R"]).ravel()
     )[0, 1]
@@ -220,7 +173,7 @@ def mechanistic_posterior(args: Any, key: Any) -> None:
 def last_layer_posterior(args: Any, key: Any) -> None:
     k_data, k_model, k_fit, k_chain = jr.split(key, 4)
     print("\n[hybrid] data from the saturating law, last layer only")
-    dataset = noisy_data(true_g, k_data)
+    dataset = make_data(k_data, true_g, NOISE_STD**2)
     hybrid, _ = build_models(k_model)
     config = hm.OptaxTrainingConfig(
         phases=(
