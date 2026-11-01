@@ -24,6 +24,7 @@
 save(
     path: 'str | Path',
     run: 'HybridModel | FitResult',
+    *,
     config: 'OptaxTrainingConfig | EvosaxTrainingConfig | None' = None,
     objective: 'Objective | None' = None,
     extras: 'dict[str, Any] | None' = None,
@@ -85,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L466)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L469)</small>
 
 ---
 

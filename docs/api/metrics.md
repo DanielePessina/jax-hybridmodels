@@ -53,6 +53,7 @@ Metrics for a single output channel.
 ```python
 compute_metrics(
     predictions: 'Mapping[str, Any]',
+    *,
     by: "Literal['channel', 'experiment']" = 'channel',
 ) -> dict[str, Any]
 ```

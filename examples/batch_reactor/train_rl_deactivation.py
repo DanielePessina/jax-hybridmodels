@@ -1169,13 +1169,11 @@ def main() -> None:
         "deactivation must matter, or there is nothing for the policy to learn"
     )
 
-    baseline_config = hm.OptaxTrainingConfig(
-        steps=args.baseline_steps, lr=args.baseline_lr, verbose=False
-    )
+    baseline_config = hm.OptaxTrainingConfig(steps=args.baseline_steps, lr=args.baseline_lr)
 
     print("\n[fit] baseline: trunk + fitted exponential decay scalar (optax)")
     model = make_model(trunk, ExponentialDecay(key=k_exp), kind="exponential")
-    fit_exp = model.fit(train_dataset, baseline_config, key=k_exp)
+    fit_exp = model.fit(train_dataset, baseline_config, key=k_exp, verbose=False)
     exponential = fit_exp.model.predictors
     print(
         f"  final loss {fit_exp.history.loss[-1]:.6f}, fitted k_d {float(exponential.rate()):.4f}"
@@ -1183,7 +1181,7 @@ def main() -> None:
 
     print("\n[fit] baseline: trunk + the activity policy, optax through the solve")
     model = make_model(trunk, build_policy(key=k_grad), kind="policy")
-    fit_grad = model.fit(train_dataset, baseline_config, key=k_grad)
+    fit_grad = model.fit(train_dataset, baseline_config, key=k_grad, verbose=False)
     gradient_policy = fit_grad.model.predictors
     print(f"  final loss {fit_grad.history.loss[-1]:.6f}")
 

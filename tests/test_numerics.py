@@ -34,7 +34,6 @@ from _models import (
     make_model,
     network_predictors,
     parameter_predictors,
-    quiet,
     simulate_parameter,
 )
 from jax import Array
@@ -94,7 +93,11 @@ from jaxhybridmodels.solver import (
     register_solver,
 )
 from jaxhybridmodels.trainable import freeze_mask, trainable_mask
-from jaxhybridmodels.training.kernels import apply_length_mask, build_score_bucket
+from jaxhybridmodels.training.kernels import (
+    apply_length_mask,
+    build_bucket_step,
+    build_score_bucket,
+)
 from jaxhybridmodels.transforms import (
     BOUND_TRANSFORMS,
     WARPS,
@@ -207,9 +210,11 @@ def test_a_horizon_change_does_not_recompile_training():
     # The horizon is a traced fraction. One trace per bucket, plus the abstract
     # shape check before training; anything more is a retrace at a phase boundary.
     traces: list[Any] = []
-    config = quiet(phases=(hm.TrainingPhase(5, lr=0.1, horizon=0.5), hm.TrainingPhase(5, lr=0.05)))
+    config = hm.OptaxTrainingConfig(
+        phases=(hm.TrainingPhase(5, lr=0.1, horizon=0.5), hm.TrainingPhase(5, lr=0.05))
+    )
     make_model(parameter_predictors(), _counting(traces)).fit(
-        decay_dataset(), config, key=jr.key(0)
+        decay_dataset(), config, key=jr.key(0), verbose=False
     )
     assert len(traces) <= len(decay_dataset().bucket_payloads) + 1
 
@@ -1542,6 +1547,33 @@ def test_the_score_charges_the_trajectory_penalty():
             assert int(bp.mask.sum()) == 0
             assert data == pytest.approx(0.0, abs=1e-7)
         assert float(penalised(predictors, bp, full)) > data + 1.0
+
+
+def test_a_new_horizon_neither_retraces_nor_needs_saying():
+    """A kernel defaults to the whole trajectory, and floats do not recompile it."""
+    traces: list[int] = []
+
+    def counted_mse(pred_obs, bp):
+        traces.append(1)
+        return masked_mse(pred_obs, bp)
+
+    predictors = latent_predictors(5.0)
+    kernels = {
+        "step": build_bucket_step(
+            loss_fn=counted_mse, trainable=trainable_mask(predictors), **EMBEDDED_KWARGS
+        ),
+        "score": build_score_bucket(loss_fn=counted_mse, **EMBEDDED_KWARGS),
+    }
+    bp = embedded_dataset().bucket_payloads[0]
+    for name, kernel in kernels.items():
+        traces.clear()
+        whole = kernel(predictors, bp)
+        for horizon in (0.3, 0.5):
+            kernel(predictors, bp, horizon=horizon)
+        same = kernel(predictors, bp, horizon=1.0)
+        assert len(traces) == 1, name
+        for a, b in zip(jax.tree.leaves(whole), jax.tree.leaves(same), strict=True):
+            np.testing.assert_array_equal(a, b)
 
 
 def test_data_penalty_points_sit_at_observed_cells(temp_data):

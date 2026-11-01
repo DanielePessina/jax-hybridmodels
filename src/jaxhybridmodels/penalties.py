@@ -379,22 +379,22 @@ def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPoint
     return tuple(sources)
 
 
-def length_mask_keep(source: PenaltyPointSource, length_mask_fraction: float) -> Array:
+def length_mask_keep(source: PenaltyPointSource, horizon: float) -> Array:
     """Boolean keep-vector over a source's cells, matching the loss's prefix mask.
 
     Applies the same prefix semantics :func:`~jaxhybridmodels.training.kernels.apply_length_mask`
     gives the loss: a cell is kept when its timestamp index is below
-    ``ceil(T * fraction)``, clamped at 1 so a phase never scores nothing.
+    ``ceil(T * horizon)``, clamped at 1 so a phase never scores nothing.
     The penalty therefore follows the curriculum exactly, disagreeing with
     the loss about which points are live only by mistake.
 
-    ``length_mask_fraction`` must be a Python float, not a traced array:
+    ``horizon`` must be a Python float, not a traced array:
     the keep-vector is used to *index* the gathered points, and JAX rejects
     boolean indexing with tracers. The penalty kernel retraces only when
-    the fraction changes (a phase boundary), never per step.
+    the horizon changes (a phase boundary), never per step.
     """
     cutoff = jnp.maximum(
-        jnp.ceil(jnp.float32(source.cell_T) * length_mask_fraction).astype(jnp.int32),
+        jnp.ceil(jnp.float32(source.cell_T) * horizon).astype(jnp.int32),
         jnp.int32(1),
     )
     return source.cell_ts < cutoff
@@ -496,7 +496,7 @@ def validate_penalty_points(
 def select_penalty_points(
     sources: tuple[PenaltyPointSource | None, ...],
     extras: tuple[Array, ...],
-    length_mask_fraction: float,
+    horizon: float,
 ) -> tuple[Array, ...]:
     """Per-leaf point arrays for one phase: length-mask-kept cells ∪ extras.
 
@@ -515,7 +515,7 @@ def select_penalty_points(
     for idx, src in enumerate(sources):
         extra = extras[idx] if idx < len(extras) else None
         if src is not None and src.points.shape[0] > 0:
-            kept = src.points[length_mask_keep(src, length_mask_fraction)]
+            kept = src.points[length_mask_keep(src, horizon)]
             if extra is not None and extra.shape[0] > 0:
                 built.append(jnp.concatenate([kept, extra]))
             else:

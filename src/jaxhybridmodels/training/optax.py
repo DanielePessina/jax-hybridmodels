@@ -222,9 +222,6 @@ class OptaxTrainingConfig:
         changes, since tracked losses over different horizons are not
         comparable and the shortest horizon would otherwise always own the
         minimum.
-    verbose : bool
-        Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An
-        explicit ``ui=...`` argument always wins.
     """
 
     # Single-phase shorthand. Init-only: after construction the schedule
@@ -238,7 +235,6 @@ class OptaxTrainingConfig:
     tournament_lr: float = 1e-4
     patience: int = 0
     restore_best: bool = True
-    verbose: bool = True
 
     def __post_init__(
         self,
@@ -449,7 +445,7 @@ def _training_step(
     predictors: Any,
     dataset: Dataset,
     bucket_step: Callable[..., tuple[Array, Any]],
-    length_mask_fraction: Array,
+    horizon: Array,
     trainable: Any,
 ) -> tuple[Array, Any, int]:
     """One training step: every bucket, gradients accumulated, raw sums back.
@@ -470,7 +466,7 @@ def _training_step(
     total_loss = jnp.asarray(0.0)
     n_buckets = 0
     for bp in dataset.bucket_payloads:
-        loss, grads = bucket_step(predictors, bp, length_mask_fraction)
+        loss, grads = bucket_step(predictors, bp, horizon)
         if acc_grads is None:
             acc_grads = grads
         else:
@@ -495,7 +491,7 @@ def _shared_tournament(
     tournament_steps: int,
     tournament_lr: float,
     key: Array,
-    length_mask_fraction: Array,
+    horizon: Array,
     top_k: int,
 ) -> list[tuple[float, Any]]:
     """Warm-start selection: train several fresh inits briefly, keep the best ``top_k``.
@@ -548,7 +544,7 @@ def _shared_tournament(
 
             for _ in range(tournament_steps):
                 _loss, acc_grads, n_buckets = _training_step(
-                    candidate, dataset, bucket_step, length_mask_fraction, trainable
+                    candidate, dataset, bucket_step, horizon, trainable
                 )
                 denom = float(max(n_buckets, 1))
 
@@ -564,7 +560,7 @@ def _shared_tournament(
             # phases charge it), so a candidate wins on fit.
             score = jnp.asarray(0.0)
             for bp in dataset.bucket_payloads:
-                score = score + score_bucket(candidate, bp, length_mask_fraction)
+                score = score + score_bucket(candidate, bp, horizon)
             score = score / max(len(dataset.bucket_payloads), 1)
             score_value = float(score)
             if not math.isfinite(score_value):
@@ -631,7 +627,7 @@ def _warmup_compile(
     *,
     bucket_step: Callable[..., tuple[Array, Any]],
     ui: TrainingUI,
-    length_mask_fraction: Array,
+    horizon: Array,
     penalty_step: Callable[..., tuple[Array, Any]] | None = None,
     optimizer: optax.GradientTransformation | None = None,
     step_update: Callable[..., tuple[Any, Any]] | None = None,
@@ -669,7 +665,7 @@ def _warmup_compile(
     for idx, bp in enumerate(bucket_payloads):
         bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
         ui.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
-        warm_loss, warm_grads = bucket_step(predictors, bp, length_mask_fraction)
+        warm_loss, warm_grads = bucket_step(predictors, bp, horizon)
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
         last_grads = warm_grads
         ui.on_compile_progress(bucket_idx=idx, total_buckets=total_buckets)
@@ -691,7 +687,7 @@ def _warmup_compile(
     # The tournament's forward-only scorer gets its first trace here too.
     if score_bucket is not None:
         for bp in bucket_payloads:
-            warm_score = score_bucket(predictors, bp, length_mask_fraction)
+            warm_score = score_bucket(predictors, bp, horizon)
             jax.block_until_ready(warm_score)  # type: ignore[no-untyped-call]
 
     if not settle:
@@ -700,7 +696,7 @@ def _warmup_compile(
     # One update round, then re-trace every kernel on the updated (strong)
     # tree, absorbing the weak→strong retrace into the compile bracket.
     for bp in bucket_payloads:
-        warm_loss, _ = bucket_step(updated, bp, length_mask_fraction)
+        warm_loss, _ = bucket_step(updated, bp, horizon)
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
     warm_penalty, _ = penalty_step(updated, zero_weight, penalty_points)
     jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
@@ -710,7 +706,7 @@ def _warmup_compile(
     # predictors; settle it too so a scoring sweep never re-traces.
     if score_bucket is not None:
         for bp in bucket_payloads:
-            warm_score = score_bucket(updated, bp, length_mask_fraction)
+            warm_score = score_bucket(updated, bp, horizon)
             jax.block_until_ready(warm_score)  # type: ignore[no-untyped-call]
     ui.on_compile_progress(bucket_idx=total_buckets, total_buckets=total_buckets)
 
@@ -868,6 +864,7 @@ def train_with_optax(
     freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
     trainable: Any = None,
     ui: TrainingUI | None = None,
+    verbose: bool = True,
     validation: Data | None = None,
 ) -> FitResult:
     """Train ``model``'s predictors with Optax; what ``model.fit`` runs for an Optax config.
@@ -922,6 +919,7 @@ def train_with_optax(
         trainable=mask,
         key=key,
         ui=ui,
+        verbose=verbose,
         validation=validation_set,
     )
     return _fit_result(model, run)
@@ -930,7 +928,7 @@ def train_with_optax(
 def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
     """Wrap one phase run as the user-facing :class:`FitResult`."""
     return FitResult(
-        model=model._with_predictors(run.predictors),
+        model=model.with_predictors(run.predictors),
         history=FitHistory(
             loss=tuple(run.loss),
             penalty=tuple(run.penalty),
@@ -960,6 +958,7 @@ def _train_with_optax(
     trainable: Any = None,
     key: Array,
     ui: TrainingUI | None = None,
+    verbose: bool = True,
     validation: Dataset | None = None,
 ) -> _PhaseRun:
     """Train loose predictors and return the full per-step record.
@@ -982,7 +981,7 @@ def _train_with_optax(
     # Resolved before the dashboard opens, so a bad channel name or penalty
     # path raises without leaving a Rich Live display on the terminal.
     resolved = _resolve_objective(objective, predictors, dataset, config)
-    ui_ = _select_ui(ui, config.verbose)
+    ui_ = _select_ui(ui, verbose)
     ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
     with close_run_on_error(ui_):
         kernels = _build_training_kernels(
@@ -1013,7 +1012,7 @@ def _train_with_optax(
                 tournament_steps=config.tournament_steps,
                 tournament_lr=config.tournament_lr,
                 key=fold(key, "tournament"),
-                length_mask_fraction=jnp.asarray(1.0),
+                horizon=jnp.asarray(1.0),
                 top_k=1,
             )
             predictors = ranked[0][1]
@@ -1115,11 +1114,11 @@ def _run_phases(
             step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
             step_update_optimizer = optimizer
 
-        length_mask_fraction = jnp.asarray(phase.horizon)
+        horizon = jnp.asarray(phase.horizon)
         weight = _phase_penalty_weight(phase, kernels.objective)
         # Traced, not closed over: a Python float that changed per phase
         # would retrace ``bucket_step`` at every phase boundary. Same reason
-        # ``length_mask_fraction`` is passed rather than baked in.
+        # ``horizon`` is passed rather than baked in.
         penalty_weight = jnp.asarray(weight)
         # Host-side per phase: the keep-mask must be concrete to index the
         # gathered points. A shape change across phases retraces only the
@@ -1146,7 +1145,7 @@ def _run_phases(
                 _set_lr(opt_state, lrs[step])
             try:
                 total_loss, acc_grads, n_buckets = _training_step(
-                    predictors, dataset, kernels.bucket_step, length_mask_fraction, trainable
+                    predictors, dataset, kernels.bucket_step, horizon, trainable
                 )
                 avg_penalty, penalty_grads = kernels.penalty_step(
                     predictors, penalty_weight, phase_points
@@ -1331,7 +1330,7 @@ def _build_training_kernels(
         bucket_payloads,
         bucket_step=bucket_step,
         ui=ui,
-        length_mask_fraction=jnp.asarray(1.0),
+        horizon=jnp.asarray(1.0),
         penalty_step=penalty_step,
         optimizer=optimizer,
         step_update=step_update,
@@ -1366,6 +1365,7 @@ def _fit_ensemble(
     freeze: Sequence[FreezeSpec] | FreezeSpec | None,
     trainable: Any,
     ui: TrainingUI | None,
+    verbose: bool = True,
     validation: Data | None = None,
 ) -> list[FitResult]:
     """The body of :meth:`HybridModel.fit_ensemble`; see there for the two modes.
@@ -1401,7 +1401,7 @@ def _fit_ensemble(
 
     # Resolved before the dashboard opens; see _train_with_optax.
     resolved = _resolve_objective(objective, predictors, dataset, config)
-    ui_ = _select_ui(ui, config.verbose)
+    ui_ = _select_ui(ui, verbose)
     ui_.on_run_start(total_steps=config.total_steps, num_phases=len(config.phases))
     with close_run_on_error(ui_):
         kernels = _build_training_kernels(
@@ -1434,7 +1434,7 @@ def _fit_ensemble(
                 tournament_steps=config.tournament_steps,
                 tournament_lr=config.tournament_lr,
                 key=seed_key,
-                length_mask_fraction=jnp.asarray(1.0),
+                horizon=jnp.asarray(1.0),
                 top_k=top_k,
             )
 

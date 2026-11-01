@@ -25,6 +25,7 @@ Pass them by name via training-config `loss="mse"` (resolved through [`LOSS_REGI
 masked_mse(
     pred_obs: "Float[Array, 'N T D']",
     bp: 'BucketPayload',
+    *,
     channel_idx: 'tuple[int, ...] | None' = None,
     channel_weights: 'tuple[float, ...] | None' = None,
 ) -> Array
@@ -60,6 +61,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 masked_mle(
     pred_obs: "Float[Array, 'N T D']",
     bp: 'BucketPayload',
+    *,
     channel_idx: 'tuple[int, ...] | None' = None,
     channel_weights: 'tuple[float, ...] | None' = None,
 ) -> Array
@@ -90,6 +92,7 @@ per-experiment averaged version.
 bal_mse(
     pred_obs: "Float[Array, 'N T D']",
     bp: 'BucketPayload',
+    *,
     channel_idx: 'tuple[int, ...] | None' = None,
     channel_weights: 'tuple[float, ...] | None' = None,
 ) -> Array
@@ -122,6 +125,7 @@ from the outer mean rather than diluting measured experiments.
 bal_mle(
     pred_obs: "Float[Array, 'N T D']",
     bp: 'BucketPayload',
+    *,
     channel_idx: 'tuple[int, ...] | None' = None,
     channel_weights: 'tuple[float, ...] | None' = None,
 ) -> Array

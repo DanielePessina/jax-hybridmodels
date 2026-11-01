@@ -127,6 +127,8 @@ if TYPE_CHECKING:
         NeuralNPolynomial,
         Parameter,
         Predictor,
+        reinitialize_pytree_with_key,
+        reinitialize_with_key,
     )
     from jaxhybridmodels.profiles import (
         constant_profile,
@@ -163,6 +165,8 @@ _EXPORTS: dict[str, str] = {
     "BoundedPredictor": "jaxhybridmodels.predictors",
     "BoundScaler": "jaxhybridmodels.predictors",
     "Predictor": "jaxhybridmodels.predictors",
+    "reinitialize_with_key": "jaxhybridmodels.predictors",
+    "reinitialize_pytree_with_key": "jaxhybridmodels.predictors",
     "MLPPredictor": "jaxhybridmodels.predictors",
     "KANPredictor": "jaxhybridmodels.predictors",
     "NeuralNPolynomial": "jaxhybridmodels.predictors",
@@ -240,6 +244,8 @@ __all__: list[str] = [
     "BoundedPredictor",
     "BoundScaler",
     "Predictor",
+    "reinitialize_with_key",
+    "reinitialize_pytree_with_key",
     "MLPPredictor",
     "KANPredictor",
     "NeuralNPolynomial",

@@ -22,6 +22,7 @@ Solvers are looked up by name through [`SOLVER_REGISTRY`](#solver_registry); [`r
 
 ```python
 SolverConfig(
+    *,
     solver: 'diffrax.AbstractSolver[Any] | None' = None,
     rtol: 'float' = 1e-05,
     atol: 'float | tuple[float, ...]' = 1e-07,

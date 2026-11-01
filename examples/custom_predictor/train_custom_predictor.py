@@ -327,9 +327,8 @@ def main() -> None:
         tournament_attempts=3,
         tournament_steps=40,
         tournament_lr=args.lr,
-        verbose=False,
     )
-    result = model.fit(dataset, config, key=k_train, freeze=freeze)
+    result = model.fit(dataset, config, key=k_train, freeze=freeze, verbose=False)
     # endregion fit
     trained = result.model.predictors
     print("\n[results]")

@@ -42,6 +42,7 @@ values, which is what a gradient-based optimiser can actually update.
 ```python
 trainable_mask(
     predictors: 'Any',
+    *,
     predicate: 'Callable[[Any], bool]' = <default_trainable>,
     train_scalers: 'bool' = False,
 ) -> Any
@@ -70,6 +71,7 @@ result unchanged.
 freeze_mask(
     predictors: 'Any',
     freeze: 'Sequence[FreezeSpec] | FreezeSpec',
+    *,
     mask: 'Any' = None,
 ) -> Any
 ```

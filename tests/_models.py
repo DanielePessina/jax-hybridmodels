@@ -25,7 +25,6 @@ import jax.random as jr
 from jax import Array
 
 import jaxhybridmodels as hm
-from jaxhybridmodels.training import OptaxTrainingConfig
 
 TRUE_RATE = 0.8
 CHANNELS = ("conc",)
@@ -125,11 +124,6 @@ def network_model(key: Array | None = None) -> hm.HybridModel:
         output_channel_names=CHANNELS,
         solver=SOLVER,
     )
-
-
-def quiet(**kwargs: Any) -> OptaxTrainingConfig:
-    """An Optax config with the Rich UI off, which tests never want on by accident."""
-    return OptaxTrainingConfig(verbose=False, **kwargs)
 
 
 def make_model(

@@ -19,6 +19,7 @@
 predict_ensemble(
     models: 'Sequence[HybridModel | FitResult]',
     data: 'Data',
+    *,
     ts: 'ArrayLike | None' = None,
     n_points: 'int | None' = None,
     quantiles: 'Sequence[float]' = (),

@@ -291,10 +291,10 @@ def make_experiment(
     *,
     channels: dict[str, ChannelObs],
     covariates: dict[str, float | Array] | None = None,
-    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
     exp_id: str = "",
     t0: float | None = None,
     y0: Any = None,
+    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
 ) -> Experiment:
     """Build one ``Experiment`` from raw covariates, channels, and a state-init hook.
 
@@ -319,6 +319,7 @@ def make_experiment(
         integrates.
     exp_id
         Optional human-readable id copied to ``Experiment.exp_id``.
+        ``make_dataset`` names an experiment that has none.
     t0
         Initial state time, at or before the first observation. Added as an
         unobserved integration point. None preserves the first-observation
@@ -352,9 +353,9 @@ def experiment_from_array(
     ts: Any,
     values: Any,
     channel_names: Sequence[str],
-    exp_id: str,
     variance: Any = 1.0,
     covariates: dict[str, float | Array] | None = None,
+    exp_id: str = "",
     t0: float | None = None,
     y0: Any = None,
     y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
@@ -375,12 +376,10 @@ def experiment_from_array(
         rank-1 ``[T]`` array is accepted when there is one channel.
     channel_names
         The ``D`` channel names.
-    exp_id
-        Identifier, required so results stay traceable to the source run.
     variance
         A scalar for every cell, a length-``D`` sequence with one value per
         channel, or a ``[T, D]`` array. Read only at observed cells.
-    covariates, t0, y0, y0_fn
+    covariates, exp_id, t0, y0, y0_fn
         As for :func:`make_experiment`. Supply exactly one of ``y0`` and
         ``y0_fn``.
     """

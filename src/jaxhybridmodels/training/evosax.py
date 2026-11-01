@@ -155,9 +155,6 @@ class EvosaxTrainingConfig:
     log_every
         UI heartbeat cadence. Honoured only by the Rich UIs; the silent
         and recording UIs see every generation.
-    verbose
-        Selects ``RichEvosaxUI`` over ``SilentUI`` when ``ui=None``. An
-        explicit ``ui=...`` argument always wins.
     """
 
     algorithm: str = "CMA_ES"
@@ -167,7 +164,6 @@ class EvosaxTrainingConfig:
     init_box_extent: float = 2.0
     sigma_init: float = 0.1
     log_every: int = 1
-    verbose: bool = True
 
     def __post_init__(self) -> None:
         if self.algorithm not in ALGORITHM_REGISTRY:
@@ -366,6 +362,7 @@ def train_with_evosax(
     freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
     trainable: Any = None,
     ui: EvosaxUI | None = None,
+    verbose: bool = True,
     validation: Data | None = None,
 ) -> FitResult:
     """Train ``model``'s predictors with an evolutionary strategy; ``fit`` for an Evosax config.
@@ -407,10 +404,11 @@ def train_with_evosax(
         trainable=mask,
         key=key,
         ui=ui,
+        verbose=verbose,
         validation=validation_set,
     )
     return FitResult(
-        model=model._with_predictors(run.predictors),
+        model=model.with_predictors(run.predictors),
         history=FitHistory(loss=tuple(run.loss), validation_loss=tuple(run.validation)),
         best_step=run.best_step,
         stop_reason="budget_exhausted" if run.failure is None else "diverged",
@@ -429,6 +427,7 @@ def _train_with_evosax(
     trainable: Any = None,
     key: Array,
     ui: EvosaxUI | None = None,
+    verbose: bool = True,
     validation: Dataset | None = None,
 ) -> _EvosaxRun:
     """Train loose predictors and return the per-generation record.
@@ -473,7 +472,7 @@ def _train_with_evosax(
             score_bucket, validation, output_channel_names=dataset.output_channel_names
         )
 
-    ui_ = _select_ui(ui, config.verbose, config.log_every)
+    ui_ = _select_ui(ui, verbose, config.log_every)
     ui_.on_run_start(total_steps=int(config.steps), population_size=int(config.population_size))
     with close_run_on_error(ui_):
         single_eval = _build_single_eval(

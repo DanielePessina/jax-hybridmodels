@@ -12,10 +12,9 @@ loops implements both protocols, as ``SilentUI`` does.
 
 UI selection
 ------------
-Each training config has a ``verbose: bool`` field defaulting to
-``True`` (the Rich live-dashboard UI); ``False`` selects ``SilentUI``.
-An explicit ``ui=...`` argument to ``train_with_optax`` /
-``train_with_evosax`` always overrides both.
+``fit``, ``fit_ensemble``, ``train_with_optax`` and ``train_with_evosax``
+take ``verbose``, defaulting to ``True`` (the Rich live-dashboard UI);
+``False`` selects ``SilentUI``. An explicit ``ui=...`` always overrides both.
 
 Compile events
 --------------
@@ -172,7 +171,7 @@ def close_run_on_error(ui: TrainingUI | EvosaxUI) -> Iterator[None]:
 class SilentUI:
     """No-op UI satisfying both ``TrainingUI`` and ``EvosaxUI``.
 
-    Selected when ``config.verbose=False``, and used in tests where stdout
+    Selected by ``verbose=False``, and used in tests where stdout
     would pollute captured logs. Every method takes ``**kwargs``, so a new
     event argument never breaks it.
     """
