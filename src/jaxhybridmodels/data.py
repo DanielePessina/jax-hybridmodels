@@ -16,8 +16,9 @@ one ``BucketPayload``, a *bucket*.
 Buckets exist because JAX compiles once per distinct input shape, so
 batching equal-length experiments lets one kernel run the whole group and
 keeps the compilation count equal to the number of distinct lengths, with
-no padding. Other layouts (regular grids, single-channel, ragged) are not
-modelled here; pre-process such data into this shape.
+no padding unless ``make_dataset(max_buckets=)`` asks for fewer. Other
+layouts (regular grids, single-channel, ragged) are not modelled here;
+pre-process such data into this shape.
 
 Lifecycle and lifetime
 ----------------------
@@ -44,6 +45,7 @@ Shape conventions (used throughout the package)
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple, cast
@@ -252,12 +254,19 @@ class Dataset(eqx.Module):
         Source experiments in input order, read through the
         :attr:`experiments` property. Empty when a ``Dataset`` is built by
         hand from raw payloads, and ``split_dataset`` then raises.
+    _locations : tuple[tuple[int, int], ...]
+        ``(bucket, row)`` of each source experiment, in the same order.
+    _max_buckets : int | None
+        The limit given to ``make_dataset``, kept so that a split or a
+        resample applies it again to its own experiments.
     """
 
     bucket_payloads: tuple[BucketPayload, ...]
     output_channel_names: tuple[str, ...] = eqx.field(static=True)
     covariate_names: tuple[str, ...] = eqx.field(static=True)
     _experiments: tuple[Experiment, ...] = ()
+    _locations: tuple[tuple[int, int], ...] = eqx.field(static=True, default=())
+    _max_buckets: int | None = eqx.field(static=True, default=None)
 
     @property
     def experiments(self) -> tuple[Experiment, ...]:
@@ -769,6 +778,90 @@ def _validate_experiments(
     return cov_keys
 
 
+def _choose_bucket_lengths(lengths: Sequence[int], max_buckets: int) -> tuple[int, ...]:
+    """Pick at most ``max_buckets`` target lengths, minimising the padded size.
+
+    A bucket pads each experiment up to its longest, so a bucket's cost is its
+    experiment count times that length, the number of solver outputs per step.
+    Experiments in a bucket are always a contiguous run of the sorted lengths,
+    because swapping two across a boundary can only add padding. That leaves
+    a small dynamic program over where the boundaries go. It is exact and
+    deterministic, which a greedy merge of the closest lengths would not be.
+    """
+    counts = Counter(lengths)
+    distinct = sorted(counts)
+    if len(distinct) <= max_buckets:
+        return tuple(distinct)
+    # Cumulative experiment counts, so a run's size is a difference of two.
+    totals = [0, *np.cumsum([counts[length] for length in distinct]).tolist()]
+    n = len(distinct)
+
+    # best[i] is the lowest cost of covering the first i lengths with the
+    # buckets placed so far; cuts[b][i] is where the last of those buckets starts.
+    best = [totals[i] * distinct[i - 1] if i else 0 for i in range(n + 1)]
+    cuts: list[list[int]] = [[0] * (n + 1)]
+    for _ in range(1, max_buckets):
+        previous, best = best, list(best)
+        row = list(cuts[-1])
+        for i in range(1, n + 1):
+            row[i] = i  # No new bucket ends at i until a cheaper split is found.
+            for start in range(1, i):
+                cost = previous[start] + (totals[i] - totals[start]) * distinct[i - 1]
+                if cost < best[i]:
+                    best[i], row[i] = cost, start
+        cuts.append(row)
+
+    chosen = []
+    end = n
+    for row in reversed(cuts):
+        chosen.append(distinct[end - 1])
+        end = row[end]
+        if end == 0:
+            break
+    # A row that added no bucket at this boundary repeats the same length.
+    return tuple(sorted(set(chosen)))
+
+
+def _pad_to_length(arrays: _ExperimentArrays, target: int, exp_id: str) -> _ExperimentArrays:
+    """Add unobserved rows at midpoints of the largest gaps until ``target`` rows.
+
+    Midpoints rather than repeats of the last time, so ``ts`` stays strictly
+    increasing and a ``simulate_fn`` stepping exactly through it keeps working,
+    and rather than later times, so the integration span does not change. The
+    new rows are masked, so no loss scores them.
+    """
+    length = arrays.ts.shape[0]
+    if length == target:
+        return arrays
+    original = np.asarray(arrays.ts)
+    # An integer time axis has no midpoints.
+    float_dtype = original.dtype if original.dtype.kind == "f" else jnp.result_type(float)
+    times = original.astype(float_dtype)
+    for _ in range(target - length):
+        gap = int(np.argmax(np.diff(times)))
+        midpoint = times[gap] + (times[gap + 1] - times[gap]) / 2
+        if not times[gap] < midpoint < times[gap + 1]:
+            raise ValueError(
+                f"Experiment {exp_id!r}: its times are too close together to pad to length "
+                f"{target}; use more buckets, or x64"
+            )
+        times = np.insert(times, gap + 1, midpoint)
+    rows = np.searchsorted(times, original.astype(times.dtype))
+    width = arrays.y_observed.shape[1]
+    y_observed = np.zeros((target, width), dtype=arrays.y_observed.dtype)
+    yvar = np.ones((target, width), dtype=arrays.yvar.dtype)
+    mask = np.zeros((target, width), dtype=bool)
+    y_observed[rows] = np.asarray(arrays.y_observed)
+    yvar[rows] = np.asarray(arrays.yvar)
+    mask[rows] = np.asarray(arrays.mask)
+    return _ExperimentArrays(
+        ts=jnp.asarray(times),
+        y_observed=jnp.asarray(y_observed),
+        yvar=jnp.asarray(yvar),
+        mask=jnp.asarray(mask),
+    )
+
+
 def _stack_bucket(
     items: list[tuple[_ExperimentArrays, Experiment]],
     cov_keys: tuple[str, ...],
@@ -818,6 +911,7 @@ def make_dataset(
     experiments: Sequence[Experiment],
     *,
     output_channel_names: tuple[str, ...] | list[str],
+    max_buckets: int | None = None,
 ) -> Dataset:
     """Bucket and stack ``experiments`` into a JAX-traceable ``Dataset``.
 
@@ -835,6 +929,17 @@ def make_dataset(
        and each group is stacked along a new leading ``N`` axis into one
        ``BucketPayload``. Buckets come out in ascending ``T`` order.
 
+    Every bucket compiles its own kernels, so many distinct lengths mean a slow
+    start. ``max_buckets`` caps the count by padding shorter experiments with
+    unobserved rows, at midpoints of their largest gaps, choosing the buckets
+    that add the fewest rows. Predictions still report each experiment's own
+    times. Only ``PredictionResult.buckets`` shows the padded grids.
+
+    Capping changes what a fit minimises. The loss averages buckets with equal
+    weight, so regrouping experiments reweights them. ``TrainingPhase.horizon``
+    counts rows, so its cutoff shifts slightly, and a trajectory penalty also
+    sees the state at the added rows.
+
     The ``Dataset`` is pure data: ``state_to_output``, being a property of
     the model, is passed to prediction and training separately.
 
@@ -846,6 +951,11 @@ def make_dataset(
     output_channel_names
         Channel order for the trailing ``D`` axis. Coerced to a tuple before
         being stored statically on the ``Dataset``.
+    max_buckets
+        Most buckets to build. ``None`` keeps one per distinct length. An
+        experiment with a single time has no gap to pad, so it stays in a
+        bucket of its own, on top of this limit. Splits and resamples of the
+        dataset apply the same limit to their own experiments.
 
     Returns
     -------
@@ -855,6 +965,10 @@ def make_dataset(
     """
     if not experiments:
         raise ValueError("make_dataset requires at least one experiment")
+    if max_buckets is not None and (
+        isinstance(max_buckets, bool) or not isinstance(max_buckets, int) or max_buckets < 1
+    ):
+        raise ValueError(f"make_dataset: max_buckets must be a positive int; got {max_buckets!r}")
     experiments = _named_experiments(experiments)
     output_channel_names = tuple(output_channel_names)
     if not output_channel_names:
@@ -863,24 +977,43 @@ def make_dataset(
         raise ValueError("output_channel_names must not contain duplicates")
     cov_keys = _validate_experiments(experiments, output_channel_names)
 
-    by_len: dict[int, list[tuple[_ExperimentArrays, Experiment]]] = defaultdict(list)
+    per_experiment = []
     for exp in experiments:
         arrays = _per_experiment_arrays(exp, output_channel_names)
         if arrays.ts.shape[0] == 0:
             raise ValueError(
                 f"Experiment {exp.exp_id!r} has no timestamps across the requested channels"
             )
-        by_len[arrays.ts.shape[0]].append((arrays, exp))
+        per_experiment.append(arrays)
+
+    lengths = [arrays.ts.shape[0] for arrays in per_experiment]
+    # One row spans no time, so there is nothing to pad into.
+    paddable = [length for length in lengths if length > 1]
+    targets = (
+        _choose_bucket_lengths(paddable, max_buckets)
+        if max_buckets is not None and paddable
+        else tuple(sorted(set(paddable)))
+    )
+    by_len: dict[int, list[tuple[_ExperimentArrays, Experiment]]] = defaultdict(list)
+    rows: list[tuple[int, int]] = []
+    for arrays, exp, length in zip(per_experiment, experiments, lengths, strict=True):
+        target = length if length == 1 else targets[bisect_left(targets, length)]
+        rows.append((target, len(by_len[target])))
+        by_len[target].append((_pad_to_length(arrays, target, exp.exp_id), exp))
 
     # Ascending T, so bucket order is a deterministic function of the data
     # rather than of dict insertion order.
-    bucket_payloads = tuple(_stack_bucket(by_len[T], cov_keys) for T in sorted(by_len))
+    ordered = sorted(by_len)
+    bucket_payloads = tuple(_stack_bucket(by_len[T], cov_keys) for T in ordered)
+    index_of = {T: i for i, T in enumerate(ordered)}
 
     return Dataset(
         bucket_payloads=bucket_payloads,
         output_channel_names=output_channel_names,
         covariate_names=cov_keys,
         _experiments=tuple(experiments),
+        _locations=tuple((index_of[T], row) for T, row in rows),
+        _max_buckets=max_buckets,
     )
 
 
@@ -960,6 +1093,7 @@ def _subset(
     return make_dataset(
         [experiments[int(i)] for i in idxs],
         output_channel_names=dataset.output_channel_names,
+        max_buckets=dataset._max_buckets,
     )
 
 
@@ -1031,7 +1165,11 @@ def make_bootstrap_dataset(
             name = f"{exp.exp_id}#{draws[exp.exp_id]}"
         taken.add(name)
         resampled.append(_renamed(exp, name))
-    return make_dataset(resampled, output_channel_names=dataset.output_channel_names)
+    return make_dataset(
+        resampled,
+        output_channel_names=dataset.output_channel_names,
+        max_buckets=dataset._max_buckets,
+    )
 
 
 def split_dataset(

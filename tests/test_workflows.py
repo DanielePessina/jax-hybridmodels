@@ -12,6 +12,7 @@ lengths, so masks and bucket dispatch are always exercised.
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, cast
 
 import diffrax
@@ -27,6 +28,7 @@ from jax import Array
 
 import jaxhybridmodels as hm
 import jaxhybridmodels.training.evosax as evosax_module
+from jaxhybridmodels.data import _choose_bucket_lengths
 from jaxhybridmodels.losses import masked_mse
 from jaxhybridmodels.penalties import box_grid
 from jaxhybridmodels.training.kernels import simulate_bucket
@@ -693,6 +695,176 @@ def test_ensemble_validation_selects_each_members_step(validated_ensemble):
 def test_ensemble_validation_ranks_the_members(validated_ensemble):
     scores = [m.history.validation_loss[m.best_step] for m in validated_ensemble]
     assert scores == sorted(scores)
+
+
+# ---------------------------------------------------------------------------
+# Capped buckets: irregular data padded into fewer compiled shapes
+# ---------------------------------------------------------------------------
+
+CAPPED = 2
+
+
+def many_lengths() -> list[hm.Experiment]:
+    """Ten experiments with seven different grid lengths."""
+    sizes = (3, 3, 4, 5, 5, 6, 7, 8, 9, 3)
+    rng = np.random.default_rng(0)
+    built = []
+    for i, size in enumerate(sizes):
+        ts = jnp.asarray(np.sort(rng.uniform(0.1, 3.0, size)), dtype=jnp.float32)
+        built.append(
+            hm.make_experiment(
+                channels={
+                    "a": hm.ChannelObs(ts=ts, values=jnp.exp(-TRUE_RATE * ts)),
+                    "b": hm.ChannelObs(ts=ts[:1], values=1 - jnp.exp(-TRUE_RATE * ts[:1])),
+                },
+                covariates={"temp": 1.0},
+                y0=[1.0, 0.0],
+                t0=0.0,
+                exp_id=f"e{i}",
+            )
+        )
+    return built
+
+
+@pytest.fixture(scope="session")
+def capped_data() -> hm.Dataset:
+    return hm.make_dataset(many_lengths(), output_channel_names=CHANNELS, max_buckets=CAPPED)
+
+
+@pytest.fixture(scope="session")
+def capped_fit(capped_data):
+    traces: list[Any] = []
+    field = hm.HybridModel.from_vector_field(
+        vector_field=plain_field,
+        predictors=plain_model().predictors,
+        state_to_output=lambda state: state,
+        output_channel_names=CHANNELS,
+        solver=SOLVER,
+    ).simulate_fn
+
+    def counted(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Any:
+        traces.append(ts.shape)
+        return field(predictors, ts, covariates, y0, solver)
+
+    model = hm.HybridModel(
+        predictors=plain_model().predictors,
+        simulate_fn=counted,
+        state_to_output=lambda state: state,
+        output_channel_names=CHANNELS,
+        solver=SOLVER,
+    )
+    config = hm.OptaxTrainingConfig(steps=80, lr=0.05, verbose=False)
+    return model.fit(capped_data, config, freeze="frozen", key=jr.key(0)), traces
+
+
+def test_capping_limits_the_buckets_and_keeps_the_data(capped_data):
+    uncapped = hm.make_dataset(many_lengths(), output_channel_names=CHANNELS)
+    assert len(uncapped.bucket_payloads) == 7
+    assert len(capped_data.bucket_payloads) == CAPPED
+    total = sum(int(bp.n_obs) for bp in capped_data.bucket_payloads)
+    assert total == sum(int(bp.n_obs) for bp in uncapped.bucket_payloads)
+    for bp in capped_data.bucket_payloads:
+        # Strictly increasing, and the same start and end as the data asks for.
+        assert bool((jnp.diff(bp.ts, axis=1) > 0).all())
+        assert bool((bp.ts[:, 0] == 0.0).all())
+        # Every padded row is unobserved in every channel, with neutral values.
+        filler = ~bp.mask
+        assert bool((bp.y_observed[filler] == 0.0).all()) and bool((bp.yvar[filler] == 1.0).all())
+
+
+def test_capped_predictions_report_only_the_experiments_own_times(capped_data):
+    data = many_lengths()
+    model = plain_model(TRUE_RATE)
+    capped = model.predict(capped_data)
+    plain = model.predict(data)
+    assert list(capped) == list(plain) == [e.exp_id for e in data]
+    for exp_id in plain:
+        np.testing.assert_array_equal(capped[exp_id].times, plain[exp_id].times)
+        np.testing.assert_allclose(
+            capped[exp_id].outputs["a"], plain[exp_id].outputs["a"], atol=1e-4
+        )
+        np.testing.assert_array_equal(
+            capped[exp_id].observation_mask["a"], plain[exp_id].observation_mask["a"]
+        )
+    assert {k: int(m.n) for k, m in hm.compute_metrics(capped).items()} == {
+        k: int(m.n) for k, m in hm.compute_metrics(plain).items()
+    }
+    # The raw arrays keep the padded grid, one row per experiment in its bucket.
+    assert [b.shape[:2] for b in capped.buckets] == [
+        bp.ts.shape for bp in capped_data.bucket_payloads
+    ]
+
+
+def test_capped_grids_keep_each_experiments_span(capped_data):
+    model = plain_model(TRUE_RATE)
+    for exp_id, experiment in model.predict(capped_data, n_points=5).items():
+        source = next(e for e in capped_data.experiments if e.exp_id == exp_id)
+        assert float(experiment.times[0]) == 0.0
+        assert float(experiment.times[-1]) == pytest.approx(float(source.channels["a"].ts.max()))
+
+
+def test_a_capped_fit_recovers_the_rate_and_compiles_per_bucket(capped_fit):
+    result, traces = capped_fit
+    assert fitted_rate(result) == pytest.approx(TRUE_RATE, abs=0.03)
+    # One abstract shape check plus one trace per bucket. More would be a retrace.
+    assert len(traces) <= CAPPED + 1
+
+
+def test_splits_and_resamples_apply_the_same_cap(capped_data):
+    for subset in hm.split_dataset(capped_data, train=0.6, val=0.2, test=0.2, key=jr.key(0)):
+        assert len(subset.bucket_payloads) <= CAPPED
+    resample = hm.make_bootstrap_dataset(capped_data, key=jr.key(0))
+    assert len(resample.bucket_payloads) <= CAPPED
+
+
+def test_a_single_time_stays_out_of_the_cap():
+    one_point = hm.make_experiment(
+        channels={"a": hm.ChannelObs(ts=jnp.array([1.0]), values=jnp.array([0.5]))},
+        y0=[1.0],
+        exp_id="lone",
+    )
+    longer = [
+        hm.make_experiment(
+            channels={"a": hm.ChannelObs(ts=jnp.arange(1.0, n + 1.0), values=jnp.zeros(n))},
+            y0=[1.0],
+            exp_id=f"n{n}",
+        )
+        for n in (2, 4)
+    ]
+    data = hm.make_dataset([*longer, one_point], output_channel_names=("a",), max_buckets=1)
+    assert sorted(bp.ts.shape[1] for bp in data.bucket_payloads) == [1, 4]
+
+
+def test_integer_times_pad_as_floats():
+    experiment = hm.make_experiment(
+        channels={"a": hm.ChannelObs(ts=jnp.array([1, 2, 4]), values=jnp.zeros(3))},
+        y0=[1.0],
+        exp_id="i",
+    )
+    longer = hm.make_experiment(
+        channels={"a": hm.ChannelObs(ts=jnp.arange(1.0, 7.0), values=jnp.zeros(6))},
+        y0=[1.0],
+        exp_id="f",
+    )
+    data = hm.make_dataset([experiment, longer], output_channel_names=("a",), max_buckets=1)
+    row = data.bucket_payloads[0].ts[0]
+    assert bool((jnp.diff(row) > 0).all()) and int(data.bucket_payloads[0].mask[0].sum()) == 3
+
+
+@pytest.mark.parametrize(
+    "lengths, limit",
+    [((3, 3, 4, 5, 5, 6, 7, 8, 9, 3), 2), ((2, 3, 10, 11, 30, 31, 31), 3), ((5, 9, 12, 20), 3)],
+)
+def test_the_chosen_buckets_are_the_cheapest(lengths, limit):
+    # Brute force over every choice of targets. The longest length is always one.
+    def cost(targets: tuple[int, ...]) -> int:
+        return sum(min(t for t in targets if t >= length) for length in lengths)
+
+    longest, others = max(lengths), sorted(set(lengths) - {max(lengths)})
+    options = [(*c, longest) for n in range(limit) for c in itertools.combinations(others, n)]
+    chosen = _choose_bucket_lengths(lengths, limit)
+    assert len(chosen) <= limit
+    assert cost(chosen) == min(cost(option) for option in options)
 
 
 # ---------------------------------------------------------------------------
