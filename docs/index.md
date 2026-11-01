@@ -93,8 +93,5 @@ hm.print_metrics(predictions)
 Python 3.11 or newer:
 
 ```bash
-uv add jax-hybridmodels==0.2.0b1
+uv add jax-hybridmodels
 ```
-
-The 0.2.0b1 release predates `HybridModel`, `Parameter` and `Constant`. Until
-the next release, use a checkout and `uv sync --extra examples`.

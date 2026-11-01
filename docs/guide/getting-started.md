@@ -7,11 +7,8 @@ inside it.
 ## Install
 
 ```bash
-uv add jax-hybridmodels==0.2.0b1
+uv add jax-hybridmodels
 ```
-
-The 0.2.0b1 release predates `HybridModel`, `Parameter` and `Constant`, which
-this page uses. Until the next release, run `uv sync` in a checkout.
 
 ## Fit a physical parameter
 

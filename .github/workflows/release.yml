@@ -9,7 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    name: Test the tagged commit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install
+        run: uv sync --frozen --python 3.12
+
+      - name: Test
+        run: uv run pytest -q
+
   build:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
@@ -61,7 +83,6 @@ jobs:
           name: distributions
           path: dist/
 
+      # No skip-existing: reusing a version should fail loudly, not publish nothing.
       - name: Publish distributions
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
