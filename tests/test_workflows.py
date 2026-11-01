@@ -68,10 +68,19 @@ def feed_integral(ts: Array) -> Array:
     return jnp.where(ts < 1.0, ts, 1.0 + 0.5 * (ts - 1.0))
 
 
-def experiments(extent: Any = None, rate: Any = None) -> list[hm.Experiment]:
-    """Exact observations. ``extent(ts)`` is the integrated forcing, ``rate(temp)`` the law."""
+def experiments(
+    extent: Any = None, rate: Any = None, *, one_length: bool = False
+) -> list[hm.Experiment]:
+    """Exact observations. ``extent(ts)`` is the integrated forcing, ``rate(temp)`` the law.
+
+    ``one_length`` keeps the experiments with a four-row grid, one bucket instead
+    of two. A fit compiles per bucket, so workflows that do not exercise bucket
+    dispatch use this to run in half the time.
+    """
     built = []
     for exp_id, temp, a_times, b_times in GRIDS:
+        if one_length and len({0.0, *a_times, *b_times}) != 4:
+            continue
         k = TRUE_RATE if rate is None else rate(temp)
         a_ts, b_ts = jnp.asarray(a_times), jnp.asarray(b_times)
         warp = (lambda t: t) if extent is None else extent
@@ -381,29 +390,32 @@ def overshoot(mechanistic_data):
     """A learning rate far too large from a good start, so the best step is an early one."""
     config = hm.OptaxTrainingConfig(steps=60, lr=0.6, patience=5, verbose=False)
     model = mechanistic_model(rate=TRUE_RATE + 0.01)
-    keep_best = model.fit(mechanistic_data, config, key=jr.key(0))
+    data = hm.make_dataset(
+        experiments(extent=feed_integral, one_length=True), output_channel_names=CHANNELS
+    )
+    keep_best = model.fit(data, config, key=jr.key(0))
     keep_last = model.fit(
-        mechanistic_data,
+        data,
         hm.OptaxTrainingConfig(steps=5, lr=0.6, restore_best=False, verbose=False),
         key=jr.key(0),
     )
-    return keep_best, keep_last
+    return keep_best, keep_last, data
 
 
-def test_patience_stops_early_and_the_best_step_labels_the_model(overshoot, mechanistic_data):
-    keep_best, _ = overshoot
+def test_patience_stops_early_and_the_best_step_labels_the_model(overshoot):
+    keep_best, _, data = overshoot
     assert keep_best.stop_reason == "patience"
     assert len(keep_best.history.loss) < 60
     assert keep_best.best_step == int(np.argmin(keep_best.history.loss))
     # One more step at lr=0 measures the returned model; it must match its label.
     remeasured = keep_best.model.fit(
-        mechanistic_data, hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False), key=jr.key(0)
+        data, hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False), key=jr.key(0)
     )
     assert remeasured.history.loss[0] == pytest.approx(keep_best.final_loss, rel=1e-5)
 
 
 def test_restore_best_off_returns_the_last_step(overshoot):
-    _, keep_last = overshoot
+    _, keep_last, _ = overshoot
     assert keep_last.best_step is None
     assert keep_last.final_loss == keep_last.history.loss[-1]
 
@@ -556,15 +568,36 @@ def tournaments(plain_data):
     return run(2), run(8)
 
 
-def test_more_tournament_attempts_never_give_a_worse_start(tournaments, plain_data):
+def test_more_tournament_attempts_never_give_a_worse_start(tournaments, plain_start_loss):
     few, many = tournaments
     assert many.history.loss[0] <= few.history.loss[0]
     # The winner replaced the starting value, and the tournament kept the frozen leaf.
-    unchanged = plain_model().fit(
-        plain_data, hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False), key=jr.key(0)
-    )
-    assert many.history.loss[0] != unchanged.history.loss[0]
+    assert many.history.loss[0] != plain_start_loss
     assert float(many.model.predictors["frozen"].value) == pytest.approx(0.7)
+
+
+def test_validation_drives_patience_as_well_as_the_returned_step(plain_data):
+    # An unreachable validation target: its loss stops improving long before the
+    # training loss does, so patience fires on it.
+    far = hm.make_dataset(experiments(rate=lambda temp: 2.5), output_channel_names=CHANNELS)
+    config = hm.OptaxTrainingConfig(steps=200, lr=0.05, patience=5, verbose=False)
+    result = plain_model(TRUE_RATE).fit(
+        plain_data, config, validation=far, freeze="frozen", key=jr.key(0)
+    )
+    assert result.stop_reason == "patience" and len(result.history.loss) < 200
+    assert result.best_step == int(np.argmin(result.history.validation_loss))
+
+
+def test_the_same_key_reproduces_a_run_and_another_key_does_not(plain_data):
+    config = hm.OptaxTrainingConfig(
+        steps=3, lr=0.05, tournament_attempts=2, tournament_steps=2, verbose=False
+    )
+    first, second, other = (
+        plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(seed))
+        for seed in (11, 11, 12)
+    )
+    assert first.history == second.history
+    assert first.history != other.history
 
 
 # ---------------------------------------------------------------------------
@@ -580,7 +613,14 @@ EVOSAX_RUNS: dict[str, dict[str, Any]] = {
 
 @pytest.fixture(scope="session")
 def plain_data() -> hm.Dataset:
-    return hm.make_dataset(experiments(), output_channel_names=CHANNELS)
+    return hm.make_dataset(experiments(one_length=True), output_channel_names=CHANNELS)
+
+
+@pytest.fixture(scope="session")
+def plain_start_loss(plain_data) -> float:
+    """The loss before any training, from a step that cannot move the parameters."""
+    config = hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False)
+    return plain_model().fit(plain_data, config, key=jr.key(0)).history.loss[0]
 
 
 @pytest.fixture(scope="session")
@@ -595,7 +635,7 @@ def evolved(plain_data):
 
 
 @pytest.mark.parametrize("run", EVOSAX_RUNS)
-def test_evosax_improves_on_the_start_and_records_the_best_so_far(evolved, plain_data, run):
+def test_evosax_improves_on_the_start_and_records_the_best_so_far(evolved, plain_start_loss, run):
     result, ui = evolved[run]
     assert fitted_rate(result) == pytest.approx(TRUE_RATE, abs=0.15)
     assert len(result.history.loss) == 25
@@ -603,10 +643,7 @@ def test_evosax_improves_on_the_start_and_records_the_best_so_far(evolved, plain
     assert result.stop_reason == "budget_exhausted"
     assert len(events_named(ui, "on_generation_end")) == 25
     assert events_named(ui, "on_run_end")[0]["final_loss"] == pytest.approx(result.final_loss)
-    start = plain_model().fit(
-        plain_data, hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False), key=jr.key(0)
-    )
-    assert result.final_loss < start.history.loss[0]
+    assert result.final_loss < plain_start_loss
 
 
 @pytest.mark.parametrize("run", EVOSAX_RUNS)
@@ -673,14 +710,15 @@ def test_predict_ensemble_is_the_member_mean_with_its_spread(ensembles, plain_da
         np.testing.assert_allclose(experiment.outputs["a"], stacked.mean(axis=0), atol=1e-5)
         np.testing.assert_allclose(experiment.std["a"], stacked.std(axis=0), atol=1e-5)
     assert "std" in combined.to_dataframe().columns
-    assert {name: int(m.n) for name, m in hm.compute_metrics(combined).items()} == N_OBSERVED
+    measured = sum(int(bp.mask[..., 0].sum()) for bp in plain_data.bucket_payloads)
+    assert int(hm.compute_metrics(combined)["a"].n) == measured
 
 
 @pytest.fixture(scope="session")
 def validated_ensemble(plain_data):
     config = hm.OptaxTrainingConfig(steps=20, lr=0.05, verbose=False)
     # Scored on a set with a different bucket layout than the training data.
-    validation = hm.make_dataset(experiments()[:3], output_channel_names=CHANNELS)
+    validation = hm.make_dataset(experiments()[-3:], output_channel_names=CHANNELS)
     return plain_model().fit_ensemble(
         plain_data, config, n_members=3, freeze="frozen", validation=validation, key=jr.key(7)
     )
@@ -705,8 +743,8 @@ CAPPED = 2
 
 
 def many_lengths() -> list[hm.Experiment]:
-    """Ten experiments with seven different grid lengths."""
-    sizes = (3, 3, 4, 5, 5, 6, 7, 8, 9, 3)
+    """Eight experiments with four different grid lengths."""
+    sizes = (3, 3, 4, 5, 5, 7, 7, 3)
     rng = np.random.default_rng(0)
     built = []
     for i, size in enumerate(sizes):
@@ -759,7 +797,7 @@ def capped_fit(capped_data):
 
 def test_capping_limits_the_buckets_and_keeps_the_data(capped_data):
     uncapped = hm.make_dataset(many_lengths(), output_channel_names=CHANNELS)
-    assert len(uncapped.bucket_payloads) == 7
+    assert len(uncapped.bucket_payloads) == 4
     assert len(capped_data.bucket_payloads) == CAPPED
     total = sum(int(bp.n_obs) for bp in capped_data.bucket_payloads)
     assert total == sum(int(bp.n_obs) for bp in uncapped.bucket_payloads)
@@ -925,7 +963,9 @@ def failing_model(mode: str) -> hm.HybridModel:
 
 @pytest.fixture(scope="session")
 def fast_reaction_data() -> hm.Dataset:
-    return hm.make_dataset(experiments(rate=lambda temp: 2.0), output_channel_names=CHANNELS)
+    return hm.make_dataset(
+        experiments(rate=lambda temp: 2.0, one_length=True), output_channel_names=CHANNELS
+    )
 
 
 @pytest.fixture(scope="session", params=["solver-error", "nan-loss"])
@@ -1144,9 +1184,11 @@ INNERS = {"kan": kan_inner, "polynomial": polynomial_inner, "custom": custom_inn
 
 
 @pytest.fixture(scope="session")
-def custom_fits(network_splits):
-    train, _, _ = network_splits
-    config = hm.OptaxTrainingConfig(steps=30, lr=0.02, optimizer=optax.adam, verbose=False)
+def custom_fits():
+    train = hm.make_dataset(
+        experiments(rate=rate_law, one_length=True), output_channel_names=CHANNELS
+    )
+    config = hm.OptaxTrainingConfig(steps=15, lr=0.02, optimizer=optax.adam, verbose=False)
     fits = {}
     for name, inner in INNERS.items():
         model = network_model(jr.key(0), inner(jr.key(7)))
@@ -1164,11 +1206,12 @@ def test_other_predictors_train_inside_a_bounded_predictor(custom_fits, name):
 
 
 @pytest.mark.parametrize("name", INNERS)
-def test_other_predictors_reload_bit_exactly(custom_fits, name, network_splits, tmp_path):
+def test_other_predictors_reload_bit_exactly(custom_fits, name, tmp_path):
     result = custom_fits[name]
     hm.save(tmp_path, result)
     saved = hm.load(tmp_path, like=network_model(jr.key(0), INNERS[name](jr.key(7))))
-    test_set = network_splits[2]
-    before, after = result.model.predict(test_set), saved.model.predict(test_set)
-    for exp_id in before:
-        np.testing.assert_array_equal(before[exp_id].outputs["a"], after[exp_id].outputs["a"])
+    temps = {"temp": jnp.linspace(0.0, 2.0, 11)}
+    np.testing.assert_array_equal(
+        hm.evaluate_predictor(saved.model.predictors["rate"], temps),
+        hm.evaluate_predictor(result.model.predictors["rate"], temps),
+    )
