@@ -15,6 +15,12 @@
   change-of-variables term for free `Parameter`s, and turns a failed solve into
   a rejected proposal. `free=` picks what is sampled, and what stays fixed is
   listed in `InferenceProblem.conditional_on`.
+- `InferenceProblem.predict` turns chain draws into a posterior predictive
+  `PredictionResult`, with or without observation noise, and
+  `InferenceProblem.to_arviz` exports them for diagnostics. The `bayes` extra
+  installs BlackJAX and `arviz-base`.
+- `predict_ensemble(quantiles=)` adds quantiles across members, also in
+  `to_dataframe`.
 - `SolverConfig(throw=False)` returns non-finite states from a failed solve
   instead of raising.
 

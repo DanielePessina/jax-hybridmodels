@@ -38,6 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pandas = ["pandas>=2.2.3"]
+bayes = ["blackjax>=1.7.1", "arviz-base>=1.3; python_version >= '3.12'"]
 examples = [
     "matplotlib>=3.10.9",
     "openpyxl>=3.1.5",
@@ -104,6 +105,7 @@ dev = [
     # tests cover experiments_from_dataframe and PredictionResult.to_dataframe
     "pandas>=3.0.2",
     "blackjax>=1.7.1",
+    "arviz-base>=1.3 ; python_full_version >= '3.12'",
 ]
 
 [tool.ruff]

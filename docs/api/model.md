@@ -246,7 +246,7 @@ phase short, ``"diverged"`` when a solver error or a non-finite loss ended
 the run (it warned, and the model holds the best parameters so far), else
 ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L137)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L151)</small>
 
 <a id="fitresultsummary"></a>
 
@@ -269,7 +269,7 @@ charge it: the outer 5% of its box for the default sigmoid. The network
 figure covers the whole declared box, including inputs no experiment
 reached, so a large share can be harmless if the data never goes there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L166)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L180)</small>
 
 ---
 
@@ -305,7 +305,7 @@ it. ``penalty`` and ``phase`` stay empty.
 present when one was given: per step for Optax, and for each
 generation's best individual for Evosax.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L111)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L125)</small>
 
 ---
 
@@ -331,7 +331,7 @@ dataset predicted on, for custom JAX analysis. For an ensemble,
 ``outputs`` and ``buckets`` hold the member mean and ``members`` holds
 each member's own result, in the order the models were given.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L49)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L50)</small>
 
 <a id="predictionresultto_dataframe"></a>
 
@@ -345,9 +345,10 @@ Long table: one row per experiment, time and channel.
 
 Columns are ``experiment_id``, ``time``, ``channel``,
 ``prediction``, ``observed`` and ``is_observed``, plus ``std`` for
-an ensemble. Needs pandas: ``pip install jax-hybridmodels[pandas]``.
+an ensemble and ``q0.05``-style columns for requested quantiles. Needs
+pandas: ``pip install jax-hybridmodels[pandas]``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L73)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L74)</small>
 
 ---
 
@@ -365,6 +366,7 @@ ExperimentPrediction(
     observation_mask: 'dict[str, Array]' = <factory>,
     state: 'Array | None' = None,
     std: 'dict[str, Array]' = <factory>,
+    quantiles: 'dict[str, dict[float, Array]]' = <factory>,
 ) -> None
 ```
 

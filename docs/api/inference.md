@@ -41,7 +41,7 @@ Build the log-density for ``model`` on ``data``.
 | `that calls ``diffrax.diffeqsolve`` itself must pass ``throw=solver.throw``, or` |  |  |
 | `a failed solve will end the chain with an exception.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L275)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L410)</small>
 
 ---
 
@@ -79,7 +79,7 @@ Build one with [`make_problem`](/api/inference#make_problem). Identity-hashed, s
 | `position` | `PyTree` | The starting position: the free leaves' current values. Latents for a ``Parameter``, weights for a network, and inferred noise under ``"noise"``. |
 | `conditional_on` | `tuple[str, ...]` | Dotted paths of the trainable leaves held fixed. The posterior is conditional on these values and its width does not account for them. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L123)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L129)</small>
 
 <a id="inferenceproblemlog_density"></a>
 
@@ -96,7 +96,7 @@ change-of-variables term for free ``Parameter`` latents. It is a density
 over the latents, so it is ``-inf`` with a zero gradient wherever a solve
 fails, and any NaN term also becomes ``-inf``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L234)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L240)</small>
 
 <a id="inferenceproblemlog_likelihood"></a>
 
@@ -112,7 +112,7 @@ The log-likelihood of the data, summed over every experiment.
 at a row no channel measured, since a failed solve leaves such rows
 non-finite too.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L200)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L206)</small>
 
 <a id="inferenceproblemphysical"></a>
 
@@ -127,7 +127,41 @@ The free values in physical units, keyed by dotted path.
 A ``Parameter`` appears under its path with its ``.value``, a free network
 leaf under its path as it is, and inferred noise as ``"noise.<name>"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L256)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L262)</small>
+
+<a id="inferenceproblempredict"></a>
+
+#### `InferenceProblem.predict()`
+
+```python
+predict(
+    self,
+    positions: 'Any',
+    data: 'Data | None' = None,
+    key: 'Array',
+    ts: 'ArrayLike | None' = None,
+    n_points: 'int | None' = None,
+    n_draws: 'int' = 200,
+    quantiles: 'Sequence[float]' = (0.05, 0.95),
+    observation_noise: 'bool' = False,
+) -> PredictionResult
+```
+
+Predict with draws from a chain and report their spread.
+
+``positions`` is the sampler's output: the position pytree with any
+leading sample axes, such as ``[draw, ...]`` or ``[chain, draw, ...]``.
+``n_draws`` of them are chosen at random, without replacement. ``data``
+defaults to the problem's own. ``ts`` and ``n_points`` are as for
+[`HybridModel.predict`](/api/model#hybridmodelpredict).
+
+``outputs`` is the mean over draws. ``std`` and ``quantiles`` describe the
+model's uncertainty, a credible band for the noiseless trajectory. With
+``observation_noise``, they include measurement noise instead, an interval
+for a new measurement. That needs a standard deviation inferred for each
+channel, since the variances in data exist only at measured cells.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L280)</small>
 
 <a id="inferenceproblemresiduals"></a>
 
@@ -143,7 +177,30 @@ Length is every ``[N, T, D]`` cell, with zero at unmeasured cells, so the
 shape does not depend on the data's mask and ``jax.jacfwd`` applies.
 ``log_likelihood`` is built on the same quantity for a Gaussian.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L182)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L188)</small>
+
+<a id="inferenceproblemto_arviz"></a>
+
+#### `InferenceProblem.to_arviz()`
+
+```python
+to_arviz(
+    self,
+    positions: 'Any',
+    sample_stats: 'Mapping[str, Any] | None' = None,
+) -> Any
+```
+
+An ArviZ ``DataTree`` of the physical values, for R-hat, ESS and plots.
+
+``positions`` must have leading ``[chain, draw]`` axes; add one with
+``jax.tree.map(lambda x: x[None], positions)`` for a single chain.
+Variables are named by dotted path. ``sample_stats`` holds per-draw
+sampler output with the same axes, such as ``{"diverging": ...}``.
+``conditional_on`` is recorded in the attributes. Needs
+``pip install jax-hybridmodels[bayes]``, and ArviZ needs Python 3.12.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L348)</small>
 
 <a id="inferenceproblemto_model"></a>
 
@@ -158,7 +215,7 @@ The given model with this position's values, for ``predict`` and ``save``.
 It keeps the model's own solver, so its solves raise on failure as usual.
 Inferred noise is not part of a model.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L248)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L254)</small>
 
 ---
 
@@ -178,4 +235,4 @@ Proper only on a bounded box, so [`make_problem`](/api/inference#make_problem) r
 value has an open bound or is a network weight. A flat prior is not neutral
 under a warp: on a log-warped parameter it still favours the upper decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L65)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L71)</small>

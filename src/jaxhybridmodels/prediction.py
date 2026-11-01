@@ -226,6 +226,7 @@ def predict_ensemble(
     *,
     ts: ArrayLike | None = None,
     n_points: int | None = None,
+    quantiles: Sequence[float] = (),
 ) -> PredictionResult:
     """Predict with every model and return the member mean, with the spread.
 
@@ -235,11 +236,16 @@ def predict_ensemble(
     ``ddof=0``; zero for one member), and ``members`` holds each model's
     own :class:`~jaxhybridmodels.PredictionResult`.
 
+    ``quantiles`` adds those levels across members to each experiment, such as
+    ``(0.05, 0.95)``. A posterior predictive is usually skewed, so an interval
+    from ``std`` alone can leave a bound's range.
+
     ``models`` holds ``HybridModel`` or ``FitResult`` objects, so the list
     ``fit_ensemble`` returns can be passed as is. They must share
     ``output_channel_names``. ``data``, ``ts`` and ``n_points`` are as for
     :meth:`HybridModel.predict`.
     """
+    levels = check_quantiles(quantiles, "predict_ensemble")
     models = [_member_model(m, i) for i, m in enumerate(models)]
     if not models:
         raise ValueError("predict_ensemble: pass at least one model")
@@ -264,12 +270,33 @@ def predict_ensemble(
             observed=first.observed,
             observation_mask=first.observation_mask,
             std={name: jnp.std(values, axis=0) for name, values in stacked.items()},
+            quantiles=member_quantiles(stacked, levels),
         )
     buckets = tuple(
         jnp.mean(jnp.stack([m.buckets[b] for m in members]), axis=0)
         for b in range(len(dataset.bucket_payloads))
     )
     return PredictionResult(experiments, buckets, members)
+
+
+def check_quantiles(quantiles: Sequence[float], caller: str) -> tuple[float, ...]:
+    """``quantiles`` as floats, each strictly inside (0, 1)."""
+    levels = tuple(float(q) for q in quantiles)
+    if any(not 0.0 < q < 1.0 for q in levels):
+        raise ValueError(f"{caller}: quantiles must lie strictly in (0, 1); got {levels}")
+    return levels
+
+
+def member_quantiles(
+    stacked: Mapping[str, Array], levels: Sequence[float]
+) -> dict[str, dict[float, Array]]:
+    """``{channel: {q: [T] values}}`` from ``{channel: [members, T] values}``."""
+    if not levels:
+        return {}
+    return {
+        name: {q: jnp.quantile(values, q, axis=0) for q in levels}
+        for name, values in stacked.items()
+    }
 
 
 def _member_model(member: Any, index: int) -> HybridModel:

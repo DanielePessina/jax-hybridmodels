@@ -391,3 +391,96 @@ def test_a_solver_records_throw_only_when_it_is_off():
     assert "throw" not in hm.SolverConfig().to_dict()
     off = hm.SolverConfig(solver=diffrax.Tsit5(), throw=False)
     assert hm.SolverConfig.from_dict(off.to_dict()).throw is False
+
+
+def test_posterior_predictive_matches_the_closed_form(linear):
+    """``y(t) = k t``, so the band at time ``t`` is the posterior of ``k`` scaled by ``t``."""
+    problem, _, ts, ys, _, _ = linear
+    mean, sd = conjugate(ts, ys)
+    positions, *_ = run_nuts(problem, jr.key(5), warmup=200, draws=600)
+    result = problem.predict(positions, key=jr.key(6), n_draws=400)
+    assert len(result.members) == 400
+    long = result["long"]
+    last = -1
+    t_last = float(long.times[last])
+    assert float(long.outputs["y"][last]) == pytest.approx(mean * t_last, abs=4 * sd * t_last / 15)
+    assert float(long.std["y"][last]) == pytest.approx(sd * t_last, rel=0.2)
+    low, high = (float(long.quantiles["y"][q][last]) for q in (0.05, 0.95))
+    assert high - low == pytest.approx(2 * 1.6449 * sd * t_last, rel=0.2)
+    frame = result.to_dataframe()
+    assert {"q0.05", "q0.95", "std"} <= set(frame.columns)
+
+
+def test_observation_noise_widens_the_interval_by_the_noise(x64):
+    experiments, ts, ys = measurements()
+
+    def prior(predictors: Any, noise: Any) -> Any:
+        return normal_prior(predictors, noise)
+
+    problem = make_problem(
+        linear_model(hm.Parameter(0.7)),
+        experiments,
+        log_prior=prior,
+        noise={"y": hm.Parameter(0.2, bounds=(0.01, 1.0))},
+    )
+    positions = jax.tree_util.tree_map(
+        lambda leaf: jnp.broadcast_to(leaf, (500, *leaf.shape)), problem.position
+    )
+    # Every draw is the same point, so the model's own band is zero and only noise is left.
+    plain = problem.predict(positions, key=jr.key(0), n_draws=500)
+    assert float(jnp.max(plain["long"].std["y"])) < 1e-6
+    noisy = problem.predict(positions, key=jr.key(0), n_draws=500, observation_noise=True)
+    assert float(jnp.mean(noisy["long"].std["y"])) == pytest.approx(0.2, rel=0.15)
+    assert np.allclose(noisy["long"].outputs["y"], plain["long"].outputs["y"])
+
+
+def test_arviz_export_names_physical_values_and_records_the_conditioning(linear):
+    pytest.importorskip("arviz_base")
+    problem, *_ = linear
+    positions = jax.tree_util.tree_map(
+        lambda leaf: jnp.broadcast_to(leaf, (2, 5, *leaf.shape)), problem.position
+    )
+    tree = problem.to_arviz(positions, sample_stats={"diverging": np.zeros((2, 5), bool)})
+    assert tree["posterior"]["k"].sizes["chain"] == 2
+    assert tree["posterior"]["k"].sizes["draw"] == 5
+    assert "diverging" in tree["sample_stats"]
+    assert tree["posterior"].attrs["conditional_on"] == ""
+
+
+@pytest.mark.parametrize(
+    ("call", "error", "match"),
+    [
+        pytest.param(lambda p, x: p.predict(x, key=0), TypeError, "key", id="key"),
+        pytest.param(
+            lambda p, x: p.predict(x, key=jr.key(0), quantiles=(1.5,)),
+            ValueError,
+            "strictly",
+            id="quantile",
+        ),
+        pytest.param(
+            lambda p, x: p.predict(x, key=jr.key(0), n_draws=0),
+            ValueError,
+            "n_draws",
+            id="draws",
+        ),
+        pytest.param(
+            lambda p, x: p.predict(p.position, key=jr.key(0)),
+            ValueError,
+            "leading sample axes",
+            id="no-sample-axis",
+        ),
+        pytest.param(
+            lambda p, x: p.predict(x, key=jr.key(0), observation_noise=True),
+            ValueError,
+            "inferred",
+            id="noise-from-data",
+        ),
+        pytest.param(lambda p, x: p.to_arviz(x), ValueError, "chain", id="arviz-axes"),
+    ],
+)
+def test_prediction_rejects_bad_input(linear, call, error, match):
+    pytest.importorskip("arviz_base")
+    problem, *_ = linear
+    positions = jax.tree_util.tree_map(lambda leaf: leaf[None], problem.position)
+    with pytest.raises(error, match=match):
+        call(problem, positions)

@@ -44,6 +44,7 @@ class ExperimentPrediction:
     observation_mask: dict[str, Array] = field(default_factory=dict)
     state: Array | None = None
     std: dict[str, Array] = field(default_factory=dict)
+    quantiles: dict[str, dict[float, Array]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,8 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
 
         Columns are ``experiment_id``, ``time``, ``channel``,
         ``prediction``, ``observed`` and ``is_observed``, plus ``std`` for
-        an ensemble. Needs pandas: ``pip install jax-hybridmodels[pandas]``.
+        an ensemble and ``q0.05``-style columns for requested quantiles. Needs
+        pandas: ``pip install jax-hybridmodels[pandas]``.
         """
         try:
             import pandas as pd
@@ -88,6 +90,15 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
         columns = ["experiment_id", "time", "channel", "prediction", "observed", "is_observed"]
         if with_std:
             columns.append("std")
+        levels = sorted(
+            {
+                q
+                for experiment in self.values()
+                for by_q in experiment.quantiles.values()
+                for q in by_q
+            }
+        )
+        columns.extend(f"q{q:g}" for q in levels)
         frames = []
         for exp_id, experiment in self.items():
             for channel, values in experiment.outputs.items():
@@ -104,6 +115,9 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
                 }
                 if with_std:
                     table["std"] = np.asarray(experiment.std.get(channel, missing))
+                by_q = experiment.quantiles.get(channel, {})
+                for q in levels:
+                    table[f"q{q:g}"] = np.asarray(by_q.get(q, missing))
                 frames.append(pd.DataFrame(table, columns=columns))
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
 

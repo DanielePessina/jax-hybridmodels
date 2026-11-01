@@ -42,12 +42,18 @@ from typing import Any, Literal, cast
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import jax.tree_util as jtu
+import numpy as np
+from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaxhybridmodels.data import BucketPayload, Data, Dataset
 from jaxhybridmodels.model import HybridModel
+from jaxhybridmodels.prediction import check_quantiles, member_quantiles, predict_ensemble
 from jaxhybridmodels.predictors import Parameter
+from jaxhybridmodels.results import PredictionResult
+from jaxhybridmodels.rng import check_key
 from jaxhybridmodels.trainable import (
     FreezeSpec,
     _path_to_dotted,
@@ -270,6 +276,135 @@ class InferenceProblem:
             elif flag:
                 out[_dotted(path)] = leaf
         return out
+
+    def predict(
+        self,
+        positions: Any,
+        data: Data | None = None,
+        *,
+        key: Array,
+        ts: ArrayLike | None = None,
+        n_points: int | None = None,
+        n_draws: int = 200,
+        quantiles: Sequence[float] = (0.05, 0.95),
+        observation_noise: bool = False,
+    ) -> PredictionResult:
+        """Predict with draws from a chain and report their spread.
+
+        ``positions`` is the sampler's output: the position pytree with any
+        leading sample axes, such as ``[draw, ...]`` or ``[chain, draw, ...]``.
+        ``n_draws`` of them are chosen at random, without replacement. ``data``
+        defaults to the problem's own. ``ts`` and ``n_points`` are as for
+        :meth:`HybridModel.predict`.
+
+        ``outputs`` is the mean over draws. ``std`` and ``quantiles`` describe the
+        model's uncertainty, a credible band for the noiseless trajectory. With
+        ``observation_noise``, they include measurement noise instead, an interval
+        for a new measurement. That needs a standard deviation inferred for each
+        channel, since the variances in data exist only at measured cells.
+        """
+        check_key(key, "InferenceProblem.predict")
+        levels = check_quantiles(quantiles, "InferenceProblem.predict")
+        if n_draws < 1:
+            raise ValueError(f"InferenceProblem.predict: n_draws must be positive; got {n_draws}")
+        channels = self.dataset.output_channel_names
+        if observation_noise and not set(channels) <= set(self._tree(self.position)[_NOISE]):
+            raise ValueError(
+                "InferenceProblem.predict: observation_noise needs noise inferred for every "
+                f"channel {list(channels)}; make_problem(noise={{...}}) provides it"
+            )
+        choice_key, noise_key = jr.split(key)
+        draws = self._unstack(positions, n_draws, choice_key)
+        result = predict_ensemble(
+            [self.to_model(draw) for draw in draws],
+            self.dataset if data is None else data,
+            ts=ts,
+            n_points=n_points,
+            quantiles=levels,
+        )
+        if not observation_noise:
+            return result
+        sigmas = [self._noise_values(self._tree(draw)) for draw in draws]
+        return _with_observation_noise(result, sigmas, levels, noise_key)
+
+    def _unstack(self, positions: Any, n_draws: int, key: Array) -> list[Any]:
+        """``positions`` as a list of up to ``n_draws`` single positions."""
+        reference = jtu.tree_leaves(self.position)[0]
+        first = jtu.tree_leaves(positions)[0]
+        extra = first.ndim - reference.ndim
+        if extra < 1 or first.shape[extra:] != reference.shape:
+            raise ValueError(
+                f"InferenceProblem: positions need leading sample axes before the shape "
+                f"{reference.shape}; got a leaf of shape {first.shape}"
+            )
+        flat = jtu.tree_map(
+            lambda leaf: leaf.reshape((-1, *leaf.shape[extra:])),
+            positions,
+        )
+        count = jtu.tree_leaves(flat)[0].shape[0]
+        chosen = jr.permutation(key, count)[: min(n_draws, count)]
+        return [jtu.tree_map(lambda leaf, i=i: leaf[i], flat) for i in chosen.tolist()]
+
+    def to_arviz(self, positions: Any, *, sample_stats: Mapping[str, Any] | None = None) -> Any:
+        """An ArviZ ``DataTree`` of the physical values, for R-hat, ESS and plots.
+
+        ``positions`` must have leading ``[chain, draw]`` axes; add one with
+        ``jax.tree.map(lambda x: x[None], positions)`` for a single chain.
+        Variables are named by dotted path. ``sample_stats`` holds per-draw
+        sampler output with the same axes, such as ``{"diverging": ...}``.
+        ``conditional_on`` is recorded in the attributes. Needs
+        ``pip install jax-hybridmodels[bayes]``, and ArviZ needs Python 3.12.
+        """
+        try:
+            from arviz_base import from_dict
+        except ImportError as exc:
+            raise ImportError(
+                "to_arviz needs ArviZ, which needs Python 3.12 or later; install it with: "
+                "pip install jax-hybridmodels[bayes]"
+            ) from exc
+        reference = jtu.tree_leaves(self.position)[0]
+        first = jtu.tree_leaves(positions)[0]
+        if first.ndim != reference.ndim + 2:
+            raise ValueError(
+                "to_arviz: positions need leading [chain, draw] axes before the shape "
+                f"{reference.shape}; got a leaf of shape {first.shape}"
+            )
+        named = jax.vmap(jax.vmap(self.physical))(positions)
+        groups = {"posterior": {name: np.asarray(value) for name, value in named.items()}}
+        if sample_stats:
+            groups["sample_stats"] = {k: np.asarray(v) for k, v in sample_stats.items()}
+        # A string, as a NetCDF attribute cannot hold an empty list.
+        conditioning = ", ".join(self.conditional_on)
+        return from_dict(groups, attrs={"posterior": {"conditional_on": conditioning}})
+
+
+def _with_observation_noise(
+    result: PredictionResult,
+    sigmas: Sequence[Mapping[str, Array]],
+    levels: Sequence[float],
+    key: Array,
+) -> PredictionResult:
+    """``result`` with ``std`` and ``quantiles`` widened by each draw's own noise.
+
+    ``outputs`` stay the draws' mean: zero-mean noise does not move it, and adding
+    sampled noise there would only make it rougher.
+    """
+    experiments = {}
+    for exp_key, (exp_id, experiment) in zip(
+        jr.split(key, len(result)), result.items(), strict=True
+    ):
+        noisy = {}
+        channel_keys = jr.split(exp_key, len(experiment.outputs))
+        for channel_key, name in zip(channel_keys, experiment.outputs, strict=True):
+            means = jnp.stack([member[exp_id].outputs[name] for member in result.members])
+            scale = jnp.stack([sigma[name] for sigma in sigmas])[:, None]
+            noisy[name] = means + scale * jr.normal(channel_key, means.shape, dtype=means.dtype)
+        experiments[exp_id] = dataclasses.replace(
+            experiment,
+            std={name: jnp.std(values, axis=0) for name, values in noisy.items()},
+            quantiles=member_quantiles(noisy, levels),
+        )
+    return dataclasses.replace(result, experiments=experiments)
 
 
 def make_problem(
