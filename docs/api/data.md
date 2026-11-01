@@ -52,7 +52,7 @@ not repeat a time within one channel.
 | `values` | `Float[Array, "Tc"]` | Observed channel values aligned with ``ts``. |
 | `variance` | `Float[Array, "Tc"]` | Per-observation variance used by ``masked_mle`` / ``bal_mle``. A scalar passed to the constructor is broadcast to ``values.shape`` so downstream code can assume rank-1. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L58)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L60)</small>
 
 ---
 
@@ -89,7 +89,7 @@ after a permutation.
 | `exp_id` | `str` | Identifier, unique within a dataset; ``make_dataset`` names an empty one ``experiment_<i>``. A static field, so it is not a JAX array leaf and never reaches a compiled kernel as data. |
 | `t0` | `float | None` | Initial state time, added to the union axis as an unobserved row. None means ``y0`` is the state at the first observation. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L140)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L142)</small>
 
 ---
 
@@ -130,7 +130,7 @@ moment initialised to zero being the common case.
 | `t0` |  | Initial state time, at or before the first observation. Added as an unobserved integration point. None preserves the first-observation convention. |
 | `y0` |  | Direct initial state, as an alternative to y0_fn. Supply exactly one. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L281)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L290)</small>
 
 ---
 
@@ -172,7 +172,7 @@ sampled at different times.
 | `variance` |  | A scalar for every cell, a length-``D`` sequence with one value per channel, or a ``[T, D]`` array. Read only at observed cells. |
 | `covariates, t0, y0, y0_fn` |  | As for [`make_experiment`](/api/data#make_experiment). Supply exactly one of ``y0`` and ``y0_fn``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L341)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L350)</small>
 
 ---
 
@@ -235,7 +235,7 @@ Experiments come back in order of first appearance, each built by
         y0_fn=lambda cov, ch: jnp.array([ch["conc"].values[0], 0.0, 0.0]),
     )
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L427)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L436)</small>
 
 ---
 
@@ -298,7 +298,7 @@ n_obs : Int[Array, ""]
     its own denominator. Kept because examples and smoke scripts assert
     dataset shape with it (R-D4).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L180)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L182)</small>
 
 ---
 
@@ -314,6 +314,8 @@ Dataset(
     output_channel_names: 'tuple[str, ...]',
     covariate_names: 'tuple[str, ...]',
     _experiments: 'tuple[Experiment, ...]' = (),
+    _locations: 'tuple[tuple[int, int], ...]' = (),
+    _max_buckets: 'int | None' = None,
 ) -> None
 ```
 
@@ -332,8 +334,10 @@ prediction and training take it as a separate argument.
 | `output_channel_names` | `tuple[str, ...]` | Channel order along the trailing ``D`` axis of every payload. ``make_dataset`` scatters values in this same order. |
 | `covariate_names` | `tuple[str, ...]` | Covariate keys, sorted. Matches each ``Experiment.covariates`` key set. Sorting makes dict iteration deterministic. |
 | `_experiments` | `tuple[Experiment, ...]` | Source experiments in input order, read through the `experiments` property. Empty when a ``Dataset`` is built by hand from raw payloads, and ``split_dataset`` then raises. |
+| `_locations` | `tuple[tuple[int, int], ...]` | ``(bucket, row)`` of each source experiment, in the same order. |
+| `_max_buckets` | `int | None` | The limit given to ``make_dataset``, kept so that a split or a resample applies it again to its own experiments. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L232)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L234)</small>
 
 ---
 
@@ -347,6 +351,7 @@ prediction and training take it as a separate argument.
 make_dataset(
     experiments: 'Sequence[Experiment]',
     output_channel_names: 'tuple[str, ...] | list[str]',
+    max_buckets: 'int | None' = None,
 ) -> Dataset
 ```
 
@@ -366,6 +371,17 @@ Three steps run in order.
    and each group is stacked along a new leading ``N`` axis into one
    ``BucketPayload``. Buckets come out in ascending ``T`` order.
 
+Every bucket compiles its own kernels, so many distinct lengths mean a slow
+start. ``max_buckets`` caps the count by padding shorter experiments with
+unobserved rows, at midpoints of their largest gaps, choosing the buckets
+that add the fewest rows. Predictions still report each experiment's own
+times. Only ``PredictionResult.buckets`` shows the padded grids.
+
+Capping changes what a fit minimises. The loss averages buckets with equal
+weight, so regrouping experiments reweights them. ``TrainingPhase.horizon``
+counts rows, so its cutoff shifts slightly, and a trajectory penalty also
+sees the state at the added rows.
+
 The ``Dataset`` is pure data: ``state_to_output``, being a property of
 the model, is passed to prediction and training separately.
 
@@ -375,6 +391,7 @@ the model, is passed to prediction and training separately.
 | --- | --- | --- |
 | `experiments` |  | Non-empty sequence of ``Experiment`` objects, usually built with ``make_experiment``. |
 | `output_channel_names` |  | Channel order for the trailing ``D`` axis. Coerced to a tuple before being stored statically on the ``Dataset``. |
+| `max_buckets` |  | Most buckets to build. ``None`` keeps one per distinct length. An experiment with a single time has no gap to pad, so it stays in a bucket of its own, on top of this limit. Splits and resamples of the dataset apply the same limit to their own experiments. |
 
 **Returns**
 
@@ -382,7 +399,7 @@ the model, is passed to prediction and training separately.
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with the (named) experiments kept on ``Dataset.experiments``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L817)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L910)</small>
 
 ---
 
@@ -428,7 +445,7 @@ ensemble whose members saw different resamples.
 | --- | --- | --- |
 | `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L966)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1100)</small>
 
 ---
 
@@ -472,7 +489,7 @@ payloads and no experiments, so it cannot be split again.
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1037)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1175)</small>
 
 ---
 
@@ -493,4 +510,4 @@ debugging and example output. Each line reports the bucket's ``N``
 (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
 fraction of ``[N, T, D]`` cells the mask marks as real observations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L799)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L892)</small>

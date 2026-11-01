@@ -126,6 +126,30 @@ them.
 Training loops over buckets in Python, and each bucket shape compiles once.
 Fewer distinct lengths means less compile time.
 
+### Fewer buckets
+
+Many distinct lengths mean many compiled shapes, and a slow start. Cap them:
+
+```python
+dataset = hm.make_dataset(
+    experiments, output_channel_names=("conc",), max_buckets=3
+)
+```
+
+Shorter experiments gain unobserved rows at the midpoints of their largest gaps,
+which leaves their span and every measurement alone. `make_dataset` chooses the
+buckets that add the fewest rows. `predict` still reports each experiment's own
+times, and only `predictions.buckets` shows the padded grids. Splits and
+resamples apply the same cap to their own experiments. An experiment with a
+single time has no gap to pad, so it stays in a bucket of its own.
+
+Capping changes what a fit minimises, so compare runs with the same cap:
+
+- The loss averages buckets with equal weight, so regrouping experiments
+  reweights them.
+- `TrainingPhase.horizon` counts rows, so its cutoff shifts slightly.
+- A trajectory penalty also sees the state at the added rows.
+
 ## Validation
 
 `make_experiment` and `make_dataset` reject inputs that would otherwise fail

@@ -80,6 +80,33 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
         ValueError,
         "duplicate exp_id",
     ),
+    (
+        "zero-buckets",
+        lambda: hm.make_dataset([experiment()], output_channel_names=("conc",), max_buckets=0),
+        ValueError,
+        "max_buckets must be a positive int",
+    ),
+    (
+        "times-too-close-to-pad",
+        lambda: hm.make_dataset(
+            [
+                hm.make_experiment(
+                    channels={
+                        "conc": hm.ChannelObs(
+                            ts=jnp.array([1.0, jnp.nextafter(1.0, 2.0)]), values=jnp.zeros(2)
+                        )
+                    },
+                    y0=[1.0],
+                    exp_id="tight",
+                ),
+                experiment(),
+            ],
+            output_channel_names=("conc",),
+            max_buckets=1,
+        ),
+        ValueError,
+        "too close together",
+    ),
     # Predictors
     ("reversed-bounds", lambda: hm.Parameter(0.5, bounds=(2.0, 1.0)), ValueError, "low < high"),
     ("outside-bounds", lambda: hm.Parameter(5.0, bounds=(0.0, 1.0)), ValueError, "strictly inside"),

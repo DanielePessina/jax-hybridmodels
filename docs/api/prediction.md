@@ -37,7 +37,7 @@ own [`PredictionResult`](/api/model#predictionresult).
 ``output_channel_names``. ``data``, ``ts`` and ``n_points`` are as for
 [`HybridModel.predict`](/api/model#hybridmodelpredict).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L225)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L223)</small>
 
 ---
 
@@ -73,4 +73,4 @@ has output shape ``()``, so a sweep over 50 temperatures gives ``[50]``.
 | --- | --- | --- |
 | `Array` |  | Call ``float(...)`` on a scalar result for a Python number. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L292)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L290)</small>

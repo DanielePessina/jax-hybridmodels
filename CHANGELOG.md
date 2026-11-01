@@ -4,6 +4,9 @@
 
 ### Added
 
+- `make_dataset(max_buckets=)` caps the number of compiled bucket shapes by
+  padding shorter experiments with unobserved rows. Off by default, because it
+  reweights the loss.
 - `FitResult.stop_reason` gains `"diverged"`. A solver error or a non-finite
   loss after the first step no longer loses the run: `fit` warns and returns
   the best parameters so far. Failing on the first step still raises, and now

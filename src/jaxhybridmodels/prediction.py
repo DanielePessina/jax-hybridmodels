@@ -195,30 +195,28 @@ def _predict(
         buckets.append(values)
         grids.append(grid)
 
-    # make_dataset groups experiments by union-grid length, keeping input
-    # order inside each group. Walking the experiments in input order and
-    # counting rows per length recovers each one's bucket row.
-    bucket_of_length = {bp.ts.shape[1]: i for i, bp in enumerate(dataset.bucket_payloads)}
-    next_row: dict[int, int] = {}
     experiments: dict[str, ExperimentPrediction] = {}
-    for exp in dataset.experiments:
+    for exp, (b, row) in zip(dataset.experiments, dataset._locations, strict=True):
         arrays = _per_experiment_arrays(exp, names)
-        length = arrays.ts.shape[0]
-        row = next_row.get(length, 0)
-        next_row[length] = row + 1
-        b = bucket_of_length[length]
-        outputs = dict(zip(names, buckets[b][row].T, strict=True))
+        values = buckets[b][row]
         grid = grids[b]
         if grid is None:
+            # Under make_dataset(max_buckets=) the row holds added times too;
+            # the experiment reports only its own.
+            bucket_ts = np.asarray(dataset.bucket_payloads[b].ts[row])
+            if bucket_ts.shape[0] != arrays.ts.shape[0]:
+                values = values[np.searchsorted(bucket_ts, np.asarray(arrays.ts, bucket_ts.dtype))]
             observed = jnp.where(arrays.mask, arrays.y_observed, jnp.nan)
             experiments[exp.exp_id] = ExperimentPrediction(
                 times=arrays.ts,
-                outputs=outputs,
+                outputs=dict(zip(names, values.T, strict=True)),
                 observed=dict(zip(names, observed.T, strict=True)),
                 observation_mask=dict(zip(names, arrays.mask.T, strict=True)),
             )
         else:
-            experiments[exp.exp_id] = ExperimentPrediction(times=grid[row], outputs=outputs)
+            experiments[exp.exp_id] = ExperimentPrediction(
+                times=grid[row], outputs=dict(zip(names, values.T, strict=True))
+            )
     return PredictionResult(experiments, tuple(buckets))
 
 
