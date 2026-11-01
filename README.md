@@ -39,12 +39,11 @@ of the same code.
 ### From PyPI
 
 ```bash
-uv add jax-hybridmodels==0.2.0b1
+uv add jax-hybridmodels
 ```
 
-The distribution is `jax-hybridmodels`; the import is `jaxhybridmodels`. The
-0.2.0b1 release predates `HybridModel`, `Parameter` and `Constant`; use a
-checkout for those until the next release.
+The distribution is `jax-hybridmodels`; the import is `jaxhybridmodels`. Add
+`jax-hybridmodels[pandas]` for `PredictionResult.to_dataframe`.
 
 ### Development
 

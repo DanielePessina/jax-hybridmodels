@@ -574,7 +574,7 @@ wheels = [
 
 [[package]]
 name = "jax-hybridmodels"
-version = "0.2.0b1"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "diffrax" },
@@ -617,24 +617,24 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "diffrax", specifier = ">=0.7.2" },
+    { name = "diffrax", specifier = ">=0.7.0" },
     { name = "equinox", specifier = ">=0.13.7" },
     { name = "evosax", specifier = ">=0.2.0" },
     { name = "flax", specifier = ">=0.12.1,<0.12.9" },
     { name = "jax", specifier = ">=0.10.0,<0.11" },
     { name = "jaxkan", specifier = ">=0.3.7" },
     { name = "jaxlib", specifier = ">=0.10.0,<0.11" },
-    { name = "jaxtyping", specifier = ">=0.3.9" },
+    { name = "jaxtyping", specifier = ">=0.3.0" },
     { name = "matplotlib", marker = "extra == 'examples'", specifier = ">=3.10.9" },
-    { name = "numpy", specifier = ">=2.4.4" },
+    { name = "numpy", specifier = ">=2.3" },
     { name = "openpyxl", marker = "extra == 'examples'", specifier = ">=3.1.5" },
-    { name = "optax", specifier = ">=0.2.8" },
-    { name = "pandas", marker = "extra == 'examples'", specifier = ">=3.0.2" },
-    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=3.0.2" },
+    { name = "optax", specifier = ">=0.2.6" },
+    { name = "pandas", marker = "extra == 'examples'", specifier = ">=2.2.3" },
+    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2.3" },
     { name = "python-libsbml", marker = "extra == 'examples'", specifier = ">=5.20.4" },
-    { name = "rich", specifier = ">=15.0.0" },
+    { name = "rich", specifier = ">=13.0" },
     { name = "rlax", marker = "extra == 'examples'", specifier = ">=0.1.9" },
-    { name = "scipy", specifier = ">=1.17.1" },
+    { name = "scipy", specifier = ">=1.16" },
     { name = "sympy", marker = "extra == 'examples'", specifier = ">=1.14" },
 ]
 provides-extras = ["pandas", "examples"]
