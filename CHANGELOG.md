@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-01
 
 ### Added
 
@@ -28,15 +28,6 @@
   with a warning.
 - `SolverConfig(throw=False)` returns non-finite states from a failed solve
   instead of raising.
-
-### Changed
-
-- A channel with no observations now has NaN error statistics instead of 0.
-
-## 0.3.0 — 2026-11-01
-
-### Added
-
 - `make_dataset(max_buckets=)` caps the number of compiled bucket shapes by
   padding shorter experiments with unobserved rows. Off by default, because it
   reweights the loss.
@@ -142,6 +133,7 @@
 
 ### Changed (breaking against 0.2.0b1)
 
+- A channel with no observations now has NaN error statistics instead of 0.
 - **Breaking.** `fit` and `fit_ensemble` raise `TypeError` unless `key` is a JAX
   PRNG key. `key=None` and `key=0` used to pass when no random numbers were
   drawn.
