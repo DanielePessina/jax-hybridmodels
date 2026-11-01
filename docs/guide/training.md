@@ -182,7 +182,9 @@ that hits a Diffrax runtime error or a non-finite loss is dropped; any
 other error propagates. If every attempt fails, training continues from
 your original predictors with a `RuntimeWarning`. Ties keep the earlier
 attempt, so the result is deterministic in the key. `Constant` leaves are
-never re-initialised.
+never re-initialised, and frozen leaves go back to their given values after
+each redraw, so a restart cannot leave a frozen array at random values. To
+compare different frozen arrays, build a model for each.
 
 ## Evosax
 
@@ -282,7 +284,9 @@ modules.
 `fit(..., verbose=True)`, the default, shows
 [`RichTrainingUI`](/api/ui#richtrainingui), a live terminal dashboard that
 also reports per-bucket compile time. `verbose=False` uses
-[`SilentUI`](/api/ui#silentui). `ui=` overrides both with any object implementing [`TrainingUI`](/api/ui#trainingui). If a run
+[`SilentUI`](/api/ui#silentui). When output is not a terminal, such as a log
+file or CI, `verbose=True` prints a plain line about every 10% of the run
+instead. `ui=` overrides all of these with any object implementing [`TrainingUI`](/api/ui#trainingui). If a run
 raises after the dashboard opens, the UI gets `on_run_end` with a NaN loss
 before the error propagates.
 

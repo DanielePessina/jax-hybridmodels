@@ -82,7 +82,10 @@ constructor applied. Define `initialized_with_key` to rebuild properly:
 
 The result must have the same pytree shape: same fields, array shapes and
 static values. The trainable mask built before the tournament is reused
-after it. The method is found with `hasattr`; nothing to register.
+after it, and frozen leaves are put back to their given values, so only
+what trains is redrawn. The method is found with `hasattr`; nothing to
+register. To check it, call `hm.reinitialize_with_key(predictor, key)`,
+which applies it with nothing put back.
 
 ## Freezing fixed arrays
 

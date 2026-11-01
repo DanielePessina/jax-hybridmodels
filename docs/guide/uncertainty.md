@@ -123,6 +123,17 @@ entry per channel, because the variances in data exist only at measured cells.
 
 ## Diagnostics
 
+`problem.physical(positions)` converts sampler output to physical values, keeping
+any leading axes, so a recipe needs no ArviZ:
+
+```python
+from blackjax.diagnostics import effective_sample_size, potential_scale_reduction
+
+draws = problem.physical(positions)      # each value has shape [chain, draw, ...]
+print(draws["logA"].mean(), draws["logA"].std())
+print(potential_scale_reduction(draws["logA"]), effective_sample_size(draws["logA"]))
+```
+
 `problem.to_arviz(positions)` takes positions with leading `[chain, draw]` axes and
 returns an ArviZ `DataTree` of physical values named by path, with `conditional_on`
 in its attributes. It needs Python 3.12 or later. `blackjax.diagnostics` also has
@@ -141,6 +152,9 @@ the number to reduce is the count. In order of effect on the tubular reactor:
   of 1e6, it took the step size from 0.0097 to 0.67 and warmup from the 63-leapfrog
   depth cap on nearly every iteration to about 7. It needs a fitted model to help,
   and the Gaussian likelihood unless you pass `precision=`.
+  Skipping it is not wrong, only slower: in one run on the Arrhenius posterior, with
+  a correlation of 0.999 on `logA` and `E`, NUTS mixed well either way, at 47 s
+  without it and 5 s with it.
 - **Run chains on threads.** Compiled code releases the GIL, so threads gave 3.4
   times the speed of running 4 chains in turn. Vmapping chains makes each one wait
   for the deepest NUTS tree in the batch.

@@ -112,25 +112,23 @@ out_scaler)` does the job without extra state.
 The trainers are built from kernels in `jaxhybridmodels.training.kernels`:
 `build_bucket_step` returns jitted `(loss, grads)` for one bucket,
 `build_score_bucket` a forward-only loss, `build_penalty_step` the
-per-step regulariser, and `build_apply_update` one optimiser update. One
-step of the stock loop, without the optimiser setup and UI:
+per-step regulariser, and `build_apply_update` one optimiser update. These
+pieces come from the [custom loop example](/examples/custom-loop), which CI
+runs. First the kernels and the optimiser state:
 
-```python
-loss_fn = hm.Objective(loss="mse").loss_fn(dataset.output_channel_names)
-step = build_bucket_step(
-    simulate_fn=simulate_fn, state_to_output=state_to_output,
-    solver=solver, loss_fn=loss_fn, trainable=mask,
-)
-apply_update = build_apply_update(optimizer=optimizer, trainable=mask)
+<<< @/../examples/custom_loop/train_custom_loop.py#bucket-step
 
-buckets = dataset.bucket_payloads
-grads = [step(predictors, bp, horizon)[1] for bp in buckets]
-mean_grads = jax.tree.map(lambda *g: sum(g) / len(g), *grads)
-predictors, opt_state = apply_update(predictors, mean_grads, opt_state)
-```
+`loss_fn` takes `(pred_obs, bp)`, and `hm.Objective(loss="mse").loss_fn(channels)`
+builds a stock one. Then, in each step, a weighted mean over buckets, a
+regulariser and the update:
 
-The [custom loop example](/examples/custom-loop) is the full version, with
-per-bucket weights and a custom regulariser.
+<<< @/../examples/custom_loop/train_custom_loop.py#loss
+
+`horizon` is the leading fraction of each time series the loss scores, and
+defaults to 1.0. A new value does not recompile. At the end, put the
+predictors back to get a model you can predict with and save:
+
+<<< @/../examples/custom_loop/train_custom_loop.py#put-back
 
 The stock trainers take an optax schedule as a phase's `lr`. In your own
 loop, any schedule works, and `annealing_schedule` returns a multiplier

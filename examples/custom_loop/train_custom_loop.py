@@ -12,7 +12,7 @@ Shows:
 - ``build_bucket_step``, ``build_penalty_step`` and ``build_apply_update``
 - a custom loss (masked Huber) and a custom regulariser (L2 on a second
   ``Parameter``) entering a hand-written loop
-- ``eqx.tree_at`` to put the loop's predictors back into the model, then
+- ``HybridModel.with_predictors`` to put the loop's predictors back, then
   ``predict`` and ``compute_metrics`` as after ``fit``
 
 Run::
@@ -168,7 +168,7 @@ def main() -> None:
 
     # The fraction of each time series the loss sees. 1.0 scores all of it;
     # a schedule over this value is how the stock trainer's horizon works.
-    horizon = jnp.asarray(1.0)
+    horizon = 1.0
     penalty_weight = jnp.asarray(0.1)
     print("\n[fit]")
     for step in range(args.steps):
@@ -204,7 +204,9 @@ def main() -> None:
     print(f"recovered omega = {float(predictors['omega'].value):.4f}  (truth {OMEGA_TRUE})")
     print(f"final scale     = {float(predictors['scale'].value):.6f}  (regularised toward 0)")
 
-    fitted = eqx.tree_at(lambda m: m.predictors, model, predictors)
+    # region put-back
+    fitted = model.with_predictors(predictors)
+    # endregion put-back
     predictions = fitted.predict(ds)
     hm.print_metrics(predictions, header="custom-loop result")
 

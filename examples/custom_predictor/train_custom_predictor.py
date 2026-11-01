@@ -162,6 +162,9 @@ class RandomFourierPredictor(hm.Predictor):
     def initialized_with_key(self, key: Array) -> RandomFourierPredictor:
         """Re-init for the restart tournament: a fresh bank and readout.
 
+        The tournament then puts frozen leaves back, so with the bank frozen
+        only the readout is actually redrawn.
+
         The default in ``reinitialize_with_key`` replaces every float
         leaf with a standard normal, which would give the bank the wrong
         scale and drop ``bandwidth`` on the floor. Rebuilding through

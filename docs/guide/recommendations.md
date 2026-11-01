@@ -105,6 +105,19 @@ and
 [`train_crystallisation_mechanistic.py`](/examples/crystallisation-mechanistic)
 fits four scalars with CMA-ES.
 
+For a positive rate spanning decades that is exactly zero below a threshold, warp
+the output and gate it in the vector field:
+
+```python
+nucleation = hm.BoundedPredictor(
+    inner=mlp, input_keys=("S",), input_bounds=(1.0, 3.0),
+    output_bounds=(1e-12, 1e-2), output_warp="log10",
+)
+# In the vector field. Keep the gate outside the network, and its input warp linear,
+# since both branches of jnp.where are evaluated.
+rate = jnp.where(S > 1.0 + 1e-5, predictors["nucleation"]({"S": S}), 0.0)
+```
+
 ### One input dict per step
 
 Build one dict of inputs in the vector field and pass it to every
@@ -135,6 +148,10 @@ at a poor loss.
 
 Use Evosax for roughly 4 to 10 kinetic scalars, then refine with Optax.
 See [Training](/guide/training#evosax-then-optax).
+
+When channels differ in scale, plain MSE fits the largest and ignores the rest. Put
+measurement variances in the data and use `Objective(loss="mle")`, which divides
+each residual by them.
 
 ### Check the wiring with everything frozen
 
