@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import diffrax
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
@@ -24,6 +26,7 @@ import pytest
 from jax import Array
 
 import jaxhybridmodels as hm
+import jaxhybridmodels.training.evosax as evosax_module
 from jaxhybridmodels.losses import masked_mse
 from jaxhybridmodels.penalties import box_grid
 from jaxhybridmodels.training.kernels import simulate_bucket
@@ -272,6 +275,13 @@ def test_metrics_count_only_measured_cells(mechanistic, mechanistic_data, capsys
     assert all(float(m.r2) > 0.99 for m in metrics.values())
     hm.print_metrics(predictions)
     assert "a" in capsys.readouterr().out
+
+
+def test_a_fit_result_prints_as_one_line(mechanistic):
+    _, result, _ = mechanistic
+    printed = repr(result)
+    assert "\n" not in printed and len(printed) < 120
+    assert "stop_reason='budget_exhausted'" in printed and "steps=100" in printed
 
 
 def test_dataframe_has_one_row_per_cell(mechanistic, mechanistic_data):
@@ -662,6 +672,206 @@ def test_predict_ensemble_is_the_member_mean_with_its_spread(ensembles, plain_da
         np.testing.assert_allclose(experiment.std["a"], stacked.std(axis=0), atol=1e-5)
     assert "std" in combined.to_dataframe().columns
     assert {name: int(m.n) for name, m in hm.compute_metrics(combined).items()} == N_OBSERVED
+
+
+@pytest.fixture(scope="session")
+def validated_ensemble(plain_data):
+    config = hm.OptaxTrainingConfig(steps=20, lr=0.05, verbose=False)
+    # Scored on a set with a different bucket layout than the training data.
+    validation = hm.make_dataset(experiments()[:3], output_channel_names=CHANNELS)
+    return plain_model().fit_ensemble(
+        plain_data, config, n_members=3, freeze="frozen", validation=validation, key=jr.key(7)
+    )
+
+
+def test_ensemble_validation_selects_each_members_step(validated_ensemble):
+    for member in validated_ensemble:
+        assert len(member.history.validation_loss) == 20
+        assert member.best_step == int(np.argmin(member.history.validation_loss))
+
+
+def test_ensemble_validation_ranks_the_members(validated_ensemble):
+    scores = [m.history.validation_loss[m.best_step] for m in validated_ensemble]
+    assert scores == sorted(scores)
+
+
+# ---------------------------------------------------------------------------
+# Failure: a run that starts healthy and breaks partway
+# ---------------------------------------------------------------------------
+
+# The rate climbs from 0.3 towards 2.0 and crosses this limit on the way.
+FAILURE_LIMIT = 1.0
+
+
+def poison_past_limit(k: Array) -> Array:
+    """1 below the limit, NaN past it, with no gradient.
+
+    A plain ``jnp.where(ok, x, nan)`` puts NaN into the gradient on every step,
+    healthy or not, and the run would break on its first update.
+    """
+    return jax.lax.stop_gradient(jnp.where(k < FAILURE_LIMIT, 1.0, jnp.nan))
+
+
+def failing_field(t: Any, y: Array, predictors: Any, covariates: Any) -> Array:
+    """Goes NaN past the limit, so the adaptive solver runs out of steps."""
+    del t, covariates
+    k = predictors["rate"].value
+    return reaction(k, y) * poison_past_limit(k)
+
+
+def failing_output(
+    predictors: Any, ts: Array, covariates: Any, y0: Array, solver: hm.SolverConfig
+) -> Array:
+    """Solves without complaint and returns NaN past the limit: a loss with no solver error."""
+    k = predictors["rate"].value
+    del covariates
+    term = diffrax.ODETerm(lambda t, y, args: reaction(k, y))
+    states = solver.diffeqsolve(term, ts, y0).ys
+    assert states is not None
+    return states * poison_past_limit(k)
+
+
+def failing_model(mode: str) -> hm.HybridModel:
+    predictors = {"rate": hm.Parameter(0.3, bounds=(0.05, 3.0))}
+    solver = hm.SolverConfig(rtol=1e-5, atol=1e-7, dt0=0.05, max_steps=64)
+    if mode == "solver-error":
+        return hm.HybridModel.from_vector_field(
+            vector_field=failing_field,
+            predictors=predictors,
+            state_to_output=lambda state: state,
+            output_channel_names=CHANNELS,
+            solver=solver,
+        )
+    return hm.HybridModel(
+        predictors=predictors,
+        simulate_fn=failing_output,
+        state_to_output=lambda state: state,
+        output_channel_names=CHANNELS,
+        solver=solver,
+    )
+
+
+@pytest.fixture(scope="session")
+def fast_reaction_data() -> hm.Dataset:
+    return hm.make_dataset(experiments(rate=lambda temp: 2.0), output_channel_names=CHANNELS)
+
+
+@pytest.fixture(scope="session", params=["solver-error", "nan-loss"])
+def failed(request, fast_reaction_data):
+    ui = RecordingUI()
+    config = hm.OptaxTrainingConfig(steps=300, lr=0.1, verbose=False)
+    with pytest.warns(RuntimeWarning, match="diverged") as caught:
+        result = failing_model(request.param).fit(fast_reaction_data, config, key=jr.key(0), ui=ui)
+    return result, ui, str(caught[0].message), request.param
+
+
+def test_a_failed_fit_returns_its_best_parameters(failed):
+    result, _, _, _ = failed
+    assert result.stop_reason == "diverged"
+    assert 1 < len(result.history.loss) < 300
+    assert all(np.isfinite(result.history.loss))
+    assert result.best_step == int(np.argmin(result.history.loss))
+    assert fitted_rate(result) < FAILURE_LIMIT
+
+
+def test_a_failed_fit_can_still_predict(failed, fast_reaction_data):
+    result, _, _, _ = failed
+    outputs = result.model.predict(fast_reaction_data)
+    assert all(np.isfinite(e.outputs["a"]).all() for e in outputs.values())
+
+
+def test_a_failed_fit_says_why_and_closes_the_ui(failed):
+    _, ui, message, mode = failed
+    assert ("maximum number of solver steps" if mode == "solver-error" else "non-finite") in message
+    assert events_named(ui, "on_message")[0]["level"] == "error"
+    assert [name for name, _ in ui.events][-1] == "on_run_end"
+    assert len(events_named(ui, "on_run_end")) == 1
+
+
+def test_a_failed_fit_saves_and_reloads(failed, tmp_path):
+    result, _, _, mode = failed
+    hm.save(tmp_path, result)
+    assert hm.load(tmp_path, like=failing_model(mode)).stop_reason == "diverged"
+
+
+def test_restore_best_off_returns_the_last_measured_step(fast_reaction_data):
+    config = hm.OptaxTrainingConfig(steps=300, lr=0.1, restore_best=False, verbose=False)
+    with pytest.warns(RuntimeWarning, match="diverged"):
+        result = failing_model("nan-loss").fit(fast_reaction_data, config, key=jr.key(0))
+    assert result.best_step is None
+    assert fitted_rate(result) < FAILURE_LIMIT
+    remeasured = result.model.fit(
+        fast_reaction_data, hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False), key=jr.key(0)
+    )
+    assert remeasured.history.loss[0] == pytest.approx(result.history.loss[-1], rel=1e-4)
+
+
+def test_a_failure_right_after_a_horizon_change_returns_a_measured_step(fast_reaction_data):
+    # The running minimum resets at the boundary, leaving no best to restore. The
+    # one update of the first phase jumps past the limit, so the second phase
+    # fails on its first step and the only measured parameters are the start.
+    config = hm.OptaxTrainingConfig(
+        phases=(hm.TrainingPhase(1, lr=3.0, horizon=0.5), hm.TrainingPhase(5, lr=0.1)),
+        verbose=False,
+    )
+    with pytest.warns(RuntimeWarning, match="diverged"):
+        result = failing_model("nan-loss").fit(fast_reaction_data, config, key=jr.key(0))
+    assert result.stop_reason == "diverged"
+    assert result.best_step is None
+    assert len(result.history.loss) == 1
+    assert result.final_loss == result.history.loss[0]
+    assert fitted_rate(result) == pytest.approx(0.3, rel=1e-4)
+
+
+@pytest.mark.parametrize("mode", ["solver-error", "nan-loss"])
+def test_a_failure_on_the_first_step_raises(fast_reaction_data, mode):
+    # Past the limit from the start, so no step can be measured.
+    start = hm.Parameter(1.5, bounds=(0.05, 3.0))
+    model = eqx.tree_at(lambda m: m.predictors["rate"], failing_model(mode), start)
+    with pytest.raises((FloatingPointError, eqx.EquinoxRuntimeError)):
+        model.fit(
+            fast_reaction_data,
+            hm.OptaxTrainingConfig(steps=5, lr=0.1, verbose=False),
+            key=jr.key(0),
+        )
+
+
+class PoisonedStrategy:
+    """An evosax strategy that asks for NaN candidates from a given generation on."""
+
+    def __init__(self, strategy: Any, poison_from: int) -> None:
+        self.strategy, self.poison_from, self.generation = strategy, poison_from, 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.strategy, name)
+
+    def ask(self, key: Array, state: Any, params: Any) -> Any:
+        population, state = self.strategy.ask(key, state, params)
+        self.generation += 1
+        return population * (jnp.nan if self.generation > self.poison_from else 1.0), state
+
+
+@pytest.mark.parametrize("poison_from, reaches_history", [(3, True), (0, False)])
+def test_evosax_returns_its_best_when_a_later_generation_fails(
+    plain_data, monkeypatch, poison_from, reaches_history
+):
+    build = evosax_module._build_strategy
+
+    def poisoned(**kwargs: Any) -> Any:
+        strategy, params = build(**kwargs)
+        return PoisonedStrategy(strategy, poison_from), params
+
+    monkeypatch.setattr(evosax_module, "_build_strategy", poisoned)
+    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.1, verbose=False)
+    if not reaches_history:
+        with pytest.raises((FloatingPointError, eqx.EquinoxRuntimeError)):
+            plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(0))
+        return
+    with pytest.warns(RuntimeWarning, match="diverged"):
+        result = plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(0))
+    assert result.stop_reason == "diverged"
+    assert len(result.history.loss) == poison_from
+    assert np.isfinite(float(result.model.predictors["rate"].value))
 
 
 # ---------------------------------------------------------------------------

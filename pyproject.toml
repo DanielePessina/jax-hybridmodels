@@ -37,6 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pandas = ["pandas>=3.0.2"]
 examples = [
     "matplotlib>=3.10.9",
     "openpyxl>=3.1.5",
@@ -108,7 +109,9 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+# W605 catches an invalid escape in a docstring, which Python only warns about
+# when it compiles the file.
+select = ["E", "F", "I", "UP", "B", "W605"]
 ignore = []
 
 [tool.pytest.ini_options]

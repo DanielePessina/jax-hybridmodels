@@ -121,7 +121,7 @@ an lr schedule) cannot be rebuilt, so it comes back as the raw dict
 with each callable as ``{"__callable__": "module.qualname"}``; rebind
 those fields yourself. ``extras`` is the dict passed to ``save``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L160)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L174)</small>
 
 ---
 

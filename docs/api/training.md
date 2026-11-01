@@ -138,7 +138,7 @@ stores ``phases``::
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever the horizon changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 | `verbose` | `bool` | Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L177)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L173)</small>
 
 ---
 
@@ -172,7 +172,7 @@ One contiguous block of Optax steps with its own schedule settings.
 | `reset_optimizer` | `bool` | Rebuild the optimiser and discard its state at the start of this phase. Set it when switching optimiser, and when a horizon change has made the accumulated momentum wrong. |
 | `penalty_weight` | `float | None` | Override of ``Objective.penalty_weight`` for this phase. ``None`` (the default) uses the objective's weight; ``0.0`` switches the bound penalty off for the phase. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L93)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L89)</small>
 
 ---
 
@@ -216,7 +216,11 @@ The returned model comes from the lowest-loss step when
 whenever the phase horizon changes, so the returned model always comes
 from the last horizon trained on.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L859)</small>
+A solver error or a non-finite loss after the first step ends the run: it
+warns and returns the best parameters so far, with ``stop_reason``
+``"diverged"``. On the first step there is nothing to return, so it raises.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L861)</small>
 
 ---
 
@@ -259,7 +263,7 @@ no phases: the run is a flat loop, so every field is a scalar.
 | `log_every` |  | UI heartbeat cadence. Honoured only by the Rich UIs; the silent and recording UIs see every generation. |
 | `verbose` |  | Selects ``RichEvosaxUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L122)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L125)</small>
 
 ---
 
@@ -303,7 +307,7 @@ candidate seen in any generation, the warm-up evaluation of the input
 included. With it, each generation's best is scored on the validation
 set and the returned model is the one that scored lowest there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L354)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L359)</small>
 
 ---
 
@@ -323,4 +327,4 @@ After registration, ``EvosaxTrainingConfig(algorithm=name)`` builds that
 strategy. Re-registering an existing name overwrites without warning.
 Mirrors [`register_solver`](/api/solver#register_solver).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L112)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L115)</small>

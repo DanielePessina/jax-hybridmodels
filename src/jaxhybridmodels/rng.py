@@ -26,9 +26,27 @@ process, which is what reproducibility needs.
 from __future__ import annotations
 
 import zlib
+from typing import Any
 
+import jax
+import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
+
+
+def check_key(key: Any, caller: str) -> None:
+    """Refuse anything but a JAX PRNG key: ``jr.key(0)`` or a legacy ``jr.PRNGKey(0)``.
+
+    Without this, a fit that draws no random numbers would accept ``key=None``
+    or ``key=0``, and the same call would fail with a JAX error as soon as a
+    tournament was switched on.
+    """
+    if isinstance(key, jax.Array):
+        if jnp.issubdtype(key.dtype, jax.dtypes.prng_key):
+            return
+        if key.dtype == jnp.uint32 and key.shape == (2,):
+            return
+    raise TypeError(f"{caller}: key must be a JAX PRNG key such as jax.random.key(0); got {key!r}")
 
 
 def fold(root_key: Array, name: str) -> Array:

@@ -60,6 +60,31 @@ from jaxtyping import Array
 from jaxhybridmodels.data import BucketPayload, Dataset
 from jaxhybridmodels.solver import SolverConfig, simulation_state
 
+# What counts as a fit failing rather than a bug: a solver error and a
+# non-finite loss. Narrow on purpose. Catching everything would also swallow
+# shape bugs in the user's simulate_fn and framework bugs, and report them as
+# a run that merely stopped early.
+FIT_FAILURES: tuple[type[BaseException], ...] = (
+    FloatingPointError,
+    jax.errors.JaxRuntimeError,
+    eqx.EquinoxRuntimeError,
+)
+
+
+def failure_summary(exc: BaseException) -> str:
+    """One line saying why a fit failed, for a warning or a UI message.
+
+    An Equinox runtime error opens with a stack listing and a long explanation
+    of how to debug under JIT. The line the user needs, such as "The maximum
+    number of solver steps was reached", follows the error's own class name.
+    """
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    marker = "EquinoxRuntimeError: "
+    for line in lines:
+        if marker in line:
+            return line.split(marker, 1)[1]
+    return lines[0] if lines else type(exc).__name__
+
 
 def apply_length_mask(bp: BucketPayload, length_mask_fraction: Array) -> BucketPayload:
     """Narrow the bucket's mask to the first ``fraction`` of its timestamps.

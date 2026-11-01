@@ -6,9 +6,13 @@ ensembles vary the initialisation; bootstrap ensembles vary the data.
 best first. `hm.predict_ensemble` averages their predictions.
 
 `fit_ensemble` takes `fit`'s arguments (`data`, `config`, `key`,
-`objective`, `freeze`, `trainable`, `ui`) plus `n_members`, `n_seeds` and
-`bootstrap`. It trains with Optax only. Every member starts from a fresh
-initialisation of the predictors drawn from `key`.
+`objective`, `freeze`, `trainable`, `ui`, `validation`) plus `n_members`,
+`n_seeds` and `bootstrap`. It trains with Optax only. Every member starts from a
+fresh initialisation of the predictors drawn from `key`.
+
+With `validation=`, each member picks its returned step on the validation loss,
+as in `fit`, and members are sorted by that loss. Seeds are still scored on the
+training data.
 
 ## Seed ensembles
 

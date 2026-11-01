@@ -8,6 +8,7 @@ compiling.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -34,6 +35,11 @@ def fit(model: hm.HybridModel | None = None, **kwargs: Any) -> Any:
     model = parameter_model() if model is None else model
     fields: dict[str, Any] = {"key": jr.key(0), **kwargs}
     return model.fit(decay_dataset(), quiet(steps=1), **fields)
+
+
+def unchecked(value: Any) -> Any:
+    """``value`` typed ``Any``, for rows that break a signature on purpose."""
+    return value
 
 
 def unchecked_model() -> Any:
@@ -79,6 +85,19 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     ("outside-bounds", lambda: hm.Parameter(5.0, bounds=(0.0, 1.0)), ValueError, "strictly inside"),
     # Configuration
     ("no-budget", lambda: hm.OptaxTrainingConfig(), ValueError, "Supply steps="),
+    ("lr-without-steps", lambda: hm.OptaxTrainingConfig(lr=0.1), ValueError, "need steps="),
+    (
+        "lr-with-phases",
+        lambda: hm.OptaxTrainingConfig(lr=0.1, phases=(hm.TrainingPhase(1),)),
+        ValueError,
+        "per TrainingPhase",
+    ),
+    (
+        "tournament-without-steps",
+        lambda: hm.OptaxTrainingConfig(steps=1, tournament_attempts=3),
+        ValueError,
+        "tournament_steps=0",
+    ),
     (
         "steps-and-phases",
         lambda: hm.OptaxTrainingConfig(steps=1, phases=(hm.TrainingPhase(1),)),
@@ -103,6 +122,24 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
         "not one Experiment",
     ),
     ("no-key", lambda: unchecked_model().fit(decay_dataset(), quiet(steps=1)), TypeError, "key"),
+    ("none-key", lambda: fit(key=None), TypeError, "must be a JAX PRNG key"),
+    ("int-key", lambda: fit(key=0), TypeError, "must be a JAX PRNG key"),
+    (
+        "ensemble-int-key",
+        lambda: parameter_model().fit_ensemble(
+            decay_dataset(), quiet(steps=1), key=unchecked(0), n_members=1
+        ),
+        TypeError,
+        "must be a JAX PRNG key",
+    ),
+    (
+        "evosax-int-key",
+        lambda: parameter_model().fit(
+            decay_dataset(), hm.EvosaxTrainingConfig(steps=1), key=unchecked(0)
+        ),
+        TypeError,
+        "must be a JAX PRNG key",
+    ),
     (
         "wrong-config-type",
         lambda: unchecked_model().fit(decay_dataset(), {"steps": 1}, key=jr.key(0)),
@@ -189,3 +226,49 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
 def test_rejected(call: Callable[[], Any], error: type[Exception], match: str) -> None:
     with pytest.raises(error, match=match):
         call()
+
+
+def test_both_kinds_of_jax_key_are_accepted() -> None:
+    for key in (jr.key(0), jr.PRNGKey(0)):
+        fit(key=key)
+
+
+def test_a_lone_tournament_budget_warns() -> None:
+    config = quiet(steps=1, tournament_steps=2)
+    with pytest.warns(RuntimeWarning, match="tournament_attempts=1"):
+        parameter_model().fit(decay_dataset(), config, key=jr.key(0))
+
+
+def _missing_covariate(predictors: Any, ts: Any, covariates: Any, y0: Any, solver: Any) -> Any:
+    del predictors, solver, y0
+    return jnp.zeros((ts.shape[0], 1)) * covariates["pressure"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda m: m.fit(decay_dataset(), quiet(steps=1), key=jr.key(0)),
+        lambda m: m.predict(decay_dataset()),
+        lambda m: m.simulate(ts=TS, y0=[1.0], covariates={"temp": 1.0}),
+    ],
+    ids=["fit", "predict", "simulate"],
+)
+def test_an_error_in_user_code_lists_the_names_that_exist(call: Any) -> None:
+    model = hm.HybridModel(
+        predictors=parameter_predictors(),
+        simulate_fn=_missing_covariate,
+        state_to_output=identity,
+        output_channel_names=("conc",),
+    )
+    with pytest.raises(KeyError, match="pressure") as caught:
+        call(model)
+    note = "\n".join(caught.value.__notes__)
+    assert "['rate', 'offset']" in note or "['offset', 'rate']" in note
+    assert "['temp']" in note and "(1,)" in note
+
+
+def test_a_missing_pandas_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    prediction = parameter_model().predict(decay_dataset())
+    monkeypatch.setitem(sys.modules, "pandas", None)
+    with pytest.raises(ImportError, match=r"jax-hybridmodels\[pandas\]"):
+        prediction.to_dataframe()

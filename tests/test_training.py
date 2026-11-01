@@ -458,10 +458,12 @@ def test_more_attempts_give_a_better_winner(tournament_losses):
 
 
 def test_tournament_falls_back_when_every_attempt_fails(decay_data):
+    # The fallback keeps the input model, whose own first step then fails too.
     with pytest.warns(RuntimeWarning, match="all attempts failed"):
-        make_model(parameter_predictors(), nan_simulate).fit(
-            decay_data, quiet(steps=1, tournament_attempts=2, tournament_steps=1), key=jr.key(0)
-        )
+        with pytest.raises(FloatingPointError, match="non-finite"):
+            make_model(parameter_predictors(), nan_simulate).fit(
+                decay_data, quiet(steps=1, tournament_attempts=2, tournament_steps=1), key=jr.key(0)
+            )
 
 
 def test_tournament_survives_equinox_runtime_failures(decay_data):
@@ -663,7 +665,9 @@ def test_the_tournament_keeps_frozen_leaves(temp_data):
 def test_ensemble_ranking_puts_a_nan_loss_last():
     """A NaN final loss would scramble a plain sort; it ranks as ``inf``."""
     losses = [0.5, float("nan"), 0.1]
-    members = [cast(hm.FitResult, SimpleNamespace(final_loss=v)) for v in losses]
+    members = [
+        cast(hm.FitResult, SimpleNamespace(final_loss=v, history=hm.FitHistory())) for v in losses
+    ]
     ranked = [m.final_loss for m in sorted(members, key=_rank_key)]
     assert ranked[:2] == [0.1, 0.5] and np.isnan(ranked[2])
 

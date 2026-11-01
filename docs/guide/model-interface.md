@@ -26,7 +26,8 @@ step.
 
 `fit` returns a `FitResult`: the fitted `model`, its `history`, the
 `best_step` that `restore_best` returned, and a `stop_reason` of
-`"budget_exhausted"` or `"patience"`. The original model is unchanged.
+`"budget_exhausted"`, `"patience"` or `"diverged"`. The original model is
+unchanged.
 `fit_ensemble` trains several members and returns a list of `FitResult`s;
 see [Ensembles](/guide/ensembles).
 
@@ -37,7 +38,7 @@ order. Each entry has `times`, `outputs`, `observed` and `observation_mask`,
 all aligned on the experiment's own time axis; `observed` is NaN where a
 channel was not measured. Experiments without an ID are named
 `experiment_<index>`, and duplicate IDs raise. `predictions.to_dataframe()`
-returns a long table (needs pandas), and `predictions.buckets` keeps the raw
+returns a long table (needs pandas: `pip install jax-hybridmodels[pandas]`), and `predictions.buckets` keeps the raw
 `[N, T, D]` arrays for custom JAX code.
 
 `hm.compute_metrics(predictions)` returns per-channel statistics over the
