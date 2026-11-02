@@ -337,6 +337,16 @@ def evaluate_predictor(predictor: Any, inputs: Mapping[str, ArrayLike]) -> Array
     Array
         Call ``float(...)`` on a scalar result for a Python number.
     """
+    if not isinstance(inputs, Mapping):
+        # A predictor built without input_keys still has names ("x1", ...),
+        # so name them rather than guess which axis of an array is the input.
+        names = getattr(predictor, "input_keys", None)
+        hint = f" This predictor's inputs are {list(names)}." if names else ""
+        raise TypeError(
+            "evaluate_predictor takes a mapping of input name to array, got an "
+            f"object of type {type(inputs).__name__}.{hint} For rows of an array, use "
+            "jax.vmap(predictor)(x)."
+        )
     arrays = {
         key: jnp.asarray(value, dtype=jnp.result_type(jnp.asarray(value).dtype, float))
         for key, value in inputs.items()

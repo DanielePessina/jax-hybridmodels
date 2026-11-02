@@ -162,6 +162,15 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     # Predictors
     ("reversed-bounds", lambda: hm.Parameter(0.5, bounds=(2.0, 1.0)), ValueError, "low < high"),
     ("outside-bounds", lambda: hm.Parameter(5.0, bounds=(0.0, 1.0)), ValueError, "strictly inside"),
+    (
+        "evaluate-array",
+        lambda: hm.evaluate_predictor(
+            hm.BoundedPredictor(inner=mlp(jr.key(0)), input_bounds=((0, 1),) * 2),
+            jnp.zeros((5, 2)),  # ty: ignore[invalid-argument-type]
+        ),
+        TypeError,
+        "inputs are .'x1', 'x2'.",
+    ),
     # Configuration
     ("no-budget", lambda: hm.OptaxTrainingConfig(), ValueError, "Supply steps="),
     ("lr-without-steps", lambda: hm.OptaxTrainingConfig(lr=0.1), ValueError, "need steps="),

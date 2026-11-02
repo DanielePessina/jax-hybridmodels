@@ -73,9 +73,10 @@ learning rate does not recompile.
 
 ## `Algebraic simplifier is likely stuck` in stderr
 
-XLA can print this many times while compiling a solve under forward-mode
-differentiation, which sampling uses for a few parameters. It comes from XLA's
-optimiser, and the results in this package's posterior tests are correct with it
+XLA can print this many times while compiling a solve, most often under
+forward-mode differentiation, which sampling uses for a few parameters, and with
+an implicit solver such as `Kvaerno5`, including inside an Evosax population. It
+comes from XLA's optimiser, and the results in this package's posterior tests are correct with it
 printing. To silence it, set `TF_CPP_MIN_LOG_LEVEL=3` before importing JAX. That
 hides XLA's other errors too, and level 2 does not remove this message.
 

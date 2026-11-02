@@ -142,6 +142,9 @@
   `covariates` is optional.
 - CI lint job and pre-commit hooks running `ruff check`, `ruff format` and
   `ty check` over sources, tests, examples and scripts.
+- Evosax ranks a candidate whose solve fails last instead of ending the run,
+  and `FitHistory.failed_candidates` counts them per generation. `summary()`
+  gives the total. Only a generation where every candidate fails ends the run.
 - A rewritten test suite built on one small shared decay model. It is
   mostly end to end and runs in about two minutes instead of twenty.
 
@@ -325,6 +328,8 @@ Migration for code written against the earlier API:
   leaves now keep their original values in `fit` and `fit_ensemble`.
 - `fit_ensemble` ranks a member whose final loss is NaN last instead of
   scrambling the order of the whole list.
+- `evaluate_predictor` given an array, not a mapping, raised an unrelated
+  `AttributeError`. It now raises a `TypeError` naming the predictor's inputs.
 
 ### Documentation
 

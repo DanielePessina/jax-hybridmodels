@@ -741,6 +741,36 @@ def test_evosax_validation_selects_a_generation(plain_data):
     assert result.best_step == int(np.argmin(result.history.validation_loss))
 
 
+def test_evosax_ranks_failed_solves_last_and_keeps_searching(plain_data, tmp_path):
+    # A wide log box puts some candidates at rates of thousands, which an
+    # explicit solver cannot finish in 16 steps. Under the default throw=True,
+    # each of those would have ended the run.
+    model = hm.HybridModel.from_vector_field(
+        vector_field=plain_field,
+        predictors={"rate": hm.Parameter(0.3, bounds=(0.05, 5000.0), warp="log")},
+        state_to_output=lambda state: state,
+        output_channel_names=CHANNELS,
+        solver=hm.SolverConfig(max_steps=16),
+    )
+    ui = RecordingUI()
+    config = hm.EvosaxTrainingConfig(
+        population_size=16, steps=20, init="uniform_box", init_box_extent=4.0
+    )
+    result = model.fit(plain_data, config, key=jr.key(0), ui=ui)
+
+    assert result.stop_reason == "budget_exhausted"
+    assert len(result.history.failed_candidates) == 20
+    assert result.history.failed_candidates[0] > 0
+    assert fitted_rate(result) == pytest.approx(TRUE_RATE, abs=0.15)
+    warnings = [e["text"] for e in events_named(ui, "on_message") if e["level"] == "warning"]
+    assert len(warnings) == 1 and "rank last" in warnings[0]
+    assert "candidates failed to solve" in result.summary()
+
+    hm.save(tmp_path / "run", result)
+    loaded = hm.load(tmp_path / "run", like=model)
+    assert loaded.history.failed_candidates == result.history.failed_candidates
+
+
 # ---------------------------------------------------------------------------
 # Ensembles
 # ---------------------------------------------------------------------------

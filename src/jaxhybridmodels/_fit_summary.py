@@ -69,6 +69,13 @@ def _run_lines(history: FitHistory, best_step: int | None, stop_reason: str | No
         lines.append(f"  validation loss {history.validation_loss[at]:.4e} at the returned point")
     if any(history.penalty):
         lines.append(f"  bound penalty {history.penalty[at]:.4e} at the returned point")
+    failed = sum(history.failed_candidates)
+    if failed:
+        generations = sum(1 for n in history.failed_candidates if n)
+        lines.append(
+            f"  {failed} candidates failed to solve, in {generations} of "
+            f"{len(history.failed_candidates)} generations, and ranked last"
+        )
     return lines
 
 
