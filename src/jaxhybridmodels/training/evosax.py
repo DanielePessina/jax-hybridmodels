@@ -341,6 +341,26 @@ def _box_population(
     raise ValueError(f"_box_population called with non-box init {config.init!r}")
 
 
+def _solver_error(
+    predictors: Any, dataset: Dataset, *, simulate_fn: Callable[..., Array], solver: SolverConfig
+) -> BaseException | None:
+    """The error a solve of ``predictors`` raises with the user's own solver, if any.
+
+    The population solves with ``throw`` off, so a failure shows only as a
+    non-finite fitness. Re-solving one candidate with ``throw`` on recovers
+    diffrax's message, such as an exhausted step budget, which
+    ``failure_details`` turns into advice. ``None`` when it solves, so the
+    non-finite value came from the loss or the penalty instead.
+    """
+    solve = eqx.filter_jit(simulate_bucket)
+    try:
+        for bp in dataset.bucket_payloads:
+            jax.block_until_ready(solve(predictors, bp, simulate_fn=simulate_fn, solver=solver))  # type: ignore[no-untyped-call]
+    except FIT_FAILURES as exc:
+        return exc
+    return None
+
+
 def _rank_failures_last(fitness: Array, finite: Array) -> Array:
     """``fitness`` with each non-finite entry set just above the worst finite one.
 
@@ -559,16 +579,21 @@ def _train_with_evosax(
         warm_pop = jnp.broadcast_to(flat0[None, :], (config.population_size, flat0.shape[0]))
         warm_fitness = population_eval(warm_pop)
         jax.block_until_ready(warm_fitness)  # type: ignore[no-untyped-call]
+
+        def rebuild(flat: Array) -> Any:
+            return eqx.combine(unflatten(flat), static_predictors)
+
+        def failed_solve(flat: Array, message: str) -> BaseException:
+            found = _solver_error(rebuild(flat), dataset, simulate_fn=simulate_fn, solver=solver)
+            return FloatingPointError(message) if found is None else found
+
         if not bool(jnp.all(jnp.isfinite(warm_fitness))):
-            raise FloatingPointError("non-finite fitness in the initial population")
+            raise failed_solve(flat0, "non-finite fitness in the initial population")
         ui_.on_compile_done(bucket_idx=0)
 
         strategy, strat_params = _build_strategy(config=config, flat=flat0)
         init_key = fold(key, "evosax_init")
         state = strategy.init(init_key, flat0, strat_params)
-
-        def rebuild(flat: Array) -> Any:
-            return eqx.combine(unflatten(flat), static_predictors)
 
         # Best-ever bookkeeping starts from the warm-up evaluation, so an
         # unlucky initial population cannot replace a perfectly good seed.
@@ -604,8 +629,9 @@ def _train_with_evosax(
                 finite = jnp.isfinite(fitness)
                 n_failed = int(fitness.shape[0] - jnp.sum(finite))
                 if n_failed == fitness.shape[0]:
-                    raise FloatingPointError(
-                        f"every candidate in generation {gen} has a non-finite fitness"
+                    raise failed_solve(
+                        population[0],
+                        f"every candidate in generation {gen} has a non-finite fitness",
                     )
                 if n_failed:
                     fitness = _rank_failures_last(fitness, finite)

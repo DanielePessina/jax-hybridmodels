@@ -1319,7 +1319,16 @@ def stiff_experiments() -> tuple[hm.Dataset, hm.SolverConfig]:
     return dataset, hm.SolverConfig(rtol=1e-5, atol=1e-7, dt0=0.01, max_steps=20000)
 
 
-def test_a_failed_first_step_names_the_experiment_and_a_better_solver():
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param(hm.OptaxTrainingConfig(steps=2, lr=1e-3), id="optax"),
+        # Evosax solves its population with throw off, so it must recover the
+        # solver's own error to give the same advice.
+        pytest.param(hm.EvosaxTrainingConfig(population_size=4, steps=2), id="evosax"),
+    ],
+)
+def test_a_failed_first_step_names_the_experiment_and_a_better_solver(config):
     dataset, solver = stiff_experiments()
     model = hm.HybridModel.from_vector_field(
         vector_field=stiff_field,
@@ -1329,7 +1338,7 @@ def test_a_failed_first_step_names_the_experiment_and_a_better_solver():
         solver=solver,
     )
     with pytest.raises(eqx.EquinoxRuntimeError) as caught:
-        model.fit(dataset, hm.OptaxTrainingConfig(steps=2, lr=1e-3), key=jr.key(0), verbose=False)
+        model.fit(dataset, config, key=jr.key(0), verbose=False)
     note = " ".join(caught.value.__notes__)
     assert "Failing: stiff." in note
     assert "gentle" not in note
