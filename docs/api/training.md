@@ -315,7 +315,7 @@ candidate seen in any generation, the warm-up evaluation of the input
 included. With it, each generation's best is scored on the validation
 set and the returned model is the one that scored lowest there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L384)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L409)</small>
 
 ---
 
