@@ -100,7 +100,7 @@ def true_ca(ts: Float[Array, " T"], *, T_C: float, pH: float) -> Float[Array, " 
         t0=float(ts[0]),
         t1=float(ts[-1]),
         dt0=0.01,
-        y0=jnp.asarray(CA0, dtype=jnp.float32),
+        y0=jnp.asarray(CA0, dtype=float),
         saveat=diffrax.SaveAt(ts=ts),
         stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-10),
         max_steps=10_000,

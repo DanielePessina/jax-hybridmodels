@@ -50,7 +50,7 @@ model = hm.HybridModel(
     solver=hm.SolverConfig(rtol=1e-6, atol=1e-8, dt0=0.05),
 )
 result = model.fit([experiment], hm.OptaxTrainingConfig(steps=200, lr=0.03), key=jr.key(0))
-print(result.model.predictors["omega"].value)
+print(result.model.named_values())
 print(result.stop_reason)
 
 predictions = result.model.predict([experiment])

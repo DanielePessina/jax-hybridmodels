@@ -14,7 +14,8 @@ Check that:
 - the initial output of each predictor is plausible
   ([Centre the box](/guide/recommendations#centre-the-box-on-your-guess)).
 
-If only some seeds fail, turn on the
+A failed fit names the experiments that failed, and says whether more steps are
+likely to help. If only some seeds fail, turn on the
 [tournament](/guide/training#the-tournament) or zero the readout with
 `with_zero_final_head()`. If every seed fails, the problem may be stiff:
 try `diffrax.Kvaerno3()`, per-state `atol`, or x64. See
@@ -67,7 +68,16 @@ two experiments. A guarded division is the usual culprit; see
 Each bucket shape compiles once. Further compiles mean something static
 changed: a static predictor field, the solver config, or the identity of
 `simulate_fn` or `state_to_output`. Define those functions once at module
-level; a closure rebuilt per call is a new function to JAX.
+level; a closure rebuilt per call is a new function to JAX. A new `horizon` or
+learning rate does not recompile.
+
+## `Algebraic simplifier is likely stuck` in stderr
+
+XLA can print this many times while compiling a solve under forward-mode
+differentiation, which sampling uses for a few parameters. It comes from XLA's
+optimiser, and the results in this package's posterior tests are correct with it
+printing. To silence it, set `TF_CPP_MIN_LOG_LEVEL=3` before importing JAX. That
+hides XLA's other errors too, and level 2 does not remove this message.
 
 ## A saved run does not load
 

@@ -4,6 +4,20 @@
 
 ### Added
 
+- `experiments_from_long_dataframe` loads a table with one row per measurement,
+  keeping variance and covariates.
+- `HybridModel.named_values()` returns every `Parameter` and `Constant` in physical
+  units by dotted path, and `HybridModel.with_predictors` puts a custom loop's
+  predictors back.
+- `summary()` reports the loss change over the last 10% of steps, which shows
+  whether a fit that ran out of budget had settled.
+- With `verbose=True` and no terminal, training prints plain progress lines through
+  `PlainTrainingUI` or `PlainEvosaxUI`, in place of the Rich dashboard.
+- A failed fit names the experiments that failed, by re-solving with `throw` off, and
+  says when more `max_steps` will not help.
+- `BoundedPredictor(input_warp=, output_warp=)` warps a scaler built from bounds.
+- `reinitialize_with_key` and `reinitialize_pytree_with_key` are top-level exports.
+- `InferenceProblem.physical` takes leading sample axes.
 - `FitResult.summary()` and `SavedRun.summary()` report how the run ended, the
   loss by phase, each `Parameter` with any near a bound, and how much of each
   network's input box is pinned against an output bound. Pass data to add the
@@ -132,6 +146,15 @@
   mostly end to end and runs in about two minutes instead of twenty.
 
 ### Changed (breaking against 0.2.0b1)
+
+- `verbose` moved from `OptaxTrainingConfig` and `EvosaxTrainingConfig` to `fit`,
+  `fit_ensemble`, `train_with_optax` and `train_with_evosax`. A run saved with the old
+  field still loads.
+- `length_mask_fraction` is now `horizon` on the kernels and `penalties` helpers.
+  `build_bucket_step` and `build_score_bucket` return functions that default it to
+  1.0 and do not recompile for a new float.
+- `exp_id` is optional on `experiment_from_array`, and the three builders share an
+  argument order.
 
 - A channel with no observations now has NaN error statistics instead of 0.
 - **Breaking.** `fit` and `fit_ensemble` raise `TypeError` unless `key` is a JAX

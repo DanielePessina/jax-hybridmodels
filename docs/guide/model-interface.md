@@ -31,8 +31,15 @@ unchanged.
 `fit_ensemble` trains several members and returns a list of `FitResult`s;
 see [Ensembles](/guide/ensembles).
 
+`result.model.named_values()` returns every `Parameter` and `Constant` in physical
+units by path, such as `{"omega": 0.9997, "damping": 0.0}`.
+
 `print(result.summary())` reports how the run ended, the loss by phase, each
-`Parameter`, and how much of each network's input box sits at an output bound.
+`Parameter`, and how much of each network's input box has a saturated output.
+The line `loss change over the last 10% of steps` shows whether a fit that ran out
+of budget had settled: on one reactor fit, it read -5% to -10% with a fitted
+constant still well off and under 0.1% once it had arrived. A saturated output is
+near its bound, where gradients vanish.
 `result.summary(experiments)` also predicts on the data and adds the metrics
 and the worst experiment per channel. A flagged parameter is where the bound
 penalty would charge it: the outer 5% of its box for the default sigmoid. The
