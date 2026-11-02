@@ -324,6 +324,7 @@ def _build_history(raw: dict[str, Any] | None) -> FitHistory:
         phase=tuple(int(v) for v in raw.get("phase", ())),
         validation_loss=tuple(_decode_float(v) for v in raw.get("validation_loss", ())),
         failed_candidates=tuple(int(v) for v in raw.get("failed_candidates", ())),
+        tournament_scores=tuple(_decode_float(v) for v in raw.get("tournament_scores", ())),
     )
 
 
@@ -352,7 +353,7 @@ def save(
         structural fingerprint ``load`` checks ``like`` against),
         ``output_channel_names``, ``solver`` (``SolverConfig.to_dict()``),
         ``config`` (``{"kind": "optax" | "evosax", "fields": {...}}``),
-        ``objective``, ``history`` (the four ``FitHistory`` series),
+        ``objective``, ``history`` (every ``FitHistory`` series),
         ``best_step``, ``stop_reason`` and ``extras``. Callables are
         described, not pickled (see the module docstring).
 

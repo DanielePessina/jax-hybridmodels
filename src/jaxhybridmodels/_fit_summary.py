@@ -9,6 +9,7 @@ network's input box and, when asked, a prediction on the data.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 import jax
@@ -76,7 +77,31 @@ def _run_lines(history: FitHistory, best_step: int | None, stop_reason: str | No
             f"  {failed} candidates failed to solve, in {generations} of "
             f"{len(history.failed_candidates)} generations, and ranked last"
         )
+    if history.tournament_scores:
+        lines.append(f"  {_tournament_line(history.tournament_scores)}")
     return lines
+
+
+def _tournament_line(scores: Sequence[float], *, kept: int | None = None) -> str:
+    """One line on a tournament: its size, best and worst score, and failures.
+
+    With ``kept``, the line also names the attempts kept, numbered from 1 in
+    the order the tournament ranks them (ties to the earlier attempt). The
+    trainer reports that as the tournament ends. A saved history does not
+    record which attempt a seed-ensemble member came from, so the summary
+    leaves it out.
+    """
+    finite = [s for s in scores if math.isfinite(s)]
+    order = sorted(range(len(scores)), key=lambda i: scores[i])
+    if kept is None:
+        line = f"tournament: {len(scores)} attempts"
+    else:
+        which = "attempt" if kept == 1 else "attempts"
+        named = ", ".join(str(i + 1) for i in order[:kept])
+        line = f"tournament: kept {which} {named} of {len(scores)}"
+    line += f", best score {scores[order[0]]:.4g}, worst {max(finite):.4g}"
+    failed = len(scores) - len(finite)
+    return line + (f", {failed} failed" if failed else "")
 
 
 def _loss_trend(history: FitHistory) -> float | None:

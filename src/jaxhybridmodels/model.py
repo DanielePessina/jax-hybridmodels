@@ -368,10 +368,14 @@ class HybridModel(eqx.Module):
         """Train an ensemble of up to ``n_members`` models, best first.
 
         Every member starts from a fresh initialisation of the predictors
-        drawn from ``key``. A candidate seed is trained briefly
-        (``config.tournament_steps`` steps at ``config.tournament_lr``) and
+        drawn from ``key``, redrawn as the tournament redraws them: a
+        ``Parameter`` without two finite bounds keeps its starting value in
+        every member. A candidate seed is trained briefly
+        (``config.tournament_steps`` steps, with the first phase's optimiser,
+        horizon and learning rate unless ``config.tournament_lr`` is set) and
         scored, as in the tournament, then the chosen seeds get the full
-        phase schedule.
+        phase schedule. Each member's ``history.tournament_scores`` holds the
+        scores of the seeds it was chosen from, when there was a choice.
 
         Seed ensemble (``bootstrap=False``)
             Score ``n_seeds`` seeds on all of ``data`` and fully train the

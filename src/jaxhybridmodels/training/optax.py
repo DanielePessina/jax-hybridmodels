@@ -34,9 +34,9 @@ import itertools
 import math
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import KW_ONLY, InitVar, dataclass
+from dataclasses import KW_ONLY, InitVar, dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import equinox as eqx
 import jax
@@ -44,6 +44,7 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array
 
+from jaxhybridmodels._fit_summary import _tournament_line
 from jaxhybridmodels.data import (
     BucketPayload,
     Data,
@@ -203,15 +204,19 @@ class OptaxTrainingConfig:
     tournament_attempts, tournament_steps : int
         The tournament runs only when ``tournament_steps > 0`` and
         ``tournament_attempts > 1``. Each attempt re-initialises the
-        predictors, trains for ``tournament_steps`` steps, and is scored on
-        the data term plus any configured trajectory penalty by a
-        forward-only pass; the bound penalty remains excluded. The lowest
-        score wins. An attempt that raises a diffrax error or a non-finite
-        loss is dropped and the next key tried. If all fail, the original
-        predictors are used and a ``RuntimeWarning`` is raised.
-    tournament_lr : float
-        Learning rate for the tournament's short bursts, independent of
-        the phase learning rates.
+        predictors, trains for ``tournament_steps`` steps with the first
+        phase's optimiser and horizon, and is scored on the data term plus
+        any configured trajectory penalty by a forward-only pass; the bound
+        penalty remains excluded. The lowest score wins, and
+        ``history.tournament_scores`` keeps every attempt's. An attempt
+        that raises a diffrax error or a non-finite loss is dropped and the
+        next key tried. If all fail, the original predictors are used and a
+        ``RuntimeWarning`` is raised.
+    tournament_lr : float or None
+        Learning rate for the tournament's short bursts. None, the default,
+        uses the first phase's starting learning rate. A much smaller rate
+        barely moves the attempts, so the tournament ranks the random
+        initialisations rather than where each one is heading.
     patience : int
         Consecutive steps without a new best tracked loss before the current
         phase stops early. The tracked loss is the data term plus any
@@ -235,7 +240,7 @@ class OptaxTrainingConfig:
     phases: tuple[TrainingPhase, ...] = ()
     tournament_attempts: int = 1
     tournament_steps: int = 0
-    tournament_lr: float = 1e-4
+    tournament_lr: float | None = None
     patience: int = 0
     restore_best: bool = True
 
@@ -306,7 +311,8 @@ def _validate_tournament(config: OptaxTrainingConfig) -> None:
             f"tournament_attempts={config.tournament_attempts} does nothing with "
             "tournament_steps=0: no candidate gets trained. Set tournament_steps."
         )
-    if not math.isfinite(config.tournament_lr) or config.tournament_lr < 0.0:
+    lr = config.tournament_lr
+    if lr is not None and (not math.isfinite(lr) or lr < 0.0):
         raise ValueError("OptaxTrainingConfig.tournament_lr must be finite and non-negative")
     if config.patience < 0:
         raise ValueError("OptaxTrainingConfig.patience must be non-negative")
@@ -496,29 +502,34 @@ def _shared_tournament(
     key: Array,
     horizon: Array,
     top_k: int,
-) -> list[tuple[float, Any]]:
+    ui: TrainingUI | None = None,
+) -> _Tournament:
     """Warm-start selection: train several fresh inits briefly, keep the best ``top_k``.
 
     Each candidate is re-initialised from its own subkey, trained for
-    ``tournament_steps`` steps at ``tournament_lr``, then scored with a
-    forward-only pass. The score is the data term, including any
-    configured trajectory penalty (the phases charge it too) and
-    *excluding* the bound penalty: that regulariser is charged
-    once per step regardless of the data, so scoring on it too would let a
-    candidate win by drifting where the penalty likes rather than by
-    fitting.
+    ``tournament_steps`` steps at ``tournament_lr`` over the first
+    ``horizon`` of each trajectory, then scored with a forward-only pass
+    over the same horizon, so it is judged on what it was trained on.
 
-    Returns the ``top_k`` candidates ranked ascending by score. Ties keep
-    the earlier attempt (stable sort), so the result stays a deterministic
-    function of ``key``. ``top_k=1`` reproduces the single-best behaviour
-    the main loop uses.
+    The score is the data term, including any configured trajectory
+    penalty (the phases charge it too) and *excluding* the bound penalty:
+    that regulariser is charged once per step regardless of the data, so
+    scoring on it too would let a candidate win by drifting where the
+    penalty likes rather than by fitting.
 
-    An attempt that raises a diffrax error or a non-finite score is dropped
-    and the next key tried. If every attempt fails, the original
-    ``predictors`` come back with score ``inf`` and a ``RuntimeWarning``.
+    Returns the ``top_k`` candidates ranked ascending by score, and every
+    attempt's score in attempt order. Ties keep the earlier attempt (stable
+    sort), so the result stays a deterministic function of ``key``.
+    ``top_k=1`` reproduces the single-best behaviour the main loop uses.
+
+    An attempt that raises a diffrax error or a non-finite score is dropped,
+    scored ``inf``, and the next key tried. If every attempt fails, the
+    original ``predictors`` come back with score ``inf`` and a
+    ``RuntimeWarning``. ``ui`` gets one line naming the attempt kept.
     """
     last_error: BaseException | None = None
     scored: list[tuple[float, Any]] = []
+    scores: list[float] = []
     for attempt in range(tournament_attempts):
         attempt_key = fold(key, f"tournament_attempt_{attempt}")
         try:
@@ -569,8 +580,10 @@ def _shared_tournament(
             if not math.isfinite(score_value):
                 raise FloatingPointError(f"non-finite tournament loss: {score_value}")
             scored.append((score_value, candidate))
+            scores.append(score_value)
         except FIT_FAILURES as exc:
             last_error = exc
+            scores.append(math.inf)
             continue
 
     if not scored:
@@ -580,10 +593,32 @@ def _shared_tournament(
             RuntimeWarning,
             stacklevel=2,
         )
-        return [(math.inf, predictors)]
+        return _Tournament([(math.inf, predictors)], tuple(scores))
 
     scored.sort(key=lambda pair: pair[0])  # stable, so ties keep the earlier attempt
-    return scored[:top_k]
+    if ui is not None and tournament_attempts > 1:
+        ui.on_message(level="info", text=_tournament_line(scores, kept=min(top_k, len(scored))))
+    return _Tournament(scored[:top_k], tuple(scores))
+
+
+class _Tournament(NamedTuple):
+    """What :func:`_shared_tournament` returns: the kept candidates, and every score."""
+
+    ranked: list[tuple[float, Any]]
+    scores: tuple[float, ...]
+
+
+def _tournament_settings(config: OptaxTrainingConfig) -> tuple[float, Array]:
+    """The tournament's learning rate and horizon, both from the first phase by default.
+
+    The winner goes on to train in the first phase, so the attempts train
+    and are scored on its horizon. A curriculum that starts on a short
+    horizon exists because the full one is hard from a fresh start, which
+    is exactly the state every attempt is in.
+    """
+    first = config.phases[0]
+    lr = _start_lr(first.lr) if config.tournament_lr is None else config.tournament_lr
+    return lr, jnp.asarray(first.horizon)
 
 
 def _tournament_enabled(config: OptaxTrainingConfig) -> bool:
@@ -833,7 +868,9 @@ class _PhaseRun:
     ``best_step`` indexes these lists. ``stopped_early`` is set when
     patience ended the final phase before its step budget. ``failure`` says
     why the run ended early on a solver error or a non-finite loss, and is
-    ``None`` otherwise.
+    ``None`` otherwise. ``tournament_scores`` holds each tournament
+    attempt's score, ``inf`` for one that failed, and is empty when no
+    tournament ran.
     """
 
     predictors: Any
@@ -845,6 +882,7 @@ class _PhaseRun:
     best_step: int | None
     stopped_early: bool
     failure: str | None = None
+    tournament_scores: tuple[float, ...] = ()
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
@@ -950,6 +988,7 @@ def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
             penalty=tuple(run.penalty),
             phase=tuple(run.phase),
             validation_loss=tuple(run.selection),
+            tournament_scores=run.tournament_scores,
         ),
         best_step=run.best_step,
         stop_reason=_stop_reason(run),
@@ -1015,8 +1054,10 @@ def _train_with_optax(
             None if validation is None else build_dataset_score(kernels.score_bucket, validation)
         )
 
+        tournament: tuple[float, ...] = ()
         if _tournament_enabled(config):
-            ranked = _shared_tournament(
+            lr, horizon = _tournament_settings(config)
+            ranked, tournament = _shared_tournament(
                 predictors,
                 dataset,
                 bucket_step=kernels.bucket_step,
@@ -1026,14 +1067,15 @@ def _train_with_optax(
                 trainable=trainable,
                 tournament_attempts=config.tournament_attempts,
                 tournament_steps=config.tournament_steps,
-                tournament_lr=config.tournament_lr,
+                tournament_lr=lr,
                 key=fold(key, "tournament"),
-                horizon=jnp.asarray(1.0),
+                horizon=horizon,
                 top_k=1,
+                ui=ui_,
             )
             predictors = ranked[0][1]
 
-        return _run_phases(
+        run = _run_phases(
             predictors,
             dataset,
             config,
@@ -1046,6 +1088,7 @@ def _train_with_optax(
                 failure_details, dataset=dataset, simulate_fn=simulate_fn, solver=solver
             ),
         )
+        return replace(run, tournament_scores=tournament)
 
 
 def _phase_penalty_weight(phase: TrainingPhase, objective: Objective) -> float:
@@ -1441,7 +1484,9 @@ def _fit_ensemble(
             else build_dataset_score(kernels.score_bucket, validation_set)
         )
 
-        def rank(data_: Dataset, seed_key: Array, top_k: int) -> list[tuple[float, Any]]:
+        lr, horizon = _tournament_settings(config)
+
+        def rank(data_: Dataset, seed_key: Array, top_k: int) -> _Tournament:
             return _shared_tournament(
                 predictors,
                 data_,
@@ -1452,31 +1497,34 @@ def _fit_ensemble(
                 trainable=mask,
                 tournament_attempts=n_seeds,
                 tournament_steps=config.tournament_steps,
-                tournament_lr=config.tournament_lr,
+                tournament_lr=lr,
                 key=seed_key,
-                horizon=jnp.asarray(1.0),
+                horizon=horizon,
                 top_k=top_k,
+                ui=ui_,
             )
 
         # (training data, seed) per member. The key labels are the ones the
         # earlier train_seed_ensemble and train_bootstrap_ensemble used, so a
         # given key still draws the same members.
-        jobs: list[tuple[Dataset, tuple[float, Any]]]
+        # Each job carries its tournament's scores; a seed ensemble's members
+        # share one tournament.
+        jobs: list[tuple[Dataset, tuple[float, Any], tuple[float, ...]]]
         if bootstrap:
             jobs = []
             for s in range(n_members):
                 boot = make_bootstrap_dataset(dataset, key=fold(key, f"bootstrap_{s}"))
                 sample_key = fold(key, f"bootstrap_seeds_{s}")
-                best = rank(boot, fold(sample_key, "bootstrap_sample_tournament"), 1)
-                jobs.append((boot, best[0]))
+                best, scores = rank(boot, fold(sample_key, "bootstrap_sample_tournament"), 1)
+                jobs.append((boot, best[0], scores))
         else:
-            ranked = rank(dataset, fold(key, "seed_ensemble_tournament"), n_members)
-            jobs = [(dataset, seed) for seed in ranked]
+            ranked, scores = rank(dataset, fold(key, "seed_ensemble_tournament"), n_members)
+            jobs = [(dataset, seed, scores) for seed in ranked]
 
         trained: list[FitResult] = []
         # The first member's on_run_start is the one opened above.
         run_open = True
-        for data_, (seed_score, candidate) in jobs:
+        for data_, (seed_score, candidate), scores in jobs:
             if not math.isfinite(seed_score):
                 continue
             if not run_open:
@@ -1507,7 +1555,9 @@ def _fit_ensemble(
                 # Failed on its first step, so it is dropped like a failed seed.
                 ui_.on_run_end(final_loss=math.nan)
                 continue
-            trained.append(_fit_result(model, run))
+            # One attempt chose nothing, so it records no tournament.
+            tournament = scores if n_seeds > 1 else ()
+            trained.append(_fit_result(model, replace(run, tournament_scores=tournament)))
 
         if run_open:
             ui_.on_run_end(final_loss=math.nan)

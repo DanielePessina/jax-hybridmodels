@@ -631,15 +631,17 @@ def test_the_bound_penalty_pulls_the_output_off_its_bound(saturated_fit):
 
 @pytest.fixture(scope="session")
 def tournaments(plain_data):
-    """The same key with more attempts: attempt keys are named, so it adds candidates."""
+    """The same key with more attempts: attempt keys are named, so it adds candidates.
+
+    The first phase scores half of each trajectory, and the tournament takes
+    its horizon and learning rate from it.
+    """
 
     def run(attempts: int) -> hm.FitResult:
         config = hm.OptaxTrainingConfig(
-            steps=1,
-            lr=1e-6,
+            phases=(hm.TrainingPhase(1, lr=0.01, horizon=0.5), hm.TrainingPhase(1, lr=1e-6)),
             tournament_attempts=attempts,
             tournament_steps=3,
-            tournament_lr=0.01,
         )
         return plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(9), verbose=False)
 
@@ -652,6 +654,17 @@ def test_more_tournament_attempts_never_give_a_worse_start(tournaments, plain_st
     # The winner replaced the starting value, and the tournament kept the frozen leaf.
     assert many.history.loss[0] != plain_start_loss
     assert float(many.model.predictors["frozen"].value) == pytest.approx(0.7)
+
+
+def test_the_tournament_records_every_attempt(tournaments, tmp_path):
+    few, many = tournaments
+    scores = many.history.tournament_scores
+    assert len(scores) == 8 and few.history.tournament_scores == scores[:2]
+    # The winner starts the first phase, scored on the same half horizon.
+    assert many.history.loss[0] == pytest.approx(min(scores), rel=1e-5)
+    assert f"tournament: 8 attempts, best score {min(scores):.4g}" in many.summary()
+    hm.save(tmp_path, many)
+    assert hm.load(tmp_path, like=plain_model()).history.tournament_scores == scores
 
 
 def test_validation_drives_patience_as_well_as_the_returned_step(plain_data):
@@ -802,6 +815,11 @@ def test_seed_ensemble_returns_trained_members_best_first(ensembles):
     assert seeds[0].final_loss <= seeds[1].final_loss
     assert all(fitted_rate(member) == pytest.approx(TRUE_RATE, abs=0.1) for member in seeds)
     assert len(events_named(ui, "on_run_end")) == 2, "each member is its own UI run"
+    # Both members came out of one tournament of three seeds.
+    assert len(seeds[0].history.tournament_scores) == 3
+    assert seeds[0].history.tournament_scores == seeds[1].history.tournament_scores
+    [line] = [e["text"] for e in events_named(ui, "on_message") if e["level"] == "info"]
+    assert line.startswith("tournament: kept attempts ") and " of 3, best score " in line
 
 
 def test_bootstrap_ensemble_trains_one_member_per_resample(ensembles):

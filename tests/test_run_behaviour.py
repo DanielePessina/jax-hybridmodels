@@ -360,7 +360,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
         raise eqx.EquinoxRuntimeError("solver failed")
 
     with pytest.warns(RuntimeWarning, match="all attempts failed"):
-        ranked = _shared_tournament(
+        ranked, scores = _shared_tournament(
             predictors,
             decay_data,
             bucket_step=lambda *_args: (jnp.asarray(0.0), predictors),
@@ -376,6 +376,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
             top_k=1,
         )
     assert ranked[0][0] == float("inf")
+    assert scores == (float("inf"), float("inf"))
 
 
 class BracketingUI(RecordingUI):

@@ -638,9 +638,20 @@ class Parameter(eqx.Module):
         return self.scaler.from_latent(self.latent).reshape(self.shape)
 
     def initialized_with_key(self, key: Array) -> Parameter:
-        """Draw a fresh standard-normal latent; the scaler is left untouched."""
+        """Draw a fresh standard-normal latent for each element with two finite bounds.
+
+        A standard-normal latent lands across the middle of a finite box,
+        which is a fair random restart. An element without two finite
+        bounds keeps its value: its latent is the value itself, or a
+        softplus distance from one endpoint, so a standard-normal draw
+        would replace a rate of 5000 with something near 1 and lose the
+        starting value the user chose. The scaler is left untouched.
+        """
+        boxed = jnp.asarray(
+            [math.isfinite(low) and math.isfinite(high) for low, high in self.scaler.bounds]
+        )
         fresh = jr.normal(key, self.latent.shape, dtype=self.latent.dtype)
-        return eqx.tree_at(lambda p: p.latent, self, fresh)
+        return eqx.tree_at(lambda p: p.latent, self, jnp.where(boxed, fresh, self.latent))
 
 
 def _is_parameter(node: Any) -> bool:

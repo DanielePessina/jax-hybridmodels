@@ -184,25 +184,44 @@ penalty weights comparable.
 
 A bad initialisation can put the solver in a stiff regime it never leaves.
 The tournament re-initialises the predictors from `tournament_attempts`
-keys, trains each for `tournament_steps` at `tournament_lr`, scores each
-with a forward pass, and keeps the best:
+keys, trains each for `tournament_steps`, scores each with a forward pass,
+and keeps the best:
 
 ```python
 config = hm.OptaxTrainingConfig(
     steps=1000, lr=1e-3,
-    tournament_attempts=8, tournament_steps=20, tournament_lr=1e-2,
+    tournament_attempts=8, tournament_steps=30,
 )
 ```
 
-It runs only when `tournament_steps > 0` and `tournament_attempts > 1`. It
-reuses the compiled training step, so it adds no compile time. An attempt
-that hits a Diffrax runtime error or a non-finite loss is dropped; any
-other error propagates. If every attempt fails, training continues from
-your original predictors with a `RuntimeWarning`. Ties keep the earlier
-attempt, so the result is deterministic in the key. `Constant` leaves are
-never re-initialised, and frozen leaves go back to their given values after
-each redraw, so a restart cannot leave a frozen array at random values. To
-compare different frozen arrays, build a model for each.
+It runs only when `tournament_steps > 0` and `tournament_attempts > 1`.
+The attempts train with the first phase's optimiser, learning rate and
+horizon, since the winner goes on to train in that phase. `tournament_lr`
+overrides the rate. Keep it close to the phase's: at a hundredth of it the
+attempts barely move, and the tournament ranks random starting points
+rather than where each is heading.
+
+The tournament reuses the compiled training step, so it adds no compile
+time. An attempt that hits a Diffrax runtime error or a non-finite loss is
+dropped; any other error propagates. If every attempt fails, training
+continues from your original predictors with a `RuntimeWarning`. Ties keep
+the earlier attempt, so the result is deterministic in the key.
+
+Every attempt's score is in `result.history.tournament_scores`, and the
+summary prints the best and worst. A wide spread means the starting point
+matters for this model. A narrow one means the tournament is not buying
+much, and its steps are better spent training.
+
+What gets redrawn:
+
+- Networks get fresh weights.
+- A `Parameter` with two finite bounds gets a random value across the middle
+  of its box. One without keeps its starting value, since there is no range
+  to draw from.
+- `Constant` leaves are never re-initialised, and frozen leaves go back to
+  their given values after each redraw, so a restart cannot leave a frozen
+  array at random values. To compare different frozen arrays, build a model
+  for each.
 
 ## Evosax
 
