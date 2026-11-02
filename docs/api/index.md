@@ -72,4 +72,4 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Inference: Log-Density, Fisher, Laplace and Profiles](/api/inference)
 
-[`make_problem`](/api/inference#make_problem), [`InferenceProblem`](/api/inference#inferenceproblem), [`OptimizeResult`](/api/inference#optimizeresult), [`FisherResult`](/api/inference#fisherresult), [`LaplaceResult`](/api/inference#laplaceresult), [`ProfileResult`](/api/inference#profileresult), [`flat_prior`](/api/inference#flat_prior)
+[`make_problem`](/api/inference#make_problem), [`InferenceProblem`](/api/inference#inferenceproblem), [`OptimizeResult`](/api/inference#optimizeresult), [`FisherResult`](/api/inference#fisherresult), [`LaplaceResult`](/api/inference#laplaceresult), [`DerivedQuantity`](/api/inference#derivedquantity), [`ProfileResult`](/api/inference#profileresult), [`flat_prior`](/api/inference#flat_prior)

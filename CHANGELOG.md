@@ -159,9 +159,18 @@
   dependency; diffrax already required it.
 - `InferenceProblem.profile` and `profiles`: profile likelihood intervals.
   Steps adapt as in pyPESTO, every other value is re-optimised with BFGS at
-  each point, and a side the data leave open is reported as open.
+  each point, and a side the data leave open is reported as open. A profile
+  starting from a value against its bound still walks away from it.
+  `ProfileResult.at_bound` names the other values that were pinned at a bound
+  along the walk, since the interval then holds only for those bounds.
 - `FisherResult.sample` draws from the estimate's asymptotic sampling
   distribution, as `LaplaceResult.sample` draws from the posterior's Gaussian.
+- `derived(fn)` on `FisherResult` and `LaplaceResult` gives the delta-method
+  estimate and standard error of any function of the values, as a
+  `DerivedQuantity` with one- or two-sided Wald intervals.
+- `OptimizeResult.gradient` and `gradient_norm` show how flat the optimum is.
+- Fisher and Laplace report `nan` for the standard error and Wald interval of
+  a value against its bound, mark it "at bound" in the summary, and warn.
 - `examples/shelf_life/shelf_life.py` and its page: a label claim from an
   accelerated stability study, set from the profile likelihood's one-sided 95%
   lower bound on the extrapolated rate.
@@ -361,6 +370,9 @@ Migration for code written against the earlier API:
   scrambling the order of the whole list.
 - `evaluate_predictor` given an array, not a mapping, raised an unrelated
   `AttributeError`. It now raises a `TypeError` naming the predictor's inputs.
+- The API reference lists the methods and properties a class inherits from a
+  private base, such as `FisherResult.standard_errors`, and leaves private
+  fields out of signatures.
 
 ### Documentation
 

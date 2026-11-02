@@ -253,6 +253,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "OptimizeResult",
             "FisherResult",
             "LaplaceResult",
+            "DerivedQuantity",
             "ProfileResult",
             "flat_prior",
         ),
@@ -262,6 +263,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 # Documented names that are not top-level exports, with the module to import
 # them from. Top-level names resolve through ``jaxhybridmodels._EXPORTS``.
 SUBMODULE_SYMBOLS: dict[str, str] = {
+    "DerivedQuantity": "jaxhybridmodels.inference",
     "FisherResult": "jaxhybridmodels.inference",
     "InferenceProblem": "jaxhybridmodels.inference",
     "LaplaceResult": "jaxhybridmodels.inference",
@@ -536,6 +538,10 @@ def render_signature(name: str, obj: Any) -> str | None:
 def _stabilise_signature(sig: inspect.Signature) -> inspect.Signature:
     new_params: list[inspect.Parameter] = []
     for p in sig.parameters.values():
+        # A private parameter, such as a result dataclass's internal field, is
+        # filled in by the package and is not part of what a reader calls.
+        if p.name.startswith("_"):
+            continue
         if p.default is not inspect.Parameter.empty and callable(p.default):
             stable = _StableDefault(getattr(p.default, "__qualname__", repr(p.default)))
             new_params.append(p.replace(default=stable))
@@ -672,10 +678,9 @@ def render_entry(name: str, module_name: str) -> str:
     if link is not None:
         parts.append(f"<small>[Source]({link})</small>")
 
-    # For classes, emit a sub-entry per public method defined on the class
-    # itself (not inherited). Keeps method docstrings — like
-    # ``MLPPredictor.with_zero_final_head`` — inside the API page rather
-    # than buried in source.
+    # For classes, emit a sub-entry per public method and property, so their
+    # docstrings, like ``MLPPredictor.with_zero_final_head``, sit on the API
+    # page rather than only in the source.
     if inspect.isclass(obj):
         for method_name, method_obj in _public_methods(obj):
             parts.append(_render_method_entry(name, method_name, method_obj))
@@ -684,37 +689,49 @@ def render_entry(name: str, module_name: str) -> str:
 
 
 def _public_methods(cls: type) -> list[tuple[str, Any]]:
-    """Return ``(name, fn)`` pairs for documentable methods defined on ``cls``.
+    """Return ``(name, member)`` pairs for the documentable methods and properties of ``cls``.
 
-    A method is documentable when it satisfies all of:
+    A member is documentable when it satisfies all of:
 
-    - public name (no leading underscore — dunder methods are noisy and
+    - public name (no leading underscore: dunder methods are noisy and
       typically restate framework conventions)
     - has a docstring (no point emitting a heading with nothing under it)
-    - is defined on this class, not inherited (``__qualname__`` starts
-      with the class name)
+    - is defined on ``cls`` itself, or on a private base class of this
+      package. A private base, such as ``_GaussianSummary``, has no entry of
+      its own, so its methods would otherwise appear nowhere. A public base
+      documents its own methods, and repeating them on every subclass would
+      only bloat the page.
     """
     out: list[tuple[str, Any]] = []
-    for name, member in inspect.getmembers(cls, predicate=inspect.isfunction):
+    for name, member in inspect.getmembers(cls):
         if name.startswith("_"):
+            continue
+        if not (inspect.isfunction(member) or isinstance(member, property)):
             continue
         if not inspect.getdoc(member):
             continue
-        qualname = getattr(member, "__qualname__", "")
-        if not qualname.startswith(cls.__name__ + "."):
+        owner = next(base for base in cls.__mro__ if name in vars(base))
+        private_base = owner.__name__.startswith("_") and owner.__module__.startswith(
+            "jaxhybridmodels"
+        )
+        if owner is not cls and not private_base:
             continue
         out.append((name, member))
     return out
 
 
 def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> str:
-    """Render one ``#### ClassName.method()`` sub-entry inside a class entry."""
+    """Render one ``#### ClassName.method()`` sub-entry inside a class entry.
+
+    A property gets its name without parentheses and no signature.
+    """
+    is_property = isinstance(method_obj, property)
     parsed = parse_docstring(inspect.getdoc(method_obj))
     parts: list[str] = []
     parts.append(f'<a id="{_slugify(f"{class_name}.{method_name}")}"></a>')
-    parts.append(f"#### `{class_name}.{method_name}()`")
+    parts.append(f"#### `{class_name}.{method_name}{'' if is_property else '()'}`")
 
-    sig = render_signature(method_name, method_obj)
+    sig = None if is_property else render_signature(method_name, method_obj)
     if sig is not None:
         parts.append(f"```python\n{sig}\n```")
 
@@ -742,7 +759,7 @@ def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> 
         else:
             parts.append(f"**{title}**\n\n{_normalise_doc_markup(body)}")
 
-    link = get_source_link(method_obj)
+    link = get_source_link(method_obj.fget if is_property else method_obj)
     if link is not None:
         parts.append(f"<small>[Source]({link})</small>")
 

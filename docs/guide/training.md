@@ -255,9 +255,21 @@ the segments back into one trajectory:
   phase table shows it at the end of each segmented phase.
 
 Segments must be short compared with how fast the model at its starting
-guess moves. If a segmented fit still settles in the wrong place, use more
-segments. The [multiple shooting example](/examples/multiple-shooting) fits a
-frequency that single shooting gets wrong from two of three starts.
+guess moves. A rule of thumb for the first phase:
+
+- each segment spans 5 to 10 samples, so the union length divided by 5 to
+  10 gives the count;
+- each segment is no longer than about half the period of the fastest
+  oscillation, or a decay time, at the starting guess and in the data;
+- then cut the count by about four per phase, such as 16, 4 and then 1, with
+  a few hundred steps each.
+
+On 81 predator-prey samples from a poor guess, 16, 4 and 1 recovered the
+parameters where single shooting stalled. If a segmented fit still settles in
+the wrong place, use more segments. Too many is safe but slow to tie back
+together, since every node must be pulled into line. The [multiple shooting
+example](/examples/multiple-shooting) fits a frequency that single shooting
+gets wrong from two of three starts.
 
 A tournament whose first phase is segmented trains its attempts with
 segments too. Evosax and `predict` always use single shooting.

@@ -52,6 +52,14 @@ penalty.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L42)</small>
 
+<a id="objectivebound_penalty_fn"></a>
+
+#### `Objective.bound_penalty_fn`
+
+``penalty_fn`` when set, else [`bound_penalty`](/api/penalties#bound_penalty).
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L141)</small>
+
 <a id="objectiveextra_penalty_points"></a>
 
 #### `Objective.extra_penalty_points()`
@@ -139,6 +147,14 @@ stores ``phases``::
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever the horizon changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L209)</small>
+
+<a id="optaxtrainingconfigtotal_steps"></a>
+
+#### `OptaxTrainingConfig.total_steps`
+
+Step budget summed over every phase.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L313)</small>
 
 ---
 

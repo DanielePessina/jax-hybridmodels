@@ -66,9 +66,10 @@ Fisher information
 ## Extrapolating
 
 The rate at any temperature is a line in $1/T$ through the data, and a line is
-known best near the middle of its data and worst far beyond it. The covariance
-of the two parameters, correlation included, gives the rate's uncertainty at
-each temperature:
+known best near the middle of its data and worst far beyond it. `derived` gives
+the standard error of any function of the values by the delta method, using
+their covariance, correlation included. Here it is applied to $\log k$ at each
+temperature:
 
 <<< @/../examples/shelf_life/shelf_life.py#extrapolation
 
@@ -102,6 +103,35 @@ Shelf life at 25 °C: 32.3 months, best estimate
 The true shelf life is 30.0 months. A label set from the best estimate would
 have claimed 32, and the product would have been out of specification for its
 last two months. The lower bound claims 28.
+
+The delta method gives a bound on any function of the values, with no need to
+reparametrise. `interval(side="lower")` makes it one-sided:
+
+<<< @/../examples/shelf_life/shelf_life.py#delta-method
+
+```text
+  delta method: 32.3 ± 2.2 months,
+  one-sided 95% lower bound 28.6 months
+```
+
+It is 0.3 months lower than the profile's bound, because it treats the shelf
+life, which is $1/k_{25}$, as Gaussian, while the profile assumes nothing about
+its shape. When the two disagree by much, trust the profile.
+
+### At another storage temperature
+
+To claim a shelf life at 30 °C, profile the rate at 30 °C. Write the law around
+that temperature, so that its rate is a parameter:
+
+```python
+def rate(log_k30, ea_over_r, temperature_c):
+    return jnp.exp(log_k30 - ea_over_r * (1 / (273.15 + temperature_c) - 1 / 303.15))
+```
+
+The data and the fit are unchanged, since this is the same law with different
+parameters. Then use `mle.profile("log_k30", confidence=0.90)` as above.
+For a quick check without refitting, use `derived` on the existing fit with
+`rate(values["log_k25"], values["Ea_over_R"], 30.0)`.
 
 Draws from the estimate's sampling distribution carry its uncertainty into any
 function of it. `FisherResult.sample` gives them, and `predict` turns them into a

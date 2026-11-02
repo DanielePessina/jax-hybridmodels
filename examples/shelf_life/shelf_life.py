@@ -13,9 +13,10 @@ and that bound comes entirely from how uncertain the extrapolated rate is.
 Shows:
 
 - ``InferenceProblem.optimize`` for the maximum likelihood, with no prior
-- ``fisher`` for the rate's uncertainty at each temperature, and how it grows
-  away from the data
-- ``profile`` for the lower bound on the shelf life, which sets the label claim
+- ``fisher`` and ``derived`` for the rate's uncertainty at each temperature, and
+  how it grows away from the data
+- ``profile`` for the lower bound on the shelf life, which sets the label claim,
+  checked against the delta method's one-sided bound
 - ``FisherResult.sample`` with ``predict`` for a potency band at 25 °C
 
 Run::
@@ -94,7 +95,7 @@ model = hm.HybridModel(
 
 def shelf_life(k25: Any) -> Any:
     """Months until potency falls to the specification, at 25 °C."""
-    return math.log(1 / SPECIFICATION) / k25
+    return jnp.log(1 / SPECIFICATION) / k25
 
 
 def make_study(key: jax.Array) -> list[hm.Experiment]:
@@ -133,16 +134,15 @@ def main() -> None:
     # endregion fisher
 
     # region extrapolation
-    # log k(T) = log_k25 - Ea/R (1/T - 1/T25), so its variance at any T follows from
-    # the covariance of the two, correlation included.
-    covariance = fisher.physical_covariance()
-    log_k25, energy = fisher.names.index("log_k25"), fisher.names.index("Ea_over_R")
+    # log k(T) depends on both values, so its standard error uses their covariance,
+    # correlation included. derived() takes the gradient and applies it.
     print("\nRelative uncertainty of the rate, one standard error:")
     spreads = {}
     for temperature in (STORAGE_C, *TEST_TEMPERATURES_C):
-        slope = -(1 / (273.15 + temperature) - 1 / STORAGE_K)
-        gradient = jnp.zeros(len(fisher.names)).at[log_k25].set(1.0).at[energy].set(slope)
-        spreads[temperature] = float(jnp.sqrt(gradient @ covariance @ gradient))
+        log_k = fisher.derived(
+            lambda values, t=temperature: jnp.log(rate(values["log_k25"], values["Ea_over_R"], t))
+        )
+        spreads[temperature] = float(log_k.standard_error)
         note = "  (storage, no data)" if temperature == STORAGE_C else ""
         print(f"  {temperature:4.0f} °C  ±{100 * spreads[temperature]:.1f}%{note}")
     # endregion extrapolation
@@ -156,12 +156,21 @@ def main() -> None:
         raise SystemExit(
             f"the data do not bound the rate, so no claim can be set: {profile.stopped}"
         )
-    estimate = shelf_life(math.exp(float(fisher.estimate[log_k25])))
+    estimate = shelf_life(math.exp(float(mle.physical(mle.position)["log_k25"])))
     lower = shelf_life(math.exp(fastest))
     label = math.floor(lower)
     print(f"\nShelf life at 25 °C: {estimate:.1f} months, best estimate")
     print(f"  one-sided 95% lower bound {lower:.1f} months, so a label claim of {label} months")
     # endregion shelf-life
+
+    # region delta-method
+    # The delta method gives the same kind of bound for any function of the values,
+    # in one line, but assumes the shelf life itself is close to Gaussian.
+    life = fisher.derived(lambda values: shelf_life(jnp.exp(values["log_k25"])))
+    wald, _ = life.interval(0.95, side="lower")
+    print(f"  delta method: {float(life.estimate):.1f} ± {float(life.standard_error):.1f} months,")
+    print(f"  one-sided 95% lower bound {float(wald):.1f} months")
+    # endregion delta-method
 
     # region band
     # Draws from the estimate's sampling distribution carry its uncertainty into
@@ -184,6 +193,8 @@ def main() -> None:
         raise SystemExit(f"the 90% interval should contain the true {true_life:.1f} months")
     if abs(np.percentile(sampled, 5) - lower) > 0.05 * lower:
         raise SystemExit("the draws' 5th percentile should agree with the profile bound")
+    if abs(float(wald) - lower) > 0.05 * lower:
+        raise SystemExit("the delta method's bound should agree with the profile's here")
     tested = [spreads[t] for t in TEST_TEMPERATURES_C]
     if not spreads[STORAGE_C] > max(tested) and spreads[STORAGE_C] > 3 * min(tested):
         raise SystemExit("extrapolating to 25 °C should widen the rate's uncertainty")

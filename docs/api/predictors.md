@@ -443,6 +443,14 @@ starting value the user chose. The scaler is left untouched.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L640)</small>
 
+<a id="parametervalue"></a>
+
+#### `Parameter.value`
+
+Current value in physical units, with the shape given at construction.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L635)</small>
+
 ---
 
 <a id="constant"></a>

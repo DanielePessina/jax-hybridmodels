@@ -300,6 +300,17 @@ the run (it warned, and the model holds the best parameters so far), else
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L176)</small>
 
+<a id="fitresultfinal_loss"></a>
+
+#### `FitResult.final_loss`
+
+The training loss recorded at the returned parameters.
+
+``history.loss[best_step]``, or the last entry when ``best_step`` is
+None. ``fit_ensemble`` ranks its members by it.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L193)</small>
+
 <a id="fitresultsummary"></a>
 
 #### `FitResult.summary()`
