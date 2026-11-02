@@ -46,6 +46,7 @@ network can absorb what the physics should explain.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -467,10 +468,19 @@ class InferenceProblem:
         def value(flat: Array) -> Array:
             position = unravel(flat)
             if target == "likelihood":
-                return problem.log_likelihood(position)
+                # A trial point can push a warped scaler's input out of range; that
+                # is -inf for a line search to back away from, as in _density.
+                with _nan_on_bad_input():
+                    return problem.log_likelihood(position)
             return problem._density(position)
 
         return value
+
+    def _target(self, position: Any) -> Array:
+        """What the problem's own methods differentiate: the density, or the likelihood alone."""
+        if self._log_prior is None:
+            return self.log_likelihood(position)
+        return self._density(position)
 
     def _value_and_grad(
         self, target: str, unravel: Callable[[Array], Any]
@@ -652,7 +662,20 @@ class InferenceProblem:
                 "first; if this persists, that direction is not identified and needs a prior."
             )
         problem._warn_if_not_at_optimum("laplace", "posterior", coordinates, covariance)
-        return LaplaceResult(**coordinates.summary_fields(covariance), _unravel=coordinates.unravel)
+        return LaplaceResult(
+            **coordinates.summary_fields(covariance), _to_position=self._position_from(coordinates)
+        )
+
+    def _position_from(self, coordinates: _Coordinates) -> Callable[[Array], Any]:
+        """Map a flat latent vector to a position of this problem, whitened or not.
+
+        Draws must be readable by the problem they were asked of, so a whitened
+        problem gets its whitened coordinates back.
+        """
+        if self._whitening is None:
+            return coordinates.unravel
+        shift, factor, _ = self._whitening
+        return functools.partial(_whiten, shift, factor)
 
     def profile(
         self,
@@ -758,16 +781,14 @@ class InferenceProblem:
             )
         fisher = problem._fisher(coordinates, gauss_newton=problem._log_likelihood is None)
         problem._warn_if_not_at_optimum(caller, "likelihood", coordinates, fisher.covariance)
-        objective = problem._objective("likelihood", coordinates.unravel)
-        flat = coordinates.flat
         return _Profiler(
             coordinates=coordinates,
             parameters=parameters,
             spreads=fisher.standard_errors(latent=True),
-            # The fixed entry is written over the full vector, so one compiled
-            # objective serves every name and every point.
-            objective=lambda x, args: objective(jnp.where(args[0], args[1], x)),
-            best=-float(objective(flat)),
+            objective=problem._profile_objective,
+            best=float(
+                problem._scalar("likelihood", coordinates.unravel, forward=False)(coordinates.flat)
+            ),
             threshold=float(stats.chi2.ppf(confidence, df=1)),
             confidence=confidence,
             max_points=max_points,
@@ -775,6 +796,17 @@ class InferenceProblem:
             rtol=rtol,
             atol=atol,
         )
+
+    @functools.cached_property
+    def _profile_objective(self) -> Callable[[Array, Any], Array]:
+        """Minus the log-likelihood with one entry held fixed, given as ``(mask, value)``.
+
+        The fixed entry is written over the full vector, so one compiled objective
+        serves every name, every point and every later ``profile`` call on this
+        problem: Optimistix caches its compile on the function's identity.
+        """
+        objective = self._objective("likelihood", ravel_pytree(self.position)[1])
+        return lambda x, args: objective(jnp.where(args[0], args[1], x))
 
     def _prior_terms(self, position: Any) -> Array:
         """The log-prior plus the change-of-variables term: the density's solve-free part."""
@@ -826,6 +858,12 @@ class InferenceProblem:
             )
         to_physical = _PhysicalMap(static=self._static, mask=self._mask, unravel=unravel)
         estimate, slopes = jax.jvp(to_physical, (flat,), (jnp.ones_like(flat),))
+        # Each transform acts on its own entry, so mapping all latents to -inf and
+        # +inf gives every entry's limits: a squash's bounds, or infinity.
+        limits = (
+            to_physical(jnp.full_like(flat, -jnp.inf)),
+            to_physical(jnp.full_like(flat, jnp.inf)),
+        )
         return _Coordinates(
             names=tuple(names),
             is_parameter=tuple(is_parameter),
@@ -833,6 +871,7 @@ class InferenceProblem:
             unravel=unravel,
             estimate=estimate,
             slopes=slopes,
+            limits=limits,
             to_physical=to_physical,
         )
 
@@ -989,6 +1028,11 @@ class InferenceProblem:
         return from_dict(groups, attrs={"posterior": {"conditional_on": conditioning}})
 
 
+def _whiten(shift: Array, factor: Array, flat: Array) -> Array:
+    """The whitened ``z`` with ``flat = shift + factor z``, for an upper-triangular ``factor``."""
+    return jax.scipy.linalg.solve_triangular(factor, flat - shift, lower=False)
+
+
 @dataclass(frozen=True)
 class _PhysicalMap:
     """The flat latent position to the free values in physical units, entry by entry.
@@ -1021,6 +1065,7 @@ class _Coordinates:
     unravel: Callable[[Array], Any]
     estimate: Array
     slopes: Array
+    limits: tuple[Array, Array]
     to_physical: _PhysicalMap
 
     def summary_fields(self, covariance: Array) -> dict[str, Any]:
@@ -1183,13 +1228,14 @@ class _GaussianSummary:
 
         Built in latent space and mapped through each value's transform, so it is
         asymmetric on a log warp and stays inside a ``Parameter``'s bounds. An
-        unconstrained entry's interval reaches its bounds.
+        unconstrained entry's interval reaches its bounds, or infinity without one.
         """
         if not 0.0 < confidence < 1.0:
             raise ValueError(f"intervals: confidence must be in (0, 1); got {confidence}")
         z = float(stats.norm.ppf(0.5 + confidence / 2))
-        # Far enough to reach a squash's bound or a log warp's zero, and still finite.
-        reach = z * jnp.minimum(self._spread(self.covariance), 1e3)
+        # An unbounded entry's reach is infinite, so its interval runs to the limits
+        # of its transform: the bounds of a squash, or plus and minus infinity.
+        reach = z * self._spread(self.covariance)
         # Each value depends on its own latent only, so both ends map in one call each.
         ends = np.asarray(
             jnp.stack(
@@ -1264,8 +1310,11 @@ class FisherResult(_GaussianSummary):
         return [_loadings(self.eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)]
 
     def _unbounded(self) -> Array:
-        loose = {name for direction in self.unidentified() for name in direction}
-        return jnp.array([name in loose for name in self.names])
+        # Any loading on an unconstrained direction makes that entry's variance
+        # unbounded, not only the loadings large enough to list. 1e-3 is well above
+        # the rounding in the eigenvectors of a near-null direction.
+        loose = self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1]
+        return jnp.any(loose[None, :] & (jnp.abs(self.eigenvectors) >= 1e-3), axis=1)
 
     def summary(self, confidence: float = 0.95) -> str:
         """Estimates, standard errors, Wald intervals, correlations and identifiability."""
@@ -1283,7 +1332,7 @@ class LaplaceResult(_GaussianSummary):
     position in ``names`` order.
     """
 
-    _unravel: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
+    _to_position: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
 
     def sample(self, key: Array, n: int) -> Any:
         """``n`` draws as positions with a leading ``[n]`` axis.
@@ -1294,9 +1343,12 @@ class LaplaceResult(_GaussianSummary):
         check_key(key, "LaplaceResult.sample")
         if n < 1:
             raise ValueError(f"LaplaceResult.sample: n must be positive; got {n}")
-        factor = jnp.linalg.cholesky(self.covariance)
+        # A square root from the eigendecomposition, which, unlike a Cholesky factor,
+        # cannot fail on rounding in an ill-conditioned covariance.
+        eigenvalues, eigenvectors = jnp.linalg.eigh(self.covariance)
+        factor = eigenvectors * jnp.sqrt(jnp.clip(eigenvalues, 0.0))
         draws = jr.normal(key, (n, len(self.names)), dtype=self.latent.dtype)
-        return jax.vmap(self._unravel)(self.latent + draws @ factor.T)
+        return jax.vmap(self._to_position)(self.latent + draws @ factor.T)
 
     def summary(self, confidence: float = 0.95) -> str:
         """Posterior means, standard deviations, Wald intervals and correlations."""
@@ -1326,51 +1378,73 @@ class _Profiler:
         fixed_entry = jnp.arange(coordinates.flat.size) == index
         spread = self.spreads[name]
         first_step = 0.2 * spread if math.isfinite(spread) and spread > 0 else 0.1
+        low, high = (float(limit[index]) for limit in coordinates.limits)
 
-        def walk(direction: float) -> list[tuple[Array, float, bool]]:
-            points: list[tuple[Array, float, bool]] = []
-            x, step, ratio = coordinates.flat, first_step, 0.0
-            value = float(coordinates.estimate[index])
-            for _ in range(self.max_points // 2):
-                fixed = x[index] + direction * step
+        def at_bound(value: float) -> bool:
+            if not (math.isfinite(low) and math.isfinite(high)):
+                return False
+            return min(value - low, high - value) <= 1e-6 * (high - low)
+
+        def solve_at(x: Array, fixed: Array) -> _Maximum:
+            found = _maximise(
+                self.objective,
+                x,
+                args=(fixed_entry, fixed),
+                rtol=self.rtol,
+                atol=self.atol,
+                max_steps=self.max_steps,
+            )
+            if not found.converged and math.isfinite(found.value):
+                # One restart from where it stopped, before the point is flagged.
                 found = _maximise(
                     self.objective,
-                    x,
+                    found.position,
                     args=(fixed_entry, fixed),
                     rtol=self.rtol,
                     atol=self.atol,
                     max_steps=self.max_steps,
                 )
+            return found
+
+        def walk(direction: float) -> tuple[list[tuple[Array, float, bool]], str]:
+            """The points on one side, and why the walk stopped there."""
+            points: list[tuple[Array, float, bool]] = []
+            x, step, ratio = coordinates.flat, first_step, 0.0
+            for _ in range(self.max_points // 2):
+                fixed = x[index] + direction * step
+                found = solve_at(x, fixed)
                 new = jnp.where(fixed_entry, fixed, found.position)
                 new_ratio = 2.0 * (self.best - found.value)
-                new_value = float(coordinates.to_physical(new)[index])
+                if not math.isfinite(new_ratio):
+                    points.append((new, math.inf, False))
+                    return points, "solve_failed"
                 points.append((new, new_ratio, found.converged))
                 if new_ratio > self.threshold:
-                    break
-                if abs(new_value - value) < 1e-10 * (1.0 + abs(new_value)):
-                    break  # at the value's bound: the squash no longer moves it
+                    # A ratio from an unfinished search can only be too high, so it
+                    # cannot show the data close this side.
+                    return points, "threshold" if found.converged else "not_converged"
+                if at_bound(float(coordinates.to_physical(new)[index])):
+                    return points, "bound"
                 # Aim each step at a tenth of the threshold, never more than doubling.
                 rise = max(new_ratio - ratio, 1e-12)
                 step *= float(np.clip(0.1 * self.threshold / rise, 0.5, 2.0))
-                x, ratio, value = new, new_ratio, new_value
-            return points
+                x, ratio = new, new_ratio
+            return points, "max_points"
 
-        def end(side: list[tuple[Array, float, bool]]) -> float | None:
-            inside_x, inside_ratio = coordinates.flat, 0.0
-            for x, ratio, ok in side:
-                if not ok:
-                    continue
-                if ratio > self.threshold:
-                    # The signed root of the ratio is linear in the value when the
-                    # profile is quadratic, so interpolating it is exact there.
-                    root, inside_root = math.sqrt(ratio), math.sqrt(max(inside_ratio, 0.0))
-                    weight = (math.sqrt(self.threshold) - inside_root) / (root - inside_root)
-                    crossing = inside_x + weight * (x - inside_x)
-                    return float(coordinates.to_physical(crossing)[index])
-                inside_x, inside_ratio = x, ratio
-            return None
+        def end(side: list[tuple[Array, float, bool]], stopped: str) -> float | None:
+            if stopped != "threshold":
+                return None
+            *inside, (outside_x, outside_ratio, _) = side
+            converged = [(x, r) for x, r, ok in inside if ok]
+            inside_x, inside_ratio = converged[-1] if converged else (coordinates.flat, 0.0)
+            # The signed root of the ratio is linear in the value when the profile is
+            # quadratic, so interpolating it is exact there.
+            root, inside_root = math.sqrt(outside_ratio), math.sqrt(max(inside_ratio, 0.0))
+            weight = (math.sqrt(self.threshold) - inside_root) / (root - inside_root)
+            crossing = inside_x + weight * (outside_x - inside_x)
+            return float(coordinates.to_physical(crossing)[index])
 
-        below, above = walk(-1.0), walk(1.0)
+        (below, stopped_below), (above, stopped_above) = walk(-1.0), walk(1.0)
         points = [*reversed(below), (coordinates.flat, 0.0, True), *above]
         physical = np.asarray(jax.vmap(coordinates.to_physical)(jnp.stack([p[0] for p in points])))
         return ProfileResult(
@@ -1383,7 +1457,8 @@ class _Profiler:
                 other: physical[:, i] for i, other in enumerate(coordinates.names) if i != index
             },
             converged=np.array([p[2] for p in points]),
-            interval=(end(below), end(above)),
+            interval=(end(below, stopped_below), end(above, stopped_above)),
+            stopped=(stopped_below, stopped_above),
         )
 
 
@@ -1410,10 +1485,16 @@ class ProfileResult:
         Every other free entry along the profile, physical. How they move shows
         what compensates for the profiled value.
     converged : ndarray
-        Whether BFGS met its tolerances at each point. The interval ignores points
-        that did not.
+        Whether BFGS met its tolerances at each point, after one restart. The
+        interval ignores points that did not.
     interval : tuple[float | None, float | None]
-        The confidence interval's ends, ``None`` on a side the data leave open.
+        The confidence interval's ends, ``None`` on a side that did not close.
+    stopped : tuple[str, str]
+        Why each side, below and above, stopped. ``"threshold"`` closed it. The
+        others leave it open: ``"bound"`` (the value reached its bound, so the data
+        do not bound it), ``"max_points"`` (still inside; raise ``max_points``),
+        ``"solve_failed"`` (the model stopped solving) and ``"not_converged"``
+        (BFGS did not converge where the ratio crossed).
     """
 
     name: str
@@ -1424,24 +1505,38 @@ class ProfileResult:
     others: dict[str, np.ndarray]
     converged: np.ndarray
     interval: tuple[float | None, float | None]
+    stopped: tuple[str, str]
 
     @property
     def identifiable(self) -> bool:
-        """Whether both sides of the interval close."""
-        return None not in self.interval
+        """Whether both sides closed at the threshold."""
+        return self.stopped == ("threshold", "threshold")
 
     def summary(self) -> str:
-        """One line: the interval, or which side the data leave open."""
+        """One line: the interval, and why a side that did not close stopped."""
         low, high = self.interval
         shown = (
             f"[{'open' if low is None else f'{low:.4g}'}, "
             f"{'open' if high is None else f'{high:.4g}'}]"
         )
-        note = "" if self.identifiable else ", not identified on the open side"
+        notes = [
+            f"{side} {_STOP_REASONS[reason]}"
+            for side, reason in zip(("below", "above"), self.stopped, strict=True)
+            if reason != "threshold"
+        ]
         unconverged = int((~self.converged).sum())
         if unconverged:
-            note += f", {unconverged} points did not converge"
+            notes.append(f"{unconverged} points did not converge")
+        note = "".join(f"; {text}" for text in notes)
         return f"{self.name}: {int(self.confidence * 100)}% profile interval {shown}{note}"
+
+
+_STOP_REASONS = {
+    "bound": "reaches its bound, so the data do not bound it",
+    "max_points": "is still inside after max_points; raise it",
+    "solve_failed": "stops where the model fails to solve",
+    "not_converged": "crosses where BFGS did not converge",
+}
 
 
 def _is_finite(prediction: PredictionResult) -> bool:
@@ -1460,7 +1555,7 @@ def _supports_forward(problem: InferenceProblem) -> bool:
     here can only mean no such rule, as for a ``simulate_fn`` with its own adjoint.
     """
     try:
-        eqx.filter_eval_shape(jax.jacfwd(problem._forward_view().log_likelihood), problem.position)
+        eqx.filter_eval_shape(jax.jacfwd(problem._forward_view()._target), problem.position)
     except (TypeError, ValueError, NotImplementedError):
         return False
     return True
@@ -1605,11 +1700,9 @@ def make_problem(
         _solver=dataclasses.replace(model.solver, throw=False),
     )
     # A bug in simulate_fn or log_prior raises here, not at the sampler's first step.
-    eqx.filter_eval_shape(
-        problem.log_likelihood if log_prior is None else problem._density, position
-    )
+    eqx.filter_eval_shape(problem._target, position)
     if gradient == "forward":
-        eqx.filter_eval_shape(jax.jacfwd(problem._forward_view().log_likelihood), position)
+        eqx.filter_eval_shape(jax.jacfwd(problem._forward_view()._target), position)
     few = ravel_pytree(position)[0].size <= _FORWARD_MODE_LIMIT
     if gradient == "auto" and few and _supports_forward(problem):
         return dataclasses.replace(problem, gradient="forward")

@@ -246,15 +246,27 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     (
         "inference",
-        "Inference: A Log-Density for Samplers",
-        ("make_problem", "InferenceProblem", "flat_prior"),
+        "Inference: Log-Density, Fisher, Laplace and Profiles",
+        (
+            "make_problem",
+            "InferenceProblem",
+            "OptimizeResult",
+            "FisherResult",
+            "LaplaceResult",
+            "ProfileResult",
+            "flat_prior",
+        ),
     ),
 )
 
 # Documented names that are not top-level exports, with the module to import
 # them from. Top-level names resolve through ``jaxhybridmodels._EXPORTS``.
 SUBMODULE_SYMBOLS: dict[str, str] = {
+    "FisherResult": "jaxhybridmodels.inference",
     "InferenceProblem": "jaxhybridmodels.inference",
+    "LaplaceResult": "jaxhybridmodels.inference",
+    "OptimizeResult": "jaxhybridmodels.inference",
+    "ProfileResult": "jaxhybridmodels.inference",
     "flat_prior": "jaxhybridmodels.inference",
     "make_problem": "jaxhybridmodels.inference",
     "LOSS_REGISTRY": "jaxhybridmodels.losses",

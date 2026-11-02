@@ -221,9 +221,12 @@ log_A: 95% profile interval [16.91, 17.29]
 
 Here they match the Wald intervals, because this likelihood is close to Gaussian.
 Where it is not, the profile is the one to trust, and it does not depend on how the
-model is parametrised. A side the data leave open, up to a bound or past
-`max_points`, is reported as `None`. `profile.others` holds every other value along
-the profile, which shows what compensates.
+model is parametrised. A side that does not close is reported as `None`, and
+`profile.stopped` says why: the value reached its bound, so the data do not bound
+it; the walk ran out of `max_points`; the model stopped solving; or BFGS did not
+converge where the ratio crossed. Only a converged crossing closes a side.
+`profile.others` holds every other value along the profile, which shows what
+compensates.
 
 The information is computed in the latent coordinates the problem uses, and
 reported in physical units. Standard errors use the delta method. A Wald interval

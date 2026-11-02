@@ -70,6 +70,6 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 [`fold`](/api/rng#fold)
 
-## [Inference: A Log-Density for Samplers](/api/inference)
+## [Inference: Log-Density, Fisher, Laplace and Profiles](/api/inference)
 
-[`make_problem`](/api/inference#make_problem), [`InferenceProblem`](/api/inference#inferenceproblem), [`flat_prior`](/api/inference#flat_prior)
+[`make_problem`](/api/inference#make_problem), [`InferenceProblem`](/api/inference#inferenceproblem), [`OptimizeResult`](/api/inference#optimizeresult), [`FisherResult`](/api/inference#fisherresult), [`LaplaceResult`](/api/inference#laplaceresult), [`ProfileResult`](/api/inference#profileresult), [`flat_prior`](/api/inference#flat_prior)
