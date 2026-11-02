@@ -619,6 +619,7 @@ dependencies = [
     { name = "jaxtyping" },
     { name = "numpy" },
     { name = "optax" },
+    { name = "optimistix" },
     { name = "rich" },
     { name = "scipy" },
 ]
@@ -669,6 +670,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.3" },
     { name = "openpyxl", marker = "extra == 'examples'", specifier = ">=3.1.5" },
     { name = "optax", specifier = ">=0.2.6" },
+    { name = "optimistix", specifier = ">=0.1.0" },
     { name = "pandas", marker = "extra == 'examples'", specifier = ">=2.2.3" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2.3" },
     { name = "python-libsbml", marker = "extra == 'examples'", specifier = ">=5.20.4" },

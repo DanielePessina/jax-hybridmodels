@@ -32,6 +32,7 @@ dependencies = [
     "jaxtyping>=0.3.0",
     "numpy>=2.3",
     "optax>=0.2.6",
+    "optimistix>=0.1.0",
     "rich>=13.0",
     "scipy>=1.16",
 ]

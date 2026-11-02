@@ -142,6 +142,16 @@
   `covariates` is optional.
 - CI lint job and pre-commit hooks running `ruff check`, `ruff format` and
   `ty check` over sources, tests, examples and scripts.
+- Frequentist uncertainty on `hm.inference.make_problem`, with no sampler:
+  `optimize` finds the maximum likelihood or posterior mode with Optimistix's
+  BFGS, `fisher` gives the Fisher information with physical standard errors,
+  Wald intervals, correlations, the condition number and the directions the
+  data cannot separate, and `laplace` gives a Gaussian posterior whose draws
+  `physical`, `predict` and `to_arviz` read. `make_problem(log_prior=None)`
+  builds a likelihood-only problem for this. `optimistix` is now a declared
+  dependency; diffrax already required it.
+- `examples/identifiability/arrhenius.py`: how correlated Arrhenius constants
+  are, and the reference temperature that decorrelates them.
 - Evosax ranks a candidate whose solve fails last instead of ending the run,
   and `FitHistory.failed_candidates` counts them per generation. `summary()`
   gives the total. Only a generation where every candidate fails ends the run.
