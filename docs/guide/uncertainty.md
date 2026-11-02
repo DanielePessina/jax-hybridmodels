@@ -5,6 +5,11 @@ and its data into a log-density, a pure JAX function of a pytree position, and a
 sampler such as [BlackJAX](https://blackjax-devs.github.io/blackjax/) takes it
 from there. Install both with `pip install jax-hybridmodels[bayes]`.
 
+The same problem also answers questions that need no sampler: the maximum
+likelihood, standard errors from the Fisher information, which parameters the data
+cannot tell apart, and a Laplace approximation to the posterior. See
+[Without sampling](#without-sampling).
+
 ## A first posterior
 
 <<< @/../examples/tubular_reactor/sample_tubular_reactor.py#problem
@@ -175,6 +180,67 @@ reactor's two parameters, float32 showed no sign of trouble: no divergences and 
 acceptance rate like x64's. That is one easy, well-specified problem, so it does
 not show float32 is safe in general. Tightening `rtol` from 1e-5 to 1e-7 did not
 move that posterior beyond Monte Carlo error.
+
+## Without sampling
+
+`log_prior=None` gives a problem with only the likelihood, for frequentist work.
+`optimize` finds its maximum with Optimistix's BFGS. A training fit is close to it
+but not at it, because the trainers average the loss over buckets.
+`fisher()` then gives the information at that point.
+
+The example fits first-order decay at seven temperatures, with the rate written two
+ways: the textbook `A exp(-E / T)`, and the same law centred at a reference
+temperature.
+
+<<< @/../examples/identifiability/arrhenius.py#model
+
+<<< @/../examples/identifiability/arrhenius.py#fisher
+
+```text
+Fisher information
+            estimate    std error  95% interval
+  E             5988        29.72  [5930, 6046]
+  log_A         17.1      0.09661  [16.91, 17.29]
+  Strongest correlations
+    E and log_A: +0.999
+  Condition number 2.04e+03
+```
+
+The information is computed in the latent coordinates the problem uses, and
+reported in physical units. Standard errors use the delta method. A Wald interval
+is built in the latent and mapped back, so it leans the way a log warp does and
+stays inside a `Parameter`'s bounds. `information="observed"` uses the negative
+Hessian of the log-likelihood instead of the Gauss-Newton `J^T J`, and is the one
+that works with a custom `log_likelihood`.
+
+A correlation of 0.999 says the data fix a combination of the two. `log A` and `E`
+trade off along the rates' temperature dependence. Centring the law at a reference
+temperature removes it. The Fisher covariance gives the temperature at which
+`log k` and `E` are uncorrelated:
+
+<<< @/../examples/identifiability/arrhenius.py#centred
+
+The centred fit reports no correlation above 0.5, and the condition number falls
+from 2040 to 35. When the data cannot separate parameters at all,
+`fisher().unidentified()` names the directions it cannot see, such as two rates
+whose product is all a model uses. Those parameters' standard errors are infinite,
+and the summary lists them under "Not identified".
+
+`laplace()` is a Gaussian approximation to the posterior at its mode, so it needs a
+prior. `sample` draws positions that `physical`, `predict` and `to_arviz` read as
+they read a sampler's output:
+
+<<< @/../examples/identifiability/arrhenius.py#laplace
+
+On the Arrhenius data of the [custom predictor](/examples/custom-predictor) example
+with inferred noise, the Laplace standard deviations were within 4% of NUTS. The
+means of `log A` and `E` agreed within 0.02 standard deviations, and the noise's
+within 0.16, as its posterior is skewed. A Laplace approximation is only as good
+as the posterior is Gaussian in latent space, so check it against a sampler before
+relying on it for a new model.
+
+`fisher` and `laplace` warn when the position is not at the maximum, since both
+describe a maximum.
 
 ## Worked example
 

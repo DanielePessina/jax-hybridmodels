@@ -759,6 +759,96 @@ def test_prediction_rejects_bad_input(linear, call, error, match):
         call(problem, positions)
 
 
+# ---------------------------------------------------------------------------
+# Frequentist: the optimum, Fisher information and the Laplace approximation
+# ---------------------------------------------------------------------------
+
+
+def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
+    """For ``y = k t`` with known noise every answer is exact: the MLE is
+    ``sum(t y) / sum(t^2)``, its standard error ``sigma / sqrt(sum(t^2))``, and the
+    Laplace approximation is the conjugate posterior itself."""
+    _, experiments, ts, ys, _, _ = linear
+    mle = float((ts * ys).sum() / (ts**2).sum())
+    error = SIGMA / float(np.sqrt((ts**2).sum()))
+
+    frequentist = make_problem(linear_model(), experiments, log_prior=None, noise="data")
+    with pytest.warns(UserWarning, match="not at the likelihood's maximum"):
+        frequentist.fisher()
+    optimum = frequentist.optimize()
+    assert optimum.converged
+    fisher = optimum.problem.fisher()
+    assert float(fisher.estimate[0]) == pytest.approx(mle, rel=1e-6)
+    assert fisher.standard_errors()["k"] == pytest.approx(error, rel=1e-6)
+    observed = optimum.problem.fisher(information="observed")
+    assert observed.standard_errors()["k"] == pytest.approx(error, rel=1e-6)
+    low, high = fisher.intervals(0.95)["k"]
+    assert (low, high) == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
+    assert "Condition number" in fisher.summary()
+
+    bayesian = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
+    laplace = bayesian.optimize(target="posterior").problem.laplace()
+    mean, sd = conjugate(ts, ys)
+    assert float(laplace.estimate[0]) == pytest.approx(mean, rel=1e-6)
+    assert laplace.standard_errors()["k"] == pytest.approx(sd, rel=1e-6)
+    draws = laplace.sample(jr.key(5), 4000)
+    values = np.asarray(bayesian.physical(draws)["k"])
+    assert values.shape == (4000,)
+    assert values.mean() == pytest.approx(mean, abs=4 * sd / np.sqrt(4000))
+    assert values.std() == pytest.approx(sd, rel=0.05)
+    band = bayesian.predict(draws, key=jr.key(6), n_draws=50)
+    assert set(band) == {e.exp_id for e in experiments}
+
+
+def product_field(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+    return predictors["a"].value * predictors["b"].value * jnp.ones_like(y)
+
+
+def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
+    experiments, ts, _ = measurements()
+    # The latent is a squashed log of k, so the information is computed far from
+    # physical units. At the MLE the delta method maps it back exactly.
+    warped = linear_model(hm.Parameter(0.7, bounds=(0.01, 10.0), warp="log"))
+    problem = make_problem(warped, experiments, log_prior=None, noise="data").optimize().problem
+    result = problem.fisher()
+    assert result.standard_errors()["k"] == pytest.approx(SIGMA / np.sqrt((ts**2).sum()), rel=1e-6)
+    assert result.standard_errors(latent=True)["k"] != pytest.approx(result.standard_errors()["k"])
+    low, high = result.intervals(0.95)["k"]
+    centre = float(result.estimate[0])
+    # Built in the latent and mapped back, so it leans up as log k does and stays in bounds.
+    assert 0.01 < low < centre < high < 10.0 and high - centre > centre - low
+
+    product = hm.HybridModel.from_vector_field(
+        vector_field=product_field,
+        predictors={"a": hm.Parameter(1.0), "b": hm.Parameter(0.7)},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
+    together = problem.fisher()
+    (direction,) = together.unidentified()
+    assert set(direction) == {"a", "b"}
+    assert together.standard_errors() == {"a": np.inf, "b": np.inf}
+    assert "Not identified: " in together.summary()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda problem: problem.log_density(problem.position), id="log_density"),
+        pytest.param(lambda problem: problem.laplace(), id="laplace"),
+        pytest.param(lambda problem: problem.preconditioned(), id="preconditioned"),
+        pytest.param(lambda problem: problem.optimize(target="posterior"), id="posterior-mode"),
+    ],
+)
+def test_without_a_prior_the_posterior_methods_say_so(x64, call):
+    experiments, *_ = measurements()
+    problem = make_problem(linear_model(), experiments, log_prior=None, noise="data")
+    with pytest.raises(ValueError, match="needs a prior"):
+        call(problem)
+
+
 @pytest.mark.slow
 def test_simulation_based_calibration(x64):
     """Draw a rate from the prior and data from the rate: its posterior rank must be uniform.
