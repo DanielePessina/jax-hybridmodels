@@ -803,7 +803,8 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     with pytest.warns(UserWarning, match="not at the likelihood's maximum"):
         frequentist.fisher()
     optimum = frequentist.optimize()
-    assert optimum.converged
+    assert optimum.converged and set(optimum.gradient) == {"k"}
+    assert optimum.gradient_norm < 1e-6
     fisher = optimum.problem.fisher()
     assert float(fisher.estimate[0]) == pytest.approx(mle, rel=1e-6)
     assert fisher.standard_errors()["k"] == pytest.approx(error, rel=1e-6)
@@ -815,6 +816,13 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     assert estimates.mean() == pytest.approx(mle, abs=4 * error / np.sqrt(4000))
     assert estimates.std() == pytest.approx(error, rel=0.05)
     assert "Condition number" in fisher.summary()
+    # The delta method is exact for a linear function, and a one-sided bound uses
+    # the one-sided quantile.
+    doubled = fisher.derived(lambda values: 2.0 * values["k"])
+    assert float(doubled.estimate) == pytest.approx(2 * mle, rel=1e-6)
+    assert float(doubled.standard_error) == pytest.approx(2 * error, rel=1e-6)
+    low, high = fisher.derived(lambda values: values["k"]).interval(0.95, side="lower")
+    assert float(low) == pytest.approx(mle - 1.644854 * error, rel=1e-6) and high == np.inf
 
     bayesian = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
     laplace = bayesian.optimize(target="posterior").problem.laplace()
@@ -918,11 +926,17 @@ def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
     profiles = problem.profiles()
     assert set(profiles) == {"a", "b"}
     assert profiles["a"].interval == (None, None) and not profiles["a"].identifiable
-    assert profiles["a"].stopped == ("bound", "bound")
+    assert profiles["a"].stopped == ("bound", "bound") and not profiles["a"].at_bound
     # b compensates for a along the whole profile, keeping the product fixed.
     product_along = profiles["a"].values * profiles["a"].others["b"]
     assert np.ptp(product_along) == pytest.approx(0.0, abs=1e-5)
     assert "reaches its bound" in profiles["a"].summary()
+    # Profiling b, a compensates until it is pinned, and only then does the profile
+    # drop: the interval holds for a's bounds, and the result says which bound.
+    with pytest.warns(RuntimeWarning, match="reached its bound along the profile"):
+        b = problem.profile("b")
+    assert b.identifiable and set(b.at_bound) == {"a"}
+    assert "a pinned at its" in b.summary()
 
 
 def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
@@ -945,6 +959,13 @@ def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
     # Bisecting the bracket close to the threshold keeps that error small.
     assert high is None and low == pytest.approx(expected, rel=1e-3)
     assert list(profile.values) == sorted(profile.values)
+    # The curvature in the squash's tail says nothing about k, so Fisher reports
+    # no number for it rather than a misleading one.
+    with pytest.warns(RuntimeWarning, match="sit against their bounds"):
+        fisher = problem.fisher()
+    assert np.isnan(fisher.standard_errors()["k"]) and np.isnan(fisher.intervals()["k"]).all()
+    assert np.isnan(fisher.derived(lambda values: values["k"]).standard_error)
+    assert "at bound" in fisher.summary()
 
 
 def test_profile_rejects_what_it_cannot_profile(x64):

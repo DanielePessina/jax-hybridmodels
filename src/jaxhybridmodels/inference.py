@@ -84,6 +84,7 @@ from jaxhybridmodels.trainable import (
 from jaxhybridmodels.training.kernels import predict_bucket_obs
 
 __all__ = (
+    "DerivedQuantity",
     "FisherResult",
     "InferenceProblem",
     "LaplaceResult",
@@ -584,12 +585,16 @@ class InferenceProblem:
         found = _maximise(
             lambda x, args: objective(x), flat, rtol=rtol, atol=atol, max_steps=max_steps
         )
+        at_optimum = dataclasses.replace(problem, position=unravel(found.position))
+        gradient = np.asarray(found.gradient)
         return OptimizeResult(
-            problem=dataclasses.replace(problem, position=unravel(found.position)),
+            problem=at_optimum,
             target=target,
             value=found.value,
             converged=found.converged,
             steps=found.steps,
+            gradient=dict(zip(at_optimum._coordinates().names, gradient.tolist(), strict=True)),
+            gradient_norm=float(np.max(np.abs(gradient), initial=0.0)),
         )
 
     def fisher(
@@ -615,6 +620,7 @@ class InferenceProblem:
         coordinates = problem._coordinates()
         result = problem._fisher(coordinates, gauss_newton=information == "gauss_newton")
         problem._warn_if_not_at_optimum("fisher", "likelihood", coordinates, result.covariance)
+        _warn_about_pinned("fisher", result.names, result.at_bound)
         return result
 
     def _fisher(self, coordinates: _Coordinates, *, gauss_newton: bool) -> FisherResult:
@@ -663,9 +669,11 @@ class InferenceProblem:
                 "first; if this persists, that direction is not identified and needs a prior."
             )
         problem._warn_if_not_at_optimum("laplace", "posterior", coordinates, covariance)
-        return LaplaceResult(
+        result = LaplaceResult(
             **coordinates.summary_fields(covariance), _to_position=self._position_from(coordinates)
         )
+        _warn_about_pinned("laplace", result.names, result.at_bound)
+        return result
 
     def _position_from(self, coordinates: _Coordinates) -> Callable[[Array], Any]:
         """Map a flat latent vector to a position of this problem, whitened or not.
@@ -782,7 +790,6 @@ class InferenceProblem:
             )
         fisher = problem._fisher(coordinates, gauss_newton=problem._log_likelihood is None)
         problem._warn_if_not_at_optimum(caller, "likelihood", coordinates, fisher.covariance)
-        _warn_if_against_a_bound(caller, coordinates)
         return _Profiler(
             coordinates=coordinates,
             parameters=parameters,
@@ -823,9 +830,13 @@ class InferenceProblem:
         """Warn when a Newton step from here would still raise the objective by much.
 
         ``0.5 g^T C g`` is that rise in log units, so the test does not depend on the
-        values' scale.
+        values' scale. An entry against its bound is left out: the maximum within
+        the bounds is there, and its huge latent variance would turn a tiny residual
+        slope into a large predicted rise that no step inside the box can deliver.
         """
         _, gradient = self._value_and_grad(target, coordinates.unravel)(coordinates.flat)
+        pinned = _bound_sides(np.asarray(coordinates.estimate), coordinates.limits) != ""
+        gradient = jnp.where(pinned, 0.0, gradient)
         rise = 0.5 * float(gradient @ covariance @ gradient)
         if rise > _OPTIMUM_TOLERANCE:
             method = "optimize()" if target == "likelihood" else "optimize(target='posterior')"
@@ -1048,13 +1059,15 @@ class _PhysicalMap:
     unravel: Callable[[Array], Any]
 
     def __call__(self, flat: Array) -> Array:
+        return jnp.concatenate([jnp.ravel(value) for value in self.values(flat).values()])
+
+    def values(self, flat: Array) -> dict[str, Array]:
+        """The free values keyed by dotted path, as ``InferenceProblem.physical`` gives them."""
         tree = eqx.combine(self.unravel(flat), self.static)
-        return jnp.concatenate(
-            [
-                jnp.ravel(leaf.value if _is_parameter(leaf) else leaf)
-                for _, leaf in _free_leaves(tree, self.mask)
-            ]
-        )
+        return {
+            _dotted(path): leaf.value if _is_parameter(leaf) else leaf
+            for path, leaf in _free_leaves(tree, self.mask)
+        }
 
 
 @dataclass(frozen=True)
@@ -1078,6 +1091,7 @@ class _Coordinates:
             "latent": self.flat,
             "covariance": covariance,
             "slopes": self.slopes,
+            "at_bound": _bound_sides(np.asarray(self.estimate), self.limits) != "",
             "_to_physical": self.to_physical,
         }
 
@@ -1087,6 +1101,7 @@ class _Maximum(NamedTuple):
     value: float
     converged: bool
     steps: int
+    gradient: Array
 
 
 def _maximise(
@@ -1100,8 +1115,9 @@ def _maximise(
 ) -> _Maximum:
     """Minimise ``objective`` (minus a log density) with BFGS, and report the maximum.
 
-    The value comes from the solver's state at the returned point, so it costs no
-    extra solve.
+    The value and the gradient come from the solver's state at the returned point,
+    so they cost no extra solve. Both are of the maximised log density, so the
+    signs are flipped from the minimised objective's.
     """
     solution = optx.minimise(
         objective,
@@ -1116,6 +1132,7 @@ def _maximise(
         value=-float(solution.state.f_info.f),
         converged=bool(solution.result == optx.RESULTS.successful),
         steps=int(solution.stats["num_steps"]),
+        gradient=-solution.state.f_info.grad,
     )
 
 
@@ -1163,6 +1180,16 @@ class OptimizeResult:
         Whether BFGS met its tolerances within ``max_steps``.
     steps : int
         BFGS steps taken.
+    gradient : dict[str, float]
+        The gradient of the log-likelihood or log-posterior at the optimum, per
+        entry as ``physical`` names it, taken in the latent coordinates the search
+        runs in. Near zero at a maximum. An entry that stays large points at the
+        value BFGS could not settle, for instance one against its bound.
+    gradient_norm : float
+        The largest entry of ``gradient`` in size, a one-number convergence check.
+        How small is small depends on the curvature: ``fisher`` and ``laplace``
+        apply the scale-free test, and warn when a Newton step from here would
+        still raise the log density by more than 0.1.
     """
 
     problem: InferenceProblem
@@ -1170,6 +1197,8 @@ class OptimizeResult:
     value: float
     converged: bool
     steps: int
+    gradient: dict[str, float]
+    gradient_norm: float
 
 
 @dataclass(frozen=True)
@@ -1179,7 +1208,8 @@ class _GaussianSummary:
     ``names`` labels every scalar entry, as ``physical`` names it, with ``[i]`` for
     an element of an array. ``estimate`` holds the physical values at the centre,
     ``latent`` the latent ones, and ``covariance`` the latent covariance, all in
-    ``names`` order. ``slopes`` is ``d value / d latent`` per entry.
+    ``names`` order. ``slopes`` is ``d value / d latent`` per entry. ``at_bound``
+    flags the entries whose estimate sits against a bound of their ``Parameter``.
     """
 
     names: tuple[str, ...]
@@ -1187,6 +1217,7 @@ class _GaussianSummary:
     latent: Array
     covariance: Array
     slopes: Array
+    at_bound: np.ndarray = dataclasses.field(kw_only=True)
     _to_physical: _PhysicalMap = dataclasses.field(repr=False)
     _to_position: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
 
@@ -1231,10 +1262,15 @@ class _GaussianSummary:
         """The standard error of each entry: physical by the delta method, or latent.
 
         An entry that loads on a direction the data does not constrain has an
-        infinite standard error.
+        infinite standard error. An entry against its bound has ``nan`` as its
+        physical one: the curvature there describes the squash's flat tail, not
+        how far the data let the value move, so no number would be honest.
         """
-        spread = self._spread(self.covariance if latent else self.physical_covariance())
-        return dict(zip(self.names, np.asarray(spread).tolist(), strict=True))
+        if latent:
+            spread = np.asarray(self._spread(self.covariance))
+        else:
+            spread = np.where(self.at_bound, np.nan, self._spread(self.physical_covariance()))
+        return dict(zip(self.names, spread.tolist(), strict=True))
 
     def physical_covariance(self) -> Array:
         """The ``[P, P]`` covariance in physical units, by the delta method, in ``names`` order.
@@ -1261,6 +1297,8 @@ class _GaussianSummary:
         Built in latent space and mapped through each value's transform, so it is
         asymmetric on a log warp and stays inside a ``Parameter``'s bounds. An
         unconstrained entry's interval reaches its bounds, or infinity without one.
+        An entry against its bound gets ``(nan, nan)``, as in ``standard_errors``;
+        a profile tells whether the data bound it away from there.
         """
         if not 0.0 < confidence < 1.0:
             raise ValueError(f"intervals: confidence must be in (0, 1); got {confidence}")
@@ -1274,8 +1312,46 @@ class _GaussianSummary:
                 [self._to_physical(self.latent - reach), self._to_physical(self.latent + reach)]
             )
         )
-        low, high = ends.min(axis=0), ends.max(axis=0)
+        low = np.where(self.at_bound, np.nan, ends.min(axis=0))
+        high = np.where(self.at_bound, np.nan, ends.max(axis=0))
         return {name: (float(low[i]), float(high[i])) for i, name in enumerate(self.names)}
+
+    def derived(self, fn: Callable[[dict[str, Array]], Any]) -> DerivedQuantity:
+        """The estimate and standard error of a function of the values, by the delta method.
+
+        ``fn`` takes the free values as ``physical`` gives them, a dict keyed by
+        dotted path, and returns a scalar or an array, such as a shelf life from a
+        rate constant or a prediction at a new condition. Its gradient comes from
+        ``jax.jacobian``, so ``fn`` must be written in ``jax.numpy``. The standard
+        error is ``sqrt(g^T C g)`` with ``C`` the physical covariance, and so is
+        exact for a function linear in the values over their spread. For a
+        strongly curved ``fn``, push draws from ``sample`` through it instead.
+
+        A result that depends on an entry with unbounded variance has an infinite
+        standard error, and one that depends on an entry against its bound ``nan``.
+        """
+        flat = jnp.asarray(self.estimate)
+        template = self._to_physical.values(self.latent)
+        sizes = [int(np.size(value)) for value in template.values()]
+
+        def from_flat(values: Array) -> Array:
+            parts = jnp.split(values, np.cumsum(sizes)[:-1])
+            tree = {
+                key: part.reshape(np.shape(old))
+                for (key, old), part in zip(template.items(), parts, strict=True)
+            }
+            return jnp.asarray(fn(tree))
+
+        estimate = from_flat(flat)
+        gradient = jax.jacobian(from_flat)(flat).reshape(-1, flat.size)
+        variance = jnp.einsum("op,pq,oq->o", gradient, self.physical_covariance(), gradient)
+        uses = np.asarray(gradient != 0.0)
+        spread = np.sqrt(np.clip(np.asarray(variance), 0.0, None))
+        spread = np.where((uses & np.asarray(self._unbounded())).any(axis=1), np.inf, spread)
+        spread = np.where((uses & self.at_bound).any(axis=1), np.nan, spread)
+        return DerivedQuantity(
+            estimate=np.asarray(estimate), standard_error=spread.reshape(np.shape(estimate))
+        )
 
     def _table(self, title: str, confidence: float = 0.95) -> list[str]:
         errors = self.standard_errors()
@@ -1288,10 +1364,12 @@ class _GaussianSummary:
         ]
         for i, name in enumerate(self.names):
             low, high = bounds[name]
-            lines.append(
-                f"  {name:{width}}  {float(self.estimate[i]):11.4g}  {errors[name]:11.4g}  "
-                f"[{low:.4g}, {high:.4g}]"
+            spread, reach = (
+                (f"{'at bound':>11}", "not reported")
+                if self.at_bound[i]
+                else (f"{errors[name]:11.4g}", f"[{low:.4g}, {high:.4g}]")
             )
+            lines.append(f"  {name:{width}}  {float(self.estimate[i]):11.4g}  {spread}  {reach}")
         correlation = np.asarray(self.correlation())
         pairs = sorted(
             (
@@ -1369,33 +1447,35 @@ class LaplaceResult(_GaussianSummary):
         return "\n".join(self._table("Laplace approximation", confidence))
 
 
-def _warn_if_against_a_bound(caller: str, coordinates: _Coordinates) -> None:
-    """Warn when a free value sits against its bound, where a profile can mislead.
+def _bound_sides(values: np.ndarray, limits: tuple[Array, Array]) -> np.ndarray:
+    """Which bound each value sits against: ``"lower"``, ``"upper"`` or ``""``.
 
-    Its latent is then far out in the squash's tail, where its gradient
-    vanishes, so re-optimising at each profile point cannot move it off the
-    bound. A profile of any other value that the data trade off against it
-    then closes where the data do not close it.
+    ``values`` has entries on its last axis, as ``limits`` do. Only a value with
+    two finite bounds can be pinned: its latent is then far out in the squash's
+    tail. "Against" means within a millionth of the box's width.
     """
-    low, high = (np.asarray(limit) for limit in coordinates.limits)
-    value = np.asarray(coordinates.estimate)
+    first, second = (np.asarray(limit) for limit in limits)
+    # A decreasing warp maps the latent's -inf to the upper bound.
+    low, high = np.minimum(first, second), np.maximum(first, second)
     span = high - low
     boxed = np.isfinite(span)
-    near = boxed & (np.minimum(value - low, high - value) <= 1e-6 * np.where(boxed, span, 1.0))
-    pressed = [
-        f"{name} ({float(v):.4g})"
-        for name, v, flag in zip(coordinates.names, value, near, strict=True)
-        if flag
-    ]
-    # With one free value there is nothing else for a pressed one to distort.
-    if pressed and len(coordinates.names) > 1:
+    tolerance = 1e-6 * np.where(boxed, span, 1.0)
+    lower = boxed & (values - low <= tolerance)
+    upper = boxed & (high - values <= tolerance) & ~lower
+    return np.where(lower, "lower", np.where(upper, "upper", ""))
+
+
+def _warn_about_pinned(caller: str, names: Sequence[str], at_bound: np.ndarray) -> None:
+    """Warn that the Gaussian results leave out entries against their bound."""
+    pinned = [name for name, flag in zip(names, at_bound.tolist(), strict=True) if flag]
+    if pinned:
         warnings.warn(
-            f"{caller}: {', '.join(pressed)} sits against its bound, where re-optimising "
-            "cannot move it. A profile of any other value can then close where the data "
-            "do not close it. Widen the bound, or reparametrise so the data fix what you "
-            "profile, before trusting these intervals.",
+            f"{caller}: {pinned} sit against their bounds, so their standard errors and "
+            "Wald intervals are nan: the curvature there says nothing about how far the "
+            "data let them move. Profile them to see whether the data bound them, and "
+            "widen a bound that is not physical.",
             RuntimeWarning,
-            stacklevel=4,
+            stacklevel=3,
         )
 
 
@@ -1436,7 +1516,7 @@ class _Profiler:
             coordinates.to_physical(coordinates.flat.at[index].set(-1.0))[index]
         )
 
-        def at_bound(value: float, direction: float) -> bool:
+        def reached_bound(value: float, direction: float) -> bool:
             """Has the walk in ``direction`` reached the bound it is heading for?
 
             Only that bound counts. An estimate at its upper bound must still walk
@@ -1528,7 +1608,7 @@ class _Profiler:
                     points += narrow(x, ratio, new, new_ratio)
                     return points, "threshold"
                 points.append((new, new_ratio, found.converged))
-                if at_bound(float(coordinates.to_physical(new)[index]), direction):
+                if reached_bound(float(coordinates.to_physical(new)[index]), direction):
                     return points, "bound"
                 # Aim each step at a tenth of the threshold, never more than doubling.
                 rise = max(new_ratio - ratio, 1e-12)
@@ -1555,6 +1635,24 @@ class _Profiler:
         (below, stopped_below), (above, stopped_above) = walk(-1.0), walk(1.0)
         points = [*reversed(below), (coordinates.flat, 0.0, True), *above]
         physical = np.asarray(jax.vmap(coordinates.to_physical)(jnp.stack([p[0] for p in points])))
+        converged = np.array([p[2] for p in points])
+        # Another value pinned at any converged point could not move further to
+        # compensate, so the drop there may be steeper than with the bound widened.
+        sides = _bound_sides(physical[converged], coordinates.limits)
+        at_bound = {
+            other: str(next(side for side in sides[:, i] if side))
+            for i, other in enumerate(coordinates.names)
+            if i != index and sides[:, i].any()
+        }
+        if at_bound:
+            pinned = ", ".join(f"{other} ({side})" for other, side in at_bound.items())
+            warnings.warn(
+                f"profile {name!r}: {pinned} reached its bound along the profile, where "
+                "re-optimising cannot move it further. The interval holds for these bounds; "
+                "if one is not physical, widen it, since the profile may then close later.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
         return ProfileResult(
             name=name,
             confidence=self.confidence,
@@ -1564,9 +1662,10 @@ class _Profiler:
             others={
                 other: physical[:, i] for i, other in enumerate(coordinates.names) if i != index
             },
-            converged=np.array([p[2] for p in points]),
+            converged=converged,
             interval=(end(below, stopped_below), end(above, stopped_above)),
             stopped=(stopped_below, stopped_above),
+            at_bound=at_bound,
         )
 
 
@@ -1603,6 +1702,11 @@ class ProfileResult:
         do not bound it), ``"max_points"`` (still inside; raise ``max_points``),
         ``"solve_failed"`` (the model stopped solving) and ``"not_converged"``
         (BFGS did not converge where the ratio crossed).
+    at_bound : dict[str, str]
+        Other values that sat against a bound, ``"lower"`` or ``"upper"``, at some
+        converged point. Re-optimising could not move them further, so the profile
+        may drop faster than it would with that bound widened, and the interval
+        holds for the bounds as set. Empty when nothing was pinned.
     """
 
     name: str
@@ -1614,6 +1718,7 @@ class ProfileResult:
     converged: np.ndarray
     interval: tuple[float | None, float | None]
     stopped: tuple[str, str]
+    at_bound: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @property
     def identifiable(self) -> bool:
@@ -1635,8 +1740,46 @@ class ProfileResult:
         unconverged = int((~self.converged).sum())
         if unconverged:
             notes.append(f"{unconverged} points did not converge")
+        notes += [f"{other} pinned at its {side} bound" for other, side in self.at_bound.items()]
         note = "".join(f"; {text}" for text in notes)
         return f"{self.name}: {int(self.confidence * 100)}% profile interval {shown}{note}"
+
+
+@dataclass(frozen=True)
+class DerivedQuantity:
+    """A function of the values with its delta-method standard error, from ``derived``.
+
+    Attributes
+    ----------
+    estimate : ndarray
+        The function at the estimate, in the shape ``fn`` returns.
+    standard_error : ndarray
+        Its standard error, same shape. ``inf`` where it depends on a value the
+        data do not constrain, ``nan`` where it depends on one against its bound.
+    """
+
+    estimate: np.ndarray
+    standard_error: np.ndarray
+
+    def interval(
+        self, confidence: float = 0.95, *, side: Literal["both", "lower", "upper"] = "both"
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """A Wald interval, ``estimate`` plus or minus ``z`` standard errors.
+
+        ``side="lower"`` gives a one-sided bound, ``(estimate - z se, inf)`` with
+        ``z`` the ``confidence`` quantile, as a shelf-life claim needs;
+        ``"upper"`` the mirror image.
+        """
+        if not 0.0 < confidence < 1.0:
+            raise ValueError(f"interval: confidence must be in (0, 1); got {confidence}")
+        if side not in ("both", "lower", "upper"):
+            raise ValueError(f"interval: side must be 'both', 'lower' or 'upper'; got {side!r}")
+        tail = (1 - confidence) / 2 if side == "both" else 1 - confidence
+        reach = float(stats.norm.ppf(1 - tail)) * self.standard_error
+        infinite = np.full(np.shape(self.estimate), np.inf)
+        low = -infinite if side == "upper" else self.estimate - reach
+        high = infinite if side == "lower" else self.estimate + reach
+        return np.asarray(low), np.asarray(high)
 
 
 _STOP_REASONS = {
