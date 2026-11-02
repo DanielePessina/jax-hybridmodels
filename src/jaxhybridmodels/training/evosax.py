@@ -244,8 +244,13 @@ def _build_single_eval(
         predictor = eqx.combine(params, static_predictor)
 
         total = jnp.asarray(0.0)
+        solved = jnp.asarray(True)
         for bp in bucket_payloads:
             full_state = simulate_bucket(predictor, bp, simulate_fn=simulate_fn, solver=solver)
+            # The loss reads measured cells only, so a solve that fails after the
+            # last measurement could still score finite. Any non-finite state is a
+            # failure, as it is for inference.
+            solved = solved & jnp.all(jnp.isfinite(full_state))
             pred_obs = jax.vmap(state_to_output)(full_state)
             total = total + loss_fn(pred_obs, bp)
             if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
@@ -263,7 +268,7 @@ def _build_single_eval(
             # with no aux channel. The weight is a closed-over Python float,
             # never traced, so it stays out of the vmap.
             total = total + penalty_weight * penalty_fn(predictor, penalty_points)
-        return total
+        return jnp.where(solved, total, jnp.inf)
 
     return single_eval
 
@@ -578,6 +583,7 @@ def _train_with_evosax(
 
         history: list[float] = []
         failed: list[int] = []
+        warned = False
         selection: list[float] = []
         failure: str | None = None
 
@@ -601,8 +607,10 @@ def _train_with_evosax(
                     raise FloatingPointError(
                         f"every candidate in generation {gen} has a non-finite fitness"
                     )
-                fitness = _rank_failures_last(fitness, finite)
-                gen_flat = jnp.asarray(population[int(jnp.argmin(fitness))])
+                if n_failed:
+                    fitness = _rank_failures_last(fitness, finite)
+                gen_best_idx = int(jnp.argmin(fitness))
+                gen_flat = jnp.asarray(population[gen_best_idx])
                 score = None if select_score is None else select_score(rebuild(gen_flat))
             except FIT_FAILURES as exc:
                 # Nothing finished, so there is nothing to hand back.
@@ -617,10 +625,10 @@ def _train_with_evosax(
             tell_key = fold(key, f"evosax_tell_{gen}")
             state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)
 
-            gen_best_idx = int(jnp.argmin(fitness))
             gen_best_loss = float(fitness[gen_best_idx])
             gen_mean_loss = float(jnp.mean(fitness, where=finite))
-            if n_failed and not any(failed):
+            if n_failed and not warned:
+                warned = True
                 ui_.on_message(
                     level="warning",
                     text=(
