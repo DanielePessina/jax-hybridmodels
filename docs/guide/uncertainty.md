@@ -10,6 +10,10 @@ likelihood, standard errors from the Fisher information, which parameters the da
 cannot tell apart, and a Laplace approximation to the posterior. See
 [Without sampling](#without-sampling).
 
+For a first example where the uncertainty is the answer, read
+[shelf life](/examples/shelf-life): a drug's label claim set from an accelerated
+stability study, where the best estimate would overstate it.
+
 ## A first posterior
 
 <<< @/../examples/tubular_reactor/sample_tubular_reactor.py#problem
@@ -263,6 +267,12 @@ relying on it for a new model.
 
 `fisher` and `laplace` warn when the position is not at the maximum, since both
 describe a maximum.
+
+`FisherResult.sample` draws from the estimate's asymptotic sampling distribution,
+for a frequentist band on any function of the parameters, such as a prediction at
+new conditions. The [shelf life](/examples/shelf-life) example uses it for a potency
+band at a temperature the study never ran. It refuses when a direction is not
+identified, since that spread is unbounded.
 
 ## Worked example
 

@@ -52,6 +52,7 @@ export default defineConfig({
         { text: 'Custom predictor', link: '/examples/custom-predictor' },
         { text: 'Custom training loop', link: '/examples/custom-loop' },
         { text: 'Mechanistic crystallisation', link: '/examples/crystallisation-mechanistic' },
+        { text: 'Shelf life', link: '/examples/shelf-life' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },

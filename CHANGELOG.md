@@ -153,6 +153,11 @@
 - `InferenceProblem.profile` and `profiles`: profile likelihood intervals.
   Steps adapt as in pyPESTO, every other value is re-optimised with BFGS at
   each point, and a side the data leave open is reported as open.
+- `FisherResult.sample` draws from the estimate's asymptotic sampling
+  distribution, as `LaplaceResult.sample` draws from the posterior's Gaussian.
+- `examples/shelf_life/shelf_life.py` and its page: a label claim from an
+  accelerated stability study, set from the profile likelihood's one-sided 95%
+  lower bound on the extrapolated rate.
 - `examples/identifiability/arrhenius.py`: how correlated Arrhenius constants
   are, and the reference temperature that decorrelates them.
 - Evosax ranks a candidate whose solve fails last instead of ending the run,
