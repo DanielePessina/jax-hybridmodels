@@ -1392,11 +1392,30 @@ class _Profiler:
         spread = self.spreads[name]
         first_step = 0.2 * spread if math.isfinite(spread) and spread > 0 else 0.1
         low, high = (float(limit[index]) for limit in coordinates.limits)
+        if math.isfinite(low) and math.isfinite(high):
+            # A latent unit already crosses much of a box. A value pressed against
+            # its bound sits far out in the squash's tail, where its latent spread
+            # is huge and meaningless, and a step sized from it would jump clean
+            # across the box.
+            first_step = min(first_step, 1.0)
+        # A warp need only be monotone, so find which way the physical value moves
+        # when the latent rises. Each entry's transform is its own, so moving one
+        # latent entry moves only its own physical value.
+        rising = float(coordinates.to_physical(coordinates.flat.at[index].set(1.0))[index]) > float(
+            coordinates.to_physical(coordinates.flat.at[index].set(-1.0))[index]
+        )
 
-        def at_bound(value: float) -> bool:
+        def at_bound(value: float, direction: float) -> bool:
+            """Has the walk in ``direction`` reached the bound it is heading for?
+
+            Only that bound counts. An estimate at its upper bound must still walk
+            down, since the data may bound it from below.
+            """
             if not (math.isfinite(low) and math.isfinite(high)):
                 return False
-            return min(value - low, high - value) <= 1e-6 * (high - low)
+            if (direction > 0) == rising:
+                return high - value <= 1e-6 * (high - low)
+            return value - low <= 1e-6 * (high - low)
 
         def solve_at(x: Array, fixed: Array) -> _Maximum:
             found = _maximise(
@@ -1419,6 +1438,36 @@ class _Profiler:
                 )
             return found
 
+        def narrow(
+            inside: Array, outside: Array, outside_ratio: float
+        ) -> list[tuple[Array, float, bool]]:
+            """Bisect a bracket that overshot the threshold, so the crossing is interpolated.
+
+            The interpolation in :func:`end` is exact for a quadratic profile. A
+            step can jump far past the threshold where the profile is not
+            quadratic, for instance from a flat stretch where a bounded value sits
+            against its bound into steep ground, and interpolating across that
+            jump misplaces the crossing badly. Bisecting until the outside point is
+            within twice the threshold keeps the bracket small. Returns the new
+            inside points, nearest the estimate first, and then the outside point.
+            """
+            insides: list[tuple[Array, float, bool]] = []
+            for _ in range(30):
+                if outside_ratio <= 2.0 * self.threshold:
+                    break
+                fixed = 0.5 * (inside[index] + outside[index])
+                found = solve_at(inside, fixed)
+                mid = jnp.where(fixed_entry, fixed, found.position)
+                mid_ratio = 2.0 * (self.best - found.value)
+                if not (found.converged and math.isfinite(mid_ratio)):
+                    break
+                if mid_ratio > self.threshold:
+                    outside, outside_ratio = mid, mid_ratio
+                else:
+                    insides.append((mid, mid_ratio, True))
+                    inside = mid
+            return [*insides, (outside, outside_ratio, True)]
+
         def walk(direction: float) -> tuple[list[tuple[Array, float, bool]], str]:
             """The points on one side, and why the walk stopped there."""
             points: list[tuple[Array, float, bool]] = []
@@ -1431,12 +1480,16 @@ class _Profiler:
                 if not math.isfinite(new_ratio):
                     points.append((new, math.inf, False))
                     return points, "solve_failed"
-                points.append((new, new_ratio, found.converged))
                 if new_ratio > self.threshold:
-                    # A ratio from an unfinished search can only be too high, so it
-                    # cannot show the data close this side.
-                    return points, "threshold" if found.converged else "not_converged"
-                if at_bound(float(coordinates.to_physical(new)[index])):
+                    if not found.converged:
+                        # A ratio from an unfinished search can only be too high, so
+                        # it cannot show the data close this side.
+                        points.append((new, new_ratio, False))
+                        return points, "not_converged"
+                    points += narrow(x, new, new_ratio)
+                    return points, "threshold"
+                points.append((new, new_ratio, found.converged))
+                if at_bound(float(coordinates.to_physical(new)[index]), direction):
                     return points, "bound"
                 # Aim each step at a tenth of the threshold, never more than doubling.
                 rise = max(new_ratio - ratio, 1e-12)
@@ -1451,11 +1504,14 @@ class _Profiler:
             converged = [(x, r) for x, r, ok in inside if ok]
             inside_x, inside_ratio = converged[-1] if converged else (coordinates.flat, 0.0)
             # The signed root of the ratio is linear in the value when the profile is
-            # quadratic, so interpolating it is exact there.
+            # quadratic in it, so interpolating it is exact there. In the physical
+            # value, not the latent: a linear-Gaussian model's profile is quadratic
+            # in the value whatever squash or warp carries it to the latent.
             root, inside_root = math.sqrt(outside_ratio), math.sqrt(max(inside_ratio, 0.0))
             weight = (math.sqrt(self.threshold) - inside_root) / (root - inside_root)
-            crossing = inside_x + weight * (outside_x - inside_x)
-            return float(coordinates.to_physical(crossing)[index])
+            inside_value = float(coordinates.to_physical(inside_x)[index])
+            outside_value = float(coordinates.to_physical(outside_x)[index])
+            return inside_value + weight * (outside_value - inside_value)
 
         (below, stopped_below), (above, stopped_above) = walk(-1.0), walk(1.0)
         points = [*reversed(below), (coordinates.flat, 0.0, True), *above]
