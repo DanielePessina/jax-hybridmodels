@@ -56,6 +56,9 @@ jobs:
       - name: Run the tubular reactor posterior example (short)
         run: uv run python examples/tubular_reactor/sample_tubular_reactor.py --warmup 10 --draws 10 --chains 2 --steps 5 --predict-draws 5
 
+      - name: Run the shelf life example
+        run: uv run python examples/shelf_life/shelf_life.py --no-plot
+
       - name: Run the identifiability example
         run: uv run python examples/identifiability/arrhenius.py
 

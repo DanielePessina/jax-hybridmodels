@@ -624,6 +624,7 @@ class InferenceProblem:
         covariance, eigenvalues, eigenvectors = _pseudo_inverse(matrix, _UNIDENTIFIED)
         return FisherResult(
             **coordinates.summary_fields(covariance),
+            _to_position=self._position_from(coordinates),
             information=matrix,
             eigenvalues=eigenvalues,
             eigenvectors=eigenvectors,
@@ -1186,6 +1187,36 @@ class _GaussianSummary:
     covariance: Array
     slopes: Array
     _to_physical: _PhysicalMap = dataclasses.field(repr=False)
+    _to_position: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
+
+    def sample(self, key: Array, n: int) -> Any:
+        """``n`` draws from this Gaussian, as positions with a leading ``[n]`` axis.
+
+        ``problem.physical``, ``problem.predict`` and, with an extra chain axis,
+        ``problem.to_arviz`` take them as they take a sampler's output. From a
+        :class:`LaplaceResult` they approximate the posterior. From a
+        :class:`FisherResult` they follow the estimate's asymptotic sampling
+        distribution, which carries its uncertainty into any function of it, such as
+        a prediction at new conditions.
+        """
+        check_key(key, f"{type(self).__name__}.sample")
+        if n < 1:
+            raise ValueError(f"{type(self).__name__}.sample: n must be positive; got {n}")
+        unbounded = [
+            name for name, flag in zip(self.names, self._unbounded().tolist(), strict=True) if flag
+        ]
+        if unbounded:
+            raise ValueError(
+                f"{type(self).__name__}.sample: the data do not constrain {unbounded}, so "
+                "their spread is unbounded; fix or reparametrise them, or add a prior and "
+                "use laplace"
+            )
+        # A square root from the eigendecomposition, which, unlike a Cholesky factor,
+        # cannot fail on rounding in an ill-conditioned covariance.
+        eigenvalues, eigenvectors = jnp.linalg.eigh(self.covariance)
+        factor = eigenvectors * jnp.sqrt(jnp.clip(eigenvalues, 0.0))
+        draws = jr.normal(key, (n, len(self.names)), dtype=self.latent.dtype)
+        return jax.vmap(self._to_position)(self.latent + draws @ factor.T)
 
     def _unbounded(self) -> Array:
         """Entries with unbounded variance. None here; ``FisherResult`` finds some."""
@@ -1331,24 +1362,6 @@ class LaplaceResult(_GaussianSummary):
     ``latent`` is its mean and ``covariance`` its covariance, over the latent
     position in ``names`` order.
     """
-
-    _to_position: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
-
-    def sample(self, key: Array, n: int) -> Any:
-        """``n`` draws as positions with a leading ``[n]`` axis.
-
-        ``problem.physical``, ``problem.predict`` and, with an extra chain axis,
-        ``problem.to_arviz`` take them as they take a sampler's output.
-        """
-        check_key(key, "LaplaceResult.sample")
-        if n < 1:
-            raise ValueError(f"LaplaceResult.sample: n must be positive; got {n}")
-        # A square root from the eigendecomposition, which, unlike a Cholesky factor,
-        # cannot fail on rounding in an ill-conditioned covariance.
-        eigenvalues, eigenvectors = jnp.linalg.eigh(self.covariance)
-        factor = eigenvectors * jnp.sqrt(jnp.clip(eigenvalues, 0.0))
-        draws = jr.normal(key, (n, len(self.names)), dtype=self.latent.dtype)
-        return jax.vmap(self._to_position)(self.latent + draws @ factor.T)
 
     def summary(self, confidence: float = 0.95) -> str:
         """Posterior means, standard deviations, Wald intervals and correlations."""

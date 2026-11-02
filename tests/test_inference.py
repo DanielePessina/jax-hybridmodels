@@ -811,6 +811,9 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     assert observed.standard_errors()["k"] == pytest.approx(error, rel=1e-6)
     low, high = fisher.intervals(0.95)["k"]
     assert (low, high) == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
+    estimates = np.asarray(optimum.problem.physical(fisher.sample(jr.key(4), 4000))["k"])
+    assert estimates.mean() == pytest.approx(mle, abs=4 * error / np.sqrt(4000))
+    assert estimates.std() == pytest.approx(error, rel=0.05)
     assert "Condition number" in fisher.summary()
 
     bayesian = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
@@ -866,6 +869,8 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     assert set(direction) == {"a", "b"}
     assert together.standard_errors() == {"a": np.inf, "b": np.inf}
     assert together.intervals()["a"] == (-np.inf, np.inf)
+    with pytest.raises(ValueError, match="do not constrain"):
+        together.sample(jr.key(0), 10)
     assert "Not identified: " in together.summary()
 
 
