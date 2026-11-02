@@ -925,6 +925,28 @@ def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
     assert "reaches its bound" in profiles["a"].summary()
 
 
+def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
+    """The data prefer a rate above the upper bound, so the estimate sits on it and
+    its latent is far out in the squash's tail, where steps barely move the value.
+    The profile must still walk down, and its crossing has a closed form: the ratio
+    is ``((k - mle)^2 - (bound - mle)^2) / se^2`` for a linear-Gaussian model."""
+    experiments, ts, ys = measurements()
+    mle, error = least_squares(ts, ys)
+    bound = mle - 2.0 * error
+    model = linear_model(hm.Parameter(mle - 4.0 * error, bounds=(0.5 * mle, bound)))
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    profile = problem.profile("k")
+    assert profile.stopped == ("threshold", "bound")
+    threshold = scipy_stats.chi2.ppf(0.95, 1)
+    expected = mle - float(np.sqrt(threshold * error**2 + (bound - mle) ** 2))
+    low, high = profile.interval
+    # Not exact: the ratio is quadratic about the unconstrained optimum, not about
+    # the estimate on the bound, so its root is only nearly linear in the value.
+    # Bisecting the bracket close to the threshold keeps that error small.
+    assert high is None and low == pytest.approx(expected, rel=1e-3)
+    assert list(profile.values) == sorted(profile.values)
+
+
 def test_profile_rejects_what_it_cannot_profile(x64):
     experiments, *_ = measurements()
     problem = make_problem(linear_model(), experiments, log_prior=None, noise="data")
