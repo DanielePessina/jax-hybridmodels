@@ -942,7 +942,8 @@ def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
     low, high = profile.interval
     # Not exact: the ratio is quadratic about the unconstrained optimum, not about
     # the estimate on the bound, so its root is only nearly linear in the value.
-    assert high is None and low == pytest.approx(expected, rel=5e-3)
+    # Bisecting the bracket close to the threshold keeps that error small.
+    assert high is None and low == pytest.approx(expected, rel=1e-3)
     assert list(profile.values) == sorted(profile.values)
 
 

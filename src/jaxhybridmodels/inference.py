@@ -1439,21 +1439,23 @@ class _Profiler:
             return found
 
         def narrow(
-            inside: Array, outside: Array, outside_ratio: float
+            inside: Array, inside_ratio: float, outside: Array, outside_ratio: float
         ) -> list[tuple[Array, float, bool]]:
-            """Bisect a bracket that overshot the threshold, so the crossing is interpolated.
+            """Bisect a wide bracket of the threshold, so the crossing is interpolated.
 
             The interpolation in :func:`end` is exact for a quadratic profile. A
             step can jump far past the threshold where the profile is not
             quadratic, for instance from a flat stretch where a bounded value sits
             against its bound into steep ground, and interpolating across that
-            jump misplaces the crossing badly. Bisecting until the outside point is
-            within twice the threshold keeps the bracket small. Returns the new
-            inside points, nearest the estimate first, and then the outside point.
+            jump misplaces the crossing badly. Bisecting until both ends lie within
+            a quarter of the threshold of it keeps the bracket small; an ordinary
+            walk, whose steps aim at a tenth of the threshold, rarely needs any.
+            Returns the new inside points, nearest the estimate first, and then
+            the outside point.
             """
             insides: list[tuple[Array, float, bool]] = []
             for _ in range(30):
-                if outside_ratio <= 2.0 * self.threshold:
+                if outside_ratio <= 1.25 * self.threshold and inside_ratio >= 0.75 * self.threshold:
                     break
                 fixed = 0.5 * (inside[index] + outside[index])
                 found = solve_at(inside, fixed)
@@ -1465,7 +1467,7 @@ class _Profiler:
                     outside, outside_ratio = mid, mid_ratio
                 else:
                     insides.append((mid, mid_ratio, True))
-                    inside = mid
+                    inside, inside_ratio = mid, mid_ratio
             return [*insides, (outside, outside_ratio, True)]
 
         def walk(direction: float) -> tuple[list[tuple[Array, float, bool]], str]:
@@ -1486,7 +1488,7 @@ class _Profiler:
                         # it cannot show the data close this side.
                         points.append((new, new_ratio, False))
                         return points, "not_converged"
-                    points += narrow(x, new, new_ratio)
+                    points += narrow(x, ratio, new, new_ratio)
                     return points, "threshold"
                 points.append((new, new_ratio, found.converged))
                 if at_bound(float(coordinates.to_physical(new)[index]), direction):
