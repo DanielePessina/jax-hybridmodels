@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 from _models import identity
 from blackjax.diagnostics import effective_sample_size
+from jax.flatten_util import ravel_pytree
 from scipy import stats as scipy_stats
 
 import jaxhybridmodels as hm
@@ -74,6 +75,11 @@ def conjugate(ts: np.ndarray, ys: np.ndarray) -> tuple[float, float]:
     precision = 1 / PRIOR_SD**2 + (ts**2).sum() / SIGMA**2
     mean = (PRIOR_MEAN / PRIOR_SD**2 + (ts * ys).sum() / SIGMA**2) / precision
     return float(mean), float(precision**-0.5)
+
+
+def least_squares(ts: np.ndarray, ys: np.ndarray) -> tuple[float, float]:
+    """The maximum likelihood of ``k`` for the linear-Gaussian model, and its standard error."""
+    return float((ts * ys).sum() / (ts**2).sum()), SIGMA / float(np.sqrt((ts**2).sum()))
 
 
 def normal_prior(predictors: Any, noise: Any) -> Any:
@@ -526,6 +532,9 @@ def test_a_bad_input_to_a_warped_scaler_rejects_the_proposal(x64):
     value, gradient = jax.value_and_grad(problem.log_density)(beyond)
     assert float(value) == -np.inf
     assert all(np.all(np.isfinite(g)) for g in jax.tree_util.tree_leaves(gradient))
+    # The likelihood that optimize and profile search is guarded the same way.
+    flat, unravel = ravel_pytree(beyond)
+    assert float(problem._scalar("likelihood", unravel, forward=False)(flat)) == -np.inf
     # Outside the density the guard is still on.
     broken = problem.to_model(beyond)
     with pytest.raises(Exception, match="strictly positive"):
@@ -610,6 +619,19 @@ def test_explicit_forward_mode_fails_when_the_problem_is_built(x64):
         make_problem(model, experiments, log_prior=normal_prior, noise="data", gradient="forward")
 
 
+@jax.custom_vjp
+def _reverse_only(x: Any) -> Any:
+    return x
+
+
+_reverse_only.defvjp(lambda x: (x, None), lambda _, g: (g,))
+
+
+def reverse_only_prior(predictors: Any, noise: Any) -> Any:
+    """A prior with no forward-mode rule, which forward mode must refuse up front."""
+    return _reverse_only(normal_prior(predictors, noise))
+
+
 def _bad_problem(**overrides: Any) -> Any:
     arguments: dict[str, Any] = dict(log_prior=normal_prior, noise="data")
     arguments.update(overrides)
@@ -631,6 +653,12 @@ def _bad_problem(**overrides: Any) -> Any:
             id="noise-channel",
         ),
         pytest.param({"gradient": "fast"}, ValueError, "gradient must", id="gradient"),
+        pytest.param(
+            {"gradient": "forward", "log_prior": reverse_only_prior},
+            TypeError,
+            "custom_vjp",
+            id="forward-prior",
+        ),
         pytest.param({"noise": {"y": hm.Parameter(0.1)}}, ValueError, "positive", id="noise-sign"),
         pytest.param({"free": "nope"}, ValueError, "nope", id="free-path"),
         pytest.param({"log_prior": flat_prior}, ValueError, "improper", id="flat-prior-open-bound"),
@@ -769,8 +797,7 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     ``sum(t y) / sum(t^2)``, its standard error ``sigma / sqrt(sum(t^2))``, and the
     Laplace approximation is the conjugate posterior itself."""
     _, experiments, ts, ys, _, _ = linear
-    mle = float((ts * ys).sum() / (ts**2).sum())
-    error = SIGMA / float(np.sqrt((ts**2).sum()))
+    mle, error = least_squares(ts, ys)
 
     frequentist = make_problem(linear_model(), experiments, log_prior=None, noise="data")
     with pytest.warns(UserWarning, match="not at the likelihood's maximum"):
@@ -798,39 +825,108 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     assert values.std() == pytest.approx(sd, rel=0.05)
     band = bayesian.predict(draws, key=jr.key(6), n_draws=50)
     assert set(band) == {e.exp_id for e in experiments}
+    whitened = bayesian.optimize(target="posterior").problem.preconditioned()
+    again = np.asarray(whitened.physical(whitened.laplace().sample(jr.key(5), 4000))["k"])
+    assert again == pytest.approx(values, rel=1e-8)
 
 
 def product_field(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
     return predictors["a"].value * predictors["b"].value * jnp.ones_like(y)
 
 
+def product_model(a: hm.Parameter) -> hm.HybridModel:
+    """``y = a b t``: the data see only the product, so ``a`` and ``b`` trade off freely."""
+    return hm.HybridModel.from_vector_field(
+        vector_field=product_field,
+        predictors={"a": a, "b": hm.Parameter(0.7)},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+
+
 def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
-    experiments, ts, _ = measurements()
+    experiments, ts, ys = measurements()
     # The latent is a squashed log of k, so the information is computed far from
     # physical units. At the MLE the delta method maps it back exactly.
     warped = linear_model(hm.Parameter(0.7, bounds=(0.01, 10.0), warp="log"))
     problem = make_problem(warped, experiments, log_prior=None, noise="data").optimize().problem
     result = problem.fisher()
-    assert result.standard_errors()["k"] == pytest.approx(SIGMA / np.sqrt((ts**2).sum()), rel=1e-6)
+    assert result.standard_errors()["k"] == pytest.approx(least_squares(ts, ys)[1], rel=1e-6)
     assert result.standard_errors(latent=True)["k"] != pytest.approx(result.standard_errors()["k"])
     low, high = result.intervals(0.95)["k"]
     centre = float(result.estimate[0])
     # Built in the latent and mapped back, so it leans up as log k does and stays in bounds.
     assert 0.01 < low < centre < high < 10.0 and high - centre > centre - low
 
-    product = hm.HybridModel.from_vector_field(
-        vector_field=product_field,
-        predictors={"a": hm.Parameter(1.0), "b": hm.Parameter(0.7)},
-        state_to_output=identity,
-        output_channel_names=("y",),
-        solver=SOLVER,
-    )
+    product = product_model(hm.Parameter(1.0))
     problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
     together = problem.fisher()
     (direction,) = together.unidentified()
     assert set(direction) == {"a", "b"}
     assert together.standard_errors() == {"a": np.inf, "b": np.inf}
+    assert together.intervals()["a"] == (-np.inf, np.inf)
     assert "Not identified: " in together.summary()
+
+
+def test_a_profile_closes_where_the_closed_form_says_and_compiles_once(linear):
+    """For a linear-Gaussian model the profile is exactly quadratic, so its 95%
+    interval is the Wald one, ``mle -/+ 1.96 se``. With a second, separately
+    identified value, re-optimising it at each point must not move the interval."""
+    _, experiments, ts, ys, _, _ = linear
+    mle, error = least_squares(ts, ys)
+    traces = []
+
+    def counted(predictors: Any, ts: Any, covariates: Any, y0: Any, solver: Any) -> Any:
+        traces.append(1)  # once per trace of whatever calls the model
+        term = diffrax.ODETerm(lambda t, y, args: field(t, y, predictors, covariates))
+        return solver.diffeqsolve(term, ts, y0)
+
+    model = hm.HybridModel(
+        predictors={"k": hm.Parameter(0.5)},
+        simulate_fn=counted,
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    before = len(traces)
+    first = problem.profile("k", max_points=4)
+    with_compile = len(traces) - before
+    before = len(traces)
+    profile = problem.profile("k")
+    # Ten times the points, and only the setup's eager Fisher is traced again: the
+    # BFGS objective is compiled once per problem and reused for every point.
+    assert len(traces) - before < with_compile
+    assert profile.identifiable and profile.converged.all()
+    assert profile.stopped == ("threshold", "threshold")
+    assert profile.interval == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
+    assert list(profile.values) == sorted(profile.values)
+    assert profile.log_likelihood_ratio.min() == pytest.approx(0.0, abs=1e-9)
+    assert "95% profile interval" in profile.summary() and first.name == "k"
+
+
+def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
+    experiments, *_ = measurements()
+    product = product_model(hm.Parameter(1.0, bounds=(0.1, 10.0)))
+    problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
+    profiles = problem.profiles()
+    assert set(profiles) == {"a", "b"}
+    assert profiles["a"].interval == (None, None) and not profiles["a"].identifiable
+    assert profiles["a"].stopped == ("bound", "bound")
+    # b compensates for a along the whole profile, keeping the product fixed.
+    product_along = profiles["a"].values * profiles["a"].others["b"]
+    assert np.ptp(product_along) == pytest.approx(0.0, abs=1e-5)
+    assert "reaches its bound" in profiles["a"].summary()
+
+
+def test_profile_rejects_what_it_cannot_profile(x64):
+    experiments, *_ = measurements()
+    problem = make_problem(linear_model(), experiments, log_prior=None, noise="data")
+    with pytest.raises(ValueError, match="not free Parameter entries"):
+        problem.profile("q")
+    with pytest.raises(ValueError, match="confidence"):
+        problem.profile("k", confidence=1.5)
 
 
 @pytest.mark.parametrize(

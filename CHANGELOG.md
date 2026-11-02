@@ -150,6 +150,9 @@
   `physical`, `predict` and `to_arviz` read. `make_problem(log_prior=None)`
   builds a likelihood-only problem for this. `optimistix` is now a declared
   dependency; diffrax already required it.
+- `InferenceProblem.profile` and `profiles`: profile likelihood intervals.
+  Steps adapt as in pyPESTO, every other value is re-optimised with BFGS at
+  each point, and a side the data leave open is reported as open.
 - `examples/identifiability/arrhenius.py`: how correlated Arrhenius constants
   are, and the reference temperature that decorrelates them.
 - Evosax ranks a candidate whose solve fails last instead of ending the run,

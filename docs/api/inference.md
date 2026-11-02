@@ -1,9 +1,13 @@
-# Inference: A Log-Density for Samplers
+# Inference: Log-Density, Fisher, Laplace and Profiles
 
 ## Quick links
 
 - [`make_problem`](#make_problem)
 - [`InferenceProblem`](#inferenceproblem)
+- [`OptimizeResult`](#optimizeresult)
+- [`FisherResult`](#fisherresult)
+- [`LaplaceResult`](#laplaceresult)
+- [`ProfileResult`](#profileresult)
 - [`flat_prior`](#flat_prior)
 
 ---
@@ -45,7 +49,7 @@ a failed solve will end the chain with an exception.
 | `log_likelihood` | `Callable | None` | Replaces the Gaussian: ``(pred_obs, bp, noise) -> scalar``, called once per bucket and summed. ``pred_obs`` is ``[N, T, D]``, and ``bp.mask`` says which cells were measured. |
 | `gradient` | `{"auto", "forward", "reverse"}` | How the density is differentiated. ``"auto"`` uses forward mode for a few free values when the model allows it, and otherwise reverse mode with the model's own adjoint. Forward mode replaces the adjoint with ``diffrax.ForwardMode``, so a ``simulate_fn`` must use ``solver.diffeqsolve`` or pass ``adjoint=solver.adjoint``. ``problem.gradient`` says which was used. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1211)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1594)</small>
 
 ---
 
@@ -86,7 +90,7 @@ Build one with [`make_problem`](/api/inference#make_problem). Identity-hashed, s
 | `conditional_on` | `tuple[str, ...]` | Dotted paths of the trainable leaves held fixed. The posterior is conditional on these values and its width does not account for them. |
 | `gradient` | `str` | The mode in use, ``"forward"`` or ``"reverse"``, after ``"auto"`` chose. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L216)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L219)</small>
 
 <a id="inferenceproblemfisher"></a>
 
@@ -112,7 +116,7 @@ Hessian of the log-likelihood, which also works with a custom
 The matrices are in latent coordinates, where the problem lives. Standard
 errors and intervals are reported in physical units by default.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L552)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L595)</small>
 
 <a id="inferenceproblemlaplace"></a>
 
@@ -138,7 +142,7 @@ solve.
 ``sample`` draws positions that ``physical``, ``predict`` and ``to_arviz``
 take as they take a sampler's output.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L604)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L632)</small>
 
 <a id="inferenceproblemlog_density"></a>
 
@@ -159,7 +163,7 @@ Take its gradient with ``jax.grad``, as samplers do. Its custom gradient
 rule rules out ``jax.jvp`` and ``jax.jacfwd`` on this method, so use them on
 ``log_likelihood`` or ``residuals``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L358)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L361)</small>
 
 <a id="inferenceproblemlog_likelihood"></a>
 
@@ -175,7 +179,7 @@ The log-likelihood of the data, summed over every experiment.
 at a row no channel measured, since a failed solve leaves such rows
 non-finite too.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L301)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L304)</small>
 
 <a id="inferenceproblemoptimize"></a>
 
@@ -204,7 +208,7 @@ Uses ``optimistix.BFGS``. ``rtol`` and ``atol`` are its tolerances on the
 latent values and on the objective. The result's ``problem`` sits at the
 optimum and ``converged`` says whether BFGS met its tolerances.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L497)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L550)</small>
 
 <a id="inferenceproblemphysical"></a>
 
@@ -221,7 +225,7 @@ leaf under its path as it is, and inferred noise as ``"noise.<name>"``.
 ``position`` may be a sampler's output: leading axes such as
 ``[chain, draw]`` stay on every value.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L745)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L886)</small>
 
 <a id="inferenceproblempreconditioned"></a>
 
@@ -253,7 +257,7 @@ guess for the noise helps too.
 | `precision` | `Array | None` | The ``[P, P]`` curvature to use, for a custom likelihood or a better estimate. ``None`` computes the Gauss-Newton ``J^T J + ridge I`` from the whitened residuals and any inferred noise, which needs the Gaussian likelihood. |
 | `ridge` | `float` | Added to the diagonal of the Gauss-Newton curvature in latent units, standing in for the prior so an unidentified direction keeps a finite scale. Ignored with ``precision``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L376)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L379)</small>
 
 <a id="inferenceproblempredict"></a>
 
@@ -291,7 +295,71 @@ channel, since the variances in data exist only at measured cells.
 A draw whose solve fails on this grid is dropped with a warning, so one bad
 draw on new data or a longer grid does not cost the others.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L768)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L909)</small>
+
+<a id="inferenceproblemprofile"></a>
+
+#### `InferenceProblem.profile()`
+
+```python
+profile(
+    self,
+    name: 'str',
+    *,
+    confidence: 'float' = 0.95,
+    max_points: 'int' = 40,
+    max_steps: 'int' = 200,
+    rtol: 'float' = 1e-06,
+    atol: 'float' = 1e-06,
+) -> ProfileResult
+```
+
+The profile likelihood of one value, and the confidence interval it gives.
+
+Steps away from the current position, which should be the maximum
+likelihood from `optimize`, in each direction. At each point the
+named value is held fixed and BFGS maximises the log-likelihood over all
+the others, starting from the previous point. A side closes when twice the
+drop in log-likelihood passes the chi-square quantile for ``confidence``,
+and the interval's end is interpolated there. A side that reaches the
+value's bound, or runs out of ``max_points`` first, stays open: the data
+do not bound the value on that side.
+
+Steps adapt so each raises the drop by about a tenth of the threshold, as
+in pyPESTO. They are taken in the latent coordinate, so profiling is
+unaffected by a warp. Profiles do not depend on the parametrisation at
+all, unlike Wald intervals.
+
+``name`` is a path as ``physical`` names it, with ``[i]`` for an element
+of an array ``Parameter``, such as ``"k"`` or ``"rates[2]"``.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L680)</small>
+
+<a id="inferenceproblemprofiles"></a>
+
+#### `InferenceProblem.profiles()`
+
+```python
+profiles(
+    self,
+    names: 'Sequence[str] | None' = None,
+    *,
+    confidence: 'float' = 0.95,
+    max_points: 'int' = 40,
+    max_steps: 'int' = 200,
+    rtol: 'float' = 1e-06,
+    atol: 'float' = 1e-06,
+) -> dict[str, ProfileResult]
+```
+
+`profile` for each name, by default every free ``Parameter`` entry.
+
+The setup, the Fisher step sizes and the compiled objective are shared, so
+each extra name costs only its own points. One that fails, for instance
+because the model stops solving far from the optimum, is skipped with a
+warning and the others still run.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L720)</small>
 
 <a id="inferenceproblemresiduals"></a>
 
@@ -307,7 +375,7 @@ Length is every ``[N, T, D]`` cell, with zero at unmeasured cells, so the
 shape does not depend on the data's mask. ``jax.jacfwd`` applies when the
 model's adjoint supports forward mode.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L280)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L283)</small>
 
 <a id="inferenceproblemto_arviz"></a>
 
@@ -331,7 +399,7 @@ sampler output with the same axes, such as ``{"diverging": ...}``.
 ``conditional_on`` is recorded in the attributes. Needs
 ``pip install jax-hybridmodels[bayes]``, and ArviZ needs Python 3.12.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L862)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1003)</small>
 
 <a id="inferenceproblemto_model"></a>
 
@@ -346,7 +414,206 @@ The given model with this position's values, for ``predict`` and ``save``.
 It keeps the model's own solver, so its solves raise on failure as usual.
 Inferred noise is not part of a model.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L737)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L878)</small>
+
+---
+
+<a id="optimizeresult"></a>
+
+### `OptimizeResult`
+
+<small>`from jaxhybridmodels.inference import OptimizeResult`</small>
+
+```python
+OptimizeResult(
+    problem: 'InferenceProblem',
+    target: 'str',
+    value: 'float',
+    converged: 'bool',
+    steps: 'int',
+) -> None
+```
+
+What [`InferenceProblem.optimize`](/api/inference#inferenceproblemoptimize) found.
+
+**Attributes**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `problem` | `InferenceProblem` | The problem positioned at the optimum, for ``fisher``, ``laplace`` or ``profile``. ``problem.to_model(problem.position)`` is the fitted model. |
+| `target` | `str` | ``"likelihood"`` or ``"posterior"``. |
+| `value` | `float` | The log-likelihood, or the log-posterior density over latents, at the optimum. |
+| `converged` | `bool` | Whether BFGS met its tolerances within ``max_steps``. |
+| `steps` | `int` | BFGS steps taken. |
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1147)</small>
+
+---
+
+<a id="fisherresult"></a>
+
+### `FisherResult`
+
+<small>`from jaxhybridmodels.inference import FisherResult`</small>
+
+```python
+FisherResult(
+    names: 'tuple[str, ...]',
+    estimate: 'Array',
+    latent: 'Array',
+    covariance: 'Array',
+    slopes: 'Array',
+    _to_physical: '_PhysicalMap',
+    *,
+    information: 'Array',
+    eigenvalues: 'Array',
+    eigenvectors: 'Array',
+) -> None
+```
+
+The Fisher information at a position, from [`InferenceProblem.fisher`](/api/inference#inferenceproblemfisher).
+
+``information`` is the latent ``[P, P]`` information, and ``covariance`` its
+inverse with unconstrained directions left out. ``eigenvalues`` ascend, and the
+columns of ``eigenvectors`` are the matching directions over ``names``.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1282)</small>
+
+<a id="fisherresultsummary"></a>
+
+#### `FisherResult.summary()`
+
+```python
+summary(self, confidence: 'float' = 0.95) -> 'str'
+```
+
+Estimates, standard errors, Wald intervals, correlations and identifiability.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1319)</small>
+
+<a id="fisherresultunidentified"></a>
+
+#### `FisherResult.unidentified()`
+
+```python
+unidentified(self, threshold: 'float' = 1e-08) -> 'list[dict[str, float]]'
+```
+
+The directions the data does not constrain, as ``{name: loading}`` per direction.
+
+A direction counts when its eigenvalue is below ``threshold`` times the
+largest. Loadings below 0.1 in size are left out, so each dict names the
+values that trade off along it, such as two rates whose product is all the
+data sees.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1301)</small>
+
+---
+
+<a id="laplaceresult"></a>
+
+### `LaplaceResult`
+
+<small>`from jaxhybridmodels.inference import LaplaceResult`</small>
+
+```python
+LaplaceResult(
+    names: 'tuple[str, ...]',
+    estimate: 'Array',
+    latent: 'Array',
+    covariance: 'Array',
+    slopes: 'Array',
+    _to_physical: '_PhysicalMap',
+    *,
+    _to_position: 'Callable[[Array], Any]',
+) -> None
+```
+
+A Gaussian approximation to the posterior, from [`InferenceProblem.laplace`](/api/inference#inferenceproblemlaplace).
+
+``latent`` is its mean and ``covariance`` its covariance, over the latent
+position in ``names`` order.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1327)</small>
+
+<a id="laplaceresultsample"></a>
+
+#### `LaplaceResult.sample()`
+
+```python
+sample(self, key: 'Array', n: 'int') -> 'Any'
+```
+
+``n`` draws as positions with a leading ``[n]`` axis.
+
+``problem.physical``, ``problem.predict`` and, with an extra chain axis,
+``problem.to_arviz`` take them as they take a sampler's output.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1337)</small>
+
+<a id="laplaceresultsummary"></a>
+
+#### `LaplaceResult.summary()`
+
+```python
+summary(self, confidence: 'float' = 0.95) -> 'str'
+```
+
+Posterior means, standard deviations, Wald intervals and correlations.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1353)</small>
+
+---
+
+<a id="profileresult"></a>
+
+### `ProfileResult`
+
+<small>`from jaxhybridmodels.inference import ProfileResult`</small>
+
+```python
+ProfileResult(
+    name: 'str',
+    confidence: 'float',
+    threshold: 'float',
+    values: 'np.ndarray',
+    log_likelihood_ratio: 'np.ndarray',
+    others: 'dict[str, np.ndarray]',
+    converged: 'np.ndarray',
+    interval: 'tuple[float | None, float | None]',
+    stopped: 'tuple[str, str]',
+) -> None
+```
+
+The profile likelihood of one value, from [`InferenceProblem.profile`](/api/inference#inferenceproblemprofile).
+
+**Attributes**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `str` | The profiled entry, as ``physical`` names it. |
+| `confidence` | `float` | The level the interval is for. |
+| `threshold` | `float` | The chi-square(1) quantile for ``confidence``: the interval is where ``log_likelihood_ratio`` stays below it. |
+| `values` | `ndarray` | The profiled value at each point, physical and ascending, the maximum likelihood included. |
+| `log_likelihood_ratio` | `ndarray` | ``2 (max log L - log L)`` at each point, with every other value re-optimised. |
+| `others` | `dict[str, ndarray]` | Every other free entry along the profile, physical. How they move shows what compensates for the profiled value. |
+| `converged` | `ndarray` | Whether BFGS met its tolerances at each point, after one restart. The interval ignores points that did not. |
+| `interval` | `tuple[float | None, float | None]` | The confidence interval's ends, ``None`` on a side that did not close. |
+| `stopped` | `tuple[str, str]` | Why each side, below and above, stopped. ``"threshold"`` closed it. The others leave it open: ``"bound"`` (the value reached its bound, so the data do not bound it), ``"max_points"`` (still inside; raise ``max_points``), ``"solve_failed"`` (the model stopped solving) and ``"not_converged"`` (BFGS did not converge where the ratio crossed). |
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1465)</small>
+
+<a id="profileresultsummary"></a>
+
+#### `ProfileResult.summary()`
+
+```python
+summary(self) -> 'str'
+```
+
+One line: the interval, and why a side that did not close stopped.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1515)</small>
 
 ---
 
@@ -366,4 +633,4 @@ Proper only on a bounded box, so [`make_problem`](/api/inference#make_problem) r
 value has an open bound or is a network weight. A flat prior is not neutral
 under a warp: on a log-warped parameter it still favours the upper decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L112)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L115)</small>

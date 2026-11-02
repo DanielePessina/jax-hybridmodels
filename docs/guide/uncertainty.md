@@ -206,6 +206,28 @@ Fisher information
   Condition number 2.04e+03
 ```
 
+A profile likelihood needs no Gaussian assumption. `profile(name)` holds one
+value fixed at points stepping away from the maximum, re-optimises all the others
+with BFGS at each, and closes a side where twice the drop in log-likelihood passes
+the chi-square quantile for the confidence level. `profiles()` runs every free
+`Parameter`:
+
+<<< @/../examples/identifiability/arrhenius.py#profile
+
+```text
+E: 95% profile interval [5930, 6047]
+log_A: 95% profile interval [16.91, 17.29]
+```
+
+Here they match the Wald intervals, because this likelihood is close to Gaussian.
+Where it is not, the profile is the one to trust, and it does not depend on how the
+model is parametrised. A side that does not close is reported as `None`, and
+`profile.stopped` says why: the value reached its bound, so the data do not bound
+it; the walk ran out of `max_points`; the model stopped solving; or BFGS did not
+converge where the ratio crossed. Only a converged crossing closes a side.
+`profile.others` holds every other value along the profile, which shows what
+compensates.
+
 The information is computed in the latent coordinates the problem uses, and
 reported in physical units. Standard errors use the delta method. A Wald interval
 is built in the latent and mapped back, so it leans the way a log warp does and

@@ -10,6 +10,7 @@ Shows:
 - ``InferenceProblem.optimize`` for the maximum likelihood and the posterior mode
 - ``fisher`` for standard errors, correlations and the condition number
 - the same law centred at a reference temperature, which removes the correlation
+- ``profiles`` for likelihood-based intervals that need no Gaussian assumption
 - ``laplace`` for a Gaussian posterior and draws that ``physical`` reads
 
 Run::
@@ -119,6 +120,17 @@ def main() -> None:
     # endregion fisher
     if not mle.converged or abs(float(fisher.correlation()[0, 1])) < 0.99:
         raise SystemExit("expected a converged MLE with log A and E almost fully correlated")
+
+    # region profile
+    profiles = mle.problem.profiles()
+    for profile in profiles.values():
+        print(profile.summary())
+    # endregion profile
+    wald = fisher.intervals()
+    for name, profile in profiles.items():
+        low, high = profile.interval
+        if low is None or high is None or abs(low - wald[name][0]) > 0.1 * (high - low):
+            raise SystemExit(f"{name}: the profile should close near the Wald interval here")
 
     # region centred
     # log k(T_ref) = log A - E / T_ref is uncorrelated with E when
