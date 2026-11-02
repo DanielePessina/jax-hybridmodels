@@ -194,6 +194,20 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     ),
     ("zero-steps", lambda: hm.TrainingPhase(0), ValueError, "at least 1"),
     ("bad-horizon", lambda: hm.TrainingPhase(1, horizon=2.0), ValueError, "horizon"),
+    ("zero-segments", lambda: hm.TrainingPhase(1, segments=0), ValueError, "segments"),
+    ("float-segments", lambda: hm.TrainingPhase(1, segments=2.5), TypeError, "segments"),  # ty: ignore[invalid-argument-type]
+    (
+        "negative-continuity",
+        lambda: hm.TrainingPhase(1, segments=2, continuity_weight=-1.0),
+        ValueError,
+        "continuity_weight",
+    ),
+    (
+        "ends-segmented",
+        lambda: hm.OptaxTrainingConfig(phases=(hm.TrainingPhase(1, segments=4),)),
+        ValueError,
+        "single shooting",
+    ),
     (
         "optimizer-change-no-reset",
         lambda: hm.OptaxTrainingConfig(

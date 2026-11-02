@@ -871,6 +871,123 @@ def test_ensemble_validation_ranks_the_members(validated_ensemble):
 
 
 # ---------------------------------------------------------------------------
+# Multiple shooting: segments rescue a fit single shooting gets wrong
+# ---------------------------------------------------------------------------
+
+
+def oscillator_fn(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any) -> Any:
+    """A lightly damped oscillator; only the position is measured."""
+    w = predictors["w"].value
+
+    def field(t: Any, y: Array, args: Any) -> Array:
+        return jnp.stack([y[1], -(w**2) * y[0] - 0.1 * y[1]])
+
+    return solver.diffeqsolve(diffrax.ODETerm(field), ts, y0)
+
+
+def oscillator(w: float) -> hm.HybridModel:
+    return hm.HybridModel(
+        predictors={"w": hm.Parameter(w, bounds=(0.1, 3.0))},
+        simulate_fn=oscillator_fn,
+        state_to_output=lambda state: state[:, :1],
+        output_channel_names=("x",),
+    )
+
+
+@pytest.fixture(scope="session")
+def oscillator_data() -> hm.Dataset:
+    """Five cycles at frequency 1, from two starting states, with noise."""
+    ts = np.linspace(0.0, 30.0, 41)
+    runs = []
+    for i, y0 in enumerate(([1.0, 0.0], [0.0, 1.0])):
+        probe = hm.make_experiment(channels={"x": hm.ChannelObs(ts=ts, values=np.zeros(41))}, y0=y0)
+        clean = np.asarray(oscillator(1.0).simulate(probe).outputs["x"])
+        noisy = clean + 0.05 * np.asarray(jr.normal(jr.key(i), clean.shape))
+        runs.append(
+            hm.make_experiment(
+                channels={"x": hm.ChannelObs(ts=ts, values=noisy)}, y0=y0, exp_id=f"run{i}"
+            )
+        )
+    return hm.make_dataset(runs, output_channel_names=("x",))
+
+
+@pytest.fixture(scope="session")
+def shooting_fits(oscillator_data):
+    """From frequency 1.75: single shooting, then segments, then segments with a tournament."""
+    segmented = (hm.TrainingPhase(100, lr=0.05, segments=8), hm.TrainingPhase(100, lr=0.05))
+    configs = (
+        hm.OptaxTrainingConfig(steps=200, lr=0.05),
+        hm.OptaxTrainingConfig(phases=segmented),
+        hm.OptaxTrainingConfig(phases=segmented, tournament_attempts=2, tournament_steps=10),
+    )
+    return tuple(
+        oscillator(1.75).fit(oscillator_data, config, key=jr.key(0), verbose=False)
+        for config in configs
+    )
+
+
+def test_segments_recover_a_frequency_single_shooting_misses(shooting_fits):
+    def frequency(result: hm.FitResult) -> float:
+        return float(result.model.predictors["w"].value)
+
+    single, segmented, tournament = shooting_fits
+    # Out of step with the data, single shooting settles in a dip of the loss.
+    assert abs(frequency(single) - 1.0) > 0.5
+    assert frequency(segmented) == pytest.approx(1.0, abs=0.01)
+    assert frequency(tournament) == pytest.approx(1.0, abs=0.01)
+    assert len(tournament.history.tournament_scores) == 2
+
+
+def test_the_gap_term_is_recorded_and_closes(shooting_fits, tmp_path):
+    _, segmented, _ = shooting_fits
+    gaps = segmented.history.continuity
+    assert len(gaps) == len(segmented.history.loss) == 200
+    # The nodes start on a solve at the current frequency, so the segments
+    # start joined; training then pulls them apart towards the data.
+    assert gaps[0] < 1e-6 < max(gaps[:100])
+    assert gaps[100:] == (0.0,) * 100
+    # The segmented loss is not the model's own, so the best step comes from
+    # the single-shooting phase.
+    assert segmented.best_step is not None and segmented.best_step >= 100
+    assert "last gap term" in segmented.summary()
+    hm.save(tmp_path, segmented)
+    assert hm.load(tmp_path, like=oscillator(1.0)).history.continuity == gaps
+
+
+def test_segments_assemble_into_the_single_solve(oscillator_data):
+    from jaxhybridmodels.training.shooting import (
+        build_checked_simulation,
+        initial_nodes,
+        segment_layout,
+        shoot_bucket,
+    )
+
+    # Segment counts clamp to what the samples can hold, two samples each.
+    assert [segment_layout(n, k).segments for n, k in ((41, 8), (10, 4), (5, 9), (2, 3))] == [
+        8,
+        3,
+        4,
+        1,
+    ]
+    model = oscillator(1.3)
+    bp = oscillator_data.bucket_payloads[0]
+    simulate = build_checked_simulation(simulate_fn=oscillator_fn, solver=model.solver)
+    states, solved = simulate(model.predictors, bp)
+    nodes = initial_nodes(model.predictors, oscillator_data, 8, simulate)
+    assembled, gaps = shoot_bucket(
+        model.predictors,
+        bp,
+        nodes.z[0] * nodes.scale[0],
+        segment_layout(int(bp.ts.shape[1]), 8),
+        simulate_fn=oscillator_fn,
+        solver=model.solver,
+    )
+    assert bool(jnp.all(solved))
+    np.testing.assert_allclose(assembled, states, atol=1e-4)
+    assert float(jnp.max(jnp.abs(gaps))) < 1e-4
+
+
+# ---------------------------------------------------------------------------
 # Capped buckets: irregular data padded into fewer compiled shapes
 # ---------------------------------------------------------------------------
 

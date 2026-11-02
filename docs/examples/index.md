@@ -26,6 +26,7 @@ uv sync --extra examples
 | [Custom training loop](/examples/custom-loop) | A hand-written training loop built from the public gradient kernels. | `uv run python examples/custom_loop/train_custom_loop.py` |
 | [Shelf life](/examples/shelf-life) | A label claim from an accelerated stability study: extrapolating a rate to a temperature never measured, and setting the claim from the one-sided 95% lower bound. Uncertainty decides the answer. | `uv run python examples/shelf_life/shelf_life.py` |
 | [Identifiability](/guide/uncertainty#without-sampling) | Maximum likelihood, Fisher standard errors and correlations, profile likelihood intervals, a reparametrisation that removes the correlation, and a Laplace posterior, with no sampler. | `uv run python examples/identifiability/arrhenius.py` |
+| [Multiple shooting](/examples/multiple-shooting) | Fitting a frequency single shooting gets wrong: segments started from trainable states, then single shooting, with the gap term in the history and summary. | `uv run python examples/multiple_shooting/oscillator.py` |
 | [Mechanistic crystallisation](/examples/crystallisation-mechanistic) | Four kinetic constants fitted with CMA-ES, no neural predictors. | `uv run python examples/crystallisation/train_crystallisation_mechanistic.py` |
 
 Read the [harmonic oscillator](/examples/pendulum) first, then

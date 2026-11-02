@@ -157,6 +157,11 @@ class FitHistory:
     attempt order, ``inf`` for an attempt that failed. Empty when no
     tournament ran. A wide spread says the starting point matters for this
     model; a narrow one, that the tournament is not buying much.
+
+    ``continuity`` is Optax only, and present when some phase used multiple
+    shooting (``TrainingPhase.segments``): the weighted gap term per step, 0
+    in single-shooting steps. ``loss`` in a segmented step is the data term
+    on the assembled segments, and the optimiser minimised the two together.
     """
 
     loss: tuple[float, ...] = ()
@@ -165,6 +170,7 @@ class FitHistory:
     validation_loss: tuple[float, ...] = ()
     failed_candidates: tuple[int, ...] = ()
     tournament_scores: tuple[float, ...] = ()
+    continuity: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True, repr=False)
