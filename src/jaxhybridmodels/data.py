@@ -449,9 +449,8 @@ def experiments_from_dataframe(
     The table has one row per (experiment, sample time) and one column per
     measured channel, which is how lab spreadsheets usually look. ``NaN``
     marks a channel that was not measured at that row, so channels may be
-    sampled at different times. A long table (one row per measurement, with
-    ``channel`` and ``value`` columns) becomes wide with
-    ``df.pivot_table(index=["run", "time"], columns="channel", values="value").reset_index()``.
+    sampled at different times. For a table with one row per measurement, use
+    :func:`experiments_from_long_dataframe`.
 
     Experiments come back in order of first appearance, each built by
     :func:`experiment_from_array`.
@@ -515,18 +514,7 @@ def experiments_from_dataframe(
     needed += [v for v in variance_spec.values() if isinstance(v, str)]
     if isinstance(t0, str):
         needed.append(t0)
-    missing = sorted({c for c in needed if c not in df.columns})
-    if missing:
-        raise KeyError(f"Columns {missing} not in the table; available: {list(df.columns)}")
-
-    def constant(group: Any, column: str, exp_id: str) -> Any:
-        values = group[column].unique()
-        if len(values) != 1:
-            raise ValueError(
-                f"Column {column!r} must be constant within experiment {exp_id!r}; "
-                f"found {list(values)}"
-            )
-        return values[0]
+    _check_table(df, experiment, needed)
 
     def channel_variance(group: Any, name: str) -> np.ndarray[Any, Any]:
         spec = variance_spec.get(name, 1.0)
@@ -534,14 +522,6 @@ def experiments_from_dataframe(
             return group[spec].to_numpy(dtype=float)
         return np.full(len(group), float(spec))
 
-    missing_ids = df[experiment].isna()
-    if missing_ids.any():
-        # groupby would drop these rows silently, and a NaN in an integer
-        # column turns every ID into a float ("1.0").
-        raise ValueError(
-            f"Column {experiment!r} has {int(missing_ids.sum())} missing experiment ID(s); "
-            "every row needs one"
-        )
     out = []
     for key, group in df.groupby(experiment, sort=False):
         exp_id = str(key)
@@ -552,17 +532,146 @@ def experiments_from_dataframe(
                 values=group[list(channel_cols.values())].to_numpy(dtype=float),
                 channel_names=tuple(channel_cols),
                 variance=np.stack(variances, axis=1),
-                covariates={
-                    name: float(constant(group, column, exp_id))
-                    for name, column in covariate_cols.items()
-                },
-                t0=float(constant(group, t0, exp_id)) if isinstance(t0, str) else t0,
-                y0=y0[exp_id] if isinstance(y0, Mapping) else y0,
-                y0_fn=y0_fn,
-                exp_id=exp_id,
+                **_run_options(group, exp_id, covariate_cols, t0, y0, y0_fn),
             )
         )
     return out
+
+
+def experiments_from_long_dataframe(
+    df: Any,
+    *,
+    time: str,
+    experiment: str,
+    channel: str,
+    value: str,
+    variance: float | str | None = None,
+    covariates: Sequence[str] | Mapping[str, str] = (),
+    t0: float | str | None = None,
+    y0: Any = None,
+    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None = None,
+) -> list[Experiment]:
+    """Build one ``Experiment`` per run from a long pandas table.
+
+    The table has one row per measurement, naming its run, channel, time and
+    value, so each channel keeps its own sample times. An experiment that
+    never measured a channel gets it empty, so experiments still share their
+    channels. Experiments come back in order of first appearance.
+
+    Parameters
+    ----------
+    df
+        A ``pandas.DataFrame``. pandas itself is never imported here.
+    time, experiment, channel, value
+        Columns holding the sample time, the run (its values, as strings,
+        become ``exp_id``), the channel name and the measurement. A missing
+        entry in any of them raises ``ValueError``, as does a repeated
+        (experiment, channel, time).
+    variance
+        None for unit variance, one number for every cell, or a column.
+    covariates, t0, y0, y0_fn
+        As for :func:`experiments_from_dataframe`.
+
+    Examples
+    --------
+    ::
+
+        experiments = hm.experiments_from_long_dataframe(
+            df,
+            time="time",
+            experiment="experiment_id",
+            channel="channel",
+            value="value",
+            variance="variance",
+            covariates=["temperature_C"],
+            y0_fn=lambda covariates, channels: jnp.array([1.0]),
+        )
+    """
+    covariate_cols = _column_map(covariates)
+    needed = [time, experiment, channel, value, *covariate_cols.values()]
+    if isinstance(variance, str):
+        needed.append(variance)
+    if isinstance(t0, str):
+        needed.append(t0)
+    _check_table(df, experiment, needed)
+    for column in (time, channel, value):
+        gaps = int(df[column].isna().sum())
+        if gaps:
+            raise ValueError(f"Column {column!r} has {gaps} missing value(s); every row needs one")
+
+    names = [str(name) for name in df[channel].unique()]
+    out = []
+    for key, group in df.groupby(experiment, sort=False):
+        exp_id = str(key)
+        channels: dict[str, ChannelObs] = {}
+        for name in names:
+            rows = group[group[channel].astype(str) == name].sort_values(time, kind="stable")
+            ts = rows[time].to_numpy(dtype=float)
+            repeated = ts[1:][np.diff(ts) == 0]
+            if repeated.size:
+                raise ValueError(
+                    f"Experiment {exp_id!r}, channel {name!r}: more than one row at time "
+                    f"{float(repeated[0])}"
+                )
+            if isinstance(variance, str):
+                cell_variance: Any = rows[variance].to_numpy(dtype=float)
+            else:
+                cell_variance = 1.0 if variance is None else float(variance)
+            try:
+                channels[name] = ChannelObs(
+                    ts=ts, values=rows[value].to_numpy(dtype=float), variance=cell_variance
+                )
+            except ValueError as exc:
+                raise ValueError(f"Experiment {exp_id!r}, channel {name!r}: {exc}") from exc
+        out.append(
+            make_experiment(
+                channels=channels, **_run_options(group, exp_id, covariate_cols, t0, y0, y0_fn)
+            )
+        )
+    return out
+
+
+def _check_table(df: Any, experiment: str, needed: Sequence[str]) -> None:
+    """Refuse a table missing a needed column, or a row with no experiment ID."""
+    missing = sorted({c for c in needed if c not in df.columns})
+    if missing:
+        raise KeyError(f"Columns {missing} not in the table; available: {list(df.columns)}")
+    missing_ids = df[experiment].isna()
+    if missing_ids.any():
+        # groupby would drop these rows silently, and a NaN in an integer
+        # column turns every ID into a float ("1.0").
+        raise ValueError(
+            f"Column {experiment!r} has {int(missing_ids.sum())} missing experiment ID(s); "
+            "every row needs one"
+        )
+
+
+def _run_options(
+    group: Any,
+    exp_id: str,
+    covariate_cols: Mapping[str, str],
+    t0: float | str | None,
+    y0: Any,
+    y0_fn: Callable[[dict[str, Array], dict[str, ChannelObs]], Array] | None,
+) -> dict[str, Any]:
+    """The per-run arguments both table loaders pass to an experiment builder."""
+
+    def constant(column: str) -> Any:
+        values = group[column].unique()
+        if len(values) != 1:
+            raise ValueError(
+                f"Column {column!r} must be constant within experiment {exp_id!r}; "
+                f"found {list(values)}"
+            )
+        return values[0]
+
+    return {
+        "covariates": {name: float(constant(column)) for name, column in covariate_cols.items()},
+        "t0": float(constant(t0)) if isinstance(t0, str) else t0,
+        "y0": y0[exp_id] if isinstance(y0, Mapping) else y0,
+        "y0_fn": y0_fn,
+        "exp_id": exp_id,
+    }
 
 
 class _ExperimentArrays(NamedTuple):

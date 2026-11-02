@@ -62,7 +62,15 @@ from jaxhybridmodels.training.evosax import (
     _build_single_eval,
 )
 from jaxhybridmodels.training.optax import _shared_tournament
-from jaxhybridmodels.ui import EvosaxUI, RichEvosaxUI, RichTrainingUI, SilentUI, TrainingUI
+from jaxhybridmodels.ui import (
+    EvosaxUI,
+    PlainEvosaxUI,
+    PlainTrainingUI,
+    RichEvosaxUI,
+    RichTrainingUI,
+    SilentUI,
+    TrainingUI,
+)
 from jaxhybridmodels.ui.testing import RecordingUI
 
 # ---------------------------------------------------------------------------
@@ -624,6 +632,7 @@ def test_stop_reason_follows_the_final_phase(decay_data, monkeypatch):
     """
     console = _console()
     monkeypatch.setattr(optax_module, "RichTrainingUI", lambda: RichTrainingUI(console=console))
+    monkeypatch.setattr(optax_module, "live_display_available", lambda: True)
     # Phase 0 cannot improve (lr=0), so patience cuts it short. Phase 1
     # improves every step and runs to its budget.
     config = hm.OptaxTrainingConfig(
@@ -648,6 +657,7 @@ def evosax_fit(decay_data):
     model = eqx.tree_at(lambda m: m.predictors, parameter_model(), predictors)
     config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5)
     with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(evosax_module, "live_display_available", lambda: True)
         patch.setattr(
             evosax_module,
             "RichEvosaxUI",
@@ -669,6 +679,31 @@ def test_population_fit_moves_values_and_keeps_constants(evosax_fit):
     meta = result.model.predictors["meta"].value
     assert float(meta[0]) == 1.0
     np.testing.assert_array_equal(meta[1], [2.0, 3.0])
+
+
+def test_piped_output_gets_plain_lines(decay_data, capsys, monkeypatch):
+    """No redrawing display is possible, so progress prints as greppable lines."""
+    monkeypatch.setattr(optax_module, "live_display_available", lambda: False)
+    monkeypatch.setattr(evosax_module, "live_display_available", lambda: False)
+
+    parameter_model().fit(decay_data, hm.OptaxTrainingConfig(steps=20, lr=0.01), key=jr.key(0))
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "training: 20 steps in 1 phase"
+    assert lines[1].startswith("compiling")
+    assert sum(line.startswith("step ") for line in lines) == 10
+    assert any(line.startswith("step 20/20") for line in lines)
+    assert lines[-1].startswith("done: final loss")
+
+    config = hm.EvosaxTrainingConfig(population_size=4, steps=3, sigma_init=0.1)
+    parameter_model().fit(decay_data, config, key=jr.key(0))
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "searching: 3 generations of 4 candidates"
+    assert sum(line.startswith("generation ") for line in lines) == 3
+
+    parameter_model().fit(
+        decay_data, hm.OptaxTrainingConfig(steps=2, lr=0.01), key=jr.key(0), verbose=False
+    )
+    assert capsys.readouterr().out == ""
 
 
 def test_vector_covariates_reach_each_simulation():
@@ -891,14 +926,16 @@ def test_an_evosax_config_reloads_as_its_own_type(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "ui", [RichTrainingUI(console=_console()), SilentUI(), RecordingUI()], ids=type
+    "ui",
+    [RichTrainingUI(console=_console()), PlainTrainingUI(), SilentUI(), RecordingUI()],
+    ids=type,
 )
 def test_training_uis_satisfy_the_protocol(ui):
     assert isinstance(ui, TrainingUI)
 
 
 @pytest.mark.parametrize(
-    "ui", [RichEvosaxUI(console=_console()), SilentUI(), RecordingUI()], ids=type
+    "ui", [RichEvosaxUI(console=_console()), PlainEvosaxUI(), SilentUI(), RecordingUI()], ids=type
 )
 def test_evosax_uis_satisfy_the_protocol(ui):
     assert isinstance(ui, EvosaxUI)

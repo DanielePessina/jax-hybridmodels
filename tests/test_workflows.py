@@ -12,6 +12,7 @@ lengths, so masks and bucket dispatch are always exercised.
 
 from __future__ import annotations
 
+import copy
 import itertools
 import json
 from typing import Any, cast
@@ -29,10 +30,11 @@ from jax import Array
 
 import jaxhybridmodels as hm
 import jaxhybridmodels.training.evosax as evosax_module
+from jaxhybridmodels._fit_summary import _loss_trend
 from jaxhybridmodels.data import _choose_bucket_lengths
 from jaxhybridmodels.losses import masked_mse
 from jaxhybridmodels.penalties import box_grid
-from jaxhybridmodels.training.kernels import simulate_bucket
+from jaxhybridmodels.training.kernels import failure_details, simulate_bucket
 from jaxhybridmodels.ui.testing import RecordingUI
 
 CHANNELS = ("a", "b")
@@ -1210,6 +1212,131 @@ def test_a_full_run_reloads_and_predicts_bit_exactly(
     before, after = result.model.predict(test_set), saved.model.predict(test_set)
     for exp_id in before:
         np.testing.assert_array_equal(before[exp_id].outputs["a"], after[exp_id].outputs["a"])
+
+
+def test_a_long_table_loads_like_the_same_experiments_built_by_hand():
+    """Channels keep their own times, unsorted rows sort, and a run may lack a channel."""
+    table = pd.DataFrame(
+        {
+            "run": ["a", "a", "a", "b", "a"],
+            "time": [2.0, 1.0, 0.5, 1.0, 1.0],
+            "channel": ["x", "x", "y", "x", "y"],
+            "value": [0.2, 0.5, 9.0, 0.7, 8.0],
+            "var": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "temp": [300.0, 300.0, 300.0, 310.0, 300.0],
+        }
+    )
+    a, b = hm.experiments_from_long_dataframe(
+        table,
+        time="time",
+        experiment="run",
+        channel="channel",
+        value="value",
+        variance="var",
+        covariates=["temp"],
+        t0=0.0,
+        y0=[1.0],
+    )
+    assert (a.exp_id, b.exp_id) == ("a", "b")
+    np.testing.assert_array_equal(a.channels["x"].ts, [1.0, 2.0])
+    np.testing.assert_allclose(a.channels["x"].values, [0.5, 0.2])
+    np.testing.assert_allclose(a.channels["x"].variance, [0.2, 0.1])
+    np.testing.assert_array_equal(a.channels["y"].ts, [0.5, 1.0])
+    assert float(b.covariates["temp"]) == 310.0
+    assert b.channels["y"].ts.size == 0
+    # Both experiments must make one dataset, which needs the same channels.
+    assert len(hm.make_dataset([a, b], output_channel_names=("x", "y")).experiments) == 2
+
+
+def test_named_values_reads_parameters_and_constants():
+    """Scalars are Python numbers, vectors stay arrays, and networks are left out."""
+    inner = hm.MLPPredictor(in_size=1, out_size=1, width_size=4, depth=1, key=jr.key(0))
+    model = eqx.tree_at(
+        lambda m: m.predictors,
+        mechanistic_model(),
+        {
+            "rate": hm.Parameter(0.3, bounds=(0.05, 3.0)),
+            "vector": hm.Parameter([0.2, 0.4], bounds=(0.0, 1.0)),
+            "g": hm.Constant(2.0),
+            "net": hm.BoundedPredictor(inner=inner, input_bounds=(0, 1), output_bounds=(0, 1)),
+        },
+    )
+    values = model.named_values()
+    assert set(values) == {"rate", "vector", "g"}
+    assert values["g"] == 2.0 and isinstance(values["g"], float)
+    assert values["rate"] == pytest.approx(0.3)
+    np.testing.assert_allclose(values["vector"], [0.2, 0.4], rtol=1e-5)
+
+
+def stiff_field(t, state, predictors, covariates):
+    return -covariates["k"] * predictors["rate"].value * state
+
+
+def stiff_experiments() -> tuple[hm.Dataset, hm.SolverConfig]:
+    """Two runs in one bucket, where only ``stiff`` runs out of explicit solver steps."""
+    ts = jnp.linspace(0.1, 1.0, 4)
+    runs = [
+        hm.make_experiment(
+            channels={"x": hm.ChannelObs(ts=ts, values=jnp.exp(-k * ts))},
+            covariates={"k": k},
+            y0=[1.0],
+            t0=0.0,
+            exp_id=name,
+        )
+        for name, k in [("gentle", 1.0), ("stiff", 1e6)]
+    ]
+    dataset = hm.make_dataset(runs, output_channel_names=("x",))
+    return dataset, hm.SolverConfig(rtol=1e-5, atol=1e-7, dt0=0.01, max_steps=20000)
+
+
+def test_a_failed_first_step_names_the_experiment_and_a_better_solver():
+    dataset, solver = stiff_experiments()
+    model = hm.HybridModel.from_vector_field(
+        vector_field=stiff_field,
+        predictors={"rate": hm.Parameter(0.3, bounds=(0.05, 3.0))},
+        state_to_output=lambda state: state,
+        output_channel_names=("x",),
+        solver=solver,
+    )
+    with pytest.raises(eqx.EquinoxRuntimeError) as caught:
+        model.fit(dataset, hm.OptaxTrainingConfig(steps=2, lr=1e-3), key=jr.key(0), verbose=False)
+    note = " ".join(caught.value.__notes__)
+    assert "Failing: stiff." in note
+    assert "gentle" not in note
+    assert "max_steps is already 20000" in note
+    assert "Kvaerno3" in note
+
+
+def test_failure_details_cannot_hide_the_original_error():
+    """A ``simulate_fn`` that breaks on the re-solve still leaves usable advice."""
+    dataset, solver = stiff_experiments()
+    exc = RuntimeError("The maximum number of solver steps was reached.")
+
+    def broken(*args, **kwargs):
+        raise TypeError("not a fit failure")
+
+    details = failure_details(exc, {}, dataset=dataset, simulate_fn=broken, solver=solver)
+    assert details.startswith("max_steps is already 20000")
+
+
+def test_summary_reports_whether_the_loss_was_still_moving():
+    """Only the final phase counts, and a short run has too few steps to say."""
+    falling = [1.0] * 50 + [float(0.99**i) for i in range(100)]
+    history = hm.FitHistory(loss=tuple(falling), phase=(0,) * 50 + (1,) * 100)
+    assert _loss_trend(history) == pytest.approx(0.99**10 - 1.0, rel=1e-6)
+    assert _loss_trend(hm.FitHistory(loss=(1.0, 0.9))) is None
+    # Evosax records no phases, and its best-so-far series can settle exactly.
+    assert _loss_trend(hm.FitHistory(loss=(1.0,) * 40)) == 0.0
+
+
+def test_a_prediction_result_says_where_per_experiment_fields_are():
+    result = hm.PredictionResult({})
+    with pytest.raises(AttributeError, match=r"result\[exp_id\]\.quantiles"):
+        _ = result.quantiles
+    with pytest.raises(AttributeError) as other:
+        _ = result.no_such_field
+    assert "keyed by experiment" not in str(other.value)
+    assert copy.deepcopy(result) == result
 
 
 def test_a_run_saved_with_the_old_verbose_field_still_loads(tmp_path):

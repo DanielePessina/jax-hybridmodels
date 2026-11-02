@@ -9,7 +9,7 @@ model, which imports both of them.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -64,6 +64,14 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
 
     def __getitem__(self, exp_id: str) -> ExperimentPrediction:
         return self.experiments[exp_id]
+
+    def __getattr__(self, name: str) -> Any:
+        # Runs only for a missing attribute. Reading ``result.quantiles`` is an
+        # easy guess, and the plain error would not say where they are.
+        message = f"{type(self).__name__!r} object has no attribute {name!r}"
+        if name in {f.name for f in fields(ExperimentPrediction)}:
+            message += f"; it is keyed by experiment, so read result[exp_id].{name}"
+        raise AttributeError(message)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.experiments)

@@ -201,6 +201,7 @@ def main():
         sources=kernels.sources,
         trainable=trainable,
         ui=ui2,
+        describe_failure=lambda exc, predictors: "",
     )
     t_loop = time.perf_counter() - t0
     print(

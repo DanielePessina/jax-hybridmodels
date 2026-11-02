@@ -35,6 +35,7 @@ import math
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import KW_ONLY, InitVar, dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import equinox as eqx
@@ -67,10 +68,12 @@ from jaxhybridmodels.training.kernels import (
     build_dataset_score,
     build_penalty_step,
     build_score_bucket,
+    failure_details,
     failure_summary,
 )
 from jaxhybridmodels.ui.base import SilentUI, TrainingUI, close_run_on_error
 from jaxhybridmodels.ui.optax import RichTrainingUI
+from jaxhybridmodels.ui.plain import PlainTrainingUI, live_display_available
 
 if TYPE_CHECKING:
     from jaxhybridmodels.model import HybridModel
@@ -849,9 +852,9 @@ def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
     # (a TensorBoard logger, say) without changing the loop.
     if ui is not None:
         return ui
-    if verbose:
-        return RichTrainingUI()
-    return SilentUI()
+    if not verbose:
+        return SilentUI()
+    return RichTrainingUI() if live_display_available() else PlainTrainingUI()
 
 
 def train_with_optax(
@@ -908,20 +911,33 @@ def train_with_optax(
     dataset, validation_set, mask = model._prepare_fit(
         data, key=key, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
     )
-    run = _train_with_optax(
-        model.predictors,
-        dataset,
-        config,
-        objective=objective,
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-        trainable=mask,
-        key=key,
-        ui=ui,
-        verbose=verbose,
-        validation=validation_set,
-    )
+    try:
+        run = _train_with_optax(
+            model.predictors,
+            dataset,
+            config,
+            objective=objective,
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+            trainable=mask,
+            key=key,
+            ui=ui,
+            verbose=verbose,
+            validation=validation_set,
+        )
+    except FIT_FAILURES as exc:
+        # The first step failed, so the error goes to the user. A note keeps its type.
+        details = failure_details(
+            exc,
+            model.predictors,
+            dataset=dataset,
+            simulate_fn=model.simulate_fn,
+            solver=model.solver,
+        )
+        if details:
+            exc.add_note(details)
+        raise
     return _fit_result(model, run)
 
 
@@ -1026,6 +1042,9 @@ def _train_with_optax(
             trainable=trainable,
             ui=ui_,
             select_score=select_score,
+            describe_failure=partial(
+                failure_details, dataset=dataset, simulate_fn=simulate_fn, solver=solver
+            ),
         )
 
 
@@ -1053,6 +1072,7 @@ def _run_phases(
     trainable: Any,
     ui: TrainingUI,
     select_score: Callable[[Any], float] | None = None,
+    describe_failure: Callable[[BaseException, Any], str],
 ) -> _PhaseRun:
     """Run the phase schedule from a starting ``predictors``.
 
@@ -1180,7 +1200,7 @@ def _run_phases(
                 # Nothing was measured, so there is nothing to hand back.
                 if not losses_history:
                     raise
-                failure = failure_summary(exc)
+                failure = f"{failure_summary(exc)} {describe_failure(exc, predictors)}".strip()
                 break
             last_measured = previous_predictors
             losses_history.append(loss_value)
@@ -1476,6 +1496,12 @@ def _fit_ensemble(
                     trainable=mask,
                     ui=ui_,
                     select_score=select_score,
+                    describe_failure=partial(
+                        failure_details,
+                        dataset=data_,
+                        simulate_fn=model.simulate_fn,
+                        solver=model.solver,
+                    ),
                 )
             except FIT_FAILURES:
                 # Failed on its first step, so it is dropped like a failed seed.

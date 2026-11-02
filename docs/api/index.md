@@ -8,7 +8,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Data: Experiments, Channels, Datasets](/api/data)
 
-[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`experiment_from_array`](/api/data#experiment_from_array), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
+[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`experiment_from_array`](/api/data#experiment_from_array), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe), [`experiments_from_long_dataframe`](/api/data#experiments_from_long_dataframe), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
 
 ## [Predictors: Trainable Components](/api/predictors)
 
@@ -64,7 +64,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [UI: Training Dashboards](/api/ui)
 
-[`TrainingUI`](/api/ui#trainingui), [`EvosaxUI`](/api/ui#evosaxui), [`SilentUI`](/api/ui#silentui), [`RichTrainingUI`](/api/ui#richtrainingui), [`RichEvosaxUI`](/api/ui#richevosaxui)
+[`TrainingUI`](/api/ui#trainingui), [`EvosaxUI`](/api/ui#evosaxui), [`SilentUI`](/api/ui#silentui), [`PlainTrainingUI`](/api/ui#plaintrainingui), [`PlainEvosaxUI`](/api/ui#plainevosaxui), [`RichTrainingUI`](/api/ui#richtrainingui), [`RichEvosaxUI`](/api/ui#richevosaxui)
 
 ## [RNG: Named-Fold Keys](/api/rng)
 

@@ -46,7 +46,7 @@ from different keys.
 | `solver` |  | Integration settings, default ``SolverConfig()``. |
 | `Fitting returns a new model; the original is unchanged.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L72)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L75)</small>
 
 <a id="hybridmodelfit"></a>
 
@@ -102,7 +102,7 @@ Same as ``train_with_optax(model, ...)`` or
 ``train_with_evosax(model, ...)`` in `jaxhybridmodels.training`,
 picked by the type of ``config``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L258)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L287)</small>
 
 <a id="hybridmodelfit_ensemble"></a>
 
@@ -161,7 +161,30 @@ A seed whose warm-up or first step fails is dropped, so fewer than
 ``stop_reason`` ``"diverged"``. Optax only. The list goes straight
 into [`predict_ensemble`](/api/prediction#predict_ensemble).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L323)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L352)</small>
+
+<a id="hybridmodelnamed_values"></a>
+
+#### `HybridModel.named_values()`
+
+```python
+named_values(self) -> 'dict[str, Any]'
+```
+
+Every ``Parameter`` and ``Constant`` in physical units, by dotted path.
+
+A scalar comes back as a Python number and anything larger as it is
+stored. Networks are left out, and ``summary`` shows bounds and which
+values sit near them.
+
+**Examples**
+
+::
+
+    result.model.named_values()
+    # {"omega": 0.9997, "damping": 0.1}
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L261)</small>
 
 <a id="hybridmodelpredict"></a>
 
@@ -192,7 +215,7 @@ still integrates from its own start, so ``y0`` stays in place.
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
 experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L394)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L423)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -228,7 +251,7 @@ must be finite, strictly increasing, and not before ``t0``. When
 ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
 returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L420)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L449)</small>
 
 <a id="hybridmodelwith_predictors"></a>
 
@@ -243,7 +266,7 @@ This model with its predictors replaced, for the end of a custom loop.
 ``predictors`` must have the same structure as ``self.predictors``.
 Everything else about the model stays the same.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L156)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L159)</small>
 
 ---
 
@@ -271,7 +294,7 @@ phase short, ``"diverged"`` when a solver error or a non-finite loss ended
 the run (it warned, and the model holds the best parameters so far), else
 ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L151)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L159)</small>
 
 <a id="fitresultsummary"></a>
 
@@ -294,7 +317,7 @@ charge it: the outer 5% of its box for the default sigmoid. The network
 figure covers the whole declared box, including inputs no experiment
 reached, so a large share can be harmless if the data never goes there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L180)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L188)</small>
 
 ---
 
@@ -330,7 +353,7 @@ it. ``penalty`` and ``phase`` stay empty.
 present when one was given: per step for Optax, and for each
 generation's best individual for Evosax.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L125)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L133)</small>
 
 ---
 
@@ -373,7 +396,7 @@ Columns are ``experiment_id``, ``time``, ``channel``,
 an ensemble and ``q0.05``-style columns for requested quantiles. Needs
 pandas: ``pip install jax-hybridmodels[pandas]``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L74)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L82)</small>
 
 ---
 

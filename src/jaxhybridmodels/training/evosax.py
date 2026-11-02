@@ -87,11 +87,13 @@ from jaxhybridmodels.training.kernels import (
     FIT_FAILURES,
     build_dataset_score,
     build_score_bucket,
+    failure_details,
     failure_summary,
     simulate_bucket,
 )
 from jaxhybridmodels.ui.base import EvosaxUI, SilentUI, close_run_on_error
 from jaxhybridmodels.ui.evosax import RichEvosaxUI
+from jaxhybridmodels.ui.plain import PlainEvosaxUI, live_display_available
 
 if TYPE_CHECKING:
     from jaxhybridmodels.model import HybridModel
@@ -325,13 +327,16 @@ def _box_population(
 
 def _select_ui(ui: EvosaxUI | None, verbose: bool, log_every: int) -> EvosaxUI:
     """Pick the concrete UI. An explicit ``ui`` always wins, and otherwise
-    ``verbose`` toggles between ``RichEvosaxUI`` and ``SilentUI``. The
-    config's ``log_every`` throttles the Rich UI's recent-generation table."""
+    ``verbose`` shows ``RichEvosaxUI``, or plain lines if nothing can redraw,
+    and otherwise ``SilentUI``. The config's ``log_every`` throttles the Rich
+    UI's recent-generation table."""
     if ui is not None:
         return ui
-    if verbose:
+    if not verbose:
+        return SilentUI()
+    if live_display_available():
         return RichEvosaxUI(log_every=log_every)
-    return SilentUI()
+    return PlainEvosaxUI()
 
 
 @dataclass
@@ -393,20 +398,33 @@ def train_with_evosax(
     dataset, validation_set, mask = model._prepare_fit(
         data, key=key, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
     )
-    run = _train_with_evosax(
-        model.predictors,
-        dataset,
-        config,
-        objective=objective,
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-        trainable=mask,
-        key=key,
-        ui=ui,
-        verbose=verbose,
-        validation=validation_set,
-    )
+    try:
+        run = _train_with_evosax(
+            model.predictors,
+            dataset,
+            config,
+            objective=objective,
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+            trainable=mask,
+            key=key,
+            ui=ui,
+            verbose=verbose,
+            validation=validation_set,
+        )
+    except FIT_FAILURES as exc:
+        # The warm-up evaluates copies of the starting values, so they can be re-solved.
+        details = failure_details(
+            exc,
+            model.predictors,
+            dataset=dataset,
+            simulate_fn=model.simulate_fn,
+            solver=model.solver,
+        )
+        if details:
+            exc.add_note(details)
+        raise
     return FitResult(
         model=model.with_predictors(run.predictors),
         history=FitHistory(loss=tuple(run.loss), validation_loss=tuple(run.validation)),
@@ -548,7 +566,11 @@ def _train_with_evosax(
                 # Nothing finished, so there is nothing to hand back.
                 if not history:
                     raise
-                failure = failure_summary(exc)
+                # A generation fails as a whole, so no one candidate can be re-solved.
+                details = failure_details(
+                    exc, None, dataset=dataset, simulate_fn=simulate_fn, solver=solver
+                )
+                failure = f"{failure_summary(exc)} {details}".strip()
                 break
             tell_key = fold(key, f"evosax_tell_{gen}")
             state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)

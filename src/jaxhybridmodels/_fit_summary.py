@@ -14,6 +14,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import numpy as np
 
 from jaxhybridmodels.metrics import _format_metrics, _worst_first, compute_metrics
 from jaxhybridmodels.penalties import _bounded_leaves_with_paths, _latents_at, box_grid
@@ -32,6 +33,9 @@ _STOP_TEXT = {
 # capped: 9 points per axis in low dimensions, and fewer as inputs are added.
 _MAX_POINTS_PER_AXIS = 9
 _MAX_BOX_POINTS = 4096
+
+
+_MIN_TREND_WINDOW = 2
 
 
 def format_fit_summary(run: Any, *, data: Any = None) -> str:
@@ -58,11 +62,38 @@ def _run_lines(history: FitHistory, best_step: int | None, stop_reason: str | No
         f"  {len(history.loss)} {unit} recorded; returned {returned}",
         f"  loss {history.loss[0]:.4e} at the start, {history.loss[at]:.4e} at the returned point",
     ]
+    trend = _loss_trend(history)
+    if trend is not None:
+        lines.append(f"  loss change over the last 10% of {unit}: {trend:+.2%}")
     if history.validation_loss:
         lines.append(f"  validation loss {history.validation_loss[at]:.4e} at the returned point")
     if any(history.penalty):
         lines.append(f"  bound penalty {history.penalty[at]:.4e} at the returned point")
     return lines
+
+
+def _loss_trend(history: FitHistory) -> float | None:
+    """Relative change of the median loss between the last two tenths of the final phase.
+
+    Budget exhaustion says nothing about whether a fit had settled, and this
+    shows if it was still moving. Medians, because a raw loss can jump from one
+    step to the next. Only the final phase, because a new horizon changes what
+    the loss measures. None when there are too few steps to have two windows.
+    """
+    final = history.phase[-1] if history.phase else None
+    losses = [
+        loss
+        for i, loss in enumerate(history.loss)
+        if not history.phase or history.phase[i] == final
+    ]
+    window = len(losses) // 10
+    if window < _MIN_TREND_WINDOW:
+        return None
+    before = float(np.median(losses[-2 * window : -window]))
+    after = float(np.median(losses[-window:]))
+    if before == 0.0 or not (math.isfinite(before) and math.isfinite(after)):
+        return None
+    return (after - before) / abs(before)
 
 
 def _phase_lines(history: FitHistory) -> list[str]:
@@ -115,7 +146,7 @@ def _network_lines(predictors: Any) -> list[str]:
     if not leaves:
         return []
     width = max(len("network"), *(len(path) for path, _ in leaves))
-    lines = ["Networks", f"  {'network':<{width}} {'params':>8}  at an output bound"]
+    lines = ["Networks", f"  {'network':<{width}} {'params':>8}  output saturated"]
     for path, leaf in leaves:
         lines.append(
             f"  {path:<{width}} {count_trainable_params(leaf):>8}  {_saturated_share(leaf)}"

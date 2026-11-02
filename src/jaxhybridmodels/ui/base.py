@@ -13,8 +13,9 @@ loops implements both protocols, as ``SilentUI`` does.
 UI selection
 ------------
 ``fit``, ``fit_ensemble``, ``train_with_optax`` and ``train_with_evosax``
-take ``verbose``, defaulting to ``True`` (the Rich live-dashboard UI);
-``False`` selects ``SilentUI``. An explicit ``ui=...`` always overrides both.
+take ``verbose``, defaulting to ``True``: the Rich live dashboard, or the
+plain lines of ``ui/plain.py`` when output is not a terminal. ``False``
+selects ``SilentUI``. An explicit ``ui=...`` always overrides both.
 
 Compile events
 --------------
