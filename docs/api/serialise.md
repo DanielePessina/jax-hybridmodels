@@ -48,14 +48,14 @@ Read it back with [`load`](/api/serialise#load).
     structural fingerprint ``load`` checks ``like`` against),
     ``output_channel_names``, ``solver`` (``SolverConfig.to_dict()``),
     ``config`` (``{"kind": "optax" | "evosax", "fields": {...}}``),
-    ``objective``, ``history`` (the four ``FitHistory`` series),
+    ``objective``, ``history`` (every ``FitHistory`` series),
     ``best_step``, ``stop_reason`` and ``extras``. Callables are
     described, not pickled (see the module docstring).
 
 The directory is created, parents included. Existing files are
 overwritten.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L330)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L331)</small>
 
 ---
 
@@ -86,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L470)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L471)</small>
 
 ---
 
@@ -122,7 +122,7 @@ an lr schedule) cannot be rebuilt, so it comes back as the raw dict
 with each callable as ``{"__callable__": "module.qualname"}``; rebind
 those fields yourself. ``extras`` is the dict passed to ``save``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L219)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L225)</small>
 
 <a id="savedrunsummary"></a>
 
@@ -134,7 +134,7 @@ summary(self, data: 'Any' = None) -> 'str'
 
 The report [`FitResult.summary`](/api/model#fitresultsummary) gives, for a run read back from disk.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L244)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L250)</small>
 
 ---
 

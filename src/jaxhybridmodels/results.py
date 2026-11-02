@@ -152,6 +152,11 @@ class FitHistory:
     ``failed_candidates`` is Evosax only: how many candidates in each
     generation had a non-finite fitness, usually a failed solve. They rank
     last and the search goes on.
+
+    ``tournament_scores`` is Optax only: each tournament attempt's score in
+    attempt order, ``inf`` for an attempt that failed. Empty when no
+    tournament ran. A wide spread says the starting point matters for this
+    model; a narrow one, that the tournament is not buying much.
     """
 
     loss: tuple[float, ...] = ()
@@ -159,6 +164,7 @@ class FitHistory:
     phase: tuple[int, ...] = ()
     validation_loss: tuple[float, ...] = ()
     failed_candidates: tuple[int, ...] = ()
+    tournament_scores: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True, repr=False)

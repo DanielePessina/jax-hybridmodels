@@ -38,6 +38,8 @@
   installs BlackJAX and `arviz-base`.
 - `predict_ensemble(quantiles=)` adds quantiles across members, also in
   `to_dataframe`.
+- `FitHistory.tournament_scores` keeps every tournament attempt's score, and the
+  summary and the training display report the spread.
 - `InferenceProblem.predict` drops a draw whose solve fails on the requested grid,
   with a warning.
 - `SolverConfig(throw=False)` returns non-finite states from a failed solve
@@ -184,6 +186,12 @@
 - **Breaking.** `tournament_attempts > 1` with `tournament_steps=0` raises
   instead of silently running no tournament. `tournament_steps > 0` with
   `tournament_attempts=1` warns in `fit`.
+- **Breaking.** The tournament trains its attempts with the first phase's
+  learning rate and horizon. `tournament_lr` defaults to None, meaning that
+  rate, instead of 1e-4, at which 30 steps barely moved an attempt and the
+  tournament ranked random initialisations. A tournament re-draws a
+  `Parameter` only where it has two finite bounds; one without keeps its
+  starting value instead of a draw near 1.
 - `repr(FitResult)` is one line instead of the whole model and history.
 - `OptaxTrainingConfig` stores `phases`, a tuple of `TrainingPhase`. The
   parallel `steps`/`lr`/`optimizer`/`reset_optimiser_state`/

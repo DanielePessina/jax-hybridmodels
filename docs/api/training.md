@@ -102,7 +102,7 @@ OptaxTrainingConfig(
     phases: 'tuple[TrainingPhase, ...]' = (),
     tournament_attempts: 'int' = 1,
     tournament_steps: 'int' = 0,
-    tournament_lr: 'float' = 0.0001,
+    tournament_lr: 'float | None' = None,
     patience: 'int' = 0,
     restore_best: 'bool' = True,
 ) -> None
@@ -133,12 +133,12 @@ stores ``phases``::
 | Field | Type | Description |
 | --- | --- | --- |
 | `phases` | `tuple[TrainingPhase, ...]` | The schedule, run in order. See [`TrainingPhase`](/api/training#trainingphase) for the per-phase settings. |
-| `tournament_attempts, tournament_steps` | `int` | The tournament runs only when ``tournament_steps > 0`` and ``tournament_attempts > 1``. Each attempt re-initialises the predictors, trains for ``tournament_steps`` steps, and is scored on the data term plus any configured trajectory penalty by a forward-only pass; the bound penalty remains excluded. The lowest score wins. An attempt that raises a diffrax error or a non-finite loss is dropped and the next key tried. If all fail, the original predictors are used and a ``RuntimeWarning`` is raised. |
-| `tournament_lr` | `float` | Learning rate for the tournament's short bursts, independent of the phase learning rates. |
+| `tournament_attempts, tournament_steps` | `int` | The tournament runs only when ``tournament_steps > 0`` and ``tournament_attempts > 1``. Each attempt re-initialises the predictors, trains for ``tournament_steps`` steps with the first phase's optimiser and horizon, and is scored on the data term plus any configured trajectory penalty by a forward-only pass; the bound penalty remains excluded. The lowest score wins, and ``history.tournament_scores`` keeps every attempt's. An attempt that raises a diffrax error or a non-finite loss is dropped and the next key tried. If all fail, the original predictors are used and a ``RuntimeWarning`` is raised. |
+| `tournament_lr` | `float or None` | Learning rate for the tournament's short bursts. None, the default, uses the first phase's starting learning rate. A much smaller rate barely moves the attempts, so the tournament ranks the random initialisations rather than where each one is heading. |
 | `patience` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever the horizon changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L176)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L177)</small>
 
 ---
 
@@ -173,7 +173,7 @@ One contiguous block of Optax steps with its own schedule settings.
 | `reset_optimizer` | `bool` | Rebuild the optimiser and discard its state at the start of this phase. Set it when switching optimiser, and when a horizon change has made the accumulated momentum wrong. |
 | `penalty_weight` | `float | None` | Override of ``Objective.penalty_weight`` for this phase. ``None`` (the default) uses the objective's weight; ``0.0`` switches the bound penalty off for the phase. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L92)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L93)</small>
 
 ---
 
@@ -223,7 +223,7 @@ A solver error or a non-finite loss after the first step ends the run: it
 warns and returns the best parameters so far, with ``stop_reason``
 ``"diverged"``. On the first step there is nothing to return, so it raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L860)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L898)</small>
 
 ---
 

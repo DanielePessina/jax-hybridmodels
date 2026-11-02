@@ -1459,8 +1459,15 @@ def test_pytree_restart_keeps_scalers_and_constants():
     predictors = {
         "twins": (bounded(jr.key(0)), bounded(jr.key(0))),
         "fixed": hm.Constant((1.0, [2.0, 3.0])),
+        # Only the boxed element has a range to draw from.
+        "rates": hm.Parameter(
+            [5000.0, 5000.0, 5000.0], bounds=[(1.0, 1e5), (0.0, None), (None, None)]
+        ),
     }
     fresh = reinitialize_pytree_with_key(predictors, jr.key(2))
+    boxed, one_sided, unbounded = fresh["rates"].value.tolist()
+    assert boxed != pytest.approx(5000.0) and 1.0 < boxed < 1e5
+    assert (one_sided, unbounded) == pytest.approx((5000.0, 5000.0))
     a, b = fresh["twins"]
     # Identical siblings get independent subkeys.
     assert not jnp.allclose(a.inner.mlp.layers[0].weight, b.inner.mlp.layers[0].weight)

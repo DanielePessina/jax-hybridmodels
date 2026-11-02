@@ -130,10 +130,14 @@ fit_ensemble(
 Train an ensemble of up to ``n_members`` models, best first.
 
 Every member starts from a fresh initialisation of the predictors
-drawn from ``key``. A candidate seed is trained briefly
-(``config.tournament_steps`` steps at ``config.tournament_lr``) and
+drawn from ``key``, redrawn as the tournament redraws them: a
+``Parameter`` without two finite bounds keeps its starting value in
+every member. A candidate seed is trained briefly
+(``config.tournament_steps`` steps, with the first phase's optimiser,
+horizon and learning rate unless ``config.tournament_lr`` is set) and
 scored, as in the tournament, then the chosen seeds get the full
-phase schedule.
+phase schedule. Each member's ``history.tournament_scores`` holds the
+scores of the seeds it was chosen from, when there was a choice.
 
 Seed ensemble (``bootstrap=False``)
     Score ``n_seeds`` seeds on all of ``data`` and fully train the
@@ -215,7 +219,7 @@ still integrates from its own start, so ``y0`` stays in place.
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
 experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L423)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L427)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -251,7 +255,7 @@ must be finite, strictly increasing, and not before ``t0``. When
 ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
 returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L449)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L453)</small>
 
 <a id="hybridmodelwith_predictors"></a>
 
@@ -294,7 +298,7 @@ phase short, ``"diverged"`` when a solver error or a non-finite loss ended
 the run (it warned, and the model holds the best parameters so far), else
 ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L164)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L170)</small>
 
 <a id="fitresultsummary"></a>
 
@@ -317,7 +321,7 @@ charge it: the outer 5% of its box for the default sigmoid. The network
 figure covers the whole declared box, including inputs no experiment
 reached, so a large share can be harmless if the data never goes there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L193)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L199)</small>
 
 ---
 
@@ -334,6 +338,7 @@ FitHistory(
     phase: 'tuple[int, ...]' = (),
     validation_loss: 'tuple[float, ...]' = (),
     failed_candidates: 'tuple[int, ...]' = (),
+    tournament_scores: 'tuple[float, ...]' = (),
 ) -> None
 ```
 
@@ -357,6 +362,11 @@ generation's best individual for Evosax.
 ``failed_candidates`` is Evosax only: how many candidates in each
 generation had a non-finite fitness, usually a failed solve. They rank
 last and the search goes on.
+
+``tournament_scores`` is Optax only: each tournament attempt's score in
+attempt order, ``inf`` for an attempt that failed. Empty when no
+tournament ran. A wide spread says the starting point matters for this
+model; a narrow one, that the tournament is not buying much.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L133)</small>
 
