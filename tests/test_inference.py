@@ -833,6 +833,66 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     assert "Not identified: " in together.summary()
 
 
+def test_a_profile_closes_where_the_closed_form_says_and_compiles_once(linear):
+    """For a linear-Gaussian model the profile is exactly quadratic, so its 95%
+    interval is the Wald one, ``mle -/+ 1.96 se``. With a second, separately
+    identified value, re-optimising it at each point must not move the interval."""
+    _, experiments, ts, ys, _, _ = linear
+    mle = float((ts * ys).sum() / (ts**2).sum())
+    error = SIGMA / float(np.sqrt((ts**2).sum()))
+    traces = []
+
+    def counted(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+        traces.append(1)
+        return field(t, y, predictors, covariates)
+
+    model = hm.HybridModel.from_vector_field(
+        vector_field=counted,
+        predictors={"k": hm.Parameter(0.5)},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    first = problem.profile("k", max_points=4)
+    compiled = len(traces)
+    profile = problem.profile("k")
+    assert len(traces) == compiled
+    assert profile.identifiable and profile.converged.all()
+    assert profile.interval == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
+    assert list(profile.values) == sorted(profile.values)
+    assert profile.log_likelihood_ratio.min() == pytest.approx(0.0, abs=1e-9)
+    assert "95% profile interval" in profile.summary() and first.name == "k"
+
+
+def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
+    experiments, *_ = measurements()
+    product = hm.HybridModel.from_vector_field(
+        vector_field=product_field,
+        predictors={"a": hm.Parameter(1.0, bounds=(0.1, 10.0)), "b": hm.Parameter(0.7)},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
+    profiles = problem.profiles(max_points=12)
+    assert set(profiles) == {"a", "b"}
+    assert profiles["a"].interval == (None, None) and not profiles["a"].identifiable
+    # b compensates for a along the whole profile, keeping the product fixed.
+    product_along = profiles["a"].values * profiles["a"].others["b"]
+    assert np.ptp(product_along) == pytest.approx(0.0, abs=1e-5)
+    assert "open" in profiles["a"].summary()
+
+
+def test_profile_rejects_what_it_cannot_profile(x64):
+    experiments, *_ = measurements()
+    problem = make_problem(linear_model(), experiments, log_prior=None, noise="data")
+    with pytest.raises(ValueError, match="not a free Parameter entry"):
+        problem.profile("q")
+    with pytest.raises(ValueError, match="confidence"):
+        problem.profile("k", confidence=1.5)
+
+
 @pytest.mark.parametrize(
     "call",
     [

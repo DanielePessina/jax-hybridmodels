@@ -14,8 +14,9 @@ or an Optimistix MAP search can all take it::
 
 Without a sampler, :meth:`InferenceProblem.optimize` finds the maximum likelihood
 or the posterior mode, :meth:`InferenceProblem.fisher` gives standard errors and the
-directions the data cannot separate, and :meth:`InferenceProblem.laplace` a Gaussian
-approximation to the posterior. ``log_prior=None`` is enough for the first two.
+directions the data cannot separate, :meth:`InferenceProblem.profile` profile
+likelihood intervals, and :meth:`InferenceProblem.laplace` a Gaussian approximation
+to the posterior. ``log_prior=None`` is enough for all but the last.
 
 Three things make this density differ from the training loss.
 
@@ -86,6 +87,7 @@ __all__ = (
     "InferenceProblem",
     "LaplaceResult",
     "OptimizeResult",
+    "ProfileResult",
     "flat_prior",
     "make_problem",
 )
@@ -566,6 +568,11 @@ class InferenceProblem:
         """
         self._require_unwhitened("fisher")
         coordinates = self._coordinates()
+        result = self._fisher(information, coordinates)
+        self._warn_if_not_at_optimum("fisher", "likelihood", coordinates, result.covariance)
+        return result
+
+    def _fisher(self, information: str, coordinates: _Coordinates) -> FisherResult:
         flat, unravel = coordinates.flat, coordinates.unravel
         if information == "gauss_newton":
             if self._log_likelihood is not None:
@@ -589,7 +596,6 @@ class InferenceProblem:
                 "this position; in single precision, enable x64."
             )
         covariance, eigenvalues, eigenvectors = _pseudo_inverse(matrix)
-        self._warn_if_not_at_optimum("fisher", "likelihood", coordinates, covariance)
         return FisherResult(
             names=coordinates.names,
             estimate=coordinates.estimate,
@@ -658,6 +664,180 @@ class InferenceProblem:
             _to_physical=coordinates.to_physical,
             _to_positions=coordinates.to_positions,
         )
+
+    def profile(
+        self,
+        name: str,
+        *,
+        confidence: float = 0.95,
+        max_points: int = 40,
+        max_steps: int = 200,
+        rtol: float = 1e-6,
+        atol: float = 1e-6,
+    ) -> ProfileResult:
+        """The profile likelihood of one value, and the confidence interval it gives.
+
+        Steps away from the current position, which should be the maximum
+        likelihood from :meth:`optimize`, in each direction. At each point the
+        named value is held fixed and BFGS maximises the log-likelihood over all
+        the others, starting from the previous point. A side closes when twice the
+        drop in log-likelihood passes the chi-square quantile for ``confidence``,
+        and the interval's end is interpolated there. A side that reaches the
+        value's bound, or runs out of ``max_points`` first, stays open: the data
+        do not bound the value on that side.
+
+        Steps adapt so each raises the drop by about a tenth of the threshold, as
+        in pyPESTO. They are taken in the latent coordinate, so profiling is
+        unaffected by a warp. Profiles do not depend on the parametrisation at
+        all, unlike Wald intervals.
+
+        ``name`` is a path as ``physical`` names it, with ``[i]`` for an element
+        of an array ``Parameter``, such as ``"k"`` or ``"rates[2]"``.
+        """
+        self._require_unwhitened("profile")
+        if not 0.0 < confidence < 1.0:
+            raise ValueError(f"profile: confidence must be in (0, 1); got {confidence}")
+        if max_points < 2:
+            raise ValueError(f"profile: max_points must be at least 2; got {max_points}")
+        coordinates = self._coordinates()
+        parameters = {
+            entry for entry in coordinates.names if entry.split("[")[0] in self._parameter_paths()
+        }
+        if name not in parameters:
+            raise ValueError(
+                f"profile: {name!r} is not a free Parameter entry; choose from {sorted(parameters)}"
+            )
+        index = coordinates.names.index(name)
+        threshold = float(stats.chi2.ppf(confidence, df=1))
+        fisher = self._fisher(
+            "gauss_newton" if self._log_likelihood is None else "observed", coordinates
+        )
+        self._warn_if_not_at_optimum("profile", "likelihood", coordinates, fisher.covariance)
+        spread = fisher.standard_errors(latent=True)[name]
+        first_step = 0.2 * spread if math.isfinite(spread) and spread > 0 else 0.1
+
+        inverse = np.argsort(coordinates.order)
+        unravel = coordinates.unravel
+
+        def from_names(x: Array) -> Any:
+            return unravel(x[inverse])
+
+        value_and_grad = self._value_and_grad("likelihood", lambda flat: unravel(flat))
+
+        def negated(x: Array) -> tuple[Array, Array]:
+            value, gradient = value_and_grad(x[inverse])
+            return -value, -gradient[coordinates.order]
+
+        objective = _linearizable(negated)
+
+        def with_fixed(rest: Array, fixed: Array) -> Array:
+            return jnp.concatenate([rest[:index], fixed[None], rest[index:]])
+
+        def fixed_objective(rest: Array, fixed: Array) -> Array:
+            return objective(with_fixed(rest, fixed))
+
+        solver = optx.BFGS(rtol=rtol, atol=atol)
+        log_likelihood = eqx.filter_jit(lambda x: self.log_likelihood(from_names(x)))
+        centre = coordinates.latent
+        best = float(log_likelihood(centre))
+
+        def walk(direction: float) -> list[tuple[Array, float, bool]]:
+            points: list[tuple[Array, float, bool]] = []
+            x, step, ratio = centre, first_step, 0.0
+            for _ in range(max_points // 2):
+                fixed = x[index] + direction * step
+                solution = optx.minimise(
+                    fixed_objective,
+                    solver,
+                    jnp.delete(x, index),
+                    args=fixed,
+                    max_steps=max_steps,
+                    throw=False,
+                )
+                new = with_fixed(solution.value, fixed)
+                new_ratio = 2.0 * (best - float(log_likelihood(new)))
+                converged = bool(solution.result == optx.RESULTS.successful)
+                moved = abs(
+                    float(coordinates.to_physical(new)[index] - coordinates.to_physical(x)[index])
+                )
+                points.append((new, new_ratio, converged))
+                if new_ratio > threshold:
+                    break
+                scale = 1.0 + abs(float(coordinates.to_physical(new)[index]))
+                if moved < 1e-10 * scale:
+                    break  # at the value's bound: the squash no longer moves it
+                # Aim each step at a tenth of the threshold, never more than doubling.
+                rise = max(new_ratio - ratio, 1e-12)
+                step *= float(np.clip(0.1 * threshold / rise, 0.5, 2.0))
+                x, ratio = new, new_ratio
+            return points
+
+        below, above = walk(-1.0), walk(1.0)
+        points = [*reversed(below), (centre, 0.0, True), *above]
+        latents = jnp.stack([point[0] for point in points])
+        physical = jax.vmap(coordinates.to_physical)(latents)
+        ratios = np.array([point[1] for point in points])
+        converged = np.array([point[2] for point in points])
+
+        def end(side: list[tuple[Array, float, bool]]) -> float | None:
+            inside_x, inside_ratio = centre, 0.0
+            for x, ratio, ok in side:
+                if not ok:
+                    continue
+                if ratio > threshold:
+                    # The signed root of the ratio is linear in the value when the
+                    # profile is quadratic, so interpolating it is exact there.
+                    root, inside_root = math.sqrt(ratio), math.sqrt(max(inside_ratio, 0.0))
+                    weight = (math.sqrt(threshold) - inside_root) / (root - inside_root)
+                    crossing = inside_x + weight * (x - inside_x)
+                    return float(coordinates.to_physical(crossing)[index])
+                inside_x, inside_ratio = x, ratio
+            return None
+
+        return ProfileResult(
+            name=name,
+            confidence=confidence,
+            threshold=threshold,
+            values=np.asarray(physical[:, index]),
+            log_likelihood_ratio=ratios,
+            others={
+                other: np.asarray(physical[:, i])
+                for i, other in enumerate(coordinates.names)
+                if i != index
+            },
+            converged=converged,
+            interval=(end(below), end(above)),
+        )
+
+    def profiles(
+        self, names: Sequence[str] | None = None, **options: Any
+    ) -> dict[str, ProfileResult]:
+        """:meth:`profile` for each name, by default every free ``Parameter`` entry.
+
+        Each profile is independent, so one that fails, for instance because the
+        model stops solving far from the optimum, is skipped with a warning and
+        the others still run. ``options`` go to :meth:`profile`.
+        """
+        if names is None:
+            names = [
+                entry
+                for entry in self._coordinates().names
+                if entry.split("[")[0] in self._parameter_paths()
+            ]
+        results = {}
+        for name in names:
+            try:
+                results[name] = self.profile(name, **options)
+            except (ValueError, FloatingPointError, eqx.EquinoxRuntimeError) as exc:
+                warnings.warn(f"profiles: skipped {name!r}: {exc}", RuntimeWarning, stacklevel=2)
+        return results
+
+    def _parameter_paths(self) -> set[str]:
+        """The ``physical`` names of the free ``Parameter``s, inferred noise included."""
+        tree = self._tree(self.position)
+        return {
+            _dotted(path) for path, leaf in _free_leaves(tree, self._mask) if _is_parameter(leaf)
+        }
 
     def _prior_terms(self, position: Any) -> Array:
         """The log-prior plus the change-of-variables term: the density's solve-free part."""
@@ -1154,6 +1334,63 @@ class LaplaceResult(_GaussianSummary):
     def summary(self, confidence: float = 0.95) -> str:
         """Posterior means, standard deviations, Wald intervals and correlations."""
         return "\n".join(self._table("Laplace approximation", confidence))
+
+
+@dataclass(frozen=True)
+class ProfileResult:
+    """The profile likelihood of one value, from :meth:`InferenceProblem.profile`.
+
+    Attributes
+    ----------
+    name : str
+        The profiled entry, as ``physical`` names it.
+    confidence : float
+        The level the interval is for.
+    threshold : float
+        The chi-square(1) quantile for ``confidence``: the interval is where
+        ``log_likelihood_ratio`` stays below it.
+    values : ndarray
+        The profiled value at each point, physical and ascending, the maximum
+        likelihood included.
+    log_likelihood_ratio : ndarray
+        ``2 (max log L - log L)`` at each point, with every other value
+        re-optimised.
+    others : dict[str, ndarray]
+        Every other free entry along the profile, physical. How they move shows
+        what compensates for the profiled value.
+    converged : ndarray
+        Whether BFGS met its tolerances at each point. The interval ignores points
+        that did not.
+    interval : tuple[float | None, float | None]
+        The confidence interval's ends, ``None`` on a side the data leave open.
+    """
+
+    name: str
+    confidence: float
+    threshold: float
+    values: np.ndarray
+    log_likelihood_ratio: np.ndarray
+    others: dict[str, np.ndarray]
+    converged: np.ndarray
+    interval: tuple[float | None, float | None]
+
+    @property
+    def identifiable(self) -> bool:
+        """Whether both sides of the interval close."""
+        return None not in self.interval
+
+    def summary(self) -> str:
+        """One line: the interval, or which side the data leave open."""
+        low, high = self.interval
+        shown = (
+            f"[{'open' if low is None else f'{low:.4g}'}, "
+            f"{'open' if high is None else f'{high:.4g}'}]"
+        )
+        note = "" if self.identifiable else ", not identified on the open side"
+        unconverged = int((~self.converged).sum())
+        if unconverged:
+            note += f", {unconverged} points did not converge"
+        return f"{self.name}: {int(self.confidence * 100)}% profile interval {shown}{note}"
 
 
 def _is_finite(prediction: PredictionResult) -> bool:
