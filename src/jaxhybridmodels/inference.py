@@ -782,6 +782,7 @@ class InferenceProblem:
             )
         fisher = problem._fisher(coordinates, gauss_newton=problem._log_likelihood is None)
         problem._warn_if_not_at_optimum(caller, "likelihood", coordinates, fisher.covariance)
+        _warn_if_against_a_bound(caller, coordinates)
         return _Profiler(
             coordinates=coordinates,
             parameters=parameters,
@@ -1368,6 +1369,36 @@ class LaplaceResult(_GaussianSummary):
         return "\n".join(self._table("Laplace approximation", confidence))
 
 
+def _warn_if_against_a_bound(caller: str, coordinates: _Coordinates) -> None:
+    """Warn when a free value sits against its bound, where a profile can mislead.
+
+    Its latent is then far out in the squash's tail, where its gradient
+    vanishes, so re-optimising at each profile point cannot move it off the
+    bound. A profile of any other value that the data trade off against it
+    then closes where the data do not close it.
+    """
+    low, high = (np.asarray(limit) for limit in coordinates.limits)
+    value = np.asarray(coordinates.estimate)
+    span = high - low
+    boxed = np.isfinite(span)
+    near = boxed & (np.minimum(value - low, high - value) <= 1e-6 * np.where(boxed, span, 1.0))
+    pressed = [
+        f"{name} ({float(v):.4g})"
+        for name, v, flag in zip(coordinates.names, value, near, strict=True)
+        if flag
+    ]
+    # With one free value there is nothing else for a pressed one to distort.
+    if pressed and len(coordinates.names) > 1:
+        warnings.warn(
+            f"{caller}: {', '.join(pressed)} sits against its bound, where re-optimising "
+            "cannot move it. A profile of any other value can then close where the data "
+            "do not close it. Widen the bound, or reparametrise so the data fix what you "
+            "profile, before trusting these intervals.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+
+
 @dataclass(frozen=True)
 class _Profiler:
     """Everything a profile needs that does not depend on which value is profiled."""
@@ -1475,10 +1506,16 @@ class _Profiler:
             points: list[tuple[Array, float, bool]] = []
             x, step, ratio = coordinates.flat, first_step, 0.0
             for _ in range(self.max_points // 2):
-                fixed = x[index] + direction * step
-                found = solve_at(x, fixed)
+                # A long step can land where the model cannot be solved from the
+                # previous point's other values; shorter ones may not.
+                for _attempt in range(6):
+                    fixed = x[index] + direction * step
+                    found = solve_at(x, fixed)
+                    new_ratio = 2.0 * (self.best - found.value)
+                    if math.isfinite(new_ratio):
+                        break
+                    step *= 0.25
                 new = jnp.where(fixed_entry, fixed, found.position)
-                new_ratio = 2.0 * (self.best - found.value)
                 if not math.isfinite(new_ratio):
                     points.append((new, math.inf, False))
                     return points, "solve_failed"
