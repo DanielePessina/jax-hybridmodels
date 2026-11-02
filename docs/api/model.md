@@ -298,7 +298,7 @@ phase short, ``"diverged"`` when a solver error or a non-finite loss ended
 the run (it warned, and the model holds the best parameters so far), else
 ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L170)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L176)</small>
 
 <a id="fitresultsummary"></a>
 
@@ -321,7 +321,7 @@ charge it: the outer 5% of its box for the default sigmoid. The network
 figure covers the whole declared box, including inputs no experiment
 reached, so a large share can be harmless if the data never goes there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L199)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L205)</small>
 
 ---
 
@@ -339,6 +339,7 @@ FitHistory(
     validation_loss: 'tuple[float, ...]' = (),
     failed_candidates: 'tuple[int, ...]' = (),
     tournament_scores: 'tuple[float, ...]' = (),
+    continuity: 'tuple[float, ...]' = (),
 ) -> None
 ```
 
@@ -367,6 +368,11 @@ last and the search goes on.
 attempt order, ``inf`` for an attempt that failed. Empty when no
 tournament ran. A wide spread says the starting point matters for this
 model; a narrow one, that the tournament is not buying much.
+
+``continuity`` is Optax only, and present when some phase used multiple
+shooting (``TrainingPhase.segments``): the weighted gap term per step, 0
+in single-shooting steps. ``loss`` in a segmented step is the data term
+on the assembled segments, and the optimiser minimised the two together.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L133)</small>
 

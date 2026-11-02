@@ -72,6 +72,14 @@ from jaxhybridmodels.training.kernels import (
     failure_details,
     failure_summary,
 )
+from jaxhybridmodels.training.shooting import (
+    Nodes,
+    ShootingKernels,
+    bucket_nodes,
+    build_checked_simulation,
+    build_shooting_kernels,
+    initial_nodes,
+)
 from jaxhybridmodels.ui.base import SilentUI, TrainingUI, close_run_on_error
 from jaxhybridmodels.ui.optax import RichTrainingUI
 from jaxhybridmodels.ui.plain import PlainTrainingUI, live_display_available
@@ -137,6 +145,19 @@ class TrainingPhase:
         Override of ``Objective.penalty_weight`` for this phase. ``None``
         (the default) uses the objective's weight; ``0.0`` switches the
         bound penalty off for the phase.
+    segments : int
+        Multiple shooting: split each trajectory into this many segments,
+        counted in samples, each started from a trainable state (a node).
+        ``1``, the default, is single shooting. The last phase of a schedule
+        must be single shooting, and a change in ``segments`` resets the
+        optimiser, because the nodes change shape. A bucket with too few
+        samples uses fewer segments. See
+        :mod:`jaxhybridmodels.training.shooting`.
+    continuity_weight : float
+        Weight of the gap term, ``mean((gap / scale)^2)`` over every join and
+        state, in a segmented phase. The gap term has no units; a plain
+        ``"mse"`` loss is in the units of the data, so the balance between
+        the two depends on the data's scale. Ignored when ``segments=1``.
     """
 
     steps: int
@@ -148,10 +169,21 @@ class TrainingPhase:
     horizon: float = 1.0
     reset_optimizer: bool = False
     penalty_weight: float | None = None
+    segments: int = 1
+    continuity_weight: float = 1.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
             raise ValueError(f"TrainingPhase.steps must be at least 1; got {self.steps}")
+        if isinstance(self.segments, bool) or not isinstance(self.segments, int):
+            raise TypeError(f"TrainingPhase.segments must be an int; got {self.segments!r}")
+        if self.segments < 1:
+            raise ValueError(f"TrainingPhase.segments must be at least 1; got {self.segments}")
+        weight = float(self.continuity_weight)
+        if not math.isfinite(weight) or weight < 0.0:
+            raise ValueError(
+                f"TrainingPhase.continuity_weight must be finite and non-negative; got {weight}"
+            )
         if callable(self.lr):
             if isinstance(self.optimizer, optax.GradientTransformation):
                 raise ValueError(
@@ -270,6 +302,13 @@ class OptaxTrainingConfig:
             raise ValueError("Supply steps= for one phase or phases= for a schedule")
         _validate_optimizer_transitions(self)
         _validate_tournament(self)
+        if self.phases[-1].segments != 1:
+            raise ValueError(
+                f"the last TrainingPhase has segments={self.phases[-1].segments}; a schedule "
+                "must end in single shooting (segments=1). The nodes are dropped when the run "
+                "ends, so a model last fitted in segments has never been fitted as the single "
+                "solve predict() runs. Add a final phase without segments."
+            )
 
     @property
     def total_steps(self) -> int:
@@ -487,6 +526,85 @@ def _training_step(
     return total_loss, acc_grads, n_buckets
 
 
+def _shooting_training_step(
+    predictors: Any,
+    nodes: Nodes,
+    dataset: Dataset,
+    shooting: ShootingKernels,
+    horizon: Array,
+    weight: Array,
+) -> tuple[Array, Array, Any, tuple[Array, ...], int]:
+    """:func:`_training_step` for a segmented phase.
+
+    Returns ``(data_sum, continuity_sum, predictor_grads, node_grads,
+    n_buckets)``: the predictor gradients are summed over buckets as in
+    :func:`_training_step`, while each bucket's node gradient belongs to that
+    bucket's nodes alone.
+    """
+    acc_grads: Any = None
+    node_grads: list[Array] = []
+    data_sum, gap_sum = jnp.asarray(0.0), jnp.asarray(0.0)
+    for bp, z, scale in zip(dataset.bucket_payloads, nodes.z, nodes.scale, strict=True):
+        (_, (data, gap)), (grads, z_grads) = shooting.step(
+            predictors, z, scale, bp, horizon, weight
+        )
+        acc_grads = grads if acc_grads is None else jax.tree.map(jnp.add, acc_grads, grads)
+        node_grads.append(z_grads)
+        data_sum, gap_sum = data_sum + data, gap_sum + gap
+    return data_sum, gap_sum, acc_grads, tuple(node_grads), len(node_grads)
+
+
+def _build_shooting_update(
+    *, optimizer: optax.GradientTransformation, trainable: Any
+) -> Callable[..., tuple[Any, tuple[Array, ...], Any]]:
+    """:func:`_build_step_update` for a segmented phase, which also moves the nodes.
+
+    ``update(predictors, z, acc_grads, node_grads, penalty_grads, n_buckets,
+    opt_state) -> (predictors, z, opt_state)``. The optimiser state covers
+    ``(trainable predictors, z)``, so it is initialised afresh whenever a
+    phase starts new nodes.
+    """
+
+    @eqx.filter_jit
+    def update(
+        predictors: Any,
+        z: tuple[Array, ...],
+        acc_grads: Any,
+        node_grads: tuple[Array, ...],
+        penalty_grads: Any,
+        n_buckets: Array,
+        opt_state: Any,
+    ) -> tuple[Any, tuple[Array, ...], Any]:
+        grads = (
+            jax.tree.map(lambda a, p: a / n_buckets + p, acc_grads, penalty_grads),
+            jax.tree.map(lambda g: g / n_buckets, node_grads),
+        )
+        params = (eqx.filter(predictors, trainable), z)
+        updates, new_state = optimizer.update(grads, opt_state, params)
+        predictor_updates, node_updates = cast(tuple[Any, Any], updates)
+        return (
+            eqx.apply_updates(predictors, predictor_updates),
+            cast(tuple[Array, ...], eqx.apply_updates(z, node_updates)),
+            new_state,
+        )
+
+    return update
+
+
+def _init_shooting_state(
+    optimizer: optax.GradientTransformation,
+    predictors: Any,
+    nodes: Nodes,
+    trainable: Any,
+    lr: float,
+) -> Any:
+    """A fresh optimiser state over ``(trainable predictors, nodes)``, at ``lr``."""
+    opt_state = optimizer.init((eqx.filter(predictors, trainable), nodes.z))
+    if _optimiser_state_supports_lr(opt_state):
+        _set_lr(opt_state, lr)
+    return opt_state
+
+
 def _shared_tournament(
     predictors: Any,
     dataset: Dataset,
@@ -503,6 +621,7 @@ def _shared_tournament(
     horizon: Array,
     top_k: int,
     ui: TrainingUI | None = None,
+    segmented: _Segmented | None = None,
 ) -> _Tournament:
     """Warm-start selection: train several fresh inits briefly, keep the best ``top_k``.
 
@@ -526,6 +645,10 @@ def _shared_tournament(
     scored ``inf``, and the next key tried. If every attempt fails, the
     original ``predictors`` come back with score ``inf`` and a
     ``RuntimeWarning``. ``ui`` gets one line naming the attempt kept.
+
+    With ``segmented``, the first phase's multiple shooting: each attempt
+    starts its own nodes on its own solve, trains them with the predictors,
+    and is scored on the data term plus the gap term.
     """
     last_error: BaseException | None = None
     scored: list[tuple[float, Any]] = []
@@ -544,38 +667,30 @@ def _shared_tournament(
                 eqx.filter(fresh, trainable),
                 eqx.filter(predictors, trainable, inverse=True),
             )
-            opt_state = optimizer.init(eqx.filter(candidate, trainable))
-            if _optimiser_state_supports_lr(opt_state):
-                _set_lr(opt_state, tournament_lr)
+            if segmented is None:
+                candidate, score = _single_attempt(
+                    candidate,
+                    dataset,
+                    bucket_step=bucket_step,
+                    score_bucket=score_bucket,
+                    apply_update=apply_update,
+                    optimizer=optimizer,
+                    trainable=trainable,
+                    steps=tournament_steps,
+                    lr=tournament_lr,
+                    horizon=horizon,
+                )
             else:
-                warnings.warn(
-                    "tournament_lr has no effect: the optimiser state carries no "
-                    "injectable hyperparams. Wrap the optimiser in "
-                    "optax.inject_hyperparams to make tournament_lr apply.",
-                    RuntimeWarning,
-                    stacklevel=2,
+                candidate, score = _segmented_attempt(
+                    candidate,
+                    dataset,
+                    segmented,
+                    optimizer=optimizer,
+                    trainable=trainable,
+                    steps=tournament_steps,
+                    lr=tournament_lr,
+                    horizon=horizon,
                 )
-
-            for _ in range(tournament_steps):
-                _loss, acc_grads, n_buckets = _training_step(
-                    candidate, dataset, bucket_step, horizon, trainable
-                )
-                denom = float(max(n_buckets, 1))
-
-                def _normalised(g: Array, _d: float = denom) -> Array:
-                    return g / _d
-
-                avg_grads = jax.tree.map(_normalised, acc_grads)
-                candidate, opt_state = apply_update(candidate, avg_grads, opt_state)
-
-            # Forward-only scorer, not bucket_step, whose discarded backward
-            # pass roughly tripled the cost of a scoring sweep. Scores the
-            # data term (including any configured trajectory penalty, as the
-            # phases charge it), so a candidate wins on fit.
-            score = jnp.asarray(0.0)
-            for bp in dataset.bucket_payloads:
-                score = score + score_bucket(candidate, bp, horizon)
-            score = score / max(len(dataset.bucket_payloads), 1)
             score_value = float(score)
             if not math.isfinite(score_value):
                 raise FloatingPointError(f"non-finite tournament loss: {score_value}")
@@ -601,6 +716,104 @@ def _shared_tournament(
     return _Tournament(scored[:top_k], tuple(scores))
 
 
+def _warn_if_lr_fixed(opt_state: Any, lr: float) -> None:
+    """Set the tournament's rate, or warn that a raw optimiser keeps its own."""
+    if _optimiser_state_supports_lr(opt_state):
+        _set_lr(opt_state, lr)
+    else:
+        warnings.warn(
+            "tournament_lr has no effect: the optimiser state carries no "
+            "injectable hyperparams. Wrap the optimiser in "
+            "optax.inject_hyperparams to make tournament_lr apply.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _single_attempt(
+    candidate: Any,
+    dataset: Dataset,
+    *,
+    bucket_step: Callable[..., tuple[Array, Any]],
+    score_bucket: Callable[..., Array],
+    apply_update: Callable[..., tuple[Any, Any]],
+    optimizer: optax.GradientTransformation,
+    trainable: Any,
+    steps: int,
+    lr: float,
+    horizon: Array,
+) -> tuple[Any, Array]:
+    """Train one tournament attempt by single shooting, and score it."""
+    opt_state = optimizer.init(eqx.filter(candidate, trainable))
+    _warn_if_lr_fixed(opt_state, lr)
+    for _ in range(steps):
+        _loss, acc_grads, n_buckets = _training_step(
+            candidate, dataset, bucket_step, horizon, trainable
+        )
+        denom = float(max(n_buckets, 1))
+
+        def _normalised(g: Array, _d: float = denom) -> Array:
+            return g / _d
+
+        avg_grads = jax.tree.map(_normalised, acc_grads)
+        candidate, opt_state = apply_update(candidate, avg_grads, opt_state)
+
+    # Forward-only scorer, not bucket_step, whose discarded backward pass
+    # roughly tripled the cost of a scoring sweep. Scores the data term
+    # (including any configured trajectory penalty, as the phases charge it),
+    # so a candidate wins on fit.
+    score = jnp.asarray(0.0)
+    for bp in dataset.bucket_payloads:
+        score = score + score_bucket(candidate, bp, horizon)
+    return candidate, score / max(len(dataset.bucket_payloads), 1)
+
+
+class _Segmented(NamedTuple):
+    """What a segmented first phase hands the tournament."""
+
+    kernels: ShootingKernels
+    simulate: Callable[..., tuple[Array, Array]]
+    update: Callable[..., tuple[Any, tuple[Array, ...], Any]]
+    weight: Array
+
+
+def _segmented_attempt(
+    candidate: Any,
+    dataset: Dataset,
+    segmented: _Segmented,
+    *,
+    optimizer: optax.GradientTransformation,
+    trainable: Any,
+    steps: int,
+    lr: float,
+    horizon: Array,
+) -> tuple[Any, Array]:
+    """Train one tournament attempt with segments, and score it on data plus gaps."""
+    nodes = initial_nodes(candidate, dataset, segmented.kernels.segments, segmented.simulate)
+    opt_state = optimizer.init((eqx.filter(candidate, trainable), nodes.z))
+    _warn_if_lr_fixed(opt_state, lr)
+    for _ in range(steps):
+        _, _, acc_grads, node_grads, n_buckets = _shooting_training_step(
+            candidate, nodes, dataset, segmented.kernels, horizon, segmented.weight
+        )
+        no_penalty = jax.tree.map(jnp.zeros_like, acc_grads)
+        candidate, z, opt_state = segmented.update(
+            candidate,
+            nodes.z,
+            acc_grads,
+            node_grads,
+            no_penalty,
+            jnp.asarray(n_buckets, dtype=jnp.int32),
+            opt_state,
+        )
+        nodes = nodes._replace(z=z)
+    score = jnp.asarray(0.0)
+    for bp, z, scale in zip(dataset.bucket_payloads, nodes.z, nodes.scale, strict=True):
+        data, gap = segmented.kernels.value(candidate, z, scale, bp, horizon, segmented.weight)
+        score = score + data + gap
+    return candidate, score / max(len(dataset.bucket_payloads), 1)
+
+
 class _Tournament(NamedTuple):
     """What :func:`_shared_tournament` returns: the kept candidates, and every score."""
 
@@ -621,6 +834,19 @@ def _tournament_settings(config: OptaxTrainingConfig) -> tuple[float, Array]:
     return lr, jnp.asarray(first.horizon)
 
 
+def _first_phase_segments(config: OptaxTrainingConfig, kernels: _Kernels) -> _Segmented | None:
+    """The tournament's multiple shooting, when the first phase is segmented."""
+    first = config.phases[0]
+    if first.segments == 1:
+        return None
+    return _Segmented(
+        kernels=kernels.shooting[first.segments],
+        simulate=kernels.simulate,
+        update=kernels.shooting_update,
+        weight=jnp.asarray(float(first.continuity_weight)),
+    )
+
+
 def _tournament_enabled(config: OptaxTrainingConfig) -> bool:
     """The tournament is enabled implicitly, never by its own flag.
 
@@ -630,16 +856,18 @@ def _tournament_enabled(config: OptaxTrainingConfig) -> bool:
     return config.tournament_attempts > 1 and config.tournament_steps > 0
 
 
-def _horizon_changed(config: OptaxTrainingConfig, phase_idx: int) -> bool:
-    """Does this phase score a different slice of each trajectory than the last?
+def _objective_changed(config: OptaxTrainingConfig, phase_idx: int) -> bool:
+    """Does this phase's loss measure something different from the last one's?
 
-    ``TrainingPhase.horizon`` masks the loss to a prefix, so a change here means
-    the losses either side of the boundary measure different quantities.
+    ``TrainingPhase.horizon`` masks the loss to a prefix, and ``segments``
+    replaces the single solve with segments started from nodes, so a change in
+    either means the losses either side of the boundary are not comparable.
     Phase 0 has no predecessor and so never counts as a change.
     """
     if phase_idx == 0:
         return False
-    return config.phases[phase_idx].horizon != config.phases[phase_idx - 1].horizon
+    phase, before = config.phases[phase_idx], config.phases[phase_idx - 1]
+    return phase.horizon != before.horizon or phase.segments != before.segments
 
 
 def _has_weak_scalar_trainable(predictors: Any, trainable: Any) -> bool:
@@ -673,6 +901,7 @@ def _warmup_compile(
     penalty_points: tuple[Array, ...] = (),
     score_bucket: Callable[..., Array] | None = None,
     settle: bool = False,
+    per_bucket: Callable[[BucketPayload], None] | None = None,
 ) -> None:
     """Force one trace per kernel before the run proper starts.
 
@@ -697,6 +926,9 @@ def _warmup_compile(
     a weak trainable scalar in the supplied tree; strong-typed or frozen
     trees keep the one-trace-per-shape contract exactly. Discovered and
     verified empirically; see ``scripts/bench_hotpath.py``.
+
+    ``per_bucket`` compiles any further per-bucket kernels inside the same
+    compile bracket; the trainer passes the multiple-shooting kernels here.
     """
     total_buckets = len(bucket_payloads)
     last_grads: Any = None
@@ -706,6 +938,8 @@ def _warmup_compile(
         warm_loss, warm_grads = bucket_step(predictors, bp, horizon)
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
         last_grads = warm_grads
+        if per_bucket is not None:
+            per_bucket(bp)
         ui.on_compile_progress(bucket_idx=idx, total_buckets=total_buckets)
         ui.on_compile_done(bucket_idx=idx)
 
@@ -760,6 +994,9 @@ def _begin_phase(
 ) -> tuple[optax.GradientTransformation, Any]:
     """Apply the phase-boundary optimiser policy and return the pair to run with.
 
+    A change in ``segments`` resets as ``reset_optimizer`` does: the nodes
+    change shape, so the old state no longer fits the parameters.
+
     A phase either rebuilds the optimiser and discards its state, or keeps the
     live state and pushes the new learning rate into it. Phase 0 passes
     through untouched: its optimiser was built by the caller, and the
@@ -773,7 +1010,7 @@ def _begin_phase(
         return optimizer, opt_state
 
     phase = config.phases[phase_idx]
-    if phase.reset_optimizer:
+    if phase.reset_optimizer or phase.segments != config.phases[phase_idx - 1].segments:
         optimizer = _build_optimizer(phase.optimizer, _start_lr(phase.lr))
         return optimizer, optimizer.init(eqx.filter(predictors, trainable))
     if callable(phase.lr):
@@ -817,21 +1054,22 @@ class _BestTracker:
         self.best_step: int | None = None
         self.steps_since_improvement = 0
 
-    def begin_phase(self, predictors: Any, *, horizon_changed: bool) -> None:
+    def begin_phase(self, predictors: Any, *, objective_changed: bool) -> None:
         """Phase-boundary bookkeeping for both pieces of state.
 
         The patience counter always resets. A plateau at the end of one phase
         would otherwise carry over and kill the next after a single step,
         before its fresh learning rate had any chance to act.
 
-        The running minimum resets only when the scored horizon changed.
-        Losses over a prefix and losses over the full window are not
-        comparable, and a single minimum across both lands in the shortest
-        phase, so ``restore_best`` would hand back the least-trained model in
-        the run.
+        The running minimum resets only when the loss changed meaning: a new
+        horizon, or a new segment count. Losses over a prefix and losses over
+        the full window are not comparable, and a single minimum across both
+        lands in the shortest phase, so ``restore_best`` would hand back the
+        least-trained model in the run. A segmented loss is not the model's
+        own loss at all, since segments restart from nodes.
         """
         self.steps_since_improvement = 0
-        if horizon_changed:
+        if objective_changed:
             self.best_loss = float("inf")
             self.best_predictors = predictors
             self.best_step = None
@@ -870,7 +1108,8 @@ class _PhaseRun:
     why the run ended early on a solver error or a non-finite loss, and is
     ``None`` otherwise. ``tournament_scores`` holds each tournament
     attempt's score, ``inf`` for one that failed, and is empty when no
-    tournament ran.
+    tournament ran. ``continuity`` is the weighted gap term per step, 0 in
+    single-shooting steps, and ``None`` when no phase is segmented.
     """
 
     predictors: Any
@@ -883,6 +1122,7 @@ class _PhaseRun:
     stopped_early: bool
     failure: str | None = None
     tournament_scores: tuple[float, ...] = ()
+    continuity: list[float] | None = None
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
@@ -989,6 +1229,7 @@ def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
             phase=tuple(run.phase),
             validation_loss=tuple(run.selection),
             tournament_scores=run.tournament_scores,
+            continuity=tuple(run.continuity or ()),
         ),
         best_step=run.best_step,
         stop_reason=_stop_reason(run),
@@ -1072,6 +1313,7 @@ def _train_with_optax(
                 horizon=horizon,
                 top_k=1,
                 ui=ui_,
+                segmented=_first_phase_segments(config, kernels),
             )
             predictors = ranked[0][1]
 
@@ -1162,6 +1404,14 @@ def _run_phases(
     # falls back to, since the step that failed may have poisoned ``predictors``.
     last_measured = predictors
     failure: str | None = None
+    # Multiple shooting: the nodes of the current segmented phase, and the
+    # gap term per step, recorded only when some phase is segmented.
+    nodes: Nodes | None = None
+    shooting_update = kernels.shooting_update
+    shooting_update_optimizer = optimizer
+    continuity: list[float] | None = (
+        [] if any(phase.segments > 1 for phase in config.phases) else None
+    )
 
     for phase_idx, phase in enumerate(config.phases):
         optimizer, opt_state = _begin_phase(
@@ -1177,6 +1427,25 @@ def _run_phases(
             step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
             step_update_optimizer = optimizer
 
+        shooting = kernels.shooting.get(phase.segments)
+        if shooting is None:
+            nodes = None
+        else:
+            if optimizer is not shooting_update_optimizer:
+                shooting_update = _build_shooting_update(optimizer=optimizer, trainable=trainable)
+                shooting_update_optimizer = optimizer
+            fresh = phase_idx == 0 or phase.segments != config.phases[phase_idx - 1].segments
+            if fresh:
+                # New segments start on a solve at the current predictors, so
+                # the phase opens with closed gaps at the loss it inherited.
+                nodes = initial_nodes(predictors, dataset, phase.segments, kernels.simulate)
+            if fresh or phase.reset_optimizer:
+                assert nodes is not None
+                opt_state = _init_shooting_state(
+                    optimizer, predictors, nodes, trainable, _start_lr(phase.lr)
+                )
+        continuity_weight = jnp.asarray(float(phase.continuity_weight))
+
         horizon = jnp.asarray(phase.horizon)
         weight = _phase_penalty_weight(phase, kernels.objective)
         # Traced, not closed over: a Python float that changed per phase
@@ -1191,7 +1460,7 @@ def _run_phases(
 
         best.begin_phase(
             predictors,
-            horizon_changed=select_score is None and _horizon_changed(config, phase_idx),
+            objective_changed=select_score is None and _objective_changed(config, phase_idx),
         )
         # Only the last phase decides the reported stop reason.
         stopped_early = False
@@ -1207,9 +1476,18 @@ def _run_phases(
             if lrs is not None:
                 _set_lr(opt_state, lrs[step])
             try:
-                total_loss, acc_grads, n_buckets = _training_step(
-                    predictors, dataset, kernels.bucket_step, horizon, trainable
-                )
+                gap_total = jnp.asarray(0.0)
+                if shooting is None:
+                    total_loss, acc_grads, n_buckets = _training_step(
+                        predictors, dataset, kernels.bucket_step, horizon, trainable
+                    )
+                else:
+                    assert nodes is not None
+                    total_loss, gap_total, acc_grads, node_grads, n_buckets = (
+                        _shooting_training_step(
+                            predictors, nodes, dataset, shooting, horizon, continuity_weight
+                        )
+                    )
                 avg_penalty, penalty_grads = kernels.penalty_step(
                     predictors, penalty_weight, phase_points
                 )
@@ -1220,23 +1498,40 @@ def _run_phases(
                 # grads (charged once per step, not once per bucket) and runs
                 # the optimiser update in a single launch.
                 previous_predictors = predictors
-                predictors, opt_state = step_update(
-                    predictors, acc_grads, penalty_grads, n_buckets_arg, opt_state
-                )
+                if shooting is None:
+                    predictors, opt_state = step_update(
+                        predictors, acc_grads, penalty_grads, n_buckets_arg, opt_state
+                    )
+                else:
+                    assert nodes is not None
+                    predictors, z, opt_state = shooting_update(
+                        predictors,
+                        nodes.z,
+                        acc_grads,
+                        node_grads,
+                        penalty_grads,
+                        n_buckets_arg,
+                        opt_state,
+                    )
+                    nodes = nodes._replace(z=z)
 
                 # History and early stopping follow the per-bucket-averaged
                 # loss (the data term plus any configured trajectory penalty):
                 # tracking the bound-penalty weight too would let "best" move
                 # when only the penalty weight changed.
                 loss_value = float(total_loss / float(max(n_buckets, 1)))
+                gap_value = float(gap_total / float(max(n_buckets, 1)))
                 penalty_value = float(avg_penalty)
-                if not (math.isfinite(loss_value) and math.isfinite(penalty_value)):
+                if not all(map(math.isfinite, (loss_value, gap_value, penalty_value))):
                     # One bad step poisons the weights through its gradient, so
                     # every later step would be NaN too and burn the budget.
                     raise FloatingPointError(
-                        f"non-finite loss {loss_value} or penalty {penalty_value}"
+                        f"non-finite loss {loss_value}, gap term {gap_value} or "
+                        f"penalty {penalty_value}"
                     )
-                score = loss_value
+                # A segmented phase minimises data and gaps together, so its
+                # patience follows both.
+                score = loss_value + gap_value
                 if select_score is not None:
                     score = select_score(previous_predictors)
             except FIT_FAILURES as exc:
@@ -1249,6 +1544,8 @@ def _run_phases(
             losses_history.append(loss_value)
             penalties.append(weight * penalty_value)
             phases.append(phase_idx)
+            if continuity is not None:
+                continuity.append(gap_value)
             if select_score is not None:
                 selection.append(score)
             # ``previous_predictors``, not ``predictors``: avg_data was
@@ -1308,6 +1605,7 @@ def _run_phases(
         best_step=best.best_step if config.restore_best else None,
         stopped_early=stopped_early,
         failure=failure,
+        continuity=continuity,
     )
 
 
@@ -1319,6 +1617,10 @@ class _Kernels:
     were built against and ``extras`` the objective's extra points, one per
     ``BoundedPredictor`` in traversal order. Host-side only; never passed
     into a jitted function.
+
+    ``shooting`` holds the multiple-shooting kernels for each segment count
+    the schedule uses, ``simulate`` the never-raising solve the nodes start
+    on, and ``shooting_update`` the segmented update for ``optimizer``.
     """
 
     objective: Objective
@@ -1330,6 +1632,9 @@ class _Kernels:
     step_update: Callable[..., tuple[Any, Any]]
     sources: tuple[PenaltyPointSource | None, ...]
     extras: tuple[Array, ...]
+    shooting: dict[int, ShootingKernels]
+    simulate: Callable[..., tuple[Array, Array]]
+    shooting_update: Callable[..., tuple[Any, tuple[Array, ...], Any]]
 
 
 def _build_training_kernels(
@@ -1388,6 +1693,33 @@ def _build_training_kernels(
     optimizer = _build_optimizer(first.optimizer, _start_lr(first.lr))
     apply_update = build_apply_update(optimizer=optimizer, trainable=trainable)
     step_update = _build_step_update(optimizer=optimizer, trainable=trainable)
+    shooting = {
+        count: build_shooting_kernels(
+            segments=count,
+            simulate_fn=simulate_fn,
+            state_to_output=state_to_output,
+            solver=solver,
+            loss_fn=loss_fn,
+            trainable=trainable,
+            trajectory_penalty_fn=objective.trajectory_penalty_fn,
+            trajectory_penalty_weight=objective.trajectory_penalty_weight,
+        )
+        for count in sorted({phase.segments for phase in config.phases if phase.segments > 1})
+    }
+    simulate = build_checked_simulation(simulate_fn=simulate_fn, solver=solver)
+    shooting_update = _build_shooting_update(optimizer=optimizer, trainable=trainable)
+    warm_nodes: dict[int, list[tuple[Array, Array, Any]]] = {count: [] for count in shooting}
+
+    def warm_shooting(bp: BucketPayload) -> None:
+        """Trace each segment count's kernels, and the starting solve, for one bucket."""
+        for count, kernels_ in shooting.items():
+            z, scale = bucket_nodes(predictors, bp, count, simulate)
+            (warm, _), (_, z_grads) = kernels_.step(predictors, z, scale, bp, 1.0, 1.0)
+            jax.block_until_ready(warm)  # type: ignore[no-untyped-call]
+            if _tournament_enabled(config) and first.segments == count:
+                jax.block_until_ready(kernels_.value(predictors, z, scale, bp, 1.0, 1.0))  # type: ignore[no-untyped-call]
+            warm_nodes[count].append((z, z_grads, scale))
+
     _warmup_compile(
         predictors,
         bucket_payloads,
@@ -1401,7 +1733,26 @@ def _build_training_kernels(
         penalty_points=select_penalty_points(sources, extras, 1.0),
         score_bucket=score_bucket if _tournament_enabled(config) else None,
         settle=settle,
+        per_bucket=warm_shooting if shooting else None,
     )
+    for per_bucket in warm_nodes.values():
+        # The segmented update, traced once per segment count, since the
+        # node shapes differ.
+        nodes = Nodes(tuple(z for z, _, _ in per_bucket), tuple(s for *_, s in per_bucket))
+        opt_state = _init_shooting_state(
+            optimizer, predictors, nodes, trainable, _start_lr(first.lr)
+        )
+        grads = eqx.filter(predictors, trainable)
+        warm, _, _ = shooting_update(
+            predictors,
+            nodes.z,
+            grads,
+            tuple(g for _, g, _ in per_bucket),
+            grads,
+            jnp.asarray(len(per_bucket), dtype=jnp.int32),
+            opt_state,
+        )
+        jax.block_until_ready(warm)  # type: ignore[no-untyped-call]
     return _Kernels(
         objective=objective,
         bucket_step=bucket_step,
@@ -1412,6 +1763,9 @@ def _build_training_kernels(
         step_update=step_update,
         sources=sources,
         extras=extras,
+        shooting=shooting,
+        simulate=simulate,
+        shooting_update=shooting_update,
     )
 
 
@@ -1502,6 +1856,7 @@ def _fit_ensemble(
                 horizon=horizon,
                 top_k=top_k,
                 ui=ui_,
+                segmented=_first_phase_segments(config, kernels),
             )
 
         # (training data, seed) per member. The key labels are the ones the

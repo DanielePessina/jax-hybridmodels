@@ -129,15 +129,26 @@ def _loss_trend(history: FitHistory) -> float | None:
 
 
 def _phase_lines(history: FitHistory) -> list[str]:
+    """The loss at the start and end of each phase, and the gap term where segmented.
+
+    A segmented phase's loss is the data term on the assembled segments, so
+    the table adds the gap term at the phase's last step: how far its
+    segments were from joining up when it handed over.
+    """
     phases = sorted(set(history.phase))
     if len(phases) < 2:
         return []
-    lines = ["Phases", f"  {'phase':>5} {'steps':>6} {'first loss':>13} {'last loss':>13}"]
+    gaps = history.continuity if len(history.continuity) == len(history.loss) else ()
+    header = f"  {'phase':>5} {'steps':>6} {'first loss':>13} {'last loss':>13}"
+    lines = ["Phases", header + (f" {'last gap term':>14}" if gaps else "")]
     for phase in phases:
-        losses = [
-            loss for loss, owner in zip(history.loss, history.phase, strict=True) if owner == phase
-        ]
-        lines.append(f"  {phase:>5} {len(losses):>6} {losses[0]:>13.4e} {losses[-1]:>13.4e}")
+        steps = [i for i, owner in enumerate(history.phase) if owner == phase]
+        first, last = history.loss[steps[0]], history.loss[steps[-1]]
+        line = f"  {phase:>5} {len(steps):>6} {first:>13.4e} {last:>13.4e}"
+        if gaps:
+            gap = gaps[steps[-1]]
+            line += f" {gap:>14.4e}" if any(gaps[i] for i in steps) else f" {'-':>14}"
+        lines.append(line)
     return lines
 
 

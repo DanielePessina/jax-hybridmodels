@@ -62,6 +62,9 @@ jobs:
       - name: Run the identifiability example
         run: uv run python examples/identifiability/arrhenius.py
 
+      - name: Run the multiple shooting example
+        run: uv run python examples/multiple_shooting/oscillator.py --no-plot
+
       - name: Run the hybrid ODE example (short)
         run: uv run python examples/hybrid_ode/train_hybrid_ode.py --steps 40 --no-plot
 

@@ -53,6 +53,7 @@ export default defineConfig({
         { text: 'Custom training loop', link: '/examples/custom-loop' },
         { text: 'Mechanistic crystallisation', link: '/examples/crystallisation-mechanistic' },
         { text: 'Shelf life', link: '/examples/shelf-life' },
+        { text: 'Multiple shooting', link: '/examples/multiple-shooting' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },

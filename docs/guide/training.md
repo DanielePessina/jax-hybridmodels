@@ -223,6 +223,45 @@ What gets redrawn:
   array at random values. To compare different frozen arrays, build a model
   for each.
 
+### Multiple shooting
+
+Single shooting solves each experiment once, from `y0` to its last sample.
+From a poor guess, an oscillating or stiff system or a long horizon can
+drift away from the data early. The loss then stops measuring how wrong the
+parameters are, and training stalls in the nearest dip. Multiple shooting
+splits each trajectory into segments. Segment 0 starts from `y0`, and every
+later segment starts from its own trainable state, a node. A gap term pulls
+the segments back into one trajectory:
+
+<<< @/../examples/multiple_shooting/oscillator.py#configs
+
+- **Segments are counted in samples.** Consecutive segments share one sample.
+  A bucket with too few samples uses fewer segments.
+- **A node is the full state**, unmeasured components included. When a
+  segmented phase starts, the nodes are read off a solve at the current
+  predictors, so the segments start joined. An experiment whose solve fails
+  starts its nodes at `y0`.
+- **The loss** is the data term on the joined-up segments, plus
+  `continuity_weight * mean((gap / scale)^2)`. The scale is each state's
+  largest size along that starting solve, so the gap term has no units. A
+  plain `"mse"` loss is in the units of the data, so the balance between
+  the two depends on the data's scale.
+- **The schedule must end with `segments=1`.** The nodes are dropped when
+  the run ends, and the returned model has been fitted as the single solve
+  that `predict` runs. `restore_best` picks from that last phase.
+- **A change in `segments` resets the optimiser**, because the nodes change
+  shape. Expect a short spike in the loss there.
+- **`history.continuity`** records the gap term per step, and the summary's
+  phase table shows it at the end of each segmented phase.
+
+Segments must be short compared with how fast the model at its starting
+guess moves. If a segmented fit still settles in the wrong place, use more
+segments. The [multiple shooting example](/examples/multiple-shooting) fits a
+frequency that single shooting gets wrong from two of three starts.
+
+A tournament whose first phase is segmented trains its attempts with
+segments too. Evosax and `predict` always use single shooting.
+
 ## Evosax
 
 ```python

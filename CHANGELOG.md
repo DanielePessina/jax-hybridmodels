@@ -38,6 +38,11 @@
   installs BlackJAX and `arviz-base`.
 - `predict_ensemble(quantiles=)` adds quantiles across members, also in
   `to_dataframe`.
+- Multiple shooting: `TrainingPhase(segments=K)` splits each trajectory into `K`
+  segments that start from trainable states, with a gap term weighted by
+  `continuity_weight`. The schedule must end in single shooting.
+  `FitHistory.continuity` records the gap term, and the summary's phase table
+  shows it. See the multiple shooting example.
 - `FitHistory.tournament_scores` keeps every tournament attempt's score, and the
   summary and the training display report the spread.
 - `InferenceProblem.predict` drops a draw whose solve fails on the requested grid,

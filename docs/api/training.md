@@ -138,7 +138,7 @@ stores ``phases``::
 | `patience` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever the horizon changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L177)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L209)</small>
 
 ---
 
@@ -157,6 +157,8 @@ TrainingPhase(
     horizon: 'float' = 1.0,
     reset_optimizer: 'bool' = False,
     penalty_weight: 'float | None' = None,
+    segments: 'int' = 1,
+    continuity_weight: 'float' = 1.0,
 ) -> None
 ```
 
@@ -172,8 +174,10 @@ One contiguous block of Optax steps with its own schedule settings.
 | `horizon` | `float` | Fraction of each experiment's timeline the loss looks at, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only the first ``horizon`` of the observation times is scored, which stops a long-horizon divergence from drowning the gradient. Being a runtime mask rather than a shape change, a phase boundary costs no recompile. |
 | `reset_optimizer` | `bool` | Rebuild the optimiser and discard its state at the start of this phase. Set it when switching optimiser, and when a horizon change has made the accumulated momentum wrong. |
 | `penalty_weight` | `float | None` | Override of ``Objective.penalty_weight`` for this phase. ``None`` (the default) uses the objective's weight; ``0.0`` switches the bound penalty off for the phase. |
+| `segments` | `int` | Multiple shooting: split each trajectory into this many segments, counted in samples, each started from a trainable state (a node). ``1``, the default, is single shooting. The last phase of a schedule must be single shooting, and a change in ``segments`` resets the optimiser, because the nodes change shape. A bucket with too few samples uses fewer segments. See `jaxhybridmodels.training.shooting`. |
+| `continuity_weight` | `float` | Weight of the gap term, ``mean((gap / scale)^2)`` over every join and state, in a segmented phase. The gap term has no units; a plain ``"mse"`` loss is in the units of the data, so the balance between the two depends on the data's scale. Ignored when ``segments=1``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L93)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L101)</small>
 
 ---
 
@@ -223,7 +227,7 @@ A solver error or a non-finite loss after the first step ends the run: it
 warns and returns the best parameters so far, with ``stop_reason``
 ``"diverged"``. On the first step there is nothing to return, so it raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L898)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1138)</small>
 
 ---
 

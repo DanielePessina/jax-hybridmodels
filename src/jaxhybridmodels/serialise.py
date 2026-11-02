@@ -325,6 +325,7 @@ def _build_history(raw: dict[str, Any] | None) -> FitHistory:
         validation_loss=tuple(_decode_float(v) for v in raw.get("validation_loss", ())),
         failed_candidates=tuple(int(v) for v in raw.get("failed_candidates", ())),
         tournament_scores=tuple(_decode_float(v) for v in raw.get("tournament_scores", ())),
+        continuity=tuple(_decode_float(v) for v in raw.get("continuity", ())),
     )
 
 
