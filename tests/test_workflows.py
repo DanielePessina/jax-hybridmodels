@@ -741,6 +741,36 @@ def test_evosax_validation_selects_a_generation(plain_data):
     assert result.best_step == int(np.argmin(result.history.validation_loss))
 
 
+def test_evosax_ranks_failed_solves_last_and_keeps_searching(plain_data, tmp_path):
+    # A wide log box puts some candidates at rates of thousands, which an
+    # explicit solver cannot finish in 16 steps. Under the default throw=True,
+    # each of those would have ended the run.
+    model = hm.HybridModel.from_vector_field(
+        vector_field=plain_field,
+        predictors={"rate": hm.Parameter(0.3, bounds=(0.05, 5000.0), warp="log")},
+        state_to_output=lambda state: state,
+        output_channel_names=CHANNELS,
+        solver=hm.SolverConfig(max_steps=16),
+    )
+    ui = RecordingUI()
+    config = hm.EvosaxTrainingConfig(
+        population_size=16, steps=20, init="uniform_box", init_box_extent=4.0
+    )
+    result = model.fit(plain_data, config, key=jr.key(0), ui=ui)
+
+    assert result.stop_reason == "budget_exhausted"
+    assert len(result.history.failed_candidates) == 20
+    assert result.history.failed_candidates[0] > 0
+    assert fitted_rate(result) == pytest.approx(TRUE_RATE, abs=0.15)
+    warnings = [e["text"] for e in events_named(ui, "on_message") if e["level"] == "warning"]
+    assert len(warnings) == 1 and "rank last" in warnings[0]
+    assert "candidates failed to solve" in result.summary()
+
+    hm.save(tmp_path / "run", result)
+    loaded = hm.load(tmp_path / "run", like=model)
+    assert loaded.history.failed_candidates == result.history.failed_candidates
+
+
 # ---------------------------------------------------------------------------
 # Ensembles
 # ---------------------------------------------------------------------------
@@ -1289,7 +1319,16 @@ def stiff_experiments() -> tuple[hm.Dataset, hm.SolverConfig]:
     return dataset, hm.SolverConfig(rtol=1e-5, atol=1e-7, dt0=0.01, max_steps=20000)
 
 
-def test_a_failed_first_step_names_the_experiment_and_a_better_solver():
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param(hm.OptaxTrainingConfig(steps=2, lr=1e-3), id="optax"),
+        # Evosax solves its population with throw off, so it must recover the
+        # solver's own error to give the same advice.
+        pytest.param(hm.EvosaxTrainingConfig(population_size=4, steps=2), id="evosax"),
+    ],
+)
+def test_a_failed_first_step_names_the_experiment_and_a_better_solver(config):
     dataset, solver = stiff_experiments()
     model = hm.HybridModel.from_vector_field(
         vector_field=stiff_field,
@@ -1299,7 +1338,7 @@ def test_a_failed_first_step_names_the_experiment_and_a_better_solver():
         solver=solver,
     )
     with pytest.raises(eqx.EquinoxRuntimeError) as caught:
-        model.fit(dataset, hm.OptaxTrainingConfig(steps=2, lr=1e-3), key=jr.key(0), verbose=False)
+        model.fit(dataset, config, key=jr.key(0), verbose=False)
     note = " ".join(caught.value.__notes__)
     assert "Failing: stiff." in note
     assert "gentle" not in note

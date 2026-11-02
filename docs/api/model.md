@@ -294,7 +294,7 @@ phase short, ``"diverged"`` when a solver error or a non-finite loss ended
 the run (it warned, and the model holds the best parameters so far), else
 ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L159)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L164)</small>
 
 <a id="fitresultsummary"></a>
 
@@ -317,7 +317,7 @@ charge it: the outer 5% of its box for the default sigmoid. The network
 figure covers the whole declared box, including inputs no experiment
 reached, so a large share can be harmless if the data never goes there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L188)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L193)</small>
 
 ---
 
@@ -333,6 +333,7 @@ FitHistory(
     penalty: 'tuple[float, ...]' = (),
     phase: 'tuple[int, ...]' = (),
     validation_loss: 'tuple[float, ...]' = (),
+    failed_candidates: 'tuple[int, ...]' = (),
 ) -> None
 ```
 
@@ -352,6 +353,10 @@ it. ``penalty`` and ``phase`` stay empty.
 ``validation_loss`` is the full-horizon data loss on the validation set,
 present when one was given: per step for Optax, and for each
 generation's best individual for Evosax.
+
+``failed_candidates`` is Evosax only: how many candidates in each
+generation had a non-finite fitness, usually a failed solve. They rank
+last and the search goes on.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L133)</small>
 

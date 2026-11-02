@@ -265,7 +265,7 @@ no phases: the run is a flat loop, so every field is a scalar.
 | `sigma_init` |  | Initial CMA-ES step size. Used directly by ``"warm"`` and as the prior step size for the box-init modes. CMA-ES adapts it after the first ``tell``. |
 | `log_every` |  | UI heartbeat cadence. Honoured only by the Rich UIs; the silent and recording UIs see every generation. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L127)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L138)</small>
 
 ---
 
@@ -303,6 +303,10 @@ Each individual's fitness is the bucket-averaged data loss plus any
 trajectory penalty plus ``objective.penalty_weight`` times the bound
 penalty, since evosax ranks by one scalar.
 
+A candidate whose solve fails ranks last instead of failing the
+generation, and ``history.failed_candidates`` counts them; see the
+module docstring.
+
 ``history.loss`` is the best fitness so far after each generation, so
 it is monotone non-increasing; Optax records the raw per-step loss
 instead, so the two series mean different things. Without
@@ -311,7 +315,7 @@ candidate seen in any generation, the warm-up evaluation of the input
 included. With it, each generation's best is scored on the validation
 set and the returned model is the one that scored lowest there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L360)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L409)</small>
 
 ---
 
@@ -331,4 +335,4 @@ After registration, ``EvosaxTrainingConfig(algorithm=name)`` builds that
 strategy. Re-registering an existing name overwrites without warning.
 Mirrors [`register_solver`](/api/solver#register_solver).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L117)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L128)</small>

@@ -148,12 +148,17 @@ class FitHistory:
     ``validation_loss`` is the full-horizon data loss on the validation set,
     present when one was given: per step for Optax, and for each
     generation's best individual for Evosax.
+
+    ``failed_candidates`` is Evosax only: how many candidates in each
+    generation had a non-finite fitness, usually a failed solve. They rank
+    last and the search goes on.
     """
 
     loss: tuple[float, ...] = ()
     penalty: tuple[float, ...] = ()
     phase: tuple[int, ...] = ()
     validation_loss: tuple[float, ...] = ()
+    failed_candidates: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, repr=False)

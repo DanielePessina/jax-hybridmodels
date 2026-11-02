@@ -45,7 +45,18 @@ result = model.fit(experiments, config, objective=objective, key=key)
 ```
 
 `loss` takes a name from [`LOSS_REGISTRY`](/api/losses#loss_registry) or a
-callable `(pred_obs: [N, T, D], bp: BucketPayload) -> scalar`.
+callable `(pred_obs: [N, T, D], bp: BucketPayload) -> scalar`. To use a callable
+with `channel_weights` other than 1, give it the keywords the built-in losses
+take, `(pred_obs, bp, *, channel_idx=None, channel_weights=None)`, and apply
+them in its own reduction. A loss that wraps a built-in one passes them on:
+
+```python
+def my_loss(pred_obs, bp, *, channel_idx=None, channel_weights=None):
+    data = hm.losses.bal_mle(
+        pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights
+    )
+    return data + my_extra_term(pred_obs, bp)
+```
 
 `channel_weights` keyed by channel name scores only the channels it names,
 so `{"concentration": 1.0}` fits one channel of several. A sequence gives
@@ -53,7 +64,14 @@ one weight per output channel, in `output_channel_names` order. Names are
 checked against the data when training starts, and an unknown one raises
 before anything compiles. A named channel with weight `0.0` adds nothing
 but still counts in the loss's denominator, which scales the loss down;
-leave the name out to drop the channel. [Extending](/guide/extending#losses) covers how
+leave the name out to drop the channel.
+
+The `bal_*` losses average each channel over time within an experiment before
+summing channels, so a channel with one point per run counts as much as one
+with ten. The `mle` losses divide by each point's variance, which handles
+channels on different scales. A weight is left for a model that cannot fit
+every channel at once: raising one channel's weight trades fit on the others,
+and the best value is found by trying a few. [Extending](/guide/extending#losses) covers how
 weights combine with a custom loss.
 
 `penalty_weight`, `penalty_points` and `penalty_fn` set the bound penalty,
@@ -217,10 +235,15 @@ hypercube over that box, which covers it more evenly with a small
 population.
 
 The search runs on latents, so `Parameter` and `BoundedPredictor` values
-stay inside their bounds without any constraint handling. There is no
-per-candidate error handling: one candidate that hits a Diffrax error or a
-non-finite loss fails the generation. Keep `sigma_init` and
-`init_box_extent` conservative.
+stay inside their bounds without any constraint handling.
+
+A wide box often holds candidates the solver cannot finish, such as a stiff
+one under an explicit solver. Such a candidate ranks last in its generation
+and the search goes on. `result.history.failed_candidates` counts them per
+generation, the progress display notes the first one, and `summary()` gives the
+total. Only a generation where every candidate fails ends the run, with the
+best parameters so far. A `simulate_fn` that calls `diffrax.diffeqsolve`
+itself must pass `throw=solver.throw`, or a failed solve still ends the run.
 
 ### Evosax, then Optax
 
