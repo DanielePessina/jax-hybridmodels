@@ -37,6 +37,7 @@ quantity uniformly (a quantity is either a covariate or
 
 ```python
 step_profile(
+    *,
     before: 'ArrayLike',
     after: 'ArrayLike',
     jump_at: 'ArrayLike',
@@ -61,6 +62,7 @@ place the jump at a known event time or accept a short transient.
 
 ```python
 ramp_profile(
+    *,
     t0: 'ArrayLike',
     t1: 'ArrayLike',
     v0: 'ArrayLike',

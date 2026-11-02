@@ -268,10 +268,9 @@ def main() -> None:
             hm.TrainingPhase(steps=args.steps // 2, lr=5e-3, horizon=0.4),
             hm.TrainingPhase(steps=args.steps, lr=1e-3),
         ),
-        verbose=False,
     )
     print(f"\n[fit] {list(predictors)} with {args.inner!r} inner networks, two phases")
-    result = model.fit(dataset, config, objective=objective, key=k_train)
+    result = model.fit(dataset, config, objective=objective, key=k_train, verbose=False)
     # endregion fit
     trained = result.model.predictors
     loss, phase = result.history.loss, result.history.phase

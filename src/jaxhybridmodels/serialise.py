@@ -456,6 +456,9 @@ def _build_training_config(raw: dict[str, Any] | None) -> Any:
     if _contains_serialised_callable(fields):
         return fields
     cls = _CONFIG_TYPES[raw["kind"]]
+    # 0.2 kept the display switch on the config. It never affected a result,
+    # so dropping it cannot change the configuration a run was trained with.
+    fields = {name: value for name, value in fields.items() if name != "verbose"}
     kwargs = _filter_dataclass_kwargs(cls, fields)
     kwargs = _coerce_tuple_fields(cls, kwargs)
     if "phases" in kwargs:
@@ -522,7 +525,7 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
             stacklevel=2,
         )
 
-    model = like._with_predictors(
+    model = like.with_predictors(
         load_predictors(directory / _PREDICTORS_FILENAME, like=like.predictors)
     )
     return SavedRun(

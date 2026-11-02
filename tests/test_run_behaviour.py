@@ -33,7 +33,6 @@ from _models import (
     network_model,
     parameter_model,
     parameter_predictors,
-    quiet,
     simulate_parameter,
 )
 from jax import Array
@@ -162,13 +161,14 @@ TRAJECTORY = Objective(trajectory_penalty_fn=accumulated_penalty, trajectory_pen
 
 
 def test_evosax_ranks_by_the_trajectory_penalty():
-    config = EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5, verbose=False)
+    config = EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5)
     result = train_with_evosax(
         embedded_model(latent_predictors(5.0)),
         embedded_dataset(),
         config,
         objective=TRAJECTORY,
         key=jr.key(0),
+        verbose=False,
     )
     assert len(result.history.loss) == 10
     assert float(result.model.predictors[0].inner.c) < 5.0
@@ -178,11 +178,12 @@ def test_a_probe_alone_drives_every_bootstrap_member():
     # The probe has no observations, so the penalty is the only gradient.
     members = embedded_model(latent_predictors(5.0)).fit_ensemble(
         embedded_dataset(probe=True),
-        quiet(steps=10, lr=1e-1, restore_best=False),
+        hm.OptaxTrainingConfig(steps=10, lr=1e-1, restore_best=False),
         objective=TRAJECTORY,
         n_members=2,
         bootstrap=True,
         key=jr.key(0),
+        verbose=False,
     )
     assert len(members) == 2
     for member in members:
@@ -220,9 +221,10 @@ def test_parallel_saturation_penalty_moves_the_latent_through_the_trainer():
     result = train_with_optax(
         model,
         dataset,
-        quiet(steps=20, lr=1e-1, restore_best=False),
+        hm.OptaxTrainingConfig(steps=20, lr=1e-1, restore_best=False),
         objective=Objective(trajectory_penalty_fn=saturation, trajectory_penalty_weight=1.0),
         key=jr.key(0),
+        verbose=False,
     )
     assert float(result.model.predictors[0].inner.c) < 8.0
 
@@ -268,7 +270,11 @@ def test_patience_stops_early_and_weak_scalars_train(decay_data, capsys):
     predictors = {**parameter_predictors(), "weak": WeakScale(jnp.asarray(1.0))}
     assert jax.typeof(predictors["weak"].scale).weak_type
     result = train_with_optax(
-        make_model(predictors), decay_data, quiet(steps=20, lr=0.0, patience=3), key=jr.key(0)
+        make_model(predictors),
+        decay_data,
+        hm.OptaxTrainingConfig(steps=20, lr=0.0, patience=3),
+        key=jr.key(0),
+        verbose=False,
     )
     assert len(result.history.loss) == 4
     assert result.stop_reason == "patience"
@@ -286,9 +292,14 @@ def curriculum(temp_data):
     """
     short = TrainingPhase(10, lr=0.1, horizon=0.2)
     both = parameter_model().fit(
-        temp_data, quiet(phases=(short, TrainingPhase(15, lr=0.05))), key=jr.key(0)
+        temp_data,
+        hm.OptaxTrainingConfig(phases=(short, TrainingPhase(15, lr=0.05))),
+        key=jr.key(0),
+        verbose=False,
     )
-    short_only = parameter_model().fit(temp_data, quiet(phases=(short,)), key=jr.key(0))
+    short_only = parameter_model().fit(
+        temp_data, hm.OptaxTrainingConfig(phases=(short,)), key=jr.key(0), verbose=False
+    )
     return both, short_only
 
 
@@ -302,21 +313,22 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     raw = optax.adam(1e-2)
     result = parameter_model().fit(
         decay_data,
-        quiet(
+        hm.OptaxTrainingConfig(
             phases=(
                 TrainingPhase(3, lr=0.05),
                 TrainingPhase(3, lr=1e-2, optimizer=raw, reset_optimizer=True),
             )
         ),
         key=jr.key(0),
+        verbose=False,
     )
     assert len(result.history.loss) == 6 and rate_of(result.model) != 0.3
 
-    refused = quiet(
+    refused = hm.OptaxTrainingConfig(
         phases=(TrainingPhase(2, lr=1e-3, optimizer=raw), TrainingPhase(2, lr=1e-2, optimizer=raw))
     )
     with pytest.raises(ValueError, match="cannot be re-hyperparametrised"):
-        parameter_model().fit(decay_data, refused, key=jr.key(0))
+        parameter_model().fit(decay_data, refused, key=jr.key(0), verbose=False)
 
 
 def test_tournament_falls_back_when_every_attempt_fails(decay_data):
@@ -324,7 +336,10 @@ def test_tournament_falls_back_when_every_attempt_fails(decay_data):
     with pytest.warns(RuntimeWarning, match="all attempts failed"):
         with pytest.raises(FloatingPointError, match="non-finite"):
             make_model(parameter_predictors(), nan_simulate).fit(
-                decay_data, quiet(steps=1, tournament_attempts=2, tournament_steps=1), key=jr.key(0)
+                decay_data,
+                hm.OptaxTrainingConfig(steps=1, tournament_attempts=2, tournament_steps=1),
+                key=jr.key(0),
+                verbose=False,
             )
 
 
@@ -349,7 +364,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
             tournament_steps=0,
             tournament_lr=1e-3,
             key=jr.key(0),
-            length_mask_fraction=jnp.asarray(1.0),
+            horizon=jnp.asarray(1.0),
             top_k=1,
         )
     assert ranked[0][0] == float("inf")
@@ -403,7 +418,7 @@ def test_failed_seed_ensemble_raises_and_closes_the_bracket(decay_data):
     with pytest.raises(RuntimeError, match="every seed failed"):
         make_model(parameter_predictors(), nan_simulate).fit_ensemble(
             decay_data,
-            quiet(steps=2, tournament_steps=1),
+            hm.OptaxTrainingConfig(steps=2, tournament_steps=1),
             key=jr.key(0),
             n_members=1,
             n_seeds=2,
@@ -429,13 +444,24 @@ def failing_after_the_shape_check() -> Any:
 def train_with(trainer: str, model: hm.HybridModel, data: Dataset, **kwargs: Any) -> Any:
     """Run one of the four training entry points with two cheap steps."""
     if trainer == "optax":
-        return train_with_optax(model, data, quiet(steps=2), **kwargs)
+        return train_with_optax(
+            model, data, hm.OptaxTrainingConfig(steps=2), **kwargs, verbose=False
+        )
     if trainer == "seed":
-        return model.fit_ensemble(data, quiet(steps=2), n_members=2, **kwargs)
+        return model.fit_ensemble(
+            data, hm.OptaxTrainingConfig(steps=2), n_members=2, **kwargs, verbose=False
+        )
     if trainer == "bootstrap":
-        return model.fit_ensemble(data, quiet(steps=2), n_members=2, bootstrap=True, **kwargs)
-    config = EvosaxTrainingConfig(population_size=4, steps=2, verbose=False)
-    return train_with_evosax(model, data, config, **kwargs)
+        return model.fit_ensemble(
+            data,
+            hm.OptaxTrainingConfig(steps=2),
+            n_members=2,
+            bootstrap=True,
+            **kwargs,
+            verbose=False,
+        )
+    config = EvosaxTrainingConfig(population_size=4, steps=2)
+    return train_with_evosax(model, data, config, **kwargs, verbose=False)
 
 
 @pytest.mark.parametrize("trainer", ["optax", "seed", "bootstrap", "evosax"])
@@ -552,9 +578,10 @@ def test_channel_weights_by_name_fit_only_the_named_channels(quadratic_data):
     result = train_with_optax(
         quadratic_model(),
         quadratic_data,
-        quiet(steps=60, lr=0.2),
+        hm.OptaxTrainingConfig(steps=60, lr=0.2),
         objective=Objective(channel_weights={"c0": 1.0, "c1": 2.0}),
         key=jr.key(0),
+        verbose=False,
     )
     value = result.model.predictors.value
     assert float(jnp.abs(value[:2] - THETA_STAR[:2]).max()) < 0.2
@@ -583,8 +610,10 @@ def _rate(model: hm.HybridModel) -> float:
 def validation_fit(decay_data):
     """Validation data generated at the starting rate, so training only hurts it."""
     validation = decay_dataset(lambda temp: 0.3)
-    config = quiet(steps=20, lr=0.03, patience=2)
-    return parameter_model().fit(decay_data, config, validation=validation, key=jr.key(2))
+    config = hm.OptaxTrainingConfig(steps=20, lr=0.03, patience=2)
+    return parameter_model().fit(
+        decay_data, config, validation=validation, key=jr.key(2), verbose=False
+    )
 
 
 def test_stop_reason_follows_the_final_phase(decay_data, monkeypatch):
@@ -807,8 +836,11 @@ def test_lr_schedule_counts_from_the_phase_start(decay_data):
     held = optax.join_schedules([optax.constant_schedule(0.0), optax.constant_schedule(0.1)], [3])
     result = parameter_model().fit(
         decay_data,
-        quiet(phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=held)), restore_best=False),
+        hm.OptaxTrainingConfig(
+            phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=held)), restore_best=False
+        ),
         key=jr.key(0),
+        verbose=False,
     )
     history = result.history.loss
     assert len(set(history[:9])) == 1
@@ -852,7 +884,7 @@ def _metadata(run_dir: Path) -> dict[str, Any]:
 
 def test_an_evosax_config_reloads_as_its_own_type(tmp_path):
     """The config's kind is recorded, so an Evosax config comes back as one."""
-    evosax = hm.EvosaxTrainingConfig(population_size=8, steps=2, verbose=False)
+    evosax = hm.EvosaxTrainingConfig(population_size=8, steps=2)
     hm.save(tmp_path, parameter_model(), config=evosax)
     assert _metadata(tmp_path)["config"]["kind"] == "evosax"
     assert hm.load(tmp_path, like=parameter_model()).config == evosax

@@ -13,6 +13,7 @@ lengths, so masks and bucket dispatch are always exercised.
 from __future__ import annotations
 
 import itertools
+import json
 from typing import Any, cast
 
 import diffrax
@@ -175,7 +176,6 @@ MECHANISTIC_CONFIG = hm.OptaxTrainingConfig(
         hm.TrainingPhase(40, lr=optax.linear_schedule(0.1, 0.02, 40), horizon=0.5),
         hm.TrainingPhase(60, lr=0.05, reset_optimizer=True),
     ),
-    verbose=False,
 )
 
 
@@ -425,14 +425,15 @@ def test_trajectory_penalty_is_charged_on_top_of_the_data_loss(mechanistic_data)
         del bp
         return jnp.mean(state[..., 1])
 
-    one_step = hm.OptaxTrainingConfig(steps=1, lr=1e-3, verbose=False)
+    one_step = hm.OptaxTrainingConfig(steps=1, lr=1e-3)
     model = mechanistic_model()
-    plain = model.fit(mechanistic_data, one_step, key=jr.key(0))
+    plain = model.fit(mechanistic_data, one_step, key=jr.key(0), verbose=False)
     charged = model.fit(
         mechanistic_data,
         one_step,
         objective=hm.Objective(trajectory_penalty_fn=charge, trajectory_penalty_weight=0.25),
         key=jr.key(0),
+        verbose=False,
     )
     by_bucket = [
         float(
@@ -453,16 +454,17 @@ def test_trajectory_penalty_is_charged_on_top_of_the_data_loss(mechanistic_data)
 @pytest.fixture(scope="session")
 def overshoot(mechanistic_data):
     """A learning rate far too large from a good start, so the best step is an early one."""
-    config = hm.OptaxTrainingConfig(steps=60, lr=0.6, patience=5, verbose=False)
+    config = hm.OptaxTrainingConfig(steps=60, lr=0.6, patience=5)
     model = mechanistic_model(rate=TRUE_RATE + 0.01)
     data = hm.make_dataset(
         experiments(extent=feed_integral, one_length=True), output_channel_names=CHANNELS
     )
-    keep_best = model.fit(data, config, key=jr.key(0))
+    keep_best = model.fit(data, config, key=jr.key(0), verbose=False)
     keep_last = model.fit(
         data,
-        hm.OptaxTrainingConfig(steps=5, lr=0.6, restore_best=False, verbose=False),
+        hm.OptaxTrainingConfig(steps=5, lr=0.6, restore_best=False),
         key=jr.key(0),
+        verbose=False,
     )
     return keep_best, keep_last, data
 
@@ -474,7 +476,7 @@ def test_patience_stops_early_and_the_best_step_labels_the_model(overshoot):
     assert keep_best.best_step == int(np.argmin(keep_best.history.loss))
     # One more step at lr=0 measures the returned model; it must match its label.
     remeasured = keep_best.model.fit(
-        data, hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False), key=jr.key(0)
+        data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
     )
     assert remeasured.history.loss[0] == pytest.approx(keep_best.final_loss, rel=1e-5)
 
@@ -512,7 +514,6 @@ def network_config() -> hm.OptaxTrainingConfig:
         tournament_attempts=3,
         tournament_steps=5,
         tournament_lr=1e-3,
-        verbose=False,
     )
 
 
@@ -593,7 +594,6 @@ def saturated_fit(network_splits, network_objective):
     objective = hm.Objective(penalty_weight=100.0, penalty_points=network_objective.penalty_points)
     config = hm.OptaxTrainingConfig(
         phases=(hm.TrainingPhase(10, lr=0.05, penalty_weight=0.0), hm.TrainingPhase(20, lr=0.05)),
-        verbose=False,
     )
     result = pinned.fit(network_splits[0], config, objective=objective, key=jr.key(2), ui=ui)
     return result, ui
@@ -638,9 +638,8 @@ def tournaments(plain_data):
             tournament_attempts=attempts,
             tournament_steps=3,
             tournament_lr=0.01,
-            verbose=False,
         )
-        return plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(9))
+        return plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(9), verbose=False)
 
     return run(2), run(8)
 
@@ -657,20 +656,18 @@ def test_validation_drives_patience_as_well_as_the_returned_step(plain_data):
     # An unreachable validation target: its loss stops improving long before the
     # training loss does, so patience fires on it.
     far = hm.make_dataset(experiments(rate=lambda temp: 2.5), output_channel_names=CHANNELS)
-    config = hm.OptaxTrainingConfig(steps=200, lr=0.05, patience=5, verbose=False)
+    config = hm.OptaxTrainingConfig(steps=200, lr=0.05, patience=5)
     result = plain_model(TRUE_RATE).fit(
-        plain_data, config, validation=far, freeze="frozen", key=jr.key(0)
+        plain_data, config, validation=far, freeze="frozen", key=jr.key(0), verbose=False
     )
     assert result.stop_reason == "patience" and len(result.history.loss) < 200
     assert result.best_step == int(np.argmin(result.history.validation_loss))
 
 
 def test_the_same_key_reproduces_a_run_and_another_key_does_not(plain_data):
-    config = hm.OptaxTrainingConfig(
-        steps=3, lr=0.05, tournament_attempts=2, tournament_steps=2, verbose=False
-    )
+    config = hm.OptaxTrainingConfig(steps=3, lr=0.05, tournament_attempts=2, tournament_steps=2)
     first, second, other = (
-        plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(seed))
+        plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(seed), verbose=False)
         for seed in (11, 11, 12)
     )
     assert first.history == second.history
@@ -696,8 +693,8 @@ def plain_data() -> hm.Dataset:
 @pytest.fixture(scope="session")
 def plain_start_loss(plain_data) -> float:
     """The loss before any training, from a step that cannot move the parameters."""
-    config = hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False)
-    return plain_model().fit(plain_data, config, key=jr.key(0)).history.loss[0]
+    config = hm.OptaxTrainingConfig(steps=1, lr=0.0)
+    return plain_model().fit(plain_data, config, key=jr.key(0), verbose=False).history.loss[0]
 
 
 @pytest.fixture(scope="session")
@@ -705,7 +702,7 @@ def evolved(plain_data):
     runs = {}
     for name, settings in EVOSAX_RUNS.items():
         ui = RecordingUI()
-        config = hm.EvosaxTrainingConfig(population_size=16, steps=25, verbose=False, **settings)
+        config = hm.EvosaxTrainingConfig(population_size=16, steps=25, **settings)
         result = plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(3), ui=ui)
         runs[name] = (result, ui)
     return runs
@@ -732,10 +729,11 @@ def test_evosax_keeps_frozen_leaves(evolved, run):
 def test_evosax_validation_selects_a_generation(plain_data):
     result = plain_model().fit(
         plain_data,
-        hm.EvosaxTrainingConfig(population_size=8, steps=8, sigma_init=0.5, verbose=False),
+        hm.EvosaxTrainingConfig(population_size=8, steps=8, sigma_init=0.5),
         validation=plain_data,
         freeze="frozen",
         key=jr.key(4),
+        verbose=False,
     )
     assert len(result.history.validation_loss) == 8
     assert result.best_step == int(np.argmin(result.history.validation_loss))
@@ -748,16 +746,20 @@ def test_evosax_validation_selects_a_generation(plain_data):
 
 @pytest.fixture(scope="session")
 def ensembles(plain_data):
-    config = hm.OptaxTrainingConfig(
-        steps=40, lr=0.05, tournament_steps=5, tournament_lr=0.05, verbose=False
-    )
+    config = hm.OptaxTrainingConfig(steps=40, lr=0.05, tournament_steps=5, tournament_lr=0.05)
     model = plain_model()
     ui = RecordingUI()
     seeds = model.fit_ensemble(
         plain_data, config, n_members=2, n_seeds=3, freeze="frozen", key=jr.key(5), ui=ui
     )
     bootstrap = model.fit_ensemble(
-        plain_data, config, n_members=2, bootstrap=True, freeze="frozen", key=jr.key(6)
+        plain_data,
+        config,
+        n_members=2,
+        bootstrap=True,
+        freeze="frozen",
+        key=jr.key(6),
+        verbose=False,
     )
     return seeds, bootstrap, ui
 
@@ -793,11 +795,17 @@ def test_predict_ensemble_is_the_member_mean_with_its_spread(ensembles, plain_da
 
 @pytest.fixture(scope="session")
 def validated_ensemble(plain_data):
-    config = hm.OptaxTrainingConfig(steps=20, lr=0.05, verbose=False)
+    config = hm.OptaxTrainingConfig(steps=20, lr=0.05)
     # Scored on a set with a different bucket layout than the training data.
     validation = hm.make_dataset(experiments()[-3:], output_channel_names=CHANNELS)
     return plain_model().fit_ensemble(
-        plain_data, config, n_members=3, freeze="frozen", validation=validation, key=jr.key(7)
+        plain_data,
+        config,
+        n_members=3,
+        freeze="frozen",
+        validation=validation,
+        key=jr.key(7),
+        verbose=False,
     )
 
 
@@ -868,8 +876,8 @@ def capped_fit(capped_data):
         output_channel_names=CHANNELS,
         solver=SOLVER,
     )
-    config = hm.OptaxTrainingConfig(steps=80, lr=0.05, verbose=False)
-    return model.fit(capped_data, config, freeze="frozen", key=jr.key(0)), traces
+    config = hm.OptaxTrainingConfig(steps=80, lr=0.05)
+    return model.fit(capped_data, config, freeze="frozen", key=jr.key(0), verbose=False), traces
 
 
 def test_capping_limits_the_buckets_and_keeps_the_data(capped_data):
@@ -1048,7 +1056,7 @@ def fast_reaction_data() -> hm.Dataset:
 @pytest.fixture(scope="session", params=["solver-error", "nan-loss"])
 def failed(request, fast_reaction_data):
     ui = RecordingUI()
-    config = hm.OptaxTrainingConfig(steps=300, lr=0.1, verbose=False)
+    config = hm.OptaxTrainingConfig(steps=300, lr=0.1)
     with pytest.warns(RuntimeWarning, match="diverged") as caught:
         result = failing_model(request.param).fit(fast_reaction_data, config, key=jr.key(0), ui=ui)
     return result, ui, str(caught[0].message), request.param
@@ -1084,13 +1092,15 @@ def test_a_failed_fit_saves_and_reloads(failed, tmp_path):
 
 
 def test_restore_best_off_returns_the_last_measured_step(fast_reaction_data):
-    config = hm.OptaxTrainingConfig(steps=300, lr=0.1, restore_best=False, verbose=False)
+    config = hm.OptaxTrainingConfig(steps=300, lr=0.1, restore_best=False)
     with pytest.warns(RuntimeWarning, match="diverged"):
-        result = failing_model("nan-loss").fit(fast_reaction_data, config, key=jr.key(0))
+        result = failing_model("nan-loss").fit(
+            fast_reaction_data, config, key=jr.key(0), verbose=False
+        )
     assert result.best_step is None
     assert fitted_rate(result) < FAILURE_LIMIT
     remeasured = result.model.fit(
-        fast_reaction_data, hm.OptaxTrainingConfig(steps=1, lr=0.0, verbose=False), key=jr.key(0)
+        fast_reaction_data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
     )
     assert remeasured.history.loss[0] == pytest.approx(result.history.loss[-1], rel=1e-4)
 
@@ -1101,10 +1111,11 @@ def test_a_failure_right_after_a_horizon_change_returns_a_measured_step(fast_rea
     # fails on its first step and the only measured parameters are the start.
     config = hm.OptaxTrainingConfig(
         phases=(hm.TrainingPhase(1, lr=3.0, horizon=0.5), hm.TrainingPhase(5, lr=0.1)),
-        verbose=False,
     )
     with pytest.warns(RuntimeWarning, match="diverged"):
-        result = failing_model("nan-loss").fit(fast_reaction_data, config, key=jr.key(0))
+        result = failing_model("nan-loss").fit(
+            fast_reaction_data, config, key=jr.key(0), verbose=False
+        )
     assert result.stop_reason == "diverged"
     assert result.best_step is None
     assert len(result.history.loss) == 1
@@ -1120,8 +1131,9 @@ def test_a_failure_on_the_first_step_raises(fast_reaction_data, mode):
     with pytest.raises((FloatingPointError, eqx.EquinoxRuntimeError)):
         model.fit(
             fast_reaction_data,
-            hm.OptaxTrainingConfig(steps=5, lr=0.1, verbose=False),
+            hm.OptaxTrainingConfig(steps=5, lr=0.1),
             key=jr.key(0),
+            verbose=False,
         )
 
 
@@ -1151,13 +1163,15 @@ def test_evosax_returns_its_best_when_a_later_generation_fails(
         return PoisonedStrategy(strategy, poison_from), params
 
     monkeypatch.setattr(evosax_module, "_build_strategy", poisoned)
-    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.1, verbose=False)
+    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.1)
     if not reaches_history:
         with pytest.raises((FloatingPointError, eqx.EquinoxRuntimeError)):
-            plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(0))
+            plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(0), verbose=False)
         return
     with pytest.warns(RuntimeWarning, match="diverged"):
-        result = plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(0))
+        result = plain_model().fit(
+            plain_data, config, freeze="frozen", key=jr.key(0), verbose=False
+        )
     assert result.stop_reason == "diverged"
     assert len(result.history.loss) == poison_from
     assert np.isfinite(float(result.model.predictors["rate"].value))
@@ -1198,6 +1212,46 @@ def test_a_full_run_reloads_and_predicts_bit_exactly(
         np.testing.assert_array_equal(before[exp_id].outputs["a"], after[exp_id].outputs["a"])
 
 
+def test_a_run_saved_with_the_old_verbose_field_still_loads(tmp_path):
+    """0.2 wrote ``verbose`` into a saved config; ``load`` must ignore it."""
+    model = mechanistic_model()
+    config = hm.OptaxTrainingConfig(steps=3, lr=1e-3)
+    hm.save(tmp_path, model, config=config)
+    metadata = tmp_path / "metadata.json"
+    raw = json.loads(metadata.read_text())
+    raw["config"]["fields"]["verbose"] = False
+    metadata.write_text(json.dumps(raw))
+    assert hm.load(tmp_path, like=model).config == config
+
+
+def test_short_form_warps_build_the_same_scalers_as_explicit_ones():
+    """``input_warp`` and ``output_warp`` are shorthand for a warped ``BoundScaler``."""
+    inner = hm.MLPPredictor(in_size=1, out_size=1, width_size=4, depth=1, key=jr.key(0))
+    short = hm.BoundedPredictor(
+        inner=inner,
+        input_bounds=(0.1, 10.0),
+        input_warp="log",
+        output_bounds=(1e-6, 1e-2),
+        output_warp="log10",
+    )
+    long = hm.BoundedPredictor(
+        inner=inner,
+        in_scaler=hm.BoundScaler(((0.1, 10.0),), warp="log"),
+        out_scaler=hm.BoundScaler(((1e-6, 1e-2),), warp="log10"),
+    )
+    np.testing.assert_array_equal(short(jnp.array([2.0])), long(jnp.array([2.0])))
+    assert (short.in_scaler.warp, short.out_scaler.warp) == ("log", "log10")
+
+
+def test_an_array_experiment_needs_no_id():
+    """``make_dataset`` names it, as it does for ``make_experiment``."""
+    anonymous = hm.experiment_from_array(
+        ts=[0.0, 1.0], values=[1.0, 0.5], channel_names=("x",), y0=[1.0]
+    )
+    (named,) = hm.make_dataset([anonymous], output_channel_names=("x",)).experiments
+    assert named.exp_id
+
+
 def test_a_bare_model_saves_without_a_history(tmp_path):
     hm.save(tmp_path, mechanistic_model())
     saved = hm.load(tmp_path, like=mechanistic_model())
@@ -1207,7 +1261,7 @@ def test_a_bare_model_saves_without_a_history(tmp_path):
 def test_callables_come_back_as_their_names(tmp_path):
     """A schedule and a custom loss cannot be rebuilt, so they reload as raw dicts."""
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(1, lr=optax.linear_schedule(0.1, 0.0, 1)),), verbose=False
+        phases=(hm.TrainingPhase(1, lr=optax.linear_schedule(0.1, 0.0, 1)),)
     )
     objective = hm.Objective(loss=masked_mse)
     hm.save(tmp_path, mechanistic_model(), config=config, objective=objective)
@@ -1265,12 +1319,12 @@ def custom_fits():
     train = hm.make_dataset(
         experiments(rate=rate_law, one_length=True), output_channel_names=CHANNELS
     )
-    config = hm.OptaxTrainingConfig(steps=15, lr=0.02, optimizer=optax.adam, verbose=False)
+    config = hm.OptaxTrainingConfig(steps=15, lr=0.02, optimizer=optax.adam)
     fits = {}
     for name, inner in INNERS.items():
         model = network_model(jr.key(0), inner(jr.key(7)))
         fits[name] = model.fit(
-            train, config, objective=hm.Objective(loss=weighted_loss), key=jr.key(8)
+            train, config, objective=hm.Objective(loss=weighted_loss), key=jr.key(8), verbose=False
         )
     return fits
 

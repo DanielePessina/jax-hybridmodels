@@ -15,6 +15,7 @@
 ```python
 annealing_schedule(
     kind: 'str' = 'cosine',
+    *,
     total_epochs: 'int',
     init_value: 'float' = 1.0,
     end_value: 'float' = 0.0,

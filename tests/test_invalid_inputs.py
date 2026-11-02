@@ -34,7 +34,6 @@ from _models import (
     network_predictors,
     parameter_model,
     parameter_predictors,
-    quiet,
     simulate_network,
     simulate_parameter,
 )
@@ -87,7 +86,7 @@ def experiment(**overrides: Any) -> hm.Experiment:
 def fit(model: hm.HybridModel | None = None, **kwargs: Any) -> Any:
     model = parameter_model() if model is None else model
     fields: dict[str, Any] = {"key": jr.key(0), **kwargs}
-    return model.fit(decay_dataset(), quiet(steps=1), **fields)
+    return model.fit(decay_dataset(), hm.OptaxTrainingConfig(steps=1), **fields)
 
 
 def unchecked(value: Any) -> Any:
@@ -197,17 +196,22 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     # Fit
     (
         "one-experiment",
-        lambda: unchecked_model().fit(experiment(), quiet(steps=1), key=jr.key(0)),
+        lambda: unchecked_model().fit(experiment(), hm.OptaxTrainingConfig(steps=1), key=jr.key(0)),
         TypeError,
         "not one Experiment",
     ),
-    ("no-key", lambda: unchecked_model().fit(decay_dataset(), quiet(steps=1)), TypeError, "key"),
+    (
+        "no-key",
+        lambda: unchecked_model().fit(decay_dataset(), hm.OptaxTrainingConfig(steps=1)),
+        TypeError,
+        "key",
+    ),
     ("none-key", lambda: fit(key=None), TypeError, "must be a JAX PRNG key"),
     ("int-key", lambda: fit(key=0), TypeError, "must be a JAX PRNG key"),
     (
         "ensemble-int-key",
         lambda: parameter_model().fit_ensemble(
-            decay_dataset(), quiet(steps=1), key=unchecked(0), n_members=1
+            decay_dataset(), hm.OptaxTrainingConfig(steps=1), key=unchecked(0), n_members=1
         ),
         TypeError,
         "must be a JAX PRNG key",
@@ -271,7 +275,7 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     (
         "ensemble-members",
         lambda: parameter_model().fit_ensemble(
-            decay_dataset(), quiet(steps=1), key=jr.key(0), n_members=3, n_seeds=2
+            decay_dataset(), hm.OptaxTrainingConfig(steps=1), key=jr.key(0), n_members=3, n_seeds=2
         ),
         ValueError,
         "exceeds n_seeds",
@@ -315,7 +319,7 @@ def test_both_kinds_of_jax_key_are_accepted() -> None:
 
 def test_a_lone_tournament_budget_warns() -> None:
     # A legacy key too, to show one reaches a real fit.
-    config = quiet(steps=1, tournament_steps=2)
+    config = hm.OptaxTrainingConfig(steps=1, tournament_steps=2)
     with pytest.warns(RuntimeWarning, match="tournament_attempts=1"):
         parameter_model().fit(decay_dataset(), config, key=jr.PRNGKey(0))
 
@@ -328,7 +332,7 @@ def _missing_covariate(predictors: Any, ts: Any, covariates: Any, y0: Any, solve
 @pytest.mark.parametrize(
     "call",
     [
-        lambda m: m.fit(decay_dataset(), quiet(steps=1), key=jr.key(0)),
+        lambda m: m.fit(decay_dataset(), hm.OptaxTrainingConfig(steps=1), key=jr.key(0)),
         lambda m: m.predict(decay_dataset()),
         lambda m: m.simulate(ts=TS, y0=[1.0], covariates={"temp": 1.0}),
     ],
@@ -564,6 +568,13 @@ def test_configs_reject_stray_positional_arguments():
         hm.OptaxTrainingConfig(5)  # ty: ignore[too-many-positional-arguments]
     with pytest.raises(TypeError):
         hm.EvosaxTrainingConfig("CMA_ES")  # ty: ignore[too-many-positional-arguments]
+
+
+@pytest.mark.parametrize("config", [hm.OptaxTrainingConfig, hm.EvosaxTrainingConfig])
+def test_the_display_switch_is_not_a_config_field(config):
+    """``verbose`` belongs to ``fit``, so old code fails loudly and not silently."""
+    with pytest.raises(TypeError, match="verbose"):
+        config(verbose=False)
 
 
 def test_objective_names_the_mapping_form_for_old_tuple_points():
@@ -952,6 +963,21 @@ def mlp(key: Array) -> MLPPredictor:
             lambda: BoundedPredictor(inner=mlp(jr.key(0)), output_bounds=((0, 1), (0, 1))),
             "output dimension",
         ),
+        (lambda: BoundedPredictor(inner=mlp(jr.key(0)), output_warp="log"), "needs output_bounds"),
+        (
+            lambda: BoundedPredictor(
+                inner=mlp(jr.key(0)),
+                in_scaler=hm.BoundScaler(((1.0, 2.0),) * IN),
+                input_warp="log",
+            ),
+            "needs input_bounds",
+        ),
+        (
+            lambda: BoundedPredictor(
+                inner=mlp(jr.key(0)), output_bounds=(-1.0, 1.0), output_warp="log"
+            ),
+            "positive",
+        ),
         (
             lambda: BoundedPredictor(
                 inner=mlp(jr.key(0)), input_keys=("a",), input_bounds=((0, 1), (0, 1))
@@ -1065,7 +1091,7 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
         train_with_optax(
             make_model(predictors, simulate_pressure),
             temp_data,
-            quiet(steps=2),
+            hm.OptaxTrainingConfig(steps=2),
             objective=Objective(penalty_weight=1e-2),
             key=jr.key(0),
         )
@@ -1075,7 +1101,9 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
         train_with_optax(
             make_model(predictors, simulate_pressure),
             temp_data,
-            quiet(phases=(TrainingPhase(1), TrainingPhase(1, penalty_weight=1e-2))),
+            hm.OptaxTrainingConfig(
+                phases=(TrainingPhase(1), TrainingPhase(1, penalty_weight=1e-2))
+            ),
             key=jr.key(0),
         )
 
@@ -1093,7 +1121,7 @@ def test_malformed_penalty_points_raise(temp_data, points, match):
         train_with_optax(
             make_model(network_predictors(), simulate_network),
             temp_data,
-            quiet(steps=2),
+            hm.OptaxTrainingConfig(steps=2),
             objective=objective,
             key=jr.key(0),
         )
@@ -1186,7 +1214,7 @@ def _rename_channel(metadata: dict[str, Any]) -> None:
 )
 def test_load_rejects_a_mismatched_run(tmp_path, saved, template, edit, match):
     """Loading fails loudly rather than silently mis-reading a different model."""
-    hm.save(tmp_path, make_model(saved()), config=quiet(steps=1))
+    hm.save(tmp_path, make_model(saved()), config=hm.OptaxTrainingConfig(steps=1))
     if edit is not None:
         _edit_metadata(tmp_path, edit)
     with pytest.raises(ValueError, match=match):
@@ -1239,7 +1267,7 @@ def _no_saved_state(predictors, ts, covariates, y0, solver):
     "call,match",
     [
         pytest.param(
-            lambda: _FROZEN.fit(decay_dataset(), quiet(steps=2), key=jr.key(0)),
+            lambda: _FROZEN.fit(decay_dataset(), hm.OptaxTrainingConfig(steps=2), key=jr.key(0)),
             "no trainable",
             id="all-constant",
         ),
@@ -1279,7 +1307,11 @@ def _no_saved_state(predictors, ts, covariates, y0, solver):
         ),
         pytest.param(
             lambda: parameter_model().fit(
-                decay_dataset(), quiet(steps=1), key=jr.key(0), freeze="rate", trainable=True
+                decay_dataset(),
+                hm.OptaxTrainingConfig(steps=1),
+                key=jr.key(0),
+                freeze="rate",
+                trainable=True,
             ),
             "not both",
             id="freeze-and-trainable",
@@ -1325,7 +1357,9 @@ def test_compute_metrics_names_what_it_takes(fitted, decay_data):
 )
 def test_fit_ensemble_rejects_bad_sizes(decay_data, kwargs, error, match):
     with pytest.raises(error, match=match):
-        parameter_model().fit_ensemble(decay_data, quiet(steps=1), key=jr.key(0), **kwargs)
+        parameter_model().fit_ensemble(
+            decay_data, hm.OptaxTrainingConfig(steps=1), key=jr.key(0), **kwargs
+        )
 
 
 def test_predict_ensemble_needs_matching_channels(decay_data):

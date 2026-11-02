@@ -279,10 +279,10 @@ modules.
 
 ## Progress display
 
-`verbose=True` (the default) shows [`RichTrainingUI`](/api/ui#richtrainingui),
-a live terminal dashboard that also reports per-bucket compile time.
-`verbose=False` uses [`SilentUI`](/api/ui#silentui). `ui=` overrides both
-with any object implementing [`TrainingUI`](/api/ui#trainingui). If a run
+`fit(..., verbose=True)`, the default, shows
+[`RichTrainingUI`](/api/ui#richtrainingui), a live terminal dashboard that
+also reports per-bucket compile time. `verbose=False` uses
+[`SilentUI`](/api/ui#silentui). `ui=` overrides both with any object implementing [`TrainingUI`](/api/ui#trainingui). If a run
 raises after the dashboard opens, the UI gets `on_run_end` with a NaN loss
 before the error propagates.
 

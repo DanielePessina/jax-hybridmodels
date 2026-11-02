@@ -18,6 +18,7 @@
 
 ```python
 HybridModel(
+    *,
     predictors: 'Any',
     simulate_fn: 'Callable[..., Any]',
     state_to_output: 'Callable[[Array], Array]',
@@ -56,11 +57,13 @@ fit(
     self,
     data: 'Data',
     config: 'OptaxTrainingConfig | EvosaxTrainingConfig',
+    *,
     key: 'Array',
     objective: 'Objective | None' = None,
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'Any' = None,
+    verbose: 'bool' = True,
     validation: 'Data | None' = None,
 ) -> FitResult
 ```
@@ -77,6 +80,9 @@ entries match: dotted paths (``"rate"``, ``"rate.inner"``),
 predictor classes (``hm.MLPPredictor``), or predicates
 ``(module) -> bool``. ``trainable`` is an explicit mask for full
 control; pass one or the other.
+
+``verbose`` shows a live display of the run, and ``False`` runs
+quietly. ``ui`` is a display of your own and overrides ``verbose``.
 
 With ``validation``, the validation data loss replaces the training
 loss for choosing the returned step (Optax) or generation (Evosax),
@@ -96,7 +102,7 @@ Same as ``train_with_optax(model, ...)`` or
 ``train_with_evosax(model, ...)`` in `jaxhybridmodels.training`,
 picked by the type of ``config``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L253)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L258)</small>
 
 <a id="hybridmodelfit_ensemble"></a>
 
@@ -107,6 +113,7 @@ fit_ensemble(
     self,
     data: 'Data',
     config: 'OptaxTrainingConfig',
+    *,
     key: 'Array',
     n_members: 'int',
     n_seeds: 'int | None' = None,
@@ -115,6 +122,7 @@ fit_ensemble(
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'Any' = None,
+    verbose: 'bool' = True,
     validation: 'Data | None' = None,
 ) -> list[FitResult]
 ```
@@ -153,7 +161,7 @@ A seed whose warm-up or first step fails is dropped, so fewer than
 ``stop_reason`` ``"diverged"``. Optax only. The list goes straight
 into [`predict_ensemble`](/api/prediction#predict_ensemble).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L313)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L323)</small>
 
 <a id="hybridmodelpredict"></a>
 
@@ -163,6 +171,7 @@ into [`predict_ensemble`](/api/prediction#predict_ensemble).
 predict(
     self,
     data: 'Data',
+    *,
     ts: 'Any' = None,
     n_points: 'int | None' = None,
 ) -> PredictionResult
@@ -183,7 +192,7 @@ still integrates from its own start, so ``y0`` stays in place.
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
 experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L382)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L394)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -193,6 +202,7 @@ experiments.
 simulate(
     self,
     experiment: 'Experiment | None' = None,
+    *,
     ts: 'Any' = None,
     n_points: 'int | None' = None,
     y0: 'Any' = None,
@@ -218,7 +228,22 @@ must be finite, strictly increasing, and not before ``t0``. When
 ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
 returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L408)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L420)</small>
+
+<a id="hybridmodelwith_predictors"></a>
+
+#### `HybridModel.with_predictors()`
+
+```python
+with_predictors(self, predictors: 'Any') -> 'HybridModel'
+```
+
+This model with its predictors replaced, for the end of a custom loop.
+
+``predictors`` must have the same structure as ``self.predictors``.
+Everything else about the model stays the same.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L156)</small>
 
 ---
 

@@ -22,6 +22,7 @@
 
 ```python
 Objective(
+    *,
     loss: 'Callable[..., Array] | str' = 'mse',
     channel_weights: 'Mapping[str, float] | Sequence[float] | None' = None,
     penalty_weight: 'float' = 0.0,
@@ -94,6 +95,7 @@ name raises before anything compiles.
 
 ```python
 OptaxTrainingConfig(
+    *,
     steps: 'InitVar[int | None]' = None,
     lr: 'InitVar[float | optax.Schedule | None]' = None,
     optimizer: 'InitVar[OptimizerSpec | None]' = None,
@@ -103,7 +105,6 @@ OptaxTrainingConfig(
     tournament_lr: 'float' = 0.0001,
     patience: 'int' = 0,
     restore_best: 'bool' = True,
-    verbose: 'bool' = True,
 ) -> None
 ```
 
@@ -136,7 +137,6 @@ stores ``phases``::
 | `tournament_lr` | `float` | Learning rate for the tournament's short bursts, independent of the phase learning rates. |
 | `patience` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever the horizon changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
-| `verbose` | `bool` | Selects ``RichTrainingUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L173)</small>
 
@@ -151,6 +151,7 @@ stores ``phases``::
 ```python
 TrainingPhase(
     steps: 'int',
+    *,
     lr: 'float | optax.Schedule' = 0.001,
     optimizer: 'OptimizerSpec' = 'adamw',
     horizon: 'float' = 1.0,
@@ -187,11 +188,13 @@ train_with_optax(
     model: 'HybridModel',
     data: 'Data',
     config: 'OptaxTrainingConfig',
+    *,
     key: 'Array',
     objective: 'Objective | None' = None,
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'TrainingUI | None' = None,
+    verbose: 'bool' = True,
     validation: 'Data | None' = None,
 ) -> FitResult
 ```
@@ -220,7 +223,7 @@ A solver error or a non-finite loss after the first step ends the run: it
 warns and returns the best parameters so far, with ``stop_reason``
 ``"diverged"``. On the first step there is nothing to return, so it raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L861)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L857)</small>
 
 ---
 
@@ -232,6 +235,7 @@ warns and returns the best parameters so far, with ``stop_reason``
 
 ```python
 EvosaxTrainingConfig(
+    *,
     algorithm: 'str' = 'CMA_ES',
     population_size: 'int' = 64,
     steps: 'int' = 100,
@@ -239,7 +243,6 @@ EvosaxTrainingConfig(
     init_box_extent: 'float' = 2.0,
     sigma_init: 'float' = 0.1,
     log_every: 'int' = 1,
-    verbose: 'bool' = True,
 ) -> None
 ```
 
@@ -261,7 +264,6 @@ no phases: the run is a flat loop, so every field is a scalar.
 | `init_box_extent` |  | Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``. Ignored by ``"warm"``. |
 | `sigma_init` |  | Initial CMA-ES step size. Used directly by ``"warm"`` and as the prior step size for the box-init modes. CMA-ES adapts it after the first ``tell``. |
 | `log_every` |  | UI heartbeat cadence. Honoured only by the Rich UIs; the silent and recording UIs see every generation. |
-| `verbose` |  | Selects ``RichEvosaxUI`` over ``SilentUI`` when ``ui=None``. An explicit ``ui=...`` argument always wins. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L125)</small>
 
@@ -278,11 +280,13 @@ train_with_evosax(
     model: 'HybridModel',
     data: 'Data',
     config: 'EvosaxTrainingConfig',
+    *,
     key: 'Array',
     objective: 'Objective | None' = None,
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'EvosaxUI | None' = None,
+    verbose: 'bool' = True,
     validation: 'Data | None' = None,
 ) -> FitResult
 ```
@@ -307,7 +311,7 @@ candidate seen in any generation, the warm-up evaluation of the input
 included. With it, each generation's best is scored on the validation
 set and the returned model is the one that scored lowest there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L359)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L355)</small>
 
 ---
 

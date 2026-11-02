@@ -18,6 +18,7 @@
 make_problem(
     model: 'HybridModel',
     data: 'Data',
+    *,
     log_prior: 'Callable[[Any, Mapping[str, Array]], Array]',
     noise: "Literal['data'] | Mapping[str, Parameter]",
     free: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
@@ -146,6 +147,7 @@ leaf under its path as it is, and inferred noise as ``"noise.<name>"``.
 ```python
 preconditioned(
     self,
+    *,
     precision: 'Any' = None,
     ridge: 'float' = 1.0,
 ) -> InferenceProblem
@@ -179,6 +181,7 @@ predict(
     self,
     positions: 'Any',
     data: 'Data | None' = None,
+    *,
     key: 'Array',
     ts: 'ArrayLike | None' = None,
     n_points: 'int | None' = None,
@@ -231,6 +234,7 @@ model's adjoint supports forward mode.
 to_arviz(
     self,
     positions: 'Any',
+    *,
     sample_stats: 'Mapping[str, Any] | None' = None,
 ) -> Any
 ```

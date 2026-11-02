@@ -294,13 +294,12 @@ def main() -> None:
             hm.TrainingPhase(args.steps // 3, lr=1e-2, horizon=0.5),
             hm.TrainingPhase(args.steps - args.steps // 3, lr=3e-3),
         ),
-        verbose=False,
     )
     # endregion fit
     print("\n[fit]")
     fits = {}
     for name, model in (("hybrid", hybrid), ("first order", mechanistic)):
-        fits[name] = model.fit(dataset, config, key=k_fit)
+        fits[name] = model.fit(dataset, config, key=k_fit, verbose=False)
         print(
             f"  {name}: loss {fits[name].history.loss[0]:.3e} -> {min(fits[name].history.loss):.3e}"
         )

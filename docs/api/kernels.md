@@ -20,20 +20,20 @@ The compiled pieces the stock trainers are assembled from. `build_bucket_step` i
 <small>`from jaxhybridmodels.training.kernels import apply_length_mask`</small>
 
 ```python
-apply_length_mask(bp: 'BucketPayload', length_mask_fraction: 'Array') -> 'BucketPayload'
+apply_length_mask(bp: 'BucketPayload', horizon: 'Array') -> 'BucketPayload'
 ```
 
-Narrow the bucket's mask to the first ``fraction`` of its timestamps.
+Narrow the bucket's mask to the first ``horizon`` fraction of its timestamps.
 
 This masks the **loss**, never the integration: the solver still runs the
 full trajectory, and only the leading prefix of the observation times is
 scored. That is what keeps a long-horizon divergence from drowning the
 gradient early in a run.
 
-``length_mask_fraction`` stays traced rather than becoming a Python
-branch, so a phase that changes the fraction costs no recompile.
+``horizon`` stays traced rather than becoming a Python branch, so a
+phase that changes it costs no recompile.
 
-The cutoff is clamped at 1. A fraction small enough to floor to zero
+The cutoff is clamped at 1. A horizon small enough to floor to zero
 would otherwise give an all-false mask, and every loss here divides by a
 count clamped at 1, so the step would silently score nothing.
 
@@ -51,6 +51,7 @@ count clamped at 1, so the step would silently score nothing.
 predict_bucket_obs(
     predictors: 'Any',
     bp: 'BucketPayload',
+    *,
     simulate_fn: 'Callable[..., Array]',
     state_to_output: 'Callable[[Array], Array]',
     solver: 'SolverConfig',
@@ -77,6 +78,7 @@ traced into whichever kernel calls it.
 
 ```python
 build_bucket_step(
+    *,
     simulate_fn: 'Callable[..., Array]',
     state_to_output: 'Callable[[Array], Array]',
     solver: 'SolverConfig',
@@ -84,12 +86,14 @@ build_bucket_step(
     trainable: 'Any',
     trajectory_penalty_fn: 'Callable[[Array, BucketPayload], Array] | None' = None,
     trajectory_penalty_weight: 'float' = 0.0,
-) -> Callable[[Any, BucketPayload, Array], tuple[Array, Any]]
+) -> Callable[..., tuple[Array, Any]]
 ```
 
-Return a jitted ``bucket_step(predictors, bp, fraction) -> (loss, grads)``.
+Return ``bucket_step(predictors, bp, horizon=1.0) -> (loss, grads)``, jitted inside.
 
-One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
+``horizon`` is the leading fraction of each bucket's timestamps that the
+loss scores. One trace per bucket shape (R-T5): a new horizon, float or
+array, does not retrace. Takes no ``opt_state``: the optimiser
 update lives in a separate jitted ``apply_update``, and the **bound**
 penalty is charged once per step by
 [`build_penalty_step`](/api/kernels#build_penalty_step), outside the bucket loop. This kernel
@@ -116,16 +120,17 @@ is the data term alone.
 
 ```python
 build_score_bucket(
+    *,
     simulate_fn: 'Callable[..., Array]',
     state_to_output: 'Callable[[Array], Array]',
     solver: 'SolverConfig',
     loss_fn: 'Callable[[Array, BucketPayload], Array]',
     trajectory_penalty_fn: 'Callable[[Array, BucketPayload], Array] | None' = None,
     trajectory_penalty_weight: 'float' = 0.0,
-) -> Callable[[Any, BucketPayload, Array], Array]
+) -> Callable[..., Array]
 ```
 
-Return a forward-only ``score_bucket(predictors, bp, fraction) -> loss``.
+Return a forward-only ``score_bucket(predictors, bp, horizon=1.0) -> loss``.
 
 Scoring through ``bucket_step`` would run a full ``value_and_grad`` and
 discard the gradients, roughly tripling the cost of a scoring sweep.
@@ -134,7 +139,7 @@ two attempts. The returned score includes the data loss and, when
 configured, the trajectory penalty; the bound penalty remains
 outside this per-bucket scorer.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L217)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L224)</small>
 
 ---
 
@@ -146,6 +151,7 @@ outside this per-bucket scorer.
 
 ```python
 build_penalty_step(
+    *,
     penalty_fn: 'Callable[[Any, tuple[Array, ...]], Array]',
     trainable: 'Any',
 ) -> Callable[[Any, Array, tuple[Array, ...]], tuple[Array, Any]]
@@ -175,7 +181,7 @@ Returns the gradient of ``weight * penalty``, to add straight onto the
 averaged data gradient. ``penalty`` comes back unweighted, since that
 is what gets reported.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L289)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L300)</small>
 
 ---
 
@@ -187,6 +193,7 @@ is what gets reported.
 
 ```python
 build_apply_update(
+    *,
     optimizer: 'optax.GradientTransformation',
     trainable: 'Any',
 ) -> Callable[[Any, Any, Any], tuple[Any, Any]]
@@ -198,4 +205,4 @@ The single optimiser update per training step. Build once per
 optimiser; reuse its returned state across steps, rebuilding only at a
 reset/phase boundary.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L338)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L349)</small>

@@ -699,8 +699,11 @@ class BoundedPredictor(Predictor):
     as ``input_bounds`` / ``output_bounds`` pairs (None for a missing
     endpoint; one pair broadcasts to every component). Sizes not fixed by
     the bounds come from ``input_keys`` or ``inner.in_size`` /
-    ``inner.out_size``. At least one input is required: a zero-input
-    network has no training signal, and that case is a ``Parameter``.
+    ``inner.out_size``. ``input_warp`` and ``output_warp`` set the warp of
+    a scaler built from bounds, such as ``output_warp="log10"`` for a rate
+    spanning decades; for a different squash, pass a ``BoundScaler``. At
+    least one input is required: a zero-input network has no training
+    signal, and that case is a ``Parameter``.
     Omitting ``input_keys`` auto-fills ``("x1", ..., "xN")``, so a saved
     predictor always describes its own input contract.
 
@@ -732,11 +735,17 @@ class BoundedPredictor(Predictor):
         input_keys: tuple[str, ...] | None = None,
         input_bounds: Any = None,
         output_bounds: Any = None,
+        input_warp: str = "linear",
+        output_warp: str = "linear",
     ) -> None:
         if in_scaler is not None and input_bounds is not None:
             raise ValueError("Use in_scaler= or input_bounds=, not both")
         if out_scaler is not None and output_bounds is not None:
             raise ValueError("Use out_scaler= or output_bounds=, not both")
+        if input_warp != "linear" and input_bounds is None:
+            raise ValueError("input_warp= needs input_bounds=; in_scaler= carries its own warp")
+        if output_warp != "linear" and output_bounds is None:
+            raise ValueError("output_warp= needs output_bounds=; out_scaler= carries its own warp")
 
         def size_of(bounds: Any, *fallbacks: int | None) -> int | None:
             # A sequence of pairs fixes the size; one shared pair does not.
@@ -753,12 +762,12 @@ class BoundedPredictor(Predictor):
             )
             if n_in is None:
                 raise ValueError("Supply in_scaler, input_bounds, input_keys, or inner.in_size")
-            in_scaler = BoundScaler(_bound_pairs(input_bounds, int(n_in)))
+            in_scaler = BoundScaler(_bound_pairs(input_bounds, int(n_in)), warp=input_warp)
         if out_scaler is None:
             n_out = size_of(output_bounds, getattr(inner, "out_size", None))
             if n_out is None:
                 raise ValueError("Supply out_scaler, output_bounds, or inner.out_size")
-            out_scaler = BoundScaler(_bound_pairs(output_bounds, int(n_out)))
+            out_scaler = BoundScaler(_bound_pairs(output_bounds, int(n_out)), warp=output_warp)
         n = len(in_scaler.bounds)
         if n < 1:
             raise ValueError(

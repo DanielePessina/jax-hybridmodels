@@ -153,7 +153,12 @@ class HybridModel(eqx.Module):
             solver=solver,
         )
 
-    def _with_predictors(self, predictors: Any) -> HybridModel:
+    def with_predictors(self, predictors: Any) -> HybridModel:
+        """This model with its predictors replaced, for the end of a custom loop.
+
+        ``predictors`` must have the same structure as ``self.predictors``.
+        Everything else about the model stays the same.
+        """
         return eqx.tree_at(lambda m: m.predictors, self, predictors)
 
     def _dataset(self, data: Data, caller: str) -> Dataset:
@@ -260,6 +265,7 @@ class HybridModel(eqx.Module):
         freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
         trainable: Any = None,
         ui: Any = None,
+        verbose: bool = True,
         validation: Data | None = None,
     ) -> FitResult:
         """Train the predictors and return a new model with the result.
@@ -274,6 +280,9 @@ class HybridModel(eqx.Module):
         predictor classes (``hm.MLPPredictor``), or predicates
         ``(module) -> bool``. ``trainable`` is an explicit mask for full
         control; pass one or the other.
+
+        ``verbose`` shows a live display of the run, and ``False`` runs
+        quietly. ``ui`` is a display of your own and overrides ``verbose``.
 
         With ``validation``, the validation data loss replaces the training
         loss for choosing the returned step (Optax) or generation (Evosax),
@@ -299,6 +308,7 @@ class HybridModel(eqx.Module):
             freeze=freeze,
             trainable=trainable,
             ui=ui,
+            verbose=verbose,
             validation=validation,
         )
         if isinstance(config, EvosaxTrainingConfig):
@@ -323,6 +333,7 @@ class HybridModel(eqx.Module):
         freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
         trainable: Any = None,
         ui: Any = None,
+        verbose: bool = True,
         validation: Data | None = None,
     ) -> list[FitResult]:
         """Train an ensemble of up to ``n_members`` models, best first.
@@ -376,6 +387,7 @@ class HybridModel(eqx.Module):
             freeze=freeze,
             trainable=trainable,
             ui=ui,
+            verbose=verbose,
             validation=validation,
         )
 

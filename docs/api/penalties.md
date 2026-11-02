@@ -331,21 +331,21 @@ unambiguous column to feed an input key and raises.
 <small>`from jaxhybridmodels.penalties import length_mask_keep`</small>
 
 ```python
-length_mask_keep(source: 'PenaltyPointSource', length_mask_fraction: 'float') -> 'Array'
+length_mask_keep(source: 'PenaltyPointSource', horizon: 'float') -> 'Array'
 ```
 
 Boolean keep-vector over a source's cells, matching the loss's prefix mask.
 
 Applies the same prefix semantics [`apply_length_mask`](/api/kernels#apply_length_mask)
 gives the loss: a cell is kept when its timestamp index is below
-``ceil(T * fraction)``, clamped at 1 so a phase never scores nothing.
+``ceil(T * horizon)``, clamped at 1 so a phase never scores nothing.
 The penalty therefore follows the curriculum exactly, disagreeing with
 the loss about which points are live only by mistake.
 
-``length_mask_fraction`` must be a Python float, not a traced array:
+``horizon`` must be a Python float, not a traced array:
 the keep-vector is used to *index* the gathered points, and JAX rejects
 boolean indexing with tracers. The penalty kernel retraces only when
-the fraction changes (a phase boundary), never per step.
+the horizon changes (a phase boundary), never per step.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L382)</small>
 
@@ -413,7 +413,7 @@ are closed over the user's predictors, because only the user knows the latent
 select_penalty_points(
     sources: 'tuple[PenaltyPointSource | None, ...]',
     extras: 'tuple[Array, ...]',
-    length_mask_fraction: 'float',
+    horizon: 'float',
 ) -> tuple[Array, ...]
 ```
 
@@ -588,6 +588,7 @@ validate_penalty_points(
     predictors: 'Any',
     sources: 'tuple[PenaltyPointSource | None, ...]',
     extras: 'tuple[Array, ...]',
+    *,
     enabled: 'bool',
 ) -> None
 ```

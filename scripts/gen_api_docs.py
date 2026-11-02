@@ -538,7 +538,18 @@ class _StableDefault:
 
 
 def _wrap_signature(name: str, sig: inspect.Signature) -> str:
-    parts = [f"{p}" for p in sig.parameters.values()]
+    params = list(sig.parameters.values())
+    parts: list[str] = []
+    for i, p in enumerate(params):
+        before = params[i - 1].kind if i else None
+        # ``str(sig)`` adds these markers itself; joining parameters does not.
+        if p.kind is p.KEYWORD_ONLY and before not in (p.KEYWORD_ONLY, p.VAR_POSITIONAL):
+            parts.append("*")
+        if before is p.POSITIONAL_ONLY and p.kind is not p.POSITIONAL_ONLY:
+            parts.append("/")
+        parts.append(f"{p}")
+    if params and params[-1].kind is inspect.Parameter.POSITIONAL_ONLY:
+        parts.append("/")
     indent = "    "
     body = (",\n" + indent).join(parts)
     ret = (

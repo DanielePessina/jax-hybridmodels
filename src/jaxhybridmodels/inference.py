@@ -387,7 +387,7 @@ class InferenceProblem:
         It keeps the model's own solver, so its solves raise on failure as usual.
         Inferred noise is not part of a model.
         """
-        return self.model._with_predictors(self._tree(position)[_PREDICTORS])
+        return self.model.with_predictors(self._tree(position)[_PREDICTORS])
 
     def physical(self, position: Any) -> dict[str, Array]:
         """The free values in physical units, keyed by dotted path.

@@ -133,8 +133,10 @@ def mechanistic_posterior(args: Any, key: Any) -> None:
     print("[mechanistic] data from a first-order law, full posterior")
     dataset = make_data(k_data, first_order_g, NOISE_STD**2)
     _, mechanistic = build_models(k_fit)
-    config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2, verbose=False)
-    result = mechanistic.fit(dataset, config, objective=hm.Objective(loss="mle"), key=k_fit)
+    config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2)
+    result = mechanistic.fit(
+        dataset, config, objective=hm.Objective(loss="mle"), key=k_fit, verbose=False
+    )
     print(result.summary())
 
     # region problem
@@ -180,9 +182,8 @@ def last_layer_posterior(args: Any, key: Any) -> None:
             hm.TrainingPhase(args.steps // 3, lr=1e-2, horizon=0.5),
             hm.TrainingPhase(args.steps - args.steps // 3, lr=3e-3),
         ),
-        verbose=False,
     )
-    result = hybrid.fit(dataset, config, key=k_fit)
+    result = hybrid.fit(dataset, config, key=k_fit, verbose=False)
     print(result.summary())
 
     # region last-layer

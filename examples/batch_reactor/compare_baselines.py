@@ -269,17 +269,22 @@ def main() -> None:
         init="lhs_box",
         init_box_extent=2.0,
         sigma_init=0.5,
-        verbose=False,
     )
-    adamw = hm.OptaxTrainingConfig(steps=args.steps, lr=3e-3, verbose=False)
+    adamw = hm.OptaxTrainingConfig(steps=args.steps, lr=3e-3)
 
     def fit_baseline(runs: list[hm.Experiment], seed: int) -> hm.HybridModel:
-        return baseline.fit(runs, cma_es, key=jr.PRNGKey(seed), freeze=hm.BoundedPredictor).model
+        return baseline.fit(
+            runs, cma_es, key=jr.PRNGKey(seed), freeze=hm.BoundedPredictor, verbose=False
+        ).model
 
     def fit_hybrid(runs: list[hm.Experiment], seed: int) -> hm.HybridModel:
         """CMA-ES on the trunk, then AdamW on the residual with the trunk frozen."""
-        trunk = hybrid.fit(runs, cma_es, key=jr.PRNGKey(seed), freeze=hm.BoundedPredictor).model
-        return trunk.fit(runs, adamw, key=jr.PRNGKey(seed + 1), freeze=ArrheniusKinetics).model
+        trunk = hybrid.fit(
+            runs, cma_es, key=jr.PRNGKey(seed), freeze=hm.BoundedPredictor, verbose=False
+        ).model
+        return trunk.fit(
+            runs, adamw, key=jr.PRNGKey(seed + 1), freeze=ArrheniusKinetics, verbose=False
+        ).model
 
     print("\n[fit] Arrhenius, one fit per pH bin")
     # The trunk has nowhere to put pH, so each refit absorbs it into the

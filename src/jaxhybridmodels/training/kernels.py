@@ -17,7 +17,7 @@ accumulating per-bucket gradients, then a single optimiser update. The
 kernels here are the compiled pieces that step makes:
 
 - :func:`build_bucket_step`: one jitted ``bucket_step(predictors, bp,
-  fraction) -> (loss, grads)`` per bucket shape. The **bound** penalty is
+  horizon) -> (loss, grads)`` per bucket shape. The **bound** penalty is
   *not* here; a configured **trajectory** penalty is, added to the loss
   inside the same forward pass (one charge per bucket, since each bucket's
   trajectories differ).
@@ -55,7 +55,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 from jaxhybridmodels.data import BucketPayload, Dataset
 from jaxhybridmodels.solver import SolverConfig, simulation_state
@@ -86,24 +86,24 @@ def failure_summary(exc: BaseException) -> str:
     return lines[0] if lines else type(exc).__name__
 
 
-def apply_length_mask(bp: BucketPayload, length_mask_fraction: Array) -> BucketPayload:
-    """Narrow the bucket's mask to the first ``fraction`` of its timestamps.
+def apply_length_mask(bp: BucketPayload, horizon: Array) -> BucketPayload:
+    """Narrow the bucket's mask to the first ``horizon`` fraction of its timestamps.
 
     This masks the **loss**, never the integration: the solver still runs the
     full trajectory, and only the leading prefix of the observation times is
     scored. That is what keeps a long-horizon divergence from drowning the
     gradient early in a run.
 
-    ``length_mask_fraction`` stays traced rather than becoming a Python
-    branch, so a phase that changes the fraction costs no recompile.
+    ``horizon`` stays traced rather than becoming a Python branch, so a
+    phase that changes it costs no recompile.
 
-    The cutoff is clamped at 1. A fraction small enough to floor to zero
+    The cutoff is clamped at 1. A horizon small enough to floor to zero
     would otherwise give an all-false mask, and every loss here divides by a
     count clamped at 1, so the step would silently score nothing.
     """
     T = bp.ts.shape[1]
     cutoff = jnp.maximum(
-        jnp.ceil(jnp.float32(T) * length_mask_fraction).astype(jnp.int32),
+        jnp.ceil(jnp.float32(T) * horizon).astype(jnp.int32),
         jnp.int32(1),
     )
     sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
@@ -162,10 +162,12 @@ def build_bucket_step(
     trainable: Any,
     trajectory_penalty_fn: Callable[[Array, BucketPayload], Array] | None = None,
     trajectory_penalty_weight: float = 0.0,
-) -> Callable[[Any, BucketPayload, Array], tuple[Array, Any]]:
-    """Return a jitted ``bucket_step(predictors, bp, fraction) -> (loss, grads)``.
+) -> Callable[..., tuple[Array, Any]]:
+    """Return ``bucket_step(predictors, bp, horizon=1.0) -> (loss, grads)``, jitted inside.
 
-    One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
+    ``horizon`` is the leading fraction of each bucket's timestamps that the
+    loss scores. One trace per bucket shape (R-T5): a new horizon, float or
+    array, does not retrace. Takes no ``opt_state``: the optimiser
     update lives in a separate jitted ``apply_update``, and the **bound**
     penalty is charged once per step by
     :func:`build_penalty_step`, outside the bucket loop. This kernel
@@ -204,12 +206,17 @@ def build_bucket_step(
     grad_fn = eqx.filter_value_and_grad(loss_eval)
 
     @eqx.filter_jit
-    def bucket_step(
-        predictors: Any, bp: BucketPayload, length_mask_fraction: Array
-    ) -> tuple[Array, Any]:
-        bp_masked = apply_length_mask(bp, length_mask_fraction)
+    def jitted_step(predictors: Any, bp: BucketPayload, horizon: Array) -> tuple[Array, Any]:
+        bp_masked = apply_length_mask(bp, horizon)
         diff_part, static_part = eqx.partition(predictors, trainable)
         return grad_fn(diff_part, static_part, bp_masked)
+
+    def bucket_step(
+        predictors: Any, bp: BucketPayload, horizon: ArrayLike = 1.0
+    ) -> tuple[Array, Any]:
+        # An array, because filter_jit treats a Python float as static and
+        # would recompile for each new value.
+        return jitted_step(predictors, bp, jnp.asarray(horizon, dtype=float))
 
     return bucket_step
 
@@ -222,8 +229,8 @@ def build_score_bucket(
     loss_fn: Callable[[Array, BucketPayload], Array],
     trajectory_penalty_fn: Callable[[Array, BucketPayload], Array] | None = None,
     trajectory_penalty_weight: float = 0.0,
-) -> Callable[[Any, BucketPayload, Array], Array]:
-    """Return a forward-only ``score_bucket(predictors, bp, fraction) -> loss``.
+) -> Callable[..., Array]:
+    """Return a forward-only ``score_bucket(predictors, bp, horizon=1.0) -> loss``.
 
     Scoring through ``bucket_step`` would run a full ``value_and_grad`` and
     discard the gradients, roughly tripling the cost of a scoring sweep.
@@ -234,14 +241,18 @@ def build_score_bucket(
     """
 
     @eqx.filter_jit
-    def score_bucket(predictors: Any, bp: BucketPayload, length_mask_fraction: Array) -> Array:
-        bp_masked = apply_length_mask(bp, length_mask_fraction)
+    def jitted_score(predictors: Any, bp: BucketPayload, horizon: Array) -> Array:
+        bp_masked = apply_length_mask(bp, horizon)
         full_state = simulate_bucket(predictors, bp_masked, simulate_fn=simulate_fn, solver=solver)
         pred_obs = jax.vmap(state_to_output)(full_state)
         loss = loss_fn(pred_obs, bp_masked)
         if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
             loss = loss + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp_masked)
         return loss
+
+    def score_bucket(predictors: Any, bp: BucketPayload, horizon: ArrayLike = 1.0) -> Array:
+        # An array for the same reason as in ``build_bucket_step``.
+        return jitted_score(predictors, bp, jnp.asarray(horizon, dtype=float))
 
     return score_bucket
 

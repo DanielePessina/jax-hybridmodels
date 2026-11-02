@@ -153,9 +153,8 @@ def main() -> None:
             hm.TrainingPhase(steps=200, lr=0.05),
             hm.TrainingPhase(steps=100, lr=0.01),
         ),
-        verbose=False,
     )
-    result = model.fit(dataset, config, key=k_train)
+    result = model.fit(dataset, config, key=k_train, verbose=False)
     # endregion fit
     omega = float(result.model.predictors["omega"].value)
     print(f"omega {OMEGA_INIT} -> {omega:.4f} (true {OMEGA_TRUE})")

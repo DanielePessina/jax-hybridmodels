@@ -61,6 +61,7 @@ Do not subclass to add bound handling or named inputs.
 ```python
 BoundScaler(
     bounds: 'Any',
+    *,
     transform: 'str' = 'sigmoid',
     temperature: 'Any' = 1.0,
     warp: 'str' = 'linear',
@@ -278,12 +279,15 @@ The continuation reports direction, not magnitude. Pair it with
 
 ```python
 BoundedPredictor(
+    *,
     inner: 'Predictor',
     in_scaler: 'BoundScaler | None' = None,
     out_scaler: 'BoundScaler | None' = None,
     input_keys: 'tuple[str, ...] | None' = None,
     input_bounds: 'Any' = None,
     output_bounds: 'Any' = None,
+    input_warp: 'str' = 'linear',
+    output_warp: 'str' = 'linear',
 ) -> None
 ```
 
@@ -337,8 +341,11 @@ Give the scalers either as ``in_scaler`` / ``out_scaler`` instances or
 as ``input_bounds`` / ``output_bounds`` pairs (None for a missing
 endpoint; one pair broadcasts to every component). Sizes not fixed by
 the bounds come from ``input_keys`` or ``inner.in_size`` /
-``inner.out_size``. At least one input is required: a zero-input
-network has no training signal, and that case is a ``Parameter``.
+``inner.out_size``. ``input_warp`` and ``output_warp`` set the warp of
+a scaler built from bounds, such as ``output_warp="log10"`` for a rate
+spanning decades; for a different squash, pass a ``BoundScaler``. At
+least one input is required: a zero-input network has no training
+signal, and that case is a ``Parameter``.
 Omitting ``input_keys`` auto-fills ``("x1", ..., "xN")``, so a saved
 predictor always describes its own input contract.
 
@@ -374,7 +381,7 @@ own init scheme rather than leaf-level normal sampling. The scalers
 hold bound geometry, not learned state, so a restart has no reason
 to touch them.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L840)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L849)</small>
 
 ---
 
@@ -388,6 +395,7 @@ to touch them.
 Parameter(
     value: 'Any',
     bounds: 'Any' = None,
+    *,
     transform: 'str' = 'sigmoid',
     warp: 'str' = 'linear',
 ) -> None
@@ -477,6 +485,7 @@ Keep fixed values unchanged when restarting a model.
 
 ```python
 MLPPredictor(
+    *,
     in_size: 'int',
     out_size: 'int',
     width_size: 'int',
@@ -555,6 +564,7 @@ Structurally identical predictor; only the trailing
 
 ```python
 KANPredictor(
+    *,
     in_size: 'int',
     out_size: 'int',
     hidden_widths: 'tuple[int, ...]' = (8,),
@@ -634,6 +644,7 @@ parameterisation.
 
 ```python
 NeuralNPolynomial(
+    *,
     coeff_net: 'Predictor',
     exponents: 'tuple[float, ...]',
     in_size: 'int',
@@ -690,7 +701,7 @@ back to elementwise sampling only when it offers no scheme.
 
 ### `reinitialize_with_key()`
 
-<small>`from jaxhybridmodels.predictors import reinitialize_with_key`</small>
+<small>`from jaxhybridmodels.predictors import reinitialize_with_key` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.reinitialize_with_key`</small>
 
 ```python
 reinitialize_with_key(predictor: 'eqx.Module', key: 'Array') -> 'eqx.Module'
@@ -707,7 +718,7 @@ replaced with a standard-normal sample of matching shape and dtype.
 For a *pytree* of predictors, the convention at the ``simulate_fn``
 boundary, use [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L861)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L870)</small>
 
 ---
 
@@ -715,7 +726,7 @@ boundary, use [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytr
 
 ### `reinitialize_pytree_with_key()`
 
-<small>`from jaxhybridmodels.predictors import reinitialize_pytree_with_key`</small>
+<small>`from jaxhybridmodels.predictors import reinitialize_pytree_with_key` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.reinitialize_pytree_with_key`</small>
 
 ```python
 reinitialize_pytree_with_key(predictors: 'Any', key: 'Array') -> 'Any'
@@ -736,4 +747,4 @@ Accepts any pytree shape ``jax.tree_util`` can walk, including a bare
 ``eqx.Module``. Returns a structurally identical pytree with fresh
 weights on every ``eqx.Module`` leaf.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L888)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L897)</small>
