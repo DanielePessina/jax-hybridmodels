@@ -672,7 +672,14 @@ def _train_with_evosax(
                     fitness = _rank_failures_last(fitness, finite)
                 gen_best_idx = int(jnp.argmin(fitness))
                 gen_flat = jnp.asarray(population[gen_best_idx])
-                score = None if select_score is None else select_score(rebuild(gen_flat))
+                score = None
+                if select_score is not None:
+                    try:
+                        score = select_score(rebuild(gen_flat))
+                    except FIT_FAILURES:
+                        # Only the validation solve failed; the search goes on,
+                        # and this generation's best cannot be selected.
+                        score = math.inf
             except FIT_FAILURES as exc:
                 # Nothing finished, so there is nothing to hand back.
                 if not history:

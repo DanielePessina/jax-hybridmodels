@@ -109,7 +109,9 @@ def _is_pair(spec: Any) -> bool:
     sequence of pairs, one per component.
     """
     try:
-        return len(spec) == 2 and all(v is None or isinstance(v, Real) for v in spec)
+        return len(spec) == 2 and all(
+            v is None or isinstance(v, Real) or (np.ndim(v) == 0 and np.isrealobj(v)) for v in spec
+        )
     except TypeError:  # a bare number has no len
         return False
 
@@ -288,7 +290,10 @@ class BoundScaler(eqx.Module):
         Static. Half-width of the band at each end of ``[0, 1]`` outside
         which ``to_latent`` continues linearly instead of running into
         the squash inverse's pole. Also sets the continuation slope
-        (roughly ``1 / logit_eps``).
+        (roughly ``1 / logit_eps``). For a one-sided bound there is no unit
+        interval, so it is a distance from the bound in the value's own
+        units: ``to_latent`` is exact only beyond ``logit_eps`` of the edge.
+        ``Parameter`` uses the exact inverse and is not affected.
     z_knee : float
         Static. The knee. Defaults to the transform's own value, which
         for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the
@@ -399,9 +404,10 @@ class BoundScaler(eqx.Module):
             warp = WARPS[self.warp]
             squash = BOUND_TRANSFORMS[self.transform]
             if not inverse:
-                # A nonlinear warp's inverse can round one ulp past a bound.
+                # The affine rescale, and a nonlinear warp's inverse, can round
+                # one ulp past a bound, so every warp is clipped to the box.
                 inside = warp.inverse(wl + (wh - wl) * squash.forward(v / temperature))
-                return inside if self.warp == "linear" else jnp.clip(inside, low, high)
+                return jnp.clip(inside, low, high)
             normalized = (warp.forward(v) - wl) / (wh - wl)
             if not guard:
                 return squash.inverse(normalized) * temperature
@@ -699,7 +705,7 @@ class Parameter(eqx.Module):
         element in flattened order. None for a missing endpoint. Omit for
         an unbounded value. Two finite endpoints use the ``transform``
         squash. One endpoint puts the distance from it through softplus,
-        or ``exp`` under ``warp="log"`` or ``"log10"``.
+        or ``exp`` under ``warp="log"`` (``10 **`` under ``"log10"``).
     transform, warp
         Passed to :class:`BoundScaler`. ``warp="log10"`` suits rate
         constants that span decades. With two finite bounds it warps the
@@ -731,8 +737,10 @@ class Parameter(eqx.Module):
             raise ValueError("Parameter value must be nonempty and finite")
         flat = physical.reshape(-1)
         scaler = BoundScaler(_bound_pairs(bounds, flat.size), transform=transform, warp=warp)
-        # Compared in the value's own dtype, where the arithmetic runs: a float64
-        # bound of 0.1 rounds onto the float32 value 0.1, which is on the bound.
+        # Compared in the value's own dtype: a float64 bound of 0.1 rounds onto
+        # the float32 value 0.1, which is on the bound. Under x64 the scaler
+        # promotes a float32 value to float64, so this check is stricter than
+        # the arithmetic there, which is the safe side.
         dtype = np.dtype(flat.dtype)
         for (low, high), v in zip(scaler.bounds, np.asarray(flat).tolist(), strict=True):
             if not dtype.type(low) < dtype.type(v) < dtype.type(high):
@@ -799,7 +807,10 @@ class BoundedPredictor(Predictor):
        compresses the middle of the box and stretches the edges, so an
        input sitting on its bound (a concentration starting at 0) has the
        largest sensitivity. Inputs with an open bound pass through
-       unchanged.
+       unchanged. ``input_warp`` is one setting for every input, and a
+       fully open input under a log warp is refused, though it would pass
+       through: give it a one-sided bound, such as ``(0, None)``, or keep
+       ``input_warp="linear"``.
     2. **Run the network.** The trainable ``inner`` ``Predictor`` maps
        latent to latent. It is handed no bound information at all.
     3. **Squash the output.** ``out_scaler.from_latent`` maps the
@@ -1020,15 +1031,31 @@ def reinitialize(predictor: eqx.Module, *, key: Array) -> eqx.Module:
     if hasattr(predictor, "reinitialized"):
         return cast(eqx.Module, predictor.reinitialized(key=key))
 
-    leaves, treedef = jtu.tree_flatten(predictor)
-    inexact_indices = [i for i, leaf in enumerate(leaves) if eqx.is_inexact_array(leaf)]
-    if not inexact_indices:
+    # Walk the module, but stop at the units that have a rule of their own: a
+    # nested predictor or Parameter re-initialises itself, and a scaler or a
+    # Constant keeps its values. Drawing their leaves from N(0, 1) would give a
+    # temperature that can be negative and a one-sided Parameter a value near 1.
+    def is_unit(node: Any) -> bool:
+        return node is not predictor and (
+            hasattr(node, "reinitialized") or isinstance(node, (BoundScaler, Constant))
+        )
+
+    leaves, treedef = jtu.tree_flatten(predictor, is_leaf=is_unit)
+    targets = [
+        i
+        for i, leaf in enumerate(leaves)
+        if (is_unit(leaf) and hasattr(leaf, "reinitialized")) or eqx.is_inexact_array(leaf)
+    ]
+    if not targets:
         return predictor
-    subkeys = jr.split(key, len(inexact_indices))
+    subkeys = jr.split(key, len(targets))
     new_leaves = list(leaves)
-    for k, idx in zip(subkeys, inexact_indices, strict=True):
+    for k, idx in zip(subkeys, targets, strict=True):
         leaf = leaves[idx]
-        new_leaves[idx] = jr.normal(k, leaf.shape, dtype=leaf.dtype)
+        if hasattr(leaf, "reinitialized"):
+            new_leaves[idx] = leaf.reinitialized(key=k)
+        else:
+            new_leaves[idx] = jr.normal(k, leaf.shape, dtype=leaf.dtype)
     return cast(eqx.Module, jtu.tree_unflatten(treedef, new_leaves))
 
 

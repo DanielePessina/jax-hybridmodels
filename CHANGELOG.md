@@ -411,6 +411,30 @@ Migration for code written against the earlier API:
 
 ### Fixed
 
+- A profile re-optimises over the bounded model: a value pinned deep in its
+  squash's tail is released at each point, so the data can move it off its
+  bound. It used to stay pinned, which left some sides open that the data
+  close. A crossing BFGS cannot finish is retried with shorter steps, and a
+  point that fits better than the start warns that the start was not the
+  maximum.
+- With a value pinned at its bound, the other values' standard errors,
+  intervals, correlations and `derived` are conditional on that bound, as
+  `sample` is. They used to let the pinned value trade off freely.
+- `derived` no longer flips to an infinite error for an identified function of
+  an unidentified pair, depending on where on the ridge BFGS stopped.
+- The warm-up no longer ends a tournament or an ensemble when the starting
+  values do not solve. A validation set that does not solve at a step makes
+  that step unselectable instead of ending the run. A final loss from a step on
+  another horizon, or with segments, is measured again on the final phase's
+  terms. A ready-made optimiser keeps a rate set in an earlier phase on a fresh
+  state, and the display shows the rate a phase really starts at.
+- `fit_ensemble` warns when members fail and fewer come back.
+- `NeuralNPolynomial` had a NaN gradient at a basis of exactly 0, and the
+  generic re-initialisation redrew scalers and `Parameter`s nested in custom
+  modules from N(0, 1).
+- A linear-warp value can no longer round one ulp past its box, `box_grid`'s
+  log-warped end points stay inside the box, bounds may be 0-d arrays, and
+  `evaluate_predictor` warns outside a predictor's input box.
 - A profile closes a side only when the other values are really at their
   maximum, by the Newton decrement of the inner problem. BFGS could stall on a
   value the data barely constrain and close a side that is open.

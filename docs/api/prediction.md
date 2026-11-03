@@ -84,4 +84,4 @@ has output shape ``()``, so a sweep over 50 temperatures gives ``[50]``.
 | --- | --- | --- |
 | `Array` |  | Call ``float(...)`` on a scalar result for a Python number. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L343)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L373)</small>

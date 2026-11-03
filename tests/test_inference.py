@@ -906,6 +906,42 @@ def test_a_value_pinned_at_its_only_bound_profiles_away_from_it(x64, warp):
     np.testing.assert_allclose(draws, float(fisher.estimate[0]))
 
 
+def test_a_profile_releases_another_value_pinned_at_its_bound(x64):
+    """The profile is over the bounded model: a pinned value may leave its bound.
+
+    ``y = a t + c t^2 / 2`` with ``c >= 0`` and data that want ``c`` slightly
+    negative, so it sits pinned at 0. Holding ``a`` away from its best value,
+    the data can want ``c`` above 0, which BFGS cannot reach from deep in the
+    squash's tail unless the profile releases it first.
+    """
+
+    def curved(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+        return (predictors["a"].value + predictors["c"].value * t) * jnp.ones_like(y)
+
+    experiments, ts, ys = measurements()
+    model = hm.HybridModel.from_vector_field(
+        vector_field=curved,
+        predictors={"a": hm.Parameter(0.7), "c": hm.Parameter(0.05, bounds=(0.0, 5.0))},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    profile = problem.profile("a")
+    assert profile.stop_reasons == ("threshold", "threshold")
+    # Every point is the bounded maximum: brute force over c >= 0 at each a.
+    design = np.stack([ts, ts**2 / 2], axis=1)
+
+    def best_given(a: float) -> float:
+        residual = ys - a * ts
+        c = max(0.0, float(design[:, 1] @ residual / (design[:, 1] @ design[:, 1])))
+        return float(np.sum((residual - c * design[:, 1]) ** 2)) / (2 * SIGMA**2)
+
+    floor = min(best_given(a) for a in np.linspace(0.3, 1.2, 2001))
+    for a, ratio in zip(profile.grid, profile.log_likelihood_ratio, strict=True):
+        assert ratio == pytest.approx(2 * (best_given(float(a)) - floor), abs=1e-3)
+
+
 def test_the_condition_number_ignores_how_a_value_is_bounded(x64):
     """Rescaling a latent through its bounds leaves the identifiability readout alone."""
     experiments, *_ = measurements()

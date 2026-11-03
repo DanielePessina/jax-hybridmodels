@@ -103,8 +103,10 @@ def _scaffold_parts(
 
     Cached because a KAN inside a vector field is traced once per solver
     stage, and rebuilding the jaxkan model in Python each time dominated
-    trace cost. A run uses very few distinct architectures, so the
-    unbounded cache is not a leak in practice.
+    trace cost. The seed is part of the key, so each ``reinitialized`` adds
+    an entry: a tournament or ensemble keeps one per attempt, and each new
+    seed, a static field, also retraces the kernels that hold the KAN.
+    That is a few graph scaffolds per run, not the weights.
 
     ``jax.ensure_compile_time_eval`` is load-bearing. The first call
     usually lands inside a trace, and without the context jaxkan's grid

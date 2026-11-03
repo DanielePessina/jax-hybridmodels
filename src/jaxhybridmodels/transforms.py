@@ -5,9 +5,9 @@
 question.
 
 The *warp* decides what "halfway between the bounds" means. For a rate
-constant bounded by ``(1e-6, 1e2)``, a linear warp puts 99.999% of the
-latent range above ``1e-2`` and collapses the low end into an unresolvable
-sliver. ``"log10"`` puts the midpoint at ``1e-2`` instead of ``50``.
+constant bounded by ``(1e-6, 1e2)``, a linear warp puts 99.99% of the
+physical range above ``1e-2`` and collapses the low end into an
+unresolvable sliver. ``"log10"`` puts the midpoint at ``1e-2`` instead of ``50``.
 
 The *transform* is the squash that folds the latent line into the unit
 interval. It decides how fast the gradient dies once a predictor pushes

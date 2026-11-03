@@ -261,7 +261,7 @@ A solver error or a non-finite loss after the first step ends the run: it
 warns and returns the best parameters so far, with ``stop_reason``
 ``"diverged"``. On the first step there is nothing to return, so it raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1266)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1303)</small>
 
 ---
 

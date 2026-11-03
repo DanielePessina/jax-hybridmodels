@@ -129,7 +129,11 @@ class NeuralNPolynomial(Predictor):
         coeffs_flat = jnp.asarray(self.coeff_net(x)).reshape((self.out_size * len(self.exponents),))
         coeffs = coeffs_flat.reshape((self.out_size, len(self.exponents)))
         basis = jnp.sum(x)
-        powers = basis ** jnp.asarray(self.exponents)
+        # One integer power per exponent, which lowers to repeated
+        # multiplication. A float power has a NaN derivative in its base at
+        # 0 ** 0, which a basis of exactly 0 (inputs at their midpoints, or a
+        # concentration starting at 0) would push into every gradient.
+        powers = jnp.stack([basis ** int(exponent) for exponent in self.exponents])
         return jnp.einsum("od,d->o", coeffs, powers)
 
     def reinitialized(self, *, key: Array) -> NeuralNPolynomial:

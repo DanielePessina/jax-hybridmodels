@@ -1577,8 +1577,43 @@ def test_evaluate_predictor_broadcasts_named_inputs():
     rate = BoundedPredictor(inner=Scalar(), input_keys=("T",), output_bounds=(0.0, None))
     assert hm.evaluate_predictor(rate, {"T": jnp.arange(4)}).shape == (4,)
     assert hm.evaluate_predictor(rate, {"T": 1}).shape == ()
+    # Outside its input box the network still answers, so it warns.
+    with pytest.warns(RuntimeWarning, match="a outside"):
+        hm.evaluate_predictor(bp, {"a": jnp.asarray([0.5, 1.5]), "b": 0.5})
     # A key the predictor does not read is ignored, whatever its shape.
     assert hm.evaluate_predictor(rate, {"T": jnp.arange(4), "junk": jnp.ones(3)}).shape == (4,)
+
+
+def test_a_polynomial_rate_has_a_finite_gradient_at_a_zero_basis():
+    """``0 ** 0`` has a NaN derivative as a float power; the integer power is exact."""
+    poly = npoly(jr.key(0))
+    grad = jax.grad(lambda x: jnp.sum(poly(x)))(jnp.zeros(IN))
+    assert bool(jnp.all(jnp.isfinite(grad)))
+
+
+def test_a_custom_module_restart_keeps_the_units_inside_it():
+    """The generic restart stops at a scaler, a Parameter or a bounded predictor."""
+
+    class Holder(hm.Predictor):
+        net: hm.BoundedPredictor
+        k: hm.Parameter
+
+        def __call__(self, x):
+            return self.net(x) * self.k.value
+
+    holder = Holder(
+        net=BoundedPredictor(
+            inner=mlp(jr.key(0)),
+            input_keys=("a", "b"),
+            input_bounds=((0, 10), (0, 5)),
+            output_bounds=(-2, 2),
+        ),
+        k=hm.Parameter(5000.0, bounds=(0.0, None)),
+    )
+    fresh = reinitialize_pytree({"h": holder}, key=jr.key(3))["h"]
+    assert float(fresh.k.value) == pytest.approx(5000.0)
+    np.testing.assert_array_equal(fresh.net.in_scaler.temperature, holder.net.in_scaler.temperature)
+    np.testing.assert_array_equal(fresh.k.scaler.temperature, holder.k.scaler.temperature)
 
 
 def test_pytree_restart_keeps_scalers_and_constants():

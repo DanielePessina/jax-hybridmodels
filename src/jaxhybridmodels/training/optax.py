@@ -468,6 +468,20 @@ def _scheduled_lrs(phase: TrainingPhase) -> Array | None:
         return jnp.stack([jnp.asarray(schedule(i)) for i in range(phase.steps)])
 
 
+def _running_lr(opt_state: Any, phase: TrainingPhase) -> float:
+    """The rate this phase actually starts at, for the display.
+
+    Read from the optimiser state where it is injectable. A plain ready-made
+    instance runs at the rate it was built with, which nothing can read, so
+    the display shows ``nan`` instead of the phase's unused ``lr``.
+    """
+    if _optimiser_state_supports_lr(opt_state):
+        return float(opt_state.hyperparams["learning_rate"])
+    if isinstance(phase.optimizer, optax.GradientTransformation):
+        return math.nan
+    return _start_lr(phase.lr)
+
+
 def _set_lr(opt_state: Any, value: Any) -> None:
     """Write ``value`` into an injectable optimiser state's learning rate, in place.
 
@@ -644,8 +658,16 @@ def _phase_lr(config: OptaxTrainingConfig, phase_idx: int) -> float | None:
     phase = config.phases[phase_idx]
     if not isinstance(phase.optimizer, optax.GradientTransformation):
         return _start_lr(phase.lr)
-    if phase_idx > 0 and phase.lr != config.phases[phase_idx - 1].lr:
-        return _start_lr(phase.lr)
+    # Walk back over the phases that run this same instance. Once one of them
+    # changed lr, the user has set a rate, and it holds for every later phase
+    # on the instance, a fresh state included. A switch from another optimiser
+    # starts at the instance's own rate.
+    for idx in range(phase_idx, 0, -1):
+        current, before = config.phases[idx], config.phases[idx - 1]
+        if before.optimizer is not current.optimizer:
+            return None
+        if current.lr != before.lr:
+            return _start_lr(phase.lr)
     return None
 
 
@@ -1052,20 +1074,38 @@ def _warmup_compile(
     """
     total_buckets = len(bucket_payloads)
     last_grads: Any = None
+
+    def run(kernel: Callable[..., Any], *args: Any) -> Any:
+        """Call a kernel for its compile, tolerating a solve that fails.
+
+        The compile has happened by the time a solve raises, which is all the
+        warm-up is for. A starting point that does not solve is the tournament's
+        and the ensemble's to replace, and a plain fit's first step reports it.
+        """
+        try:
+            out = kernel(*args)
+            jax.block_until_ready(out)  # type: ignore[no-untyped-call]
+        except FIT_FAILURES:
+            return None
+        return out
+
     for idx, bp in enumerate(bucket_payloads):
         bucket_shape = (int(bp.ts.shape[0]), int(bp.ts.shape[1]))
         ui.on_compile_start(bucket_idx=idx, bucket_shape=bucket_shape)
-        warm_loss, warm_grads = bucket_step(predictors, bp, horizon)
-        jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
-        last_grads = warm_grads
+        warm = run(bucket_step, predictors, bp, horizon)
+        if warm is not None:
+            last_grads = warm[1]
         if per_bucket is not None:
-            per_bucket(bp)
+            run(per_bucket, bp)
         ui.on_compile_progress(bucket_idx=idx, total_buckets=total_buckets)
         ui.on_compile_done(bucket_idx=idx)
 
     if step_update is None or optimizer is None or trainable is None or penalty_step is None:
         return
 
+    if last_grads is None:
+        # Every bucket failed to solve at the start: zeros have the shapes.
+        last_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, trainable))
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
     zero_weight = jnp.asarray(0.0)
     # Compile the loop's non-bucket kernels here (one call each) so the run
@@ -1078,8 +1118,7 @@ def _warmup_compile(
     # The tournament's forward-only scorer gets its first trace here too.
     if score_bucket is not None:
         for bp in bucket_payloads:
-            warm_score = score_bucket(predictors, bp, horizon)
-            jax.block_until_ready(warm_score)  # type: ignore[no-untyped-call]
+            run(score_bucket, predictors, bp, horizon)
 
     if not settle:
         return
@@ -1087,8 +1126,7 @@ def _warmup_compile(
     # One update round, then re-trace every kernel on the updated (strong)
     # tree, absorbing the weak→strong retrace into the compile bracket.
     for bp in bucket_payloads:
-        warm_loss, _ = bucket_step(updated, bp, horizon)
-        jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
+        run(bucket_step, updated, bp, horizon)
     warm_penalty, _ = penalty_step(updated, zero_weight, penalty_points)
     jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
     updated, opt_state = step_update(updated, last_grads, last_grads, opt_state)
@@ -1097,8 +1135,7 @@ def _warmup_compile(
     # predictors; settle it too so a scoring sweep never re-traces.
     if score_bucket is not None:
         for bp in bucket_payloads:
-            warm_score = score_bucket(updated, bp, horizon)
-            jax.block_until_ready(warm_score)  # type: ignore[no-untyped-call]
+            run(score_bucket, updated, bp, horizon)
     ui.on_compile_progress(bucket_idx=total_buckets, total_buckets=total_buckets)
 
 
@@ -1364,9 +1401,8 @@ def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
         ),
         best_step=run.best_step,
         stop_reason=_stop_reason(run),
-        # Measured at the returned parameters, which a restored best step
-        # already is.
-        measured_loss=None if run.best_step is not None else run.final_loss,
+        # Measured at the returned parameters, on the final phase's terms.
+        measured_loss=run.final_loss,
         measured_validation=run.final_selection,
     )
 
@@ -1609,7 +1645,7 @@ def _run_phases(
         ui.on_phase_start(
             phase_idx=phase_idx,
             phase_steps=phase.steps,
-            lr=_start_lr(phase.lr),
+            lr=_running_lr(opt_state, phase),
             optimizer=phase.optimizer,
         )
 
@@ -1675,7 +1711,7 @@ def _run_phases(
                 # patience follows both.
                 score = loss_value + gap_value
                 if select_score is not None:
-                    score = select_score(previous_predictors)
+                    score = _validation_score(select_score, previous_predictors)
             except FIT_FAILURES as exc:
                 # Nothing was measured, so there is nothing to hand back.
                 if not losses_history:
@@ -1710,9 +1746,10 @@ def _run_phases(
             break
 
     if failure is not None:
+        kept = "the best parameters so far" if config.restore_best else "the last measured step"
         text = (
-            f"fit failed at step {len(losses_history)} and returned the best parameters so "
-            f"far (stop_reason='diverged'): {failure}"
+            f"fit failed at step {len(losses_history)} and returned {kept} "
+            f"(stop_reason='diverged'): {failure}"
         )
         ui.on_message(level="error", text=text)
         warnings.warn(text, RuntimeWarning, stacklevel=2)
@@ -1727,6 +1764,7 @@ def _run_phases(
         best.best_predictors if config.restore_best and failure is None else predictors
     )
     final_selection: float | None = None
+    last = config.phases[-1]
     if not losses_history:
         final_loss = float("nan")
     elif config.restore_best and best.best_step is not None:
@@ -1735,14 +1773,24 @@ def _run_phases(
         # that is about to come back. ``best.best_loss`` is the validation
         # score when there is a validation set, so read the history instead.
         final_loss = losses_history[best.best_step]
+        if not _same_terms(config.phases[phases[best.best_step]], last):
+            # Chosen by validation from a phase with another horizon or with
+            # segments, so that loss is on other terms: measure again.
+            final_loss, _ = _measure_returned(
+                final_predictors, dataset, kernels, last.horizon, None
+            )
     elif failure is None:
         # The last recorded loss was measured one update before the returned
         # parameters, so measure them once more, on the last phase's terms.
         final_loss, final_selection = _measure_returned(
-            final_predictors, dataset, kernels, config.phases[-1].horizon, select_score
+            final_predictors, dataset, kernels, last.horizon, select_score
         )
     else:
         final_loss = losses_history[-1]
+        if not _same_terms(config.phases[phases[-1]], last):
+            final_loss, _ = _measure_returned(
+                final_predictors, dataset, kernels, last.horizon, None
+            )
     ui.on_run_end(final_loss=final_loss)
     return _PhaseRun(
         predictors=final_predictors,
@@ -1757,6 +1805,29 @@ def _run_phases(
         continuity=continuity,
         final_selection=final_selection,
     )
+
+
+def _same_terms(phase: TrainingPhase, last: TrainingPhase) -> bool:
+    """Does a step of ``phase`` measure the loss as the final phase does?"""
+    return phase.horizon == last.horizon and phase.segments == 1
+
+
+def _validation_score(select_score: Callable[[Any], float], predictors: Any) -> float:
+    """The validation score, or ``inf`` when the validation set does not solve.
+
+    Training is still healthy when only the validation solve fails, so the step
+    is kept and simply cannot be chosen. A warning says so.
+    """
+    try:
+        return select_score(predictors)
+    except FIT_FAILURES as exc:
+        warnings.warn(
+            f"the validation set gives no finite loss at this step ({failure_summary(exc)}); "
+            "the step is kept but cannot be selected",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return math.inf
 
 
 def _measure_returned(
@@ -1912,10 +1983,15 @@ def _build_training_kernels(
         """Trace each segment count's kernels, and the starting solve, for one bucket."""
         for count, kernels_ in shooting.items():
             z, scale = bucket_nodes(predictors, bp, count, simulate)
-            (warm, _), (_, z_grads) = kernels_.step(predictors, z, scale, bp, 1.0, 1.0)
-            jax.block_until_ready(warm)  # type: ignore[no-untyped-call]
-            if _tournament_enabled(config) and first.segments == count:
-                jax.block_until_ready(kernels_.value(predictors, z, scale, bp, 1.0, 1.0))  # type: ignore[no-untyped-call]
+            # A start that does not solve still compiles; zeros keep the shapes.
+            z_grads = jnp.zeros_like(z)
+            try:
+                (warm, _), (_, z_grads) = kernels_.step(predictors, z, scale, bp, 1.0, 1.0)
+                jax.block_until_ready(warm)  # type: ignore[no-untyped-call]
+                if _tournament_enabled(config) and first.segments == count:
+                    jax.block_until_ready(kernels_.value(predictors, z, scale, bp, 1.0, 1.0))  # type: ignore[no-untyped-call]
+            except FIT_FAILURES:
+                pass
             warm_nodes[count].append((z, z_grads, scale))
 
     _warmup_compile(
@@ -2130,6 +2206,13 @@ def _fit_ensemble(
         raise RuntimeError(
             "fit_ensemble: every seed failed (a solver error or a non-finite loss); "
             "no member was trained"
+        )
+    if len(trained) < n_members:
+        warnings.warn(
+            f"fit_ensemble: {n_members - len(trained)} of {n_members} members failed to "
+            f"train and are left out, so {len(trained)} come back",
+            RuntimeWarning,
+            stacklevel=2,
         )
     # Stable, so a tie keeps the seed ranking. A bootstrap member's training
     # loss is on its own resample, so without validation its rank is only a

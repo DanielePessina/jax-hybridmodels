@@ -62,8 +62,12 @@ linear warp.
 A softplus is linear far from its bound, so a large one-sided value moves by
 about the learning rate per Adam step: a rate of 5000 hardly trains. With
 `warp="log"` each step is a relative change instead, at any size. Use it for
-positive constants of unknown scale, such as Arrhenius prefactors:
-`hm.Parameter(5000.0, bounds=(0.0, None), warp="log")`.
+positive constants of unknown scale:
+`hm.Parameter(5000.0, bounds=(0.0, None), warp="log")`. For an Arrhenius law,
+fit `log A` rather than `A`, and better still centre the law at a reference
+temperature inside the data: written as `A exp(-E / T)`, the prefactor and the
+activation energy trade off almost perfectly, and a fit crawls along that ridge.
+See [identifiability](/guide/uncertainty#without-sampling).
 
 Cover the values the solver may meet, with a small margin. Use
 `warp="log10"` when a positive quantity spans decades: across
@@ -100,6 +104,12 @@ position in the box. That map is not affine: it compresses the middle of the
 box and stretches the edges. An input that sits on its bound, such as a
 concentration starting at 0, therefore sees the largest sensitivity, so keep
 the input box a little wider than the values the solver meets.
+
+Outside its box an input continues linearly past the edge, so the network
+still returns a value and raises nothing. That value is not an extrapolation of
+anything the data showed: a network rate learned at 40 to 70 °C says nothing
+reliable about 25 °C. See
+[comparing with a mechanistic model](/guide/recommendations#compare-a-hybrid-with-a-mechanistic-model-out-of-sample).
 
 Call it with a mapping or a rank-1 array:
 

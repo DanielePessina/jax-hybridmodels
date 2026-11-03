@@ -736,7 +736,9 @@ class InferenceProblem:
         drop in log-likelihood passes the chi-square quantile for ``confidence``,
         and the interval's end is interpolated there. A side that reaches the
         value's bound, or runs out of ``max_points`` first, stays open: the data
-        do not bound the value on that side.
+        do not bound the value on that side. The walk is local: a second mode
+        elsewhere is not seen. A point that fits better than the start warns,
+        since the start was then not the maximum.
 
         Steps adapt so each raises the drop by about a tenth of the threshold, as
         in pyPESTO. They are taken in the latent coordinate, so profiling is
@@ -1261,7 +1263,24 @@ class _Coordinates:
         return self.sides(self.flat)
 
     def summary_fields(self, covariance: Array) -> dict[str, Any]:
-        """The fields every Gaussian result shares, around a latent ``covariance``."""
+        """The fields every Gaussian result shares, around a latent ``covariance``.
+
+        The covariance is conditioned on the entries pinned at their bounds,
+        whose rows and columns become zero. Their latent spread comes from the
+        squash's flat tail, and letting the other values trade off against it
+        would report errors for them that no draw, and no fit with the bound as
+        set, could show. Every result method then reads one covariance: the
+        others' uncertainty given the bound.
+        """
+        pinned = np.asarray(self.at_bound != "")
+        if pinned.any():
+            free = ~pinned
+            cross = covariance[np.ix_(free, pinned)]
+            conditional = (
+                covariance[np.ix_(free, free)]
+                - cross @ jnp.linalg.pinv(covariance[np.ix_(pinned, pinned)]) @ cross.T
+            )
+            covariance = jnp.zeros_like(covariance).at[np.ix_(free, free)].set(conditional)
         return {
             "names": self.names,
             "estimate": self.estimate,
@@ -1471,13 +1490,8 @@ class _GaussianSummary:
                 RuntimeWarning,
                 stacklevel=2,
             )
-            free = ~pinned
-            cross = covariance[np.ix_(free, pinned)]
-            conditional = (
-                covariance[np.ix_(free, free)]
-                - cross @ jnp.linalg.pinv(covariance[np.ix_(pinned, pinned)]) @ cross.T
-            )
-            covariance = jnp.zeros_like(covariance).at[np.ix_(free, free)].set(conditional)
+            # The covariance is already conditioned on them (``summary_fields``),
+            # so their rows are zero and every draw holds them at the estimate.
         # A square root from the eigendecomposition, which, unlike a Cholesky factor,
         # cannot fail on rounding in an ill-conditioned covariance.
         eigenvalues, eigenvectors = jnp.linalg.eigh(covariance)
@@ -1531,8 +1545,9 @@ class _GaussianSummary:
         """
         spread = jnp.sqrt(jnp.clip(jnp.diagonal(self.covariance), jnp.finfo(float).tiny))
         correlation = self.covariance / spread[:, None] / spread[None, :]
-        unbounded = self._unbounded()
-        return jnp.where(unbounded[:, None] | unbounded[None, :], jnp.nan, correlation)
+        # A pinned entry is left out too: its covariance is conditioned away.
+        hidden = self._unbounded() | jnp.asarray(self.at_bound, dtype=bool)
+        return jnp.where(hidden[:, None] | hidden[None, :], jnp.nan, correlation)
 
     def intervals(self, *, confidence: float = 0.95) -> dict[str, tuple[float, float]]:
         """A Wald interval per entry, in physical units.
@@ -1601,11 +1616,14 @@ class _GaussianSummary:
         # them, such as the product of two rates when only the product is seen.
         # Its spread is unbounded only if its latent gradient has a component
         # along a direction the data leave free; the pseudo-inverse gives the rest.
+        # The loose direction found at a point on a ridge is only close to the
+        # ridge's own, so an identified function shows a small component along
+        # it; a thousandth of its size separates that from a real dependence.
         latent_gradient = np.asarray(gradient * self.slopes[None, :])
         loose = np.asarray(self._loose_directions())
         along = np.abs(latent_gradient @ loose).max(axis=1, initial=0.0)
         size = np.linalg.norm(latent_gradient, axis=1)
-        spread = np.where(along > 1e-6 * np.maximum(size, np.finfo(float).tiny), np.inf, spread)
+        spread = np.where(along > 1e-3 * np.maximum(size, np.finfo(float).tiny), np.inf, spread)
         spread = np.where((uses & self.at_bound).any(axis=1), np.nan, spread)
         return DerivedQuantity(
             estimate=np.asarray(estimate), standard_error=spread.reshape(np.shape(estimate))
@@ -1622,11 +1640,14 @@ class _GaussianSummary:
         ]
         for i, name in enumerate(self.names):
             low, high = bounds[name]
-            spread, reach = (
-                (f"{'at bound':>11}", "not reported")
-                if self.at_bound[i]
-                else (f"{errors[name]:11.4g}", f"[{low:.4g}, {high:.4g}]")
-            )
+            if self.at_bound[i]:
+                spread, reach = f"{'at bound':>11}", "not reported"
+            elif math.isinf(errors[name]):
+                # The interval would be the whole box, which is not information
+                # from the data.
+                spread, reach = f"{'inf':>11}", "not identified"
+            else:
+                spread, reach = f"{errors[name]:11.4g}", f"[{low:.4g}, {high:.4g}]"
             lines.append(f"  {name:{width}}  {float(self.estimate[i]):11.4g}  {spread}  {reach}")
         correlation = np.asarray(self.correlation())
         pairs = sorted(
@@ -1774,7 +1795,10 @@ def _warn_about_pinned(caller: str, names: Sequence[str], at_bound: np.ndarray) 
         warnings.warn(
             f"{caller}: {pinned} sit against their bounds, so their standard errors and "
             "Wald intervals are nan: the curvature there says nothing about how far the "
-            "data let them move. Profile them to see whether the data bound them, and "
+            "data let them move. The other values are the best fit with these held at "
+            "their bounds, so they and anything derived from them hold only for those "
+            "bounds, and a value correlated with a pinned one is biased if its bound is "
+            "wrong. Profile the pinned values to see whether the data bound them, and "
             "widen a bound that is not physical.",
             RuntimeWarning,
             stacklevel=3,
@@ -1822,6 +1846,8 @@ class _Profiler:
             to_physical(coordinates.flat.at[index].set(-1.0))[index]
         )
 
+        start_value = float(coordinates.to_physical(coordinates.flat)[index])
+
         def reached_bound(x: Array, direction: float) -> bool:
             """Has the walk in ``direction`` reached the bound it is heading for?
 
@@ -1829,21 +1855,41 @@ class _Profiler:
             still walk down, since the data may bound it from below. Read on the
             squash's scale, so a one-sided bound counts too. The algebraic and
             softsign squashes approach their edges so slowly that a walk would
-            run out of points first, so a value within a relative 1e-5 of the
-            bound counts as well: the walk only gets there while the ratio is
-            still under the threshold, so the data leave that side open.
+            run out of points first, so a value within 1e-5 of the estimate's
+            distance to the bound counts as well.
             """
             target = "upper" if (direction > 0) == rising else "lower"
             if _edge_side(float(positions(x)[index])) == target:
                 return True
             edge = high if target == "upper" else low
+            if not math.isfinite(edge):
+                return False
             value = float(coordinates.to_physical(x)[index])
-            return math.isfinite(edge) and abs(value - edge) <= 1e-5 * max(1.0, abs(edge))
+            # Relative to how far the estimate sits from that bound, so a value
+            # in small units, or one whose interval ends just short of the
+            # bound, is not stopped early.
+            return abs(value - edge) <= 1e-5 * abs(start_value - edge)
+
+        def release(x: Array) -> Array:
+            """``x`` with every other value that sits in its squash's tail moved to the tail's edge.
+
+            Deep in the tail a value's gradient is about 1e-17, so BFGS never
+            moves it, even where the data, with the profiled value held
+            elsewhere, now want it off its bound. From the tail's edge the
+            search can go either way: back to the bound if the data still
+            push there, or inward.
+            """
+            for other, side in enumerate(coordinates.sides(x).tolist()):
+                if other == index or not side:
+                    continue
+                edge = _TAIL if side == "lower" else 1.0 - _TAIL
+                x = coordinates.to_physical.with_position(x, other, jnp.asarray(edge))
+            return x
 
         def solve_at(x: Array, fixed: Array) -> _Maximum:
             found = _maximise(
                 self.objective,
-                x,
+                release(x),
                 args=(fixed_entry, fixed),
                 rtol=self.rtol,
                 atol=self.atol,
@@ -1861,6 +1907,9 @@ class _Profiler:
                 )
             return found
 
+        # Compiled once per profile, since every crossing calls it.
+        objective_hessian = jax.jit(jax.hessian(self.objective))
+
         def settled(found: _Maximum, fixed: Array) -> bool:
             """Is ``found`` a maximum over the other values, not just a stalled search?
 
@@ -1871,21 +1920,34 @@ class _Profiler:
             much the log-likelihood would still rise; a crossing counts only when
             it is small and the curvature is that of a maximum.
             """
-            free = ~np.asarray(fixed_entry)
+            # A value pinned at its bound has a flat squash, so its curvature is
+            # rounding noise either side of zero; it is not part of the question.
+            free = ~np.asarray(fixed_entry) & (coordinates.sides(found.position) == "")
             if not free.any():
                 return True
-            args = (fixed_entry, fixed)
             try:
-                hessian = np.asarray(
-                    jax.hessian(lambda flat: self.objective(flat, args))(found.position)
-                )[np.ix_(free, free)]
+                hessian = np.asarray(objective_hessian(found.position, (fixed_entry, fixed)))[
+                    np.ix_(free, free)
+                ]
             except (TypeError, ValueError, NotImplementedError):
                 # No second derivative through this solve: BFGS's own test stands.
                 return True
             gradient = np.asarray(found.gradient)[free]
-            if not np.all(np.isfinite(hessian)) or np.linalg.eigvalsh(hessian)[0] <= 0.0:
+            if not np.all(np.isfinite(hessian)):
                 return False
-            decrement = 0.5 * float(gradient @ np.linalg.solve(hessian, gradient))
+            # In the eigenbasis: a direction of clear positive curvature adds its
+            # share of the decrement; a flat one (no information, as for a value
+            # the model ignores) counts only if the gradient still pushes along
+            # it; clear negative curvature is not a maximum.
+            eigenvalues, eigenvectors = np.linalg.eigh(hessian)
+            along = eigenvectors.T @ gradient
+            floor = 1e-10 * max(float(np.max(np.abs(eigenvalues))), np.finfo(float).tiny)
+            if np.any(eigenvalues < -floor):
+                return False
+            curved = eigenvalues > floor
+            if np.any(np.abs(along[~curved]) > 1e-6):
+                return False
+            decrement = 0.5 * float(np.sum(along[curved] ** 2 / eigenvalues[curved]))
             return decrement <= _NEWTON_DECREMENT
 
         def narrow(
@@ -1920,6 +1982,8 @@ class _Profiler:
                     inside, inside_ratio = mid, mid_ratio
             return [*insides, (outside, outside_ratio, True)]
 
+        higher_warned: list[bool] = []
+
         def walk(direction: float) -> tuple[list[tuple[Array, float, bool]], str]:
             """The points on one side, and why the walk stopped there."""
             points: list[tuple[Array, float, bool]] = []
@@ -1950,6 +2014,31 @@ class _Profiler:
                 if not math.isfinite(new_ratio):
                     points.append((new, math.inf, False))
                     return points, "solve_failed"
+                # A long step across a flat ridge can land where BFGS cannot
+                # finish. Shorter steps, before the side is given up on.
+                retries = 0
+                while new_ratio > self.threshold and retries < 4:
+                    if found.converged and settled(found, fixed):
+                        break
+                    retries += 1
+                    step *= 0.25
+                    fixed = x[index] + direction * step
+                    found = solve_at(x, fixed)
+                    new_ratio = 2.0 * (self.best - found.value)
+                    new = jnp.where(fixed_entry, fixed, found.position)
+                    if not math.isfinite(new_ratio):
+                        points.append((new, math.inf, False))
+                        return points, "solve_failed"
+                if new_ratio < -0.1 and found.converged and not higher_warned:
+                    higher_warned.append(True)
+                    warnings.warn(
+                        f"profile {name!r}: a point along the profile fits better than the "
+                        f"estimate, by {-new_ratio / 2:.3g} in log-likelihood, so the start was "
+                        "not the maximum. Optimize again from there; the interval here is "
+                        "relative to the wrong maximum.",
+                        RuntimeWarning,
+                        stacklevel=4,
+                    )
                 if new_ratio > self.threshold:
                     if not (found.converged and settled(found, fixed)):
                         # A ratio from an unfinished search can only be too high, so

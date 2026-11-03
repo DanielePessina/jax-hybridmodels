@@ -14,6 +14,20 @@ For a first example where the uncertainty is the answer, read
 [shelf life](/examples/shelf-life): a drug's label claim set from an accelerated
 stability study, where the best estimate would overstate it.
 
+## What every interval assumes
+
+- The model is right. An interval measures the noise, not a wrong law or a
+  missing term.
+- The noise is independent and Gaussian, with the variances in the data or the
+  ones inferred. `log_likelihood=` replaces that, see [Noise](#noise).
+- Wald intervals, `derived`, `FisherResult.sample` and `laplace` assume the
+  estimate is close to Gaussian. The profile assumes the chi-square limit of the
+  likelihood ratio, which holds better with few data.
+- A posterior or an estimate conditions on everything held fixed: solver settings,
+  `y0`, other layers of a network, and any value pinned at its bound.
+- An extrapolation is only as good as the law where it is made. A shelf life at
+  25 °C from data at 40 to 70 °C trusts the Arrhenius form below the data.
+
 ## A first posterior
 
 <<< @/../examples/tubular_reactor/sample_tubular_reactor.py#problem
@@ -230,7 +244,10 @@ Fisher information
 A profile likelihood needs no Gaussian assumption. `profile(name)` holds one
 value fixed at points stepping away from the maximum, re-optimises all the others
 with BFGS at each, and closes a side where twice the drop in log-likelihood passes
-the chi-square quantile for the confidence level. `profiles()` runs every free
+the chi-square quantile for the confidence level. It is local: it follows the
+likelihood from the maximum you start at, so a second mode, such as an aliased
+frequency, can hold parameter values the profile never visits. It warns when a
+point it reaches fits better than its start. `profiles()` runs every free
 `Parameter`:
 
 <<< @/../examples/identifiability/arrhenius.py#profile
@@ -266,7 +283,10 @@ correlation form, so changing a bound or a warp does not move them.
 A correlation of 0.999 says the data fix a combination of the two. `log A` and `E`
 trade off along the rates' temperature dependence. Centring the law at a reference
 temperature removes it. The Fisher covariance gives the temperature at which
-`log k` and `E` are uncorrelated:
+`log k` and `E` are uncorrelated, and it lies inside the data's range. Centring at
+the condition you care about instead, such as a storage temperature below the
+data, leaves the correlation high: the [shelf life](/examples/shelf-life) example's
+25 °C form still has -0.989.
 
 <<< @/../examples/identifiability/arrhenius.py#centred
 
@@ -275,7 +295,10 @@ in correlation form, falls from about 1.8e3 to 1. When the data cannot separate
 parameters at all,
 `fisher().unidentified()` names the directions it cannot see, such as two rates
 whose product is all a model uses. Those parameters' standard errors are infinite,
-and the summary lists them under "Not identified".
+and the summary lists them under "Not identified". Their Wald interval runs to
+their bounds, or to infinity without one: that is the box you declared, not
+information from the data. A profile side that closes only because another value
+was pinned at its bound is likewise conditional on that bound.
 
 `laplace()` is a Gaussian approximation to the posterior at its mode, so it needs a
 prior. `sample` draws positions that `physical`, `predict` and `to_arviz` read as
@@ -303,11 +326,13 @@ identified, since that spread is unbounded.
 
 `derived(fn)` gives the estimate and delta-method standard error of any function
 of the values. `fn` takes the dict that `physical` returns and must use
-`jax.numpy`, since its gradient comes from `jax.jacobian`. A shelf life from a rate:
+`jax.numpy`, since its gradient comes from `jax.jacobian`. A shelf life from the
+rate at 25 °C, in the [shelf life](/examples/shelf-life) example's model, whose
+`log_k25` is that rate's log:
 
 ```python
 life = fisher.derived(lambda values: jnp.log(1 / 0.9) / jnp.exp(values["log_k25"]))
-low, _ = life.interval(confidence=0.95, side="lower")  # one-sided 95% lower bound
+low, high = life.interval(confidence=0.95, side="lower")  # high is inf
 ```
 
 It assumes the quantity is close to Gaussian. For a bound that does not, profile
@@ -323,10 +348,18 @@ A value is pinned when the data would push it past a bound of its `Parameter`, s
 the bound, not the data, holds it there. Its latent is then far out in the
 squash's flat tail, and the curvature there says nothing about how far the data
 would let the value move. Being close to a bound is not enough: a value near the
-end of a wide or log-warped box that the data put there is reported as usual. `fisher` and `laplace` therefore report `nan` for
-its standard error and Wald interval, mark the row "at bound", and warn. A
-`derived` quantity that depends on it is `nan` too. Profile the value to see
-whether the data bound it from the other side.
+end of a wide or log-warped box that the data put there is reported as usual.
+`fisher` and `laplace` therefore report `nan` for its standard error and Wald
+interval, mark the row "at bound", and warn. A `derived` quantity that uses it
+directly is `nan` too. Profile the value to see whether the data bound it from
+the other side.
+
+The other estimates are the best fit with the pinned value held at its bound, so
+they, their standard errors and any `derived` quantity built from them are
+conditional on that bound. One correlated with the pinned value is biased when
+the bound is wrong, and its interval can exclude the truth while looking normal.
+An activation energy capped below its true value pulls the rate constant with it.
+Widen the bound and refit, or profile, before trusting the rest.
 
 A profile of another value re-optimises the pinned one at each point, but cannot
 move it past its bound. If the data trade the two off, the profile then drops

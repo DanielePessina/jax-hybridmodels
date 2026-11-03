@@ -340,6 +340,36 @@ def _member_model(member: Any, index: int) -> HybridModel:
     )
 
 
+def _warn_outside_box(predictor: Any, arrays: Mapping[str, Array]) -> None:
+    """Warn when a ``BoundedPredictor`` is asked about inputs outside its input box.
+
+    The guarded inverse continues past the box, so the network still returns a
+    value there, from latents it never saw in training. Concrete inputs only:
+    under a trace the check is skipped.
+    """
+    keys = getattr(predictor, "input_keys", None)
+    scaler = getattr(predictor, "in_scaler", None)
+    if not keys or scaler is None or len(scaler.bounds) != len(keys):
+        return
+    outside = []
+    for key, (low, high) in zip(keys, scaler.bounds, strict=True):
+        if key not in arrays:
+            continue
+        try:
+            values = np.asarray(arrays[key])
+        except jax.errors.TracerArrayConversionError:
+            return
+        if np.any(values < low) or np.any(values > high):
+            outside.append(f"{key} outside ({low:g}, {high:g})")
+    if outside:
+        warnings.warn(
+            f"evaluate_predictor: {', '.join(outside)}. The network extrapolates there "
+            "from a box it was not trained beyond, so the value is not reliable.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
 def evaluate_predictor(predictor: Any, inputs: Mapping[str, ArrayLike]) -> Array:
     """Evaluate a predictor at named inputs, vectorised over array-valued ones.
 
@@ -380,6 +410,7 @@ def evaluate_predictor(predictor: Any, inputs: Mapping[str, ArrayLike]) -> Array
         for key, value in inputs.items()
         if used is None or key in used
     }
+    _warn_outside_box(predictor, arrays)
     shape = jnp.broadcast_shapes(*(a.shape for a in arrays.values())) if arrays else ()
     if not shape:
         return jnp.asarray(predictor(arrays))

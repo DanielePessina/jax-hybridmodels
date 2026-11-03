@@ -326,9 +326,11 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
     warp = WARPS[in_scaler.warp]
     lows = jnp.asarray([b[0] for b in in_scaler.warped_bounds])
     highs = jnp.asarray([b[1] for b in in_scaler.warped_bounds])
+    # Clipped, since a log warp's inverse can round the end points one ulp
+    # outside the box, where input_violation would charge them.
     axes = [
-        warp.inverse(jnp.linspace(low, high, n_per_dim))
-        for low, high in zip(lows, highs, strict=True)
+        jnp.clip(warp.inverse(jnp.linspace(low, high, n_per_dim)), lo, hi)
+        for low, high, (lo, hi) in zip(lows, highs, in_scaler.bounds, strict=True)
     ]
     mesh = jnp.meshgrid(*axes, indexing="ij")
     return jnp.stack([m.reshape(-1) for m in mesh], axis=-1)

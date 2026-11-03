@@ -22,6 +22,12 @@ Make input boxes slightly wider than the data, for example
 flattest at the edges, so a margin keeps the gradient usable across the
 measured range.
 
+Outside the box an input continues linearly and the network still returns a
+value, with no warning. A network does not extrapolate past the data, so do not
+read a prediction at a condition the data never reached, such as a storage
+temperature below an accelerated study, from a network rate. Use a mechanistic
+law there, compared out of sample as below.
+
 ### Zero the readout when the box is very wide
 
 The last layer's random weights can still push the starting output far
@@ -107,6 +113,15 @@ and
 [`train_crystallisation_mechanistic.py`](/examples/crystallisation-mechanistic)
 fits four scalars with CMA-ES.
 
+### Compare a hybrid with a mechanistic model out of sample
+
+In-sample metrics favour the more flexible model: a network with hundreds of
+weights fits the training runs better than a two-constant law even when the law
+is right. Hold out whole conditions instead, for example leave one temperature
+out, fit on the rest, and compare predictions on the held-out runs. Count the
+parameters each model spends, and prefer the mechanistic law where it predicts
+the held-out conditions as well, especially when you need to extrapolate.
+
 For a positive rate spanning decades that is exactly zero below a threshold, warp
 the output and gate it in the vector field:
 
@@ -140,9 +155,15 @@ rank-1 array straight to a predictor that takes the whole vector.
 
 ## Training
 
-Start with one phase, `OptaxTrainingConfig(steps=1000, lr=1e-3)`. Add a
-lower-rate phase when the loss plateaus, or a first phase with
-`horizon=0.5` when the tail of each trajectory diverges early on.
+Start with one phase, `OptaxTrainingConfig(steps=1000, lr=1e-3)`, for a model
+with networks. Add a lower-rate phase when the loss plateaus, or a first phase
+with `horizon=0.5` when the tail of each trajectory diverges early on.
+
+A model of a few `Parameter` scalars usually wants a larger rate: the shelf-life
+and Arrhenius examples use `lr=0.05` for 1500 steps. Adam still stops short of
+the maximum along a correlated direction, so finish a mechanistic fit with
+`hm.inference.make_problem(model, data, log_prior=None, noise="data").optimize()`,
+which runs BFGS to the maximum likelihood.
 
 Turn on the tournament (`tournament_attempts=8, tournament_steps=20`) when
 `max_steps` errors appear on some seeds, or when several seeds all settle

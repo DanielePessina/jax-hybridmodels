@@ -1324,8 +1324,14 @@ def test_a_failure_right_after_a_horizon_change_returns_a_measured_step(fast_rea
     assert result.stop_reason == "diverged"
     assert result.best_step is None
     assert len(result.history.loss) == 1
-    assert result.final_loss == result.history.loss[0]
     assert fitted_rate(result) == pytest.approx(0.3, rel=1e-4)
+    # That one loss was on the half horizon; final_loss is measured again on the
+    # final phase's full horizon, at the same parameters.
+    remeasured = result.model.fit(
+        fast_reaction_data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
+    )
+    assert result.final_loss == pytest.approx(remeasured.history.loss[0], rel=1e-5)
+    assert result.final_loss != result.history.loss[0]
 
 
 @pytest.mark.parametrize("mode", ["solver-error", "nan-loss"])
