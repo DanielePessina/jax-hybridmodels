@@ -296,9 +296,11 @@ example does for a storage temperature.
 
 ### Values at a bound
 
-A value whose estimate sits against a bound of its `Parameter` has its latent far
-out in the squash's flat tail. The curvature there says nothing about how far the
-data would let the value move. `fisher` and `laplace` therefore report `nan` for
+A value is pinned when the data would push it past a bound of its `Parameter`, so
+the bound, not the data, holds it there. Its latent is then far out in the
+squash's flat tail, and the curvature there says nothing about how far the data
+would let the value move. Being close to a bound is not enough: a value near the
+end of a wide or log-warped box that the data put there is reported as usual. `fisher` and `laplace` therefore report `nan` for
 its standard error and Wald interval, mark the row "at bound", and warn. A
 `derived` quantity that depends on it is `nan` too. Profile the value to see
 whether the data bound it from the other side.

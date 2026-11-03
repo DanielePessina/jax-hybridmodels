@@ -439,6 +439,49 @@ class BoundScaler(eqx.Module):
         ]
         return jnp.stack(parts, axis=-1)
 
+    def squash_position(self, latent: Array) -> Array:
+        """Where each latent sits between its bounds, on the squash's ``[0, 1]`` scale.
+
+        0 is the lower bound and 1 the upper. A value with two finite bounds
+        reads off its squash. One with one finite bound uses the softplus slope,
+        which is 0 at that bound and 1 far from it, so the bound end is 0 for a
+        lower bound and 1 for an upper one. An unbounded value is 0.5. Near 0 or
+        1 the value's gradient vanishes, whatever its physical scale or warp:
+        that is what "pinned" means for inference.
+        """
+
+        def component(v: Array, i: int) -> Array:
+            low, high = self.bounds[i]
+            temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
+            if math.isfinite(low) and math.isfinite(high):
+                return BOUND_TRANSFORMS[self.transform].forward(v / temperature)
+            if not (math.isfinite(low) or math.isfinite(high)):
+                return jnp.full_like(v, 0.5)
+            slope = jax.nn.sigmoid(v / temperature)
+            return slope if math.isfinite(low) else 1.0 - slope
+
+        latent = jnp.asarray(latent)
+        if len(self.bounds) == 1:
+            return component(latent, 0)
+        latent = jnp.atleast_1d(latent)
+        latent = jnp.broadcast_to(latent, (*latent.shape[:-1], len(self.bounds)))
+        return jnp.stack([component(latent[..., i], i) for i in range(len(self.bounds))], axis=-1)
+
+    def latent_at_position(self, position: Array, i: int) -> Array:
+        """The latent of component ``i`` whose :meth:`squash_position` is ``position``.
+
+        Its exact inverse. An unbounded component has no such map.
+        """
+        low, high = self.bounds[i]
+        temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
+        if math.isfinite(low) and math.isfinite(high):
+            return BOUND_TRANSFORMS[self.transform].inverse(position) * temperature
+        if not (math.isfinite(low) or math.isfinite(high)):
+            raise ValueError("latent_at_position: an unbounded component has no squash position")
+        # The softplus slope is the sigmoid, so its inverse is the logit.
+        logit = jnp.log(position) - jnp.log1p(-position)
+        return (logit if math.isfinite(low) else -logit) * temperature
+
     def to_latent(self, x: Array) -> Array:
         """Map a physical value to its latent representative.
 

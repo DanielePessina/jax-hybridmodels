@@ -869,6 +869,35 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     centre = float(result.estimate[0])
     # Built in the latent and mapped back, so it leans up as log k does and stays in bounds.
     assert 0.01 < low < centre < high < 10.0 and high - centre > centre - low
+    # An interior optimum a millionth of the way along a huge box is in the squash's
+    # tail but not held there by the bound, so it is reported in full.
+    for wide in (
+        hm.Parameter(0.7, bounds=(0.0, 1e7)),
+        hm.Parameter(0.7, bounds=(1e-12, 1e4), warp="log10"),
+    ):
+        problem = make_problem(linear_model(wide), experiments, log_prior=None, noise="data")
+        result = problem.optimize().problem.fisher()
+        assert not result.at_bound.any()
+        assert result.standard_errors()["k"] == pytest.approx(least_squares(ts, ys)[1], rel=1e-5)
+
+    # With inferred noise the Gauss-Newton information must count the noise once:
+    # the MLE's standard error is sigma / sqrt(2 n), as the observed information says.
+    noisy = (
+        make_problem(
+            linear_model(),
+            experiments,
+            log_prior=None,
+            noise={"y": hm.Parameter(0.3, bounds=(1e-3, 10.0), warp="log")},
+        )
+        .optimize()
+        .problem
+    )
+    sigma = float(noisy.physical(noisy.position)["noise.y"])
+    expected = sigma / np.sqrt(2 * ys.size)
+    assert noisy.fisher().standard_errors()["noise.y"] == pytest.approx(expected, rel=1e-6)
+    assert noisy.fisher(information="observed").standard_errors()["noise.y"] == pytest.approx(
+        expected, rel=1e-6
+    )
 
     product = product_model(hm.Parameter(1.0))
     problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
@@ -876,6 +905,10 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     (direction,) = together.unidentified()
     assert set(direction) == {"a", "b"}
     assert together.standard_errors() == {"a": np.inf, "b": np.inf}
+    # The product is what the data see, so its error is finite: that of the slope.
+    product_error = together.derived(lambda values: values["a"] * values["b"]).standard_error
+    assert float(product_error) == pytest.approx(least_squares(ts, ys)[1], rel=1e-5)
+    assert np.isinf(together.derived(lambda values: values["a"]).standard_error)
     assert together.intervals()["a"] == (-np.inf, np.inf)
     with pytest.raises(ValueError, match="do not constrain"):
         together.sample(jr.key(0), 10)
