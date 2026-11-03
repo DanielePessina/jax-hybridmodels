@@ -10,17 +10,22 @@ alongside the predictors. A penalty on the **gap** where one segment ends
 and the next begins pulls the segments back into one trajectory.
 
 A ``TrainingPhase(segments=K)`` turns it on for one phase, and the schedule
-must end in single shooting, so the returned model has been fitted as one
-solve. The nodes belong to the run and are dropped when it ends.
+must end in single shooting. Without validation the returned model comes from
+that final phase, so it has been fitted as one solve. With ``validation=``
+the step with the best validation score wins, which can be in a segmented
+phase; its parameters still predict by single shooting, which is what the
+validation score measured. The nodes belong to the run and are dropped when
+it ends.
 
 Layout
 ------
 Segments are counted in samples. A bucket's ``T`` union timestamps are split
-into segments of ``L`` samples that overlap by one: segment ``k`` covers
-indices ``k(L-1)`` to ``(k+1)(L-1)``. Every experiment in a bucket has the
-same ``T``, so the layout is fixed when the step compiles. The last segment
-is padded by repeating its final time, which diffrax accepts, so every
-segment has the same length and all of them solve as one ``vmap``.
+into ``K = min(segments, T-1)`` segments that overlap by one sample: segment
+``k`` starts at index ``floor(k(T-1)/K)`` and ends where the next starts, so
+their lengths differ by at most one step. Every experiment in a bucket has
+the same ``T``, so the layout is fixed when the step compiles. Each segment
+is padded to the longest, ``L``, by repeating its end time, which diffrax
+accepts, so all of them solve as one ``vmap``.
 
 The **assembled** trajectory takes each index from the segment that starts
 at or before it: a node's own sample is scored at the node value. The result
@@ -46,7 +51,6 @@ continuity term ``weight * mean((gap / scale)^2)`` has no units.
 from __future__ import annotations
 
 import dataclasses
-import math
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -56,9 +60,9 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, ArrayLike
 
-from jaxhybridmodels.data import BucketPayload, Dataset
+from jaxhybridmodels.data import BucketPayload, Dataset, horizon_rows
 from jaxhybridmodels.solver import SolverConfig, simulation_state
-from jaxhybridmodels.training.kernels import apply_length_mask
+from jaxhybridmodels.training.kernels import apply_length_mask, share_pair, split_share
 
 __all__ = [
     "Nodes",
@@ -76,10 +80,11 @@ __all__ = [
 class SegmentLayout(NamedTuple):
     """Where each segment starts and which segment supplies each sample.
 
-    ``segments`` can be fewer than asked for: a bucket with few samples
-    cannot hold that many segments of at least two samples each.
+    ``segments`` is fewer than asked for only when a bucket has fewer than
+    ``segments + 1`` samples, since each segment spans at least one step.
     ``samples[k, j]`` is the union index of segment ``k``'s ``j``-th sample,
-    clamped at ``T - 1`` to pad the last segment. ``segment[i]`` and
+    clamped at the segment's own end so a shorter segment repeats its last
+    time. ``segment[i]`` and
     ``position[i]`` say which segment supplies union index ``i``, and where in
     it. ``boundaries`` are the union indices of the nodes.
     """
@@ -95,10 +100,12 @@ class SegmentLayout(NamedTuple):
 def segment_layout(n_times: int, segments: int) -> SegmentLayout:
     """Split ``n_times`` samples into at most ``segments`` overlapping segments.
 
-    Each segment gets ``L = ceil((T-1)/K) + 1`` samples, and the count is
-    then recomputed from ``L``, so the last segment always starts before the
-    final sample and holds at least two distinct times. One sample, or one
-    segment, is single shooting.
+    Segment ``k`` starts at union index ``floor(k (T-1) / K)``, so the
+    ``K = min(segments, T-1)`` segments differ in length by at most one step
+    and each holds at least two distinct times. Each segment's last sample is
+    the next one's first. All are padded to the longest, ``L``, by repeating
+    their end time, so they solve together in one ``vmap``. One sample, or
+    one segment, is single shooting.
     """
     if n_times < 2 or segments < 2:
         index = np.arange(n_times)[None, :]
@@ -107,12 +114,15 @@ def segment_layout(n_times: int, segments: int) -> SegmentLayout:
             1, n_times, index, zeros, np.arange(n_times), np.zeros(0, dtype=np.int32)
         )
     steps = n_times - 1
-    length = math.ceil(steps / min(segments, steps)) + 1
-    count = math.ceil(steps / (length - 1))
-    starts = np.arange(count) * (length - 1)
-    index = np.minimum(starts[:, None] + np.arange(length)[None, :], steps)
-    segment = np.minimum(np.arange(n_times) // (length - 1), count - 1)
-    position = np.arange(n_times) - segment * (length - 1)
+    count = min(segments, steps)
+    starts = (np.arange(count) * steps) // count
+    ends = np.append(starts[1:], steps)
+    length = int(np.max(ends - starts)) + 1
+    index = np.minimum(starts[:, None] + np.arange(length)[None, :], ends[:, None])
+    # The segment that starts at or before each sample; the final sample
+    # belongs to the last segment, whose end it is.
+    segment = np.searchsorted(starts, np.arange(n_times), side="right") - 1
+    position = np.arange(n_times) - starts[segment]
     return SegmentLayout(count, length, index, segment, position, starts[1:])
 
 
@@ -150,11 +160,13 @@ def shoot_bucket(
 class ShootingKernels(NamedTuple):
     """The jitted pieces of one segment count.
 
-    ``step(predictors, z, scale, bp, horizon, weight)`` returns
+    ``step(predictors, z, scale, bp, horizon, weight, share)`` returns
     ``((total, (data, continuity)), (predictor_grads, z_grads))``. ``value``
     takes the same arguments and returns ``(data, continuity)`` with no
     backward pass. ``data`` is the loss plus any trajectory penalty on the
-    assembled trajectory, and ``continuity`` the weighted gap term.
+    assembled trajectory, and ``continuity`` the weighted gap term, both
+    scaled by the bucket's pooling ``share``, a ``(data, penalty)`` pair (see
+    :func:`~jaxhybridmodels.training.kernels.build_bucket_step`).
     """
 
     segments: int
@@ -182,41 +194,75 @@ def build_shooting_kernels(
     """
 
     def terms(
-        predictors: Any, z: Array, scale: Array, bp: BucketPayload, weight: Array
+        predictors: Any,
+        z: Array,
+        scale: Array,
+        bp: BucketPayload,
+        horizon: Array,
+        weight: Array,
+        share: Array,
     ) -> tuple[Array, Array]:
-        layout = segment_layout(int(bp.ts.shape[1]), segments)
+        n_times = int(bp.ts.shape[1])
+        layout = segment_layout(n_times, segments)
         full, gaps = shoot_bucket(
             predictors, bp, z * scale, layout, simulate_fn=simulate_fn, solver=solver
         )
-        data = loss_fn(jax.vmap(state_to_output)(full), bp)
+        scored = apply_length_mask(bp, horizon)
+        data_share, penalty_share = split_share(share)
+        data = data_share * loss_fn(jax.vmap(state_to_output)(full), scored)
         if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-            data = data + trajectory_penalty_weight * trajectory_penalty_fn(full, bp)
+            penalty = trajectory_penalty_fn(full, scored)
+            data = data + penalty_share * trajectory_penalty_weight * penalty
         if layout.segments == 1:
             return data, jnp.zeros_like(data)
-        return data, weight * jnp.mean((gaps / scale) ** 2)
+        # A join past the horizon is as unscored as the data there: it would
+        # otherwise pull the predictors toward a stretch the phase leaves out.
+        # Each experiment is cut at its own horizon, as its data are.
+        in_horizon = horizon_rows(bp.ts, bp.mask.any(axis=-1), horizon)
+        joined = in_horizon[:, jnp.asarray(layout.boundaries)]  # [N, K-1]
+        squared = jnp.where(joined[:, :, None], (gaps / scale) ** 2, 0.0)
+        count = jnp.maximum(joined.sum() * gaps.shape[2], 1)
+        return data, penalty_share * weight * squared.sum() / count
 
     def objective(
-        diff: tuple[Any, Array], static: Any, scale: Array, bp: BucketPayload, weight: Array
+        diff: tuple[Any, Array],
+        static: Any,
+        scale: Array,
+        bp: BucketPayload,
+        horizon: Array,
+        weight: Array,
+        share: Array,
     ) -> tuple[Array, tuple[Array, Array]]:
         predictors = eqx.combine(diff[0], static)
-        data, continuity = terms(predictors, diff[1], scale, bp, weight)
+        data, continuity = terms(predictors, diff[1], scale, bp, horizon, weight, share)
         return data + continuity, (data, continuity)
 
     grad_fn = eqx.filter_value_and_grad(objective, has_aux=True)
 
     @eqx.filter_jit
     def jitted_step(
-        predictors: Any, z: Array, scale: Array, bp: BucketPayload, horizon: Array, weight: Array
+        predictors: Any,
+        z: Array,
+        scale: Array,
+        bp: BucketPayload,
+        horizon: Array,
+        weight: Array,
+        share: Array,
     ) -> tuple[tuple[Array, tuple[Array, Array]], Any]:
-        masked = apply_length_mask(bp, horizon)
         diff, static = eqx.partition(predictors, trainable)
-        return grad_fn((diff, z), static, scale, masked, weight)
+        return grad_fn((diff, z), static, scale, bp, horizon, weight, share)
 
     @eqx.filter_jit
     def jitted_value(
-        predictors: Any, z: Array, scale: Array, bp: BucketPayload, horizon: Array, weight: Array
+        predictors: Any,
+        z: Array,
+        scale: Array,
+        bp: BucketPayload,
+        horizon: Array,
+        weight: Array,
+        share: Array,
     ) -> tuple[Array, Array]:
-        return terms(predictors, z, scale, apply_length_mask(bp, horizon), weight)
+        return terms(predictors, z, scale, bp, horizon, weight, share)
 
     def step(
         predictors: Any,
@@ -225,11 +271,10 @@ def build_shooting_kernels(
         bp: BucketPayload,
         horizon: ArrayLike = 1.0,
         weight: ArrayLike = 1.0,
+        share: ArrayLike = 1.0,
     ) -> tuple[tuple[Array, tuple[Array, Array]], Any]:
         # Arrays, because filter_jit treats a Python float as static.
-        return jitted_step(
-            predictors, z, scale, bp, jnp.asarray(horizon, float), jnp.asarray(weight, float)
-        )
+        return jitted_step(predictors, z, scale, bp, *_traced(horizon, weight), share_pair(share))
 
     def value(
         predictors: Any,
@@ -238,12 +283,15 @@ def build_shooting_kernels(
         bp: BucketPayload,
         horizon: ArrayLike = 1.0,
         weight: ArrayLike = 1.0,
+        share: ArrayLike = 1.0,
     ) -> tuple[Array, Array]:
-        return jitted_value(
-            predictors, z, scale, bp, jnp.asarray(horizon, float), jnp.asarray(weight, float)
-        )
+        return jitted_value(predictors, z, scale, bp, *_traced(horizon, weight), share_pair(share))
 
     return ShootingKernels(segments, step, value)
+
+
+def _traced(*values: ArrayLike) -> tuple[Array, ...]:
+    return tuple(jnp.asarray(value, float) for value in values)
 
 
 def build_checked_simulation(

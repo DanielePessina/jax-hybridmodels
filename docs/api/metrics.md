@@ -64,7 +64,7 @@ Per-channel summary stats of a prediction against the data it was made on.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `predictions` | `PredictionResult` | From ``HybridModel.predict`` or ``predict_ensemble`` (which is scored on its member mean), or any mapping from experiment ID to a record with ``outputs``, ``observed`` and ``observation_mask`` dicts keyed by channel. Only cells the mask marks as measured count. Channels are read from the first experiment's ``outputs``. |
+| `predictions` | `PredictionResult` | From ``HybridModel.predict`` or ``predict_ensemble`` (which is scored on its member mean), or any mapping from experiment ID to a record with ``outputs``, ``observed`` and ``mask`` dicts keyed by channel. Only cells the mask marks as measured count. Channels are read from the first experiment's ``outputs``. |
 | `by` | `{"channel", "experiment"}` | ``"channel"`` pools every experiment. ``"experiment"`` scores each one alone, which is how to find the run a pooled number hides. Its R^2 compares against that experiment's own mean, so a good fit to a nearly flat run can still score low. A channel an experiment did not measure has ``n == 0`` and NaN statistics. |
 
 **Returns**

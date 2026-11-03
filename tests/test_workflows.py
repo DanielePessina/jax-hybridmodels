@@ -41,7 +41,7 @@ CHANNELS = ("a", "b")
 SOLVER = hm.SolverConfig(rtol=1e-5, atol=1e-7, dt0=0.05, max_steps=256)
 TRUE_RATE = 0.8
 # The rate drops by half at t = 1 in the mechanistic workflow.
-FEED = hm.step_profile(before=1.0, after=0.5, jump_at=1.0)
+FEED = hm.step_profile(before=1.0, after=0.5, at=1.0)
 
 # (exp_id, temp, times for channel a, times for channel b). Grid lengths after
 # the union with t0 are 4 and 5, so every dataset here has two buckets.
@@ -148,7 +148,7 @@ def plain_model(rate: float = 0.3) -> hm.HybridModel:
 def rate_network(key: Array, inner: Any = None) -> hm.BoundedPredictor:
     if inner is None:
         inner = hm.MLPPredictor(
-            in_size=1, out_size=1, width_size=8, depth=1, activation_name="tanh", key=key
+            in_size=1, out_size=1, width_size=8, depth=1, activation="tanh", key=key
         )
     return hm.BoundedPredictor(
         inner=inner,
@@ -175,8 +175,8 @@ def events_named(ui: RecordingUI, name: str) -> list[dict[str, Any]]:
 
 MECHANISTIC_CONFIG = hm.OptaxTrainingConfig(
     phases=(
-        hm.TrainingPhase(40, lr=optax.linear_schedule(0.1, 0.02, 40), horizon=0.5),
-        hm.TrainingPhase(60, lr=0.05, reset_optimizer=True),
+        hm.TrainingPhase(steps=40, lr=optax.linear_schedule(0.1, 0.02, 40), horizon=0.5),
+        hm.TrainingPhase(steps=60, lr=0.05, reset_optimizer=True),
     ),
 )
 
@@ -237,12 +237,12 @@ def test_predict_matches_the_closed_form_on_the_measured_grid(mechanistic):
     assert list(predictions) == [grid[0] for grid in GRIDS]
     k = fitted_rate(result)
     for experiment in predictions.values():
-        expected = jnp.exp(-k * feed_integral(experiment.times))
+        expected = jnp.exp(-k * feed_integral(experiment.ts))
         np.testing.assert_allclose(experiment.outputs["a"], expected, atol=2e-3)
         np.testing.assert_allclose(experiment.outputs["b"], 1 - expected, atol=2e-3)
         # The t0 row was never measured, so it is NaN and masked in both channels.
-        assert experiment.times[0] == 0.0
-        assert not experiment.observation_mask["a"][0] and not experiment.observation_mask["b"][0]
+        assert experiment.ts[0] == 0.0
+        assert not experiment.mask["a"][0] and not experiment.mask["b"][0]
         assert np.isnan(experiment.observed["a"][0])
 
 
@@ -253,8 +253,8 @@ def test_predict_on_a_requested_grid_has_no_observations(mechanistic):
     shared = result.model.predict(data, ts=jnp.array([0.5, 1.5]))
     k = fitted_rate(result)
     for experiment in even.values():
-        assert experiment.times.shape == (7,) and experiment.observed == {}
-        assert experiment.times[0] == 0.0
+        assert experiment.ts.shape == (7,) and experiment.observed == {}
+        assert experiment.ts[0] == 0.0
     for experiment in shared.values():
         expected = jnp.exp(-k * feed_integral(jnp.array([0.5, 1.5])))
         np.testing.assert_allclose(experiment.outputs["a"], expected, atol=2e-3)
@@ -276,7 +276,7 @@ def test_simulate_rereads_an_experiment_as_predict_does():
     source = experiments()[0]
     again = model.simulate(source)
     on_data = model.predict([source])[source.exp_id]
-    np.testing.assert_array_equal(again.times, on_data.times)
+    np.testing.assert_array_equal(again.ts, on_data.ts)
     np.testing.assert_allclose(again.outputs["a"], on_data.outputs["a"], atol=1e-5)
 
 
@@ -416,7 +416,7 @@ def test_every_data_builder_gives_the_same_experiment():
     ]
     for payload in payloads[1:]:
         np.testing.assert_allclose(payload.ts, payloads[0].ts)
-        np.testing.assert_allclose(payload.y_observed, payloads[0].y_observed)
+        np.testing.assert_allclose(payload.observed, payloads[0].observed)
         np.testing.assert_array_equal(payload.mask, payloads[0].mask)
 
 
@@ -484,9 +484,15 @@ def test_patience_stops_early_and_the_best_step_labels_the_model(overshoot):
 
 
 def test_restore_best_off_returns_the_last_step(overshoot):
-    _, keep_last, _ = overshoot
+    _, keep_last, data = overshoot
     assert keep_last.best_step is None
-    assert keep_last.final_loss == keep_last.history.loss[-1]
+    # The last recorded loss predates the last update; final_loss is measured
+    # at the parameters that came back.
+    remeasured = keep_last.model.fit(
+        data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
+    )
+    assert remeasured.history.loss[0] == pytest.approx(keep_last.final_loss, rel=1e-5)
+    assert keep_last.final_loss != keep_last.history.loss[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +505,7 @@ NETWORK_STEPS = 150
 @pytest.fixture(scope="session")
 def network_splits() -> tuple[hm.Dataset, hm.Dataset, hm.Dataset]:
     data = hm.make_dataset(experiments(rate=rate_law), output_channel_names=CHANNELS)
-    return hm.split_dataset(data, train=0.6, val=0.2, test=0.2, key=jr.key(1))
+    return hm.split_dataset(data, train=0.6, validation=0.2, test=0.2, key=jr.key(1))
 
 
 @pytest.fixture(scope="session")
@@ -595,7 +601,10 @@ def saturated_fit(network_splits, network_objective):
     ui = RecordingUI()
     objective = hm.Objective(penalty_weight=100.0, penalty_points=network_objective.penalty_points)
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(10, lr=0.05, penalty_weight=0.0), hm.TrainingPhase(20, lr=0.05)),
+        phases=(
+            hm.TrainingPhase(steps=10, lr=0.05, penalty_weight=0.0),
+            hm.TrainingPhase(steps=20, lr=0.05),
+        ),
     )
     result = pinned.fit(network_splits[0], config, objective=objective, key=jr.key(2), ui=ui)
     return result, ui
@@ -639,7 +648,10 @@ def tournaments(plain_data):
 
     def run(attempts: int) -> hm.FitResult:
         config = hm.OptaxTrainingConfig(
-            phases=(hm.TrainingPhase(1, lr=0.01, horizon=0.5), hm.TrainingPhase(1, lr=1e-6)),
+            phases=(
+                hm.TrainingPhase(steps=1, lr=0.01, horizon=0.5),
+                hm.TrainingPhase(steps=1, lr=1e-6),
+            ),
             tournament_attempts=attempts,
             tournament_steps=3,
         )
@@ -694,9 +706,9 @@ def test_the_same_key_reproduces_a_run_and_another_key_does_not(plain_data):
 # ---------------------------------------------------------------------------
 
 EVOSAX_RUNS: dict[str, dict[str, Any]] = {
-    "cma-warm": {"algorithm": "CMA_ES", "init": "warm", "sigma_init": 0.5},
-    "sep-uniform": {"algorithm": "Sep_CMA_ES", "init": "uniform_box", "sigma_init": 0.5},
-    "simple-lhs": {"algorithm": "SimpleES", "init": "lhs_box", "sigma_init": 0.5},
+    "cma-warm": {"algorithm": "CMA_ES", "init": "warm", "init_sigma": 0.5},
+    "sep-uniform": {"algorithm": "Sep_CMA_ES", "init": "uniform_box", "init_sigma": 0.5},
+    "simple-lhs": {"algorithm": "SimpleES", "init": "lhs_box", "init_sigma": 0.5},
 }
 
 
@@ -744,7 +756,7 @@ def test_evosax_keeps_frozen_leaves(evolved, run):
 def test_evosax_validation_selects_a_generation(plain_data):
     result = plain_model().fit(
         plain_data,
-        hm.EvosaxTrainingConfig(population_size=8, steps=8, sigma_init=0.5),
+        hm.EvosaxTrainingConfig(population_size=8, steps=8, init_sigma=0.5),
         validation=plain_data,
         freeze="frozen",
         key=jr.key(4),
@@ -825,6 +837,9 @@ def test_seed_ensemble_returns_trained_members_best_first(ensembles):
 def test_bootstrap_ensemble_trains_one_member_per_resample(ensembles):
     _, bootstrap, _ = ensembles
     assert len(bootstrap) == 2
+    # One seed per resample still trains no tournament, and every member
+    # starts from a fresh draw rather than the model as given.
+    assert bootstrap[0].history.tournament_scores == ()
     assert fitted_rate(bootstrap[0]) == pytest.approx(TRUE_RATE, abs=0.1)
     assert fitted_rate(bootstrap[0]) != fitted_rate(bootstrap[1])
 
@@ -838,7 +853,7 @@ def test_predict_ensemble_is_the_member_mean_with_its_spread(ensembles, plain_da
         stacked = jnp.stack([m.model.predict(plain_data)[exp_id].outputs["a"] for m in members])
         np.testing.assert_allclose(experiment.outputs["a"], stacked.mean(axis=0), atol=1e-5)
         np.testing.assert_allclose(experiment.std["a"], stacked.std(axis=0), atol=1e-5)
-    assert "std" in combined.to_dataframe().columns
+    assert {"std", "q0.025", "q0.975"} <= set(combined.to_dataframe().columns)
     measured = sum(int(bp.mask[..., 0].sum()) for bp in plain_data.bucket_payloads)
     assert int(hm.compute_metrics(combined)["a"].n) == measured
 
@@ -914,7 +929,10 @@ def oscillator_data() -> hm.Dataset:
 @pytest.fixture(scope="session")
 def shooting_fits(oscillator_data):
     """From frequency 1.75: single shooting, then segments, then segments with a tournament."""
-    segmented = (hm.TrainingPhase(100, lr=0.05, segments=8), hm.TrainingPhase(100, lr=0.05))
+    segmented = (
+        hm.TrainingPhase(steps=100, lr=0.05, segments=8),
+        hm.TrainingPhase(steps=100, lr=0.05),
+    )
     configs = (
         hm.OptaxTrainingConfig(steps=200, lr=0.05),
         hm.OptaxTrainingConfig(phases=segmented),
@@ -962,13 +980,17 @@ def test_segments_assemble_into_the_single_solve(oscillator_data):
         shoot_bucket,
     )
 
-    # Segment counts clamp to what the samples can hold, two samples each.
+    # Every count up to T - 1 is honoured, and every sample is supplied by
+    # exactly one segment, in order.
     assert [segment_layout(n, k).segments for n, k in ((41, 8), (10, 4), (5, 9), (2, 3))] == [
         8,
-        3,
+        4,
         4,
         1,
     ]
+    for n, k in ((10, 4), (41, 8), (7, 6)):
+        layout = segment_layout(n, k)
+        np.testing.assert_array_equal(layout.samples[layout.segment, layout.position], np.arange(n))
     model = oscillator(1.3)
     bp = oscillator_data.bucket_payloads[0]
     simulate = build_checked_simulation(simulate_fn=oscillator_fn, solver=model.solver)
@@ -985,6 +1007,24 @@ def test_segments_assemble_into_the_single_solve(oscillator_data):
     assert bool(jnp.all(solved))
     np.testing.assert_allclose(assembled, states, atol=1e-4)
     assert float(jnp.max(jnp.abs(gaps))) < 1e-4
+
+    # A node knocked off the trajectory past the horizon opens a gap there, and
+    # the phase leaves it unscored, as it does the data.
+    from jaxhybridmodels.losses import masked_mse
+    from jaxhybridmodels.training.shooting import build_shooting_kernels
+
+    kernels = build_shooting_kernels(
+        segments=8,
+        simulate_fn=oscillator_fn,
+        state_to_output=lambda state: state,
+        solver=model.solver,
+        loss_fn=masked_mse,
+        trainable=jax.tree.map(eqx.is_inexact_array, model.predictors),
+    )
+    late = nodes.z[0].at[:, -1].add(0.5)
+    _, full_gap = kernels.value(model.predictors, late, nodes.scale[0], bp, 1.0, 1.0)
+    _, early_gap = kernels.value(model.predictors, late, nodes.scale[0], bp, 0.5, 1.0)
+    assert float(full_gap) > 1e-3 and float(early_gap) < 1e-8
 
 
 # ---------------------------------------------------------------------------
@@ -1059,7 +1099,7 @@ def test_capping_limits_the_buckets_and_keeps_the_data(capped_data):
         assert bool((bp.ts[:, 0] == 0.0).all())
         # Every padded row is unobserved in every channel, with neutral values.
         filler = ~bp.mask
-        assert bool((bp.y_observed[filler] == 0.0).all()) and bool((bp.yvar[filler] == 1.0).all())
+        assert bool((bp.observed[filler] == 0.0).all()) and bool((bp.variance[filler] == 1.0).all())
 
 
 def test_capped_predictions_report_only_the_experiments_own_times(capped_data):
@@ -1069,13 +1109,11 @@ def test_capped_predictions_report_only_the_experiments_own_times(capped_data):
     plain = model.predict(data)
     assert list(capped) == list(plain) == [e.exp_id for e in data]
     for exp_id in plain:
-        np.testing.assert_array_equal(capped[exp_id].times, plain[exp_id].times)
+        np.testing.assert_array_equal(capped[exp_id].ts, plain[exp_id].ts)
         np.testing.assert_allclose(
             capped[exp_id].outputs["a"], plain[exp_id].outputs["a"], atol=1e-4
         )
-        np.testing.assert_array_equal(
-            capped[exp_id].observation_mask["a"], plain[exp_id].observation_mask["a"]
-        )
+        np.testing.assert_array_equal(capped[exp_id].mask["a"], plain[exp_id].mask["a"])
     assert {k: int(m.n) for k, m in hm.compute_metrics(capped).items()} == {
         k: int(m.n) for k, m in hm.compute_metrics(plain).items()
     }
@@ -1089,8 +1127,8 @@ def test_capped_grids_keep_each_experiments_span(capped_data):
     model = plain_model(TRUE_RATE)
     for exp_id, experiment in model.predict(capped_data, n_points=5).items():
         source = next(e for e in capped_data.experiments if e.exp_id == exp_id)
-        assert float(experiment.times[0]) == 0.0
-        assert float(experiment.times[-1]) == pytest.approx(float(source.channels["a"].ts.max()))
+        assert float(experiment.ts[0]) == 0.0
+        assert float(experiment.ts[-1]) == pytest.approx(float(source.channels["a"].ts.max()))
 
 
 def test_a_capped_fit_recovers_the_rate_and_compiles_per_bucket(capped_fit):
@@ -1101,7 +1139,7 @@ def test_a_capped_fit_recovers_the_rate_and_compiles_per_bucket(capped_fit):
 
 
 def test_splits_and_resamples_apply_the_same_cap(capped_data):
-    for subset in hm.split_dataset(capped_data, train=0.6, val=0.2, test=0.2, key=jr.key(0)):
+    for subset in hm.split_dataset(capped_data, train=0.6, validation=0.2, test=0.2, key=jr.key(0)):
         assert len(subset.bucket_payloads) <= CAPPED
     resample = hm.make_bootstrap_dataset(capped_data, key=jr.key(0))
     assert len(resample.bucket_payloads) <= CAPPED
@@ -1277,7 +1315,7 @@ def test_a_failure_right_after_a_horizon_change_returns_a_measured_step(fast_rea
     # one update of the first phase jumps past the limit, so the second phase
     # fails on its first step and the only measured parameters are the start.
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(1, lr=3.0, horizon=0.5), hm.TrainingPhase(5, lr=0.1)),
+        phases=(hm.TrainingPhase(steps=1, lr=3.0, horizon=0.5), hm.TrainingPhase(steps=5, lr=0.1)),
     )
     with pytest.warns(RuntimeWarning, match="diverged"):
         result = failing_model("nan-loss").fit(
@@ -1286,8 +1324,14 @@ def test_a_failure_right_after_a_horizon_change_returns_a_measured_step(fast_rea
     assert result.stop_reason == "diverged"
     assert result.best_step is None
     assert len(result.history.loss) == 1
-    assert result.final_loss == result.history.loss[0]
     assert fitted_rate(result) == pytest.approx(0.3, rel=1e-4)
+    # That one loss was on the half horizon; final_loss is measured again on the
+    # final phase's full horizon, at the same parameters.
+    remeasured = result.model.fit(
+        fast_reaction_data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
+    )
+    assert result.final_loss == pytest.approx(remeasured.history.loss[0], rel=1e-5)
+    assert result.final_loss != result.history.loss[0]
 
 
 @pytest.mark.parametrize("mode", ["solver-error", "nan-loss"])
@@ -1330,7 +1374,7 @@ def test_evosax_returns_its_best_when_a_later_generation_fails(
         return PoisonedStrategy(strategy, poison_from), params
 
     monkeypatch.setattr(evosax_module, "_build_strategy", poisoned)
-    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.1)
+    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.1)
     if not reaches_history:
         with pytest.raises((FloatingPointError, eqx.EquinoxRuntimeError)):
             plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(0), verbose=False)
@@ -1562,7 +1606,7 @@ def test_a_bare_model_saves_without_a_history(tmp_path):
 def test_callables_come_back_as_their_names(tmp_path):
     """A schedule and a custom loss cannot be rebuilt, so they reload as raw dicts."""
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(1, lr=optax.linear_schedule(0.1, 0.0, 1)),)
+        phases=(hm.TrainingPhase(steps=1, lr=optax.linear_schedule(0.1, 0.0, 1)),)
     )
     objective = hm.Objective(loss=masked_mse)
     hm.save(tmp_path, mechanistic_model(), config=config, objective=objective)
@@ -1609,7 +1653,7 @@ def custom_inner(key: Array) -> hm.Predictor:
 
 def weighted_loss(predicted: Array, bp: Any) -> Array:
     """A plain custom loss, the signature ``Objective(loss=...)`` documents."""
-    return jnp.sum(((predicted - bp.y_observed) * bp.mask) ** 2) / jnp.maximum(bp.mask.sum(), 1)
+    return jnp.sum(((predicted - bp.observed) * bp.mask) ** 2) / jnp.maximum(bp.mask.sum(), 1)
 
 
 INNERS = {"kan": kan_inner, "polynomial": polynomial_inner, "custom": custom_inner}

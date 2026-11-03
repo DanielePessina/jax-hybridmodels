@@ -29,6 +29,10 @@ about two minutes and writes three more. Both accept `--no-plot`, and
 `--generations` / `--steps` for a short run. `train_hybrid.py
 --save-predictors PATH` writes the fitted predictors for the RL example.
 
+XLA may print `Algebraic simplifier is likely stuck` to stderr while this compiles.
+It is harmless; see
+[Troubleshooting](/guide/troubleshooting#algebraic-simplifier-is-likely-stuck-in-stderr).
+
 ## The model
 
 $$

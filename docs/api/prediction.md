@@ -22,7 +22,7 @@ predict_ensemble(
     *,
     ts: 'ArrayLike | None' = None,
     n_points: 'int | None' = None,
-    quantiles: 'Sequence[float]' = (),
+    quantiles: 'Sequence[float]' = (0.025, 0.975),
 ) -> PredictionResult
 ```
 
@@ -34,16 +34,21 @@ holds the per-channel standard deviation across members (population,
 ``ddof=0``; zero for one member), and ``members`` holds each model's
 own [`PredictionResult`](/api/model#predictionresult).
 
-``quantiles`` adds those levels across members to each experiment, such as
-``(0.05, 0.95)``. A posterior predictive is usually skewed, so an interval
-from ``std`` alone can leave a bound's range.
+``quantiles`` adds those levels across members to each experiment, by
+default a central 95% band; ``()`` leaves them out. They interpolate
+linearly between members, so with few members a 95% band sits near the
+smallest and largest. A posterior predictive is usually skewed, so an
+interval from ``std`` alone can leave a bound's range.
+
+A member that predicts a non-finite value anywhere is left out of the
+statistics, with a warning, and still appears in ``members``.
 
 ``models`` holds ``HybridModel`` or ``FitResult`` objects, so the list
 ``fit_ensemble`` returns can be passed as is. They must share
 ``output_channel_names``. ``data``, ``ts`` and ``n_points`` are as for
 [`HybridModel.predict`](/api/model#hybridmodelpredict).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L223)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L224)</small>
 
 ---
 
@@ -79,4 +84,4 @@ has output shape ``()``, so a sweep over 50 temperatures gives ``[50]``.
 | --- | --- | --- |
 | `Array` |  | Call ``float(...)`` on a scalar result for a Python number. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L318)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/prediction.py#L373)</small>

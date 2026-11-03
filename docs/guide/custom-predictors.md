@@ -73,10 +73,10 @@ template built with the same values. Do not put JAX arrays or lists there.
 The [tournament](/guide/training#the-tournament) restarts every predictor
 from a new key. By default each float array is replaced with a
 standard-normal sample of the same shape, which ignores any scaling your
-constructor applied. Define `initialized_with_key` to rebuild properly:
+constructor applied. Define `reinitialized` to rebuild properly:
 
 ```python
-    def initialized_with_key(self, key: Array) -> "Affine":
+    def reinitialized(self, *, key: Array) -> "Affine":
         return Affine(self.in_size, self.out_size, key=key)
 ```
 
@@ -84,7 +84,7 @@ The result must have the same pytree shape: same fields, array shapes and
 static values. The trainable mask built before the tournament is reused
 after it, and frozen leaves are put back to their given values, so only
 what trains is redrawn. The method is found with `hasattr`; nothing to
-register. To check it, call `hm.reinitialize_with_key(predictor, key)`,
+register. To check it, call `hm.reinitialize(predictor, key=key)`,
 which applies it with nothing put back.
 
 ## Freezing fixed arrays
@@ -123,7 +123,7 @@ returns a scalar. To pick a `transform` or `warp`, pass
 
 - Subclasses `Predictor` and implements `__call__`.
 - Trainable arrays are plain fields; hyperparameters are static.
-- `initialized_with_key` is defined if the constructor does anything
+- `reinitialized` is defined if the constructor does anything
   smarter than standard-normal weights, and keeps the pytree shape.
 - Arrays that must stay fixed are frozen with `freeze=` or a mask.
 - Saving and loading into a fresh template gives the same outputs; see

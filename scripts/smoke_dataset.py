@@ -74,7 +74,7 @@ def _print_buckets(label: str, dataset: Dataset) -> None:
     print(f"\n[{label}] {len(dataset.bucket_payloads)} bucket(s)")
     for i, bp in enumerate(dataset.bucket_payloads):
         print(
-            f"  bucket {i}: ts {bp.ts.shape} | y_observed {bp.y_observed.shape} "
+            f"  bucket {i}: ts {bp.ts.shape} | observed {bp.observed.shape} "
             f"| mask {bp.mask.shape} | y0 {bp.y0.shape} | n_obs={int(bp.n_obs)}"
         )
 
@@ -88,7 +88,9 @@ def main() -> None:
     )
     _print_buckets("full", dataset)
 
-    train, val, test = split_dataset(dataset, train=0.6, val=0.2, test=0.2, key=jr.PRNGKey(42))
+    train, val, test = split_dataset(
+        dataset, train=0.6, validation=0.2, test=0.2, key=jr.PRNGKey(42)
+    )
     print(
         f"\nsplit sizes: train={len(train._experiments)}, "
         f"val={len(val._experiments)}, test={len(test._experiments)}"
@@ -113,7 +115,7 @@ def main() -> None:
         out_size=2,
         width_size=8,
         depth=2,
-        activation_name="tanh",
+        activation="tanh",
         key=jr.PRNGKey(7),
     )
     raw_input = jnp.array([0.5, -0.3])

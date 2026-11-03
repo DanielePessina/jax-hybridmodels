@@ -15,7 +15,7 @@ Shows:
 - ``fit(freeze=...)`` to fit the trunk alone or the residual alone
 - repeated ``fit`` and ``predict`` calls on lists of experiments for
   cross-validation, and ``ExperimentPrediction.observed`` /
-  ``observation_mask`` for scoring
+  ``mask`` for scoring
 
 Run::
 
@@ -97,7 +97,7 @@ def _pairs(result: hm.PredictionResult) -> tuple[np.ndarray, np.ndarray]:
     """Observed and predicted ``Ca`` at every measured cell, as flat arrays."""
     obs, pred = [], []
     for exp_pred in result.values():
-        mask = np.asarray(exp_pred.observation_mask["Ca"], dtype=bool)
+        mask = np.asarray(exp_pred.mask["Ca"], dtype=bool)
         obs.append(np.asarray(exp_pred.observed["Ca"])[mask])
         pred.append(np.asarray(exp_pred.outputs["Ca"])[mask])
     return np.concatenate(obs), np.concatenate(pred)
@@ -214,7 +214,7 @@ def _held_out_plot(
         )
         for (name, result), style in zip(predictions.items(), ("--", ":"), strict=True):
             pred = result[exp.exp_id]
-            ax.plot(pred.times, pred.outputs["Ca"], ls=style, lw=1.6, label=name)
+            ax.plot(pred.ts, pred.outputs["Ca"], ls=style, lw=1.6, label=name)
         ax.set_title(f"T ramp around {ramp_midpoint(exp):.1f}°C", fontsize=9)
         ax.set_xlabel("t")
         ax.grid(alpha=0.3)
@@ -268,7 +268,7 @@ def main() -> None:
         steps=args.generations,
         init="lhs_box",
         init_box_extent=2.0,
-        sigma_init=0.5,
+        init_sigma=0.5,
     )
     adamw = hm.OptaxTrainingConfig(steps=args.steps, lr=3e-3)
 

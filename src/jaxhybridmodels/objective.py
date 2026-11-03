@@ -27,7 +27,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaxhybridmodels.data import BucketPayload, Dataset
-from jaxhybridmodels.losses import resolve_loss_fn
+from jaxhybridmodels.losses import Pooling, loss_pooling, resolve_loss_fn
 from jaxhybridmodels.penalties import (
     PenaltyPointSource,
     bound_penalty,
@@ -55,15 +55,21 @@ class Objective:
         Per-channel multipliers on the loss. A mapping keyed by channel
         name scores only the channels it names (``{"conc": 1.0}`` fits one
         channel of several); a sequence gives one weight per output channel,
-        in ``output_channel_names`` order, and keeps every channel's cells
-        in the loss's denominator. ``None`` weights every channel 1. Names
-        are checked against the dataset's channels when training starts.
-        A named channel with weight ``0.0`` contributes nothing but its
-        cells still count in the denominator, so ``{"a": 1.0, "b": 0.0}``
-        gives half the loss of ``{"a": 1.0}``; leave a name out to drop it.
+        in ``output_channel_names`` order. ``None`` weights every channel 1.
+        Names are checked against the dataset's channels when training
+        starts. A named channel with weight ``0.0`` contributes no error.
+        Under ``"mse"`` its cells still count in the denominator, so
+        ``{"a": 1.0, "b": 0.0}`` scales the loss of ``{"a": 1.0}`` by
+        ``cells(a) / cells(a and b)``. ``"mle"`` sums, so there a zero
+        weight is the same as leaving the name out. ``"bal_*"`` averages over
+        experiments, and one measured only in a zero-weight channel still
+        counts in that average, so the loss is scaled by the share of
+        experiments measured in the weighted channels.
     penalty_weight : float
-        Weight on the bound-saturation penalty, relative to the
-        per-bucket-averaged data term. ``0.0`` disables it.
+        Weight on the bound-saturation penalty, relative to the pooled data
+        loss. Under ``"mle"`` that loss is a sum over every measurement, so
+        the same weight counts for less as the data grow. ``0.0`` disables
+        it.
         ``TrainingPhase.penalty_weight`` overrides it for one Optax phase.
     penalty_points : Mapping[str, ArrayLike] | None
         Extra points where the bound penalty is charged, keyed by the path of
@@ -81,8 +87,12 @@ class Objective:
     trajectory_penalty_fn : Callable | None
         Trajectory-aware penalty for embedded hybrid models, called as
         ``(full_state, bp) -> scalar`` on the full simulator state
-        ``[N, T, S]``, penalty accumulators included. See the
-        ``penalty_*`` helpers in ``jaxhybridmodels.penalties``.
+        ``[N, T, S]``, penalty accumulators included. Return a mean over
+        the bucket's ``N`` experiments: the trainers weight each bucket by
+        its share of the experiments, so a mean gives the mean over the
+        dataset, and a sum would count an experiment more in a larger
+        bucket. See the ``penalty_*`` helpers in
+        ``jaxhybridmodels.penalties``.
     trajectory_penalty_weight : float
         Weight on ``trajectory_penalty_fn``. ``0.0`` disables it even when a
         function is set; a non-zero weight without a function raises.
@@ -138,6 +148,15 @@ class Objective:
         )
         return resolve_loss_fn(self.loss, channel_idx, channel_weights)
 
+    def pooling(self, output_channel_names: Sequence[str]) -> Pooling:
+        """How this objective's per-bucket losses add up to the dataset loss.
+
+        See :func:`~jaxhybridmodels.losses.loss_pooling`. Only the channels
+        the loss reads are counted.
+        """
+        channel_idx, _ = _channel_selection(self.channel_weights, tuple(output_channel_names))
+        return Pooling(loss_pooling(self.loss), channel_idx)
+
     @property
     def bound_penalty_fn(self) -> Callable[[Any, tuple[Array, ...]], Array]:
         """``penalty_fn`` when set, else :func:`~jaxhybridmodels.penalties.bound_penalty`."""
@@ -156,13 +175,15 @@ class Objective:
 class ResolvedObjective:
     """An objective matched against one dataset and predictors pytree.
 
-    ``loss_fn`` is the bound ``(pred_obs, bp) -> scalar``; ``sources`` and
+    ``loss_fn`` is the bound ``(pred_obs, bp) -> scalar`` and ``pooling`` how
+    its per-bucket values add up; ``sources`` and
     ``extras`` are the measured and extra penalty points, one per
     ``BoundedPredictor`` in traversal order. Host-side only.
     """
 
     objective: Objective
     loss_fn: Callable[[Array, BucketPayload], Array]
+    pooling: Pooling
     sources: tuple[PenaltyPointSource | None, ...]
     extras: tuple[Array, ...]
 
@@ -188,7 +209,13 @@ def resolve_objective(
         # ``penalty_fn`` owns its points and needs no coverage check.
         enabled=penalty_on and objective.penalty_fn is None,
     )
-    return ResolvedObjective(objective=objective, loss_fn=loss_fn, sources=sources, extras=extras)
+    return ResolvedObjective(
+        objective=objective,
+        loss_fn=loss_fn,
+        pooling=objective.pooling(dataset.output_channel_names),
+        sources=sources,
+        extras=extras,
+    )
 
 
 def _check_weight(name: str, value: float) -> None:

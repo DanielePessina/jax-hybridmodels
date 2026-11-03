@@ -361,7 +361,7 @@ def build_policy(*, key: Array) -> hm.BoundedPredictor:
             out_size=1,
             width_size=POLICY_WIDTH,
             depth=POLICY_DEPTH,
-            activation_name="tanh",
+            activation="tanh",
             key=key,
         ),
         output_bounds=ACTIVITY_BOUNDS,
@@ -486,7 +486,7 @@ def build_agent(*, key: Array) -> Agent:
             out_size=1,
             width_size=POLICY_WIDTH,
             depth=POLICY_DEPTH,
-            activation_name="tanh",
+            activation="tanh",
             key=k_critic,
         ),
     )

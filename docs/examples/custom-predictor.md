@@ -51,7 +51,7 @@ asks:
   input of roughly unit scale, a value near 1 is the sane start.
 - **How it re-initialises.** The restart
   [tournament](/guide/training#the-tournament) calls
-  `initialized_with_key`. Without it, every float array is resampled from a
+  `reinitialized`. Without it, every float array is resampled from a
   standard normal: the phases stop being uniform on $[0, 2\pi)$, the
   readout loses its $1/\sqrt{m}$ scale and `bandwidth` is ignored.
 - **How the bank is held fixed.** A module cannot declare its own field
@@ -89,7 +89,7 @@ dict, and `fit` takes them through `freeze=`:
 <<< @/../examples/custom_predictor/train_custom_predictor.py#mask
 
 The fit runs a three-restart tournament, which is what exercises
-`initialized_with_key`:
+`reinitialized`:
 
 <<< @/../examples/custom_predictor/train_custom_predictor.py#fit
 

@@ -16,6 +16,7 @@ separately from any training kernel.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -167,7 +168,7 @@ def _predict(
                     state_to_output=model.state_to_output,
                     solver=model.solver,
                 )
-            expected = bp.y_observed.shape
+            expected = bp.observed.shape
         else:
             if bool(jnp.any(grid[:, 0] < bp.ts[:, 0])):
                 raise ValueError(
@@ -206,16 +207,16 @@ def _predict(
             bucket_ts = np.asarray(dataset.bucket_payloads[b].ts[row])
             if bucket_ts.shape[0] != arrays.ts.shape[0]:
                 values = values[np.searchsorted(bucket_ts, np.asarray(arrays.ts, bucket_ts.dtype))]
-            observed = jnp.where(arrays.mask, arrays.y_observed, jnp.nan)
+            observed = jnp.where(arrays.mask, arrays.observed, jnp.nan)
             experiments[exp.exp_id] = ExperimentPrediction(
-                times=arrays.ts,
+                ts=arrays.ts,
                 outputs=dict(zip(names, values.T, strict=True)),
                 observed=dict(zip(names, observed.T, strict=True)),
-                observation_mask=dict(zip(names, arrays.mask.T, strict=True)),
+                mask=dict(zip(names, arrays.mask.T, strict=True)),
             )
         else:
             experiments[exp.exp_id] = ExperimentPrediction(
-                times=grid[row], outputs=dict(zip(names, values.T, strict=True))
+                ts=grid[row], outputs=dict(zip(names, values.T, strict=True))
             )
     return PredictionResult(experiments, tuple(buckets))
 
@@ -226,7 +227,7 @@ def predict_ensemble(
     *,
     ts: ArrayLike | None = None,
     n_points: int | None = None,
-    quantiles: Sequence[float] = (),
+    quantiles: Sequence[float] = (0.025, 0.975),
 ) -> PredictionResult:
     """Predict with every model and return the member mean, with the spread.
 
@@ -236,9 +237,14 @@ def predict_ensemble(
     ``ddof=0``; zero for one member), and ``members`` holds each model's
     own :class:`~jaxhybridmodels.PredictionResult`.
 
-    ``quantiles`` adds those levels across members to each experiment, such as
-    ``(0.05, 0.95)``. A posterior predictive is usually skewed, so an interval
-    from ``std`` alone can leave a bound's range.
+    ``quantiles`` adds those levels across members to each experiment, by
+    default a central 95% band; ``()`` leaves them out. They interpolate
+    linearly between members, so with few members a 95% band sits near the
+    smallest and largest. A posterior predictive is usually skewed, so an
+    interval from ``std`` alone can leave a bound's range.
+
+    A member that predicts a non-finite value anywhere is left out of the
+    statistics, with a warning, and still appears in ``members``.
 
     ``models`` holds ``HybridModel`` or ``FitResult`` objects, so the list
     ``fit_ensemble`` returns can be passed as is. They must share
@@ -261,19 +267,38 @@ def predict_ensemble(
     members = tuple(
         _predict(m, dataset, ts=grid, n_points=n_points, caller="predict_ensemble") for m in models
     )
+    # A member whose solve fails anywhere would turn the mean, spread and band
+    # into NaN wherever it fails, so it is left out of the statistics.
+    finite = [
+        all(bool(jnp.all(jnp.isfinite(out))) for p in m.values() for out in p.outputs.values())
+        for m in members
+    ]
+    if not all(finite):
+        dropped = [i for i, ok in enumerate(finite) if not ok]
+        warnings.warn(
+            f"predict_ensemble: members {dropped} predict non-finite values on this grid and "
+            "are left out of the mean, std and quantiles"
+            if any(finite)
+            else "predict_ensemble: every member predicts non-finite values on this grid",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    # With no finite member there is nothing to leave out, and the NaN result
+    # says so.
+    kept = [m for m, ok in zip(members, finite, strict=True) if ok] or list(members)
     experiments: dict[str, ExperimentPrediction] = {}
     for exp_id, first in members[0].items():
-        stacked = {name: jnp.stack([m[exp_id].outputs[name] for m in members]) for name in names}
+        stacked = {name: jnp.stack([m[exp_id].outputs[name] for m in kept]) for name in names}
         experiments[exp_id] = ExperimentPrediction(
-            times=first.times,
+            ts=first.ts,
             outputs={name: jnp.mean(values, axis=0) for name, values in stacked.items()},
             observed=first.observed,
-            observation_mask=first.observation_mask,
+            mask=first.mask,
             std={name: jnp.std(values, axis=0) for name, values in stacked.items()},
             quantiles=_member_quantiles(stacked, levels),
         )
     buckets = tuple(
-        jnp.mean(jnp.stack([m.buckets[b] for m in members]), axis=0)
+        jnp.mean(jnp.stack([m.buckets[b] for m in kept]), axis=0)
         for b in range(len(dataset.bucket_payloads))
     )
     return PredictionResult(experiments, buckets, members)
@@ -315,6 +340,36 @@ def _member_model(member: Any, index: int) -> HybridModel:
     )
 
 
+def _warn_outside_box(predictor: Any, arrays: Mapping[str, Array]) -> None:
+    """Warn when a ``BoundedPredictor`` is asked about inputs outside its input box.
+
+    The guarded inverse continues past the box, so the network still returns a
+    value there, from latents it never saw in training. Concrete inputs only:
+    under a trace the check is skipped.
+    """
+    keys = getattr(predictor, "input_keys", None)
+    scaler = getattr(predictor, "in_scaler", None)
+    if not keys or scaler is None or len(scaler.bounds) != len(keys):
+        return
+    outside = []
+    for key, (low, high) in zip(keys, scaler.bounds, strict=True):
+        if key not in arrays:
+            continue
+        try:
+            values = np.asarray(arrays[key])
+        except jax.errors.TracerArrayConversionError:
+            return
+        if np.any(values < low) or np.any(values > high):
+            outside.append(f"{key} outside ({low:g}, {high:g})")
+    if outside:
+        warnings.warn(
+            f"evaluate_predictor: {', '.join(outside)}. The network extrapolates there "
+            "from a box it was not trained beyond, so the value is not reliable.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
 def evaluate_predictor(predictor: Any, inputs: Mapping[str, ArrayLike]) -> Array:
     """Evaluate a predictor at named inputs, vectorised over array-valued ones.
 
@@ -347,10 +402,15 @@ def evaluate_predictor(predictor: Any, inputs: Mapping[str, ArrayLike]) -> Array
             f"object of type {type(inputs).__name__}.{hint} For rows of an array, use "
             "jax.vmap(predictor)(x)."
         )
+    # Only the inputs the predictor reads are broadcast: an extra key, which a
+    # BoundedPredictor allows, must not fail on a shape it never uses.
+    used = getattr(predictor, "input_keys", None)
     arrays = {
         key: jnp.asarray(value, dtype=jnp.result_type(jnp.asarray(value).dtype, float))
         for key, value in inputs.items()
+        if used is None or key in used
     }
+    _warn_outside_box(predictor, arrays)
     shape = jnp.broadcast_shapes(*(a.shape for a in arrays.values())) if arrays else ()
     if not shape:
         return jnp.asarray(predictor(arrays))

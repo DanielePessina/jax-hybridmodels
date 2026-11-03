@@ -118,6 +118,10 @@ Build one ``Experiment`` from raw covariates, channels, and a state-init hook.
 (already JAX arrays) and the channels, returning ``Float[Array, "S"]``.
 Where the observed channels are the whole state, a typical hook is
 ``lambda c, ch: jnp.array([ch["x"].values[0], ch["v"].values[0]])``.
+The state belongs to the experiment's start: ``t0`` when set, else the
+earliest time of any channel the model outputs. ``values[0]`` is that
+state only when the channel's ``ts`` is sorted and the channel was
+measured at that start.
 Unobserved state components are constructed there too, a population
 moment initialised to zero being the common case.
 
@@ -132,7 +136,7 @@ moment initialised to zero being the common case.
 | `t0` |  | Initial state time, at or before the first observation. Added as an unobserved integration point. None preserves the first-observation convention. |
 | `y0` |  | Direct initial state, as an alternative to y0_fn. Supply exactly one. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L290)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L331)</small>
 
 ---
 
@@ -174,7 +178,7 @@ sampled at different times.
 | `variance` |  | A scalar for every cell, a length-``D`` sequence with one value per channel, or a ``[T, D]`` array. Read only at observed cells. |
 | `covariates, exp_id, t0, y0, y0_fn` |  | As for [`make_experiment`](/api/data#make_experiment). Supply exactly one of ``y0`` and ``y0_fn``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L351)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L396)</small>
 
 ---
 
@@ -237,7 +241,7 @@ Experiments come back in order of first appearance, each built by
         y0_fn=lambda cov, ch: jnp.array([ch["conc"].values[0], 0.0, 0.0]),
     )
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L435)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L480)</small>
 
 ---
 
@@ -294,7 +298,7 @@ channels. Experiments come back in order of first appearance.
         y0_fn=lambda covariates, channels: jnp.array([1.0]),
     )
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L541)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L589)</small>
 
 ---
 
@@ -307,8 +311,8 @@ channels. Experiments come back in order of first appearance.
 ```python
 BucketPayload(
     ts: ForwardRef("Float[Array, 'N T']"),
-    y_observed: ForwardRef("Float[Array, 'N T D']"),
-    yvar: ForwardRef("Float[Array, 'N T D']"),
+    observed: ForwardRef("Float[Array, 'N T D']"),
+    variance: ForwardRef("Float[Array, 'N T D']"),
     mask: ForwardRef("Bool[Array, 'N T D']"),
     covariates: ForwardRef('dict[str, Array]'),
     y0: ForwardRef("Float[Array, 'N S']"),
@@ -331,15 +335,15 @@ the lightest pytree container JAX already recognises.
 
 ts : Float[Array, "N T"]
     Per-experiment union-timestamp axis, sorted ascending row-wise.
-y_observed : Float[Array, "N T D"]
+observed : Float[Array, "N T D"]
     Channel observations scattered onto ``ts``. Cells where the channel
     was not observed at that timestamp hold ``0.0``; consumers must read
     ``mask`` to know which entries are real.
-yvar : Float[Array, "N T D"]
+variance : Float[Array, "N T D"]
     Per-observation variance (used by MLE losses). Defaults to ``1.0``
     at unobserved cells so masked positions never divide by zero.
 mask : Bool[Array, "N T D"]
-    ``True`` where the corresponding ``y_observed`` cell came from a
+    ``True`` where the corresponding ``observed`` cell came from a
     real ``ChannelObs`` entry, ``False`` where the union axis carries a
     time at which that channel was not measured. Every loss reads this
     to know which cells count.
@@ -393,7 +397,7 @@ prediction and training take it as a separate argument.
 | `_locations` | `tuple[tuple[int, int], ...]` | ``(bucket, row)`` of each source experiment, in the same order. |
 | `_max_buckets` | `int | None` | The limit given to ``make_dataset``, kept so that a split or a resample applies it again to its own experiments. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L234)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L275)</small>
 
 <a id="datasetexperiments"></a>
 
@@ -404,7 +408,7 @@ The source experiments in the order given to ``make_dataset``.
 Every ``exp_id`` is nonempty and unique. Empty for a dataset built
 by hand from raw payloads.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L271)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L312)</small>
 
 ---
 
@@ -445,10 +449,10 @@ unobserved rows, at midpoints of their largest gaps, choosing the buckets
 that add the fewest rows. Predictions still report each experiment's own
 times. Only ``PredictionResult.buckets`` shows the padded grids.
 
-Capping changes what a fit minimises. The loss averages buckets with equal
-weight, so regrouping experiments reweights them. ``TrainingPhase.horizon``
-counts rows, so its cutoff shifts slightly, and a trajectory penalty also
-sees the state at the added rows.
+Capping does not change what ``mse`` or ``bal_mse`` minimise: the trainers
+pool buckets by what each one averages over, and ``TrainingPhase.horizon``
+cuts each experiment at a fraction of its own span, which the added rows
+do not move. Only a trajectory penalty sees the state at the added rows.
 
 The ``Dataset`` is pure data: ``state_to_output``, being a property of
 the model, is passed to prediction and training separately.
@@ -467,7 +471,7 @@ the model, is passed to prediction and training separately.
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with the (named) experiments kept on ``Dataset.experiments``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1018)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1077)</small>
 
 ---
 
@@ -514,7 +518,7 @@ ensemble whose members saw different resamples.
 | --- | --- | --- |
 | `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1208)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1269)</small>
 
 ---
 
@@ -529,7 +533,7 @@ split_dataset(
     dataset: 'Dataset',
     *,
     train: 'float' = 0.8,
-    val: 'float' = 0.1,
+    validation: 'float' = 0.1,
     test: 'float' = 0.1,
     key: 'Array',
 ) -> tuple[Dataset, Dataset, Dataset]
@@ -541,8 +545,9 @@ Splitting happens at the ``Experiment`` level and each split is bucketed
 from scratch, so its bucket structure suits its own contents rather than
 the original bucket boundaries.
 
-Counts use ``floor(train*n)`` and ``floor(val*n)``, with test taking the
-remainder so the sizes sum to ``n``. An empty split comes back with no
+Counts use ``floor(train*n)`` and ``floor(validation*n)``, with test taking the
+remainder so the sizes sum to ``n``. With ``test=0`` the remainder goes to
+train or validation instead, whichever lost more to the floor. An empty split comes back with no
 payloads and no experiments, so it cannot be split again.
 
 **Parameters**
@@ -550,16 +555,16 @@ payloads and no experiments, so it cannot be split again.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `dataset` |  | Source dataset. Must carry its experiments, or this raises. |
-| `train, val, test` |  | Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``). |
+| `train, validation, test` |  | Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``). |
 | `key` |  | Required ``jr.PRNGKey`` for the permutation, never defaulted, so reproducibility does not rest on a hidden global. |
 
 **Returns**
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
+| `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, validation_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1283)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1344)</small>
 
 ---
 
@@ -580,4 +585,4 @@ debugging and example output. Each line reports the bucket's ``N``
 (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
 fraction of ``[N, T, D]`` cells the mask marks as real observations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1000)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1059)</small>

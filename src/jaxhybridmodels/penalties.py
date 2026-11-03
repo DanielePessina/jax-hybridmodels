@@ -8,7 +8,7 @@ two places it goes missing.
 
 Output side, saturation. ``from_latent`` has derivative
 ``(high - low) / T * sigma'(z / T)``, which underflows to exactly 0.0 past
-``|z / T| = 15`` in float32. A predictor that far out is pinned against its
+``|z / T| ~ 16.8`` in float32. A predictor that far out is pinned against its
 bound with nothing left to pull it back. :meth:`BoundScaler.saturation`
 hinges on the latent magnitude to stop it getting there. Hinge on the
 latent, never the physical value: a penalty written against the output
@@ -24,8 +24,9 @@ instead, and :func:`box_violation` supplies push-back beyond its reach.
 The bound penalty (:func:`bound_penalty`) is charged at *points*, not on a
 box sweep. The default points are the measured ones: the input vectors the
 loss actually sees at observed cells, gathered from the dataset by
-:func:`data_penalty_points` and following the same length-mask prefix as
-the loss (:func:`length_mask_keep`). User-supplied penalty-only points
+:func:`data_penalty_points` and following the same horizon mask as the
+loss (:func:`length_mask_keep`): each experiment's measurements in the
+first ``horizon`` of its own span. User-supplied penalty-only points
 (no measurements needed) extend coverage where it matters, such as a
 deployment region or a future operating point. :func:`box_grid` is the
 collocation-as-extension recipe: a deterministic sweep of the input box,
@@ -49,7 +50,7 @@ import jax.tree_util as jtu
 from jax.typing import ArrayLike
 from jaxtyping import Array
 
-from jaxhybridmodels.data import Dataset
+from jaxhybridmodels.data import Dataset, row_horizons
 
 if TYPE_CHECKING:
     from jaxhybridmodels.predictors import BoundedPredictor
@@ -142,14 +143,24 @@ def soft_inverse(
     interval, where a hard clip would zero the derivative and silently drop
     state-derived sensitivities from the ODE adjoint (R-P2).
 
-    Exact in value and derivative inside the band, and C^1 across the
-    junction, since the continuation uses the inverse's own slope there.
-    The ``stop_gradient`` on the clamp is load-bearing: without it the
-    correction term picks up a contribution through the clip and the
-    interior derivative comes out wrong.
+    Exact inside the band, in value and every derivative, so a Hessian
+    through it (``fisher(curvature="exact")``, ``laplace``) is right too.
+    Outside it is the tangent line at the band's edge, C^1 across the
+    junction. Two branches with ``jnp.where``, each fed an input that is
+    safe for it: the inside branch sees ``s`` itself, so its derivatives
+    are the inverse's own, and the outside branch sees a clamped edge
+    behind ``stop_gradient``, so it is exactly linear in ``s``. A single
+    expression ``inverse(edge) + slope(edge) * (s - edge)`` matches the
+    first derivative but drops the second.
     """
-    s_clamped = jax.lax.stop_gradient(jnp.clip(s, eps, 1.0 - eps))
-    return inverse(s_clamped) + inverse_slope(s_clamped) * (s - s_clamped)
+    low, high = eps, 1.0 - eps
+    inside = (s >= low) & (s <= high)
+    edge = jax.lax.stop_gradient(jnp.clip(s, low, high))
+    # The dead branch must stay finite: ``inverse`` at a pole would put a NaN
+    # into the gradient through ``where``.
+    safe = jnp.where(inside, s, edge)
+    tangent = inverse(edge) + inverse_slope(edge) * (s - edge)
+    return jnp.where(inside, inverse(safe), tangent)
 
 
 def soft_logit(s: Array, eps: float = 1e-3) -> Array:
@@ -166,8 +177,9 @@ def soft_logit(s: Array, eps: float = 1e-3) -> Array:
     enough to keep gradient far outside the box also distorts the middle.
 
     ``eps`` sets the continuation slope, roughly ``1 / eps``, and is the one
-    tuning knob. The default 1e-3 maps a 1% overshoot to ``|z| ~ 10``, a
-    number a network can still consume; 1e-6 would map it to ``|z| ~ 1e4``.
+    tuning knob. The default 1e-3 maps a 1% overshoot to ``|z| ~ 18``
+    (``logit(0.999) ~ 6.9`` plus about 1000 per unit past it), a number a
+    network can still consume; 1e-6 would map it to ``|z| ~ 1e4``.
     """
     from jaxhybridmodels.transforms import BOUND_TRANSFORMS
 
@@ -180,10 +192,13 @@ def softclip(x: Array, lo: float | Array, hi: float | Array, beta: float = 20.0)
 
     Built from two softplus shoulders, so the derivative is
     ``sigmoid(beta * (x - lo)) - sigmoid(beta * (x - hi))``, analytically in
-    ``(0, 1)``. The interior is reproduced to ``O(1 / beta)``. Larger
-    ``beta`` tracks a hard clip more closely but underflows sooner outside
-    the box; the default 20 holds interior error below about 0.05 box widths
-    and keeps usable gradient roughly one width out.
+    ``(0, 1)``. The interior is reproduced to about ``log(2) / beta`` in the
+    units of ``x``, whatever the box width. Larger ``beta`` tracks a hard
+    clip more closely but underflows sooner outside the box; the default 20
+    gives an interior error of about 0.035 and usable gradient up to about
+    ``1 / beta`` times a few units past each edge. Choose ``beta`` against
+    the scale of ``x``: on a box 0.01 wide the default error is half the
+    box.
 
     Repairs the near field only. Several widths out the derivative
     underflows as a hard clip's does, so pair it with :func:`box_violation`
@@ -205,6 +220,12 @@ def clip_ste(x: Array, lo: float | Array, hi: float | Array) -> Array:
     the data loss asks for, including "go further out of bounds", forever.
     Pair it with :func:`box_violation` on the pre-clip value for the
     restoring force.
+
+    Not for a model you pass to :mod:`jaxhybridmodels.inference`. There the
+    gradient is taken as the likelihood's own, and wherever the clip is
+    active it is wrong, so ``optimize`` can stop off the maximum and Fisher
+    and Laplace curvatures are wrong. Use :func:`softclip`, whose gradient
+    is exact.
     """
     return x + jax.lax.stop_gradient(jnp.clip(x, lo, hi) - x)
 
@@ -252,17 +273,15 @@ class PenaltyPointSource(NamedTuple):
     ----------
     points : Float[Array, "G n_inputs"]
         The measured input vectors.
-    cell_ts : Int[Array, " G"]
-        Timestamp index of each cell inside its own experiment.
-    cell_T : Int[Array, " G"]
-        Length of that experiment's time grid. ``cell_ts`` and ``cell_T``
-        let :func:`length_mask_keep` apply the loss's prefix mask to the
+    cell_horizon : Float[Array, " G"]
+        The smallest training horizon at which each cell is scored (see
+        :func:`~jaxhybridmodels.data.row_horizons`). It lets
+        :func:`length_mask_keep` apply the loss's horizon mask to the
         penalty, so the two never disagree about which points are live.
     """
 
     points: Array
-    cell_ts: Array
-    cell_T: Array
+    cell_horizon: Array
 
 
 def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
@@ -307,9 +326,11 @@ def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
     warp = WARPS[in_scaler.warp]
     lows = jnp.asarray([b[0] for b in in_scaler.warped_bounds])
     highs = jnp.asarray([b[1] for b in in_scaler.warped_bounds])
+    # Clipped, since a log warp's inverse can round the end points one ulp
+    # outside the box, where input_violation would charge them.
     axes = [
-        warp.inverse(jnp.linspace(low, high, n_per_dim))
-        for low, high in zip(lows, highs, strict=True)
+        jnp.clip(warp.inverse(jnp.linspace(low, high, n_per_dim)), lo, hi)
+        for low, high, (lo, hi) in zip(lows, highs, in_scaler.bounds, strict=True)
     ]
     mesh = jnp.meshgrid(*axes, indexing="ij")
     return jnp.stack([m.reshape(-1) for m in mesh], axis=-1)
@@ -344,8 +365,7 @@ def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPoint
             sources.append(None)
             continue
         point_chunks: list[Array] = []
-        ts_chunks: list[Array] = []
-        t_chunks: list[Array] = []
+        horizon_chunks: list[Array] = []
         for bp in dataset.bucket_payloads:
             vectors = jnp.stack([bp.covariates[key] for key in keys], axis=-1)
             if vectors.ndim != 2:
@@ -354,50 +374,44 @@ def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPoint
                     "must be scalar per experiment (constant in time); got shape "
                     f"{vectors.shape} for input_keys {keys!r}"
                 )
-            observed = jnp.argwhere(bp.mask.any(axis=-1))
+            observed_rows = bp.mask.any(axis=-1)
+            observed = jnp.argwhere(observed_rows)
             if observed.shape[0] == 0:
                 continue
             point_chunks.append(vectors[observed[:, 0]])
-            ts_chunks.append(observed[:, 1])
-            t_chunks.append(jnp.full(observed.shape[0], bp.ts.shape[1], dtype=observed.dtype))
+            horizons = row_horizons(bp.ts, observed_rows)
+            horizon_chunks.append(horizons[observed[:, 0], observed[:, 1]])
         if not point_chunks:
             sources.append(
                 PenaltyPointSource(
                     points=jnp.zeros((0, len(keys))),
-                    cell_ts=jnp.zeros(0, jnp.int32),
-                    cell_T=jnp.zeros(0, jnp.int32),
+                    cell_horizon=jnp.zeros(0),
                 )
             )
             continue
         sources.append(
             PenaltyPointSource(
                 points=jnp.concatenate(point_chunks),
-                cell_ts=jnp.concatenate(ts_chunks),
-                cell_T=jnp.concatenate(t_chunks),
+                cell_horizon=jnp.concatenate(horizon_chunks),
             )
         )
     return tuple(sources)
 
 
 def length_mask_keep(source: PenaltyPointSource, horizon: float) -> Array:
-    """Boolean keep-vector over a source's cells, matching the loss's prefix mask.
+    """Boolean keep-vector over a source's cells, matching the loss's horizon mask.
 
-    Applies the same prefix semantics :func:`~jaxhybridmodels.training.kernels.apply_length_mask`
-    gives the loss: a cell is kept when its timestamp index is below
-    ``ceil(T * horizon)``, clamped at 1 so a phase never scores nothing.
-    The penalty therefore follows the curriculum exactly, disagreeing with
-    the loss about which points are live only by mistake.
+    Applies the rule :func:`~jaxhybridmodels.training.kernels.apply_length_mask`
+    gives the loss: a cell is kept when it lies in the first ``horizon`` of
+    its experiment's timeline, and each experiment's first measurement is
+    always kept. The penalty therefore follows the curriculum exactly.
 
     ``horizon`` must be a Python float, not a traced array:
     the keep-vector is used to *index* the gathered points, and JAX rejects
     boolean indexing with tracers. The penalty kernel retraces only when
     the horizon changes (a phase boundary), never per step.
     """
-    cutoff = jnp.maximum(
-        jnp.ceil(jnp.float32(source.cell_T) * horizon).astype(jnp.int32),
-        jnp.int32(1),
-    )
-    return source.cell_ts < cutoff
+    return source.cell_horizon <= jnp.asarray(horizon, dtype=source.cell_horizon.dtype)
 
 
 def resolve_penalty_points(
@@ -536,12 +550,13 @@ def _latents_at(leaf: BoundedPredictor, points: Array) -> Array:
 
 
 def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
-    """Mean output-squash saturation over every ``BoundedPredictor`` in a pytree.
+    """Output-squash saturation summed over every ``BoundedPredictor`` in a pytree.
 
     For each leaf, evaluates ``inner(in_scaler.to_latent(x))`` across the
     leaf's point set and charges
     :meth:`~jaxhybridmodels.predictors.BoundScaler.saturation` on the
-    resulting latents. Leaves are summed.
+    resulting latents, a mean within each leaf. Leaves are summed, so the
+    penalty grows with the number of predictors.
 
     ``points`` is positional, one ``[G, n_inputs]`` array per leaf in
     traversal order: measured points from :func:`data_penalty_points`,
@@ -711,11 +726,13 @@ def trajectory_saturation_penalty(state: Array, out_scaler: Any) -> Array:
     where the model actually predicted, not across a synthetic grid.
 
     It works near the knee, which is where it should catch a predictor
-    drifting into saturation. Deep in saturation it cannot: the outputs it
-    reads have rounded onto the bound, so the latents rebuilt from them stop
-    growing, and the charge caps (about 25 for the sigmoid in float32) with
-    a vanishing gradient. Where the latents themselves are at hand, charge
-    ``out_scaler.saturation`` on them instead, which has neither limit.
+    drifting into saturation, and fades soon after. ``to_latent`` continues
+    linearly once the box position passes ``1 - 1e-3`` (``|z| ≈ 6.9`` for
+    the sigmoid), so the latent rebuilt from an output stops growing near
+    7.9 and the charge caps near 24.6. From about ``|z| = 8`` the gradient
+    is small (0.45 at 10, against 14 when charged on the latent itself).
+    Where the latents are at hand, charge ``out_scaler.saturation`` on them
+    instead, which has no cap.
 
     ``state`` is ``[..., T, D]`` (or ``[..., T, S]`` projected to the
     predictor's channel); ``out_scaler`` is the ``BoundScaler`` whose

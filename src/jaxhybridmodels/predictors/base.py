@@ -29,7 +29,7 @@ rate is one more tuple entry.
 
 The trainable component handed to training kernels is therefore a
 ``PyTree[eqx.Module]``: a tuple by convention, but any pytree shape
-works. :func:`reinitialize_pytree_with_key` walks that pytree and gives
+works. :func:`reinitialize_pytree` walks that pytree and gives
 each ``eqx.Module`` leaf an independent subkey, so identical-shape
 siblings get different fresh weights when the tournament restarts a run.
 """
@@ -64,8 +64,8 @@ __all__ = (
     "BoundedPredictor",
     "Constant",
     "Parameter",
-    "reinitialize_with_key",
-    "reinitialize_pytree_with_key",
+    "reinitialize",
+    "reinitialize_pytree",
 )
 
 
@@ -83,9 +83,9 @@ class Predictor(eqx.Module):
     Dynamic leaves must be JAX float arrays and static fields must be
     JSON-encodable, so the module round-trips through
     ``eqx.tree_serialise_leaves``. Optionally implement
-    ``initialized_with_key(self, key) -> Self`` to control how the
+    ``reinitialized(self, *, key) -> Self`` to control how the
     tournament restarts your weights; without it,
-    :func:`reinitialize_with_key` replaces every float leaf with a
+    :func:`reinitialize` replaces every float leaf with a
     standard-normal sample, which skews any considered init scheme.
 
     Do not subclass to add bound handling or named inputs.
@@ -109,7 +109,9 @@ def _is_pair(spec: Any) -> bool:
     sequence of pairs, one per component.
     """
     try:
-        return len(spec) == 2 and all(v is None or isinstance(v, Real) for v in spec)
+        return len(spec) == 2 and all(
+            v is None or isinstance(v, Real) or (np.ndim(v) == 0 and np.isrealobj(v)) for v in spec
+        )
     except TypeError:  # a bare number has no len
         return False
 
@@ -165,7 +167,7 @@ class Constant(eqx.Module):
 
         self.value = convert(value)
 
-    def initialized_with_key(self, key: Array) -> Constant:
+    def reinitialized(self, *, key: Array) -> Constant:
         """Keep fixed values unchanged when restarting a model."""
         return self
 
@@ -288,11 +290,14 @@ class BoundScaler(eqx.Module):
         Static. Half-width of the band at each end of ``[0, 1]`` outside
         which ``to_latent`` continues linearly instead of running into
         the squash inverse's pole. Also sets the continuation slope
-        (roughly ``1 / logit_eps``).
+        (roughly ``1 / logit_eps``). For a one-sided bound there is no unit
+        interval, so it is a distance from the bound in the value's own
+        units: ``to_latent`` is exact only beyond ``logit_eps`` of the edge.
+        ``Parameter`` uses the exact inverse and is not affected.
     z_knee : float
         Static. The knee. Defaults to the transform's own value, which
         for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the
-        box. Do not share one number across transforms: 2.944 is 12.5%
+        box. Do not share one number across transforms: 2.944 is 12.7%
         from the bound on softsign, which would charge 2.7x too hard.
     """
 
@@ -386,8 +391,9 @@ class BoundScaler(eqx.Module):
 
         The bound kind is static, so only the branch for this component is
         traced and no infinite endpoint ever enters the arithmetic. A finite
-        interval uses the warp and squash. One finite endpoint uses softplus
-        distance from it. No endpoints is the identity. ``guard=False``
+        interval uses the warp and squash. One finite endpoint puts the
+        distance from it through softplus, or through ``exp`` under a log
+        warp. No endpoints is the identity. ``guard=False``
         gives the exact inverse, used to initialise a ``Parameter`` close to
         an endpoint.
         """
@@ -398,9 +404,10 @@ class BoundScaler(eqx.Module):
             warp = WARPS[self.warp]
             squash = BOUND_TRANSFORMS[self.transform]
             if not inverse:
-                # A nonlinear warp's inverse can round one ulp past a bound.
+                # The affine rescale, and a nonlinear warp's inverse, can round
+                # one ulp past a bound, so every warp is clipped to the box.
                 inside = warp.inverse(wl + (wh - wl) * squash.forward(v / temperature))
-                return inside if self.warp == "linear" else jnp.clip(inside, low, high)
+                return jnp.clip(inside, low, high)
             normalized = (warp.forward(v) - wl) / (wh - wl)
             if not guard:
                 return squash.inverse(normalized) * temperature
@@ -411,6 +418,8 @@ class BoundScaler(eqx.Module):
         if not (math.isfinite(low) or math.isfinite(high)):
             return v
         edge, sign = (low, 1.0) if math.isfinite(low) else (high, -1.0)
+        if self.warp != "linear":
+            return self._warped_one_sided(v, edge, sign, temperature, inverse=inverse, guard=guard)
         if not inverse:
             return edge + sign * jax.nn.softplus(v / temperature)
         distance = sign * (v - edge)
@@ -428,6 +437,29 @@ class BoundScaler(eqx.Module):
     def _uniform(self) -> bool:
         """Do all components share one bound pair and one temperature?"""
         return len(set(self.bounds)) == 1 and self.temperature.ndim == 0
+
+    def _warped_one_sided(
+        self, v: Array, edge: float, sign: float, temperature: Array, *, inverse: bool, guard: bool
+    ) -> Array:
+        """One finite bound under a warp: the warp acts on the distance from the edge.
+
+        Under ``"log"`` the value is ``edge + exp(z / T)``, so an Adam step on
+        the latent is a relative change in the distance however large it is.
+        A softplus would move a value of 5000 by about the learning rate per
+        step. The guarded inverse continues linearly below ``logit_eps``, as
+        the softplus branch does, so an input at or past the edge keeps a
+        finite latent and a finite sensitivity.
+        """
+        warp = WARPS[self.warp]
+        if not inverse:
+            return edge + sign * warp.inverse(v / temperature)
+        distance = sign * (v - edge)
+        if not guard:
+            return warp.forward(distance) * temperature
+        eps = jnp.asarray(self.logit_eps, dtype=jnp.result_type(distance, float))
+        safe = jnp.maximum(distance, eps)
+        _, slope = jax.jvp(warp.forward, (eps,), (jnp.ones_like(eps),))
+        return (warp.forward(safe) + jnp.minimum(distance - eps, 0.0) * slope) * temperature
 
     def _map(self, x: Array, *, inverse: bool, guard: bool = True) -> Array:
         """Apply :meth:`_component` along the last axis; a scalar broadcasts.
@@ -456,11 +488,13 @@ class BoundScaler(eqx.Module):
         """Where each latent sits between its bounds, on the squash's ``[0, 1]`` scale.
 
         0 is the lower bound and 1 the upper. A value with two finite bounds
-        reads off its squash. One with one finite bound uses the softplus slope,
-        which is 0 at that bound and 1 far from it, so the bound end is 0 for a
-        lower bound and 1 for an upper one. An unbounded value is 0.5. Near 0 or
-        1 the value's gradient vanishes, whatever its physical scale or warp:
-        that is what "pinned" means for inference.
+        reads off its squash. One with one finite bound uses half the sigmoid
+        of its latent, which follows the value's gradient into the bound: 0 at
+        a lower bound, rising to 0.5 far from it (and 1 down to 0.5 for an
+        upper bound). The far side has no bound, so it stops at the middle and
+        never reads as one. An unbounded value is 0.5. Near 0 or 1 the
+        value's gradient vanishes, whatever its physical scale or warp: that
+        is what "pinned" means for inference.
         """
 
         def component(v: Array, i: int) -> Array:
@@ -470,8 +504,8 @@ class BoundScaler(eqx.Module):
                 return BOUND_TRANSFORMS[self.transform].forward(v / temperature)
             if not (math.isfinite(low) or math.isfinite(high)):
                 return jnp.full_like(v, 0.5)
-            slope = jax.nn.sigmoid(v / temperature)
-            return slope if math.isfinite(low) else 1.0 - slope
+            half = 0.5 * jax.nn.sigmoid(v / temperature)
+            return half if math.isfinite(low) else 1.0 - half
 
         latent = jnp.asarray(latent)
         if len(self.bounds) == 1 or self._uniform:
@@ -491,9 +525,10 @@ class BoundScaler(eqx.Module):
             return BOUND_TRANSFORMS[self.transform].inverse(position) * temperature
         if not (math.isfinite(low) or math.isfinite(high)):
             raise ValueError("latent_at_position: an unbounded component has no squash position")
-        # The softplus slope is the sigmoid, so its inverse is the logit.
-        logit = jnp.log(position) - jnp.log1p(-position)
-        return (logit if math.isfinite(low) else -logit) * temperature
+        # Half the sigmoid, so the inverse is the logit of twice the distance
+        # from the bound end. Only positions on the bound's half exist.
+        slope = 2.0 * (position if math.isfinite(low) else 1.0 - position)
+        return (jnp.log(slope) - jnp.log1p(-slope)) * temperature
 
     def to_latent(self, x: Array) -> Array:
         """Map a physical value to its latent representative.
@@ -520,9 +555,21 @@ class BoundScaler(eqx.Module):
         The continuation reports direction, not magnitude. Pair it with
         :meth:`input_violation` when an input can leave its box.
         """
+        return self._map(self._guard_positive(x), inverse=True)
+
+    def _guard_positive(self, x: Array) -> Array:
+        """Refuse a non-positive input to a boxed component under a positive-only warp.
+
+        Only a box warps the value itself. One finite bound warps the distance
+        from it, which the guarded inverse continues past the edge. Raises on
+        concrete input; traced input raises through ``eqx.error_if`` or becomes
+        NaN inside inference, which counts that as a rejected proposal.
+        """
         warp = WARPS[self.warp]
-        if warp.requires_positive:
-            nonpositive = jnp.any(x <= 0.0)
+        boxed = [math.isfinite(low) and math.isfinite(high) for low, high in self.bounds]
+        if warp.requires_positive and any(boxed):
+            checked = x if all(boxed) else self._components_last(x)[..., np.flatnonzero(boxed)]
+            nonpositive = jnp.any(checked <= 0.0)
             try:
                 if bool(nonpositive):
                     raise ValueError(
@@ -537,7 +584,7 @@ class BoundScaler(eqx.Module):
                     )
                 else:
                     x = jnp.where(nonpositive, jnp.nan, x)
-        return self._map(x, inverse=True)
+        return x
 
     def input_violation(self, x: Array) -> Array:
         """Scalar squared hinge on how far ``x`` fell outside ``bounds``.
@@ -588,11 +635,16 @@ class BoundScaler(eqx.Module):
 
         Only a component with two finite bounds is charged. One with a single
         bound is ``edge + softplus(z / T)``, which near its edge behaves like
-        ``edge + exp(z / T)``: a log parametrisation whose relative slope stays
-        1, so a small value there is not stuck and costs nothing.
+        ``edge + exp(z / T)``, or exactly that under a log warp: a log
+        parametrisation whose relative slope stays 1, so a small value there
+        is not stuck and costs nothing.
         """
-        terms = self._saturation_terms(z)
-        return jnp.mean(terms) if terms.size else jnp.asarray(0.0)
+        # The mean runs over the charged components only, so uncharged
+        # one-sided outputs do not dilute the weight.
+        boxed = [i for i, (low, high) in enumerate(self.bounds) if math.isfinite(low + high)]
+        if not boxed:
+            return jnp.asarray(0.0)
+        return jnp.mean(self._saturation_terms(z)[..., np.asarray(boxed)])
 
     def _saturation_terms(self, z: Array) -> Array:
         """The squared overshoot per component, ``saturation`` before its mean."""
@@ -626,7 +678,7 @@ class BoundScaler(eqx.Module):
             return self.to_latent(x)
         if len(self.bounds) == 1:
             return jnp.asarray(x)
-        x = jnp.atleast_1d(x)
+        x = self._guard_positive(jnp.atleast_1d(x))
         parts = [
             self._component(x[..., i], i, inverse=True)
             if all(map(math.isfinite, pair))
@@ -652,10 +704,13 @@ class Parameter(eqx.Module):
         One ``(low, high)`` pair shared by every element, or one pair per
         element in flattened order. None for a missing endpoint. Omit for
         an unbounded value. Two finite endpoints use the ``transform``
-        squash. One endpoint uses softplus distance from it.
+        squash. One endpoint puts the distance from it through softplus,
+        or ``exp`` under ``warp="log"`` (``10 **`` under ``"log10"``).
     transform, warp
         Passed to :class:`BoundScaler`. ``warp="log10"`` suits rate
-        constants that span decades and needs finite positive bounds.
+        constants that span decades. With two finite bounds it warps the
+        value and needs them positive; with one it warps the distance from
+        the edge, as ``"log"`` does.
 
     Examples
     --------
@@ -682,8 +737,10 @@ class Parameter(eqx.Module):
             raise ValueError("Parameter value must be nonempty and finite")
         flat = physical.reshape(-1)
         scaler = BoundScaler(_bound_pairs(bounds, flat.size), transform=transform, warp=warp)
-        # Compared in the value's own dtype, where the arithmetic runs: a float64
-        # bound of 0.1 rounds onto the float32 value 0.1, which is on the bound.
+        # Compared in the value's own dtype: a float64 bound of 0.1 rounds onto
+        # the float32 value 0.1, which is on the bound. Under x64 the scaler
+        # promotes a float32 value to float64, so this check is stricter than
+        # the arithmetic there, which is the safe side.
         dtype = np.dtype(flat.dtype)
         for (low, high), v in zip(scaler.bounds, np.asarray(flat).tolist(), strict=True):
             if not dtype.type(low) < dtype.type(v) < dtype.type(high):
@@ -711,13 +768,13 @@ class Parameter(eqx.Module):
         """Current value in physical units, with the shape given at construction."""
         return self.scaler.from_latent(self.latent).reshape(self.shape)
 
-    def initialized_with_key(self, key: Array) -> Parameter:
+    def reinitialized(self, *, key: Array) -> Parameter:
         """Draw a fresh standard-normal latent for each element with two finite bounds.
 
         A standard-normal latent lands across the middle of a finite box,
         which is a fair random restart. An element without two finite
         bounds keeps its value: its latent is the value itself, or a
-        softplus distance from one endpoint, so a standard-normal draw
+        softplus (or log) distance from one endpoint, so a standard-normal draw
         would replace a rate of 5000 with something near 1 and lose the
         starting value the user chose. The scaler is left untouched.
         """
@@ -742,11 +799,18 @@ class BoundedPredictor(Predictor):
 
     Three stages
     ------------
-    1. **Normalise the input.** ``in_scaler.scale_inputs`` maps each input
-       from its physical range onto an unbounded latent, so the network
-       receives numbers of comparable size whether the input was a
-       temperature in the tens or a concentration in the thousandths.
-       Inputs with an open bound pass through unchanged.
+    1. **Normalise the input.** ``in_scaler.scale_inputs`` maps each boxed
+       input from its physical range onto an unbounded latent through the
+       inverse squash, a logit of its position in the box, so the network
+       sees the same scale whether the input was a temperature in the tens
+       or a concentration in the thousandths. The map is not affine: it
+       compresses the middle of the box and stretches the edges, so an
+       input sitting on its bound (a concentration starting at 0) has the
+       largest sensitivity. Inputs with an open bound pass through
+       unchanged. ``input_warp`` is one setting for every input, and a
+       fully open input under a log warp is refused, though it would pass
+       through: give it a one-sided bound, such as ``(0, None)``, or keep
+       ``input_warp="linear"``.
     2. **Run the network.** The trainable ``inner`` ``Predictor`` maps
        latent to latent. It is handed no bound information at all.
     3. **Squash the output.** ``out_scaler.from_latent`` maps the
@@ -931,10 +995,10 @@ class BoundedPredictor(Predictor):
         )
         return self.out_scaler.from_latent(z_out)
 
-    def initialized_with_key(self, key: Array) -> BoundedPredictor:
+    def reinitialized(self, *, key: Array) -> BoundedPredictor:
         """Re-initialise ``inner`` only, leaving both scalers untouched.
 
-        Without this method, ``reinitialize_with_key`` takes its generic
+        Without this method, ``reinitialize`` takes its generic
         branch and replaces every inexact leaf, ``BoundScaler.temperature``
         included, with a sample from ``N(0, 1)``. A temperature near zero
         or negative inverts and blows up both ``to_latent`` and
@@ -948,38 +1012,54 @@ class BoundedPredictor(Predictor):
         return eqx.tree_at(
             lambda bp: bp.inner,
             self,
-            reinitialize_with_key(self.inner, key),
+            reinitialize(self.inner, key=key),
         )
 
 
-def reinitialize_with_key(predictor: eqx.Module, key: Array) -> eqx.Module:
+def reinitialize(predictor: eqx.Module, *, key: Array) -> eqx.Module:
     """Return a fresh copy of ``predictor`` with its float leaves re-initialised.
 
     Single-Module helper. If ``predictor`` implements
-    ``initialized_with_key`` (a ``self -> key -> self`` method for classes
+    ``reinitialized`` (a ``self -> key -> self`` method for classes
     that want their own re-init scheme, such as a KAN that has to rebuild
     its grid), this delegates to it. Otherwise every inexact-array leaf is
     replaced with a standard-normal sample of matching shape and dtype.
 
     For a *pytree* of predictors, the convention at the ``simulate_fn``
-    boundary, use :func:`reinitialize_pytree_with_key`.
+    boundary, use :func:`reinitialize_pytree`.
     """
-    if hasattr(predictor, "initialized_with_key"):
-        return cast(eqx.Module, predictor.initialized_with_key(key))
+    if hasattr(predictor, "reinitialized"):
+        return cast(eqx.Module, predictor.reinitialized(key=key))
 
-    leaves, treedef = jtu.tree_flatten(predictor)
-    inexact_indices = [i for i, leaf in enumerate(leaves) if eqx.is_inexact_array(leaf)]
-    if not inexact_indices:
+    # Walk the module, but stop at the units that have a rule of their own: a
+    # nested predictor or Parameter re-initialises itself, and a scaler or a
+    # Constant keeps its values. Drawing their leaves from N(0, 1) would give a
+    # temperature that can be negative and a one-sided Parameter a value near 1.
+    def is_unit(node: Any) -> bool:
+        return node is not predictor and (
+            hasattr(node, "reinitialized") or isinstance(node, (BoundScaler, Constant))
+        )
+
+    leaves, treedef = jtu.tree_flatten(predictor, is_leaf=is_unit)
+    targets = [
+        i
+        for i, leaf in enumerate(leaves)
+        if (is_unit(leaf) and hasattr(leaf, "reinitialized")) or eqx.is_inexact_array(leaf)
+    ]
+    if not targets:
         return predictor
-    subkeys = jr.split(key, len(inexact_indices))
+    subkeys = jr.split(key, len(targets))
     new_leaves = list(leaves)
-    for k, idx in zip(subkeys, inexact_indices, strict=True):
+    for k, idx in zip(subkeys, targets, strict=True):
         leaf = leaves[idx]
-        new_leaves[idx] = jr.normal(k, leaf.shape, dtype=leaf.dtype)
+        if hasattr(leaf, "reinitialized"):
+            new_leaves[idx] = leaf.reinitialized(key=k)
+        else:
+            new_leaves[idx] = jr.normal(k, leaf.shape, dtype=leaf.dtype)
     return cast(eqx.Module, jtu.tree_unflatten(treedef, new_leaves))
 
 
-def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
+def reinitialize_pytree(predictors: Any, *, key: Array) -> Any:
     """Per-``eqx.Module``-leaf re-initialisation across a ``predictors`` pytree.
 
     Used by the training tournament to escape bad initial weights: when
@@ -994,14 +1074,14 @@ def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
     Accepts any pytree shape ``jax.tree_util`` can walk, including a bare
     ``eqx.Module``. Returns a structurally identical pytree with fresh
     weights on every unit it finds. A unit is a ``Predictor``, a module with
-    its own ``initialized_with_key``, or a module holding neither, such as an
+    its own ``reinitialized``, or a module holding neither, such as an
     ``eqx.nn.MLP``. A plain container module of predictors is walked into,
     as a dict is, so a ``Parameter`` inside it keeps its own rule: only
     boxed entries are redrawn.
     """
 
     def _has_own_rule(node: Any) -> bool:
-        return isinstance(node, Predictor) or hasattr(node, "initialized_with_key")
+        return isinstance(node, Predictor) or hasattr(node, "reinitialized")
 
     def _is_module(node: Any) -> bool:
         if not isinstance(node, eqx.Module):
@@ -1023,7 +1103,7 @@ def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
 
     def _per_leaf(node: Any) -> Any:
         if _is_module(node):
-            return reinitialize_with_key(node, next(keys_iter))
+            return reinitialize(node, key=next(keys_iter))
         return node
 
     return jtu.tree_map(_per_leaf, predictors, is_leaf=_is_module)

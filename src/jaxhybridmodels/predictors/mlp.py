@@ -60,7 +60,7 @@ class MLPPredictor(Predictor):
         Input / output dimensionality (static).
     width_size, depth : int
         Hidden width and number of hidden layers (static).
-    activation_name : str
+    activation : str
         Key into ``_ACTIVATION_MAP``; stored as a string rather than the
         callable so the module is JSON-serialisable.
     """
@@ -70,7 +70,7 @@ class MLPPredictor(Predictor):
     out_size: int = eqx.field(static=True)
     width_size: int = eqx.field(static=True)
     depth: int = eqx.field(static=True)
-    activation_name: str = eqx.field(static=True)
+    activation: str = eqx.field(static=True)
 
     def __init__(
         self,
@@ -80,27 +80,27 @@ class MLPPredictor(Predictor):
         width_size: int,
         depth: int,
         key: Array,
-        activation_name: str = "tanh",
+        activation: str = "tanh",
     ) -> None:
         """Build the MLP, materialising the activation callable from its name.
 
         ``key`` is required, not defaulted, so reproducibility never rests
-        on a hidden global RNG. ``activation_name`` must be a key of
+        on a hidden global RNG. ``activation`` must be a key of
         ``_ACTIVATION_MAP``; an unknown name raises, listing the supported
         set.
         """
-        activation = _resolve_activation(activation_name)
+        resolved = _resolve_activation(activation)
         self.in_size = int(in_size)
         self.out_size = int(out_size)
         self.width_size = int(width_size)
         self.depth = int(depth)
-        self.activation_name = activation_name
+        self.activation = activation
         self.mlp = eqx.nn.MLP(
             in_size=self.in_size,
             out_size=self.out_size,
             width_size=self.width_size,
             depth=self.depth,
-            activation=activation,
+            activation=resolved,
             key=key,
         )
 
@@ -112,14 +112,14 @@ class MLPPredictor(Predictor):
         """
         return jnp.asarray(self.mlp(x))
 
-    def initialized_with_key(self, key: Array) -> MLPPredictor:
+    def reinitialized(self, *, key: Array) -> MLPPredictor:
         """Return a fresh ``MLPPredictor`` with the same architecture, new weights.
 
-        The re-init protocol consumed by :func:`reinitialize_with_key` and
+        The re-init protocol consumed by :func:`reinitialize` and
         by the tournament when it restarts a stalled attempt.
         Re-instantiating beats reinitialising leaves in place because
-        ``eqx.nn.MLP`` owns its per-layer init (LeCun-uniform weights
-        scaled by fan-in, zero biases), which leaf-level normal sampling
+        ``eqx.nn.MLP`` owns its per-layer init (weights and biases
+        uniform in +-1/sqrt(fan_in)), which leaf-level normal sampling
         would replace with a badly scaled scheme.
         """
         return MLPPredictor(
@@ -127,20 +127,23 @@ class MLPPredictor(Predictor):
             out_size=self.out_size,
             width_size=self.width_size,
             depth=self.depth,
-            activation_name=self.activation_name,
+            activation=self.activation,
             key=key,
         )
 
     def with_zero_final_head(self) -> MLPPredictor:
         """Return a copy whose final ``Linear`` layer's weight and bias are zero.
 
-        Hidden layers keep their LeCun-uniform init, so the feature
+        Hidden layers keep their uniform init, so the feature
         transformation stays non-degenerate; only the readout is zeroed.
         Inside a ``BoundedPredictor`` the resulting zero latent maps
-        through ``out_scaler.from_latent(0)`` to the exact midpoint of the
-        physical output box, a known-good start independent of the key.
-        That matters when rate bounds span decades, where an unlucky
-        readout draw can stall the solver on step one.
+        through ``out_scaler.from_latent(0)`` to the midpoint of the box in
+        warped space, the same start whatever the key. That is the
+        arithmetic midpoint under a linear warp and the geometric mean
+        under ``log`` or ``log10``. For a one-sided bound it is
+        ``edge + log 2`` under a linear warp and ``edge + 1`` under ``log``.
+        A fixed start matters when rate bounds span decades, where an
+        unlucky readout draw can stall the solver on step one.
 
         Structurally identical predictor; only the trailing
         ``eqx.nn.Linear``'s ``weight`` and ``bias`` change.

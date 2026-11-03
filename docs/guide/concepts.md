@@ -100,8 +100,8 @@ from its predicted output.
 
 ## Training steps and phases
 
-An Optax **step** visits every bucket, averages the bucket losses and
-gradients, and applies one optimizer update. A bucket is not a step.
+An Optax **step** visits every bucket, pools the bucket losses and gradients
+into the loss over the whole dataset, and applies one optimizer update. A bucket is not a step.
 
 A **phase** is a run of steps with one learning rate (a number or an optax
 schedule), optimizer and loss horizon, written as a `TrainingPhase`.

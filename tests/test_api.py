@@ -43,8 +43,8 @@ CORE = [
     "count_trainable_params",
     "save",
     "load",
-    "reinitialize_with_key",
-    "reinitialize_pytree_with_key",
+    "reinitialize",
+    "reinitialize_pytree",
 ]
 
 

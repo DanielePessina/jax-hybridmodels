@@ -42,7 +42,7 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from jaxhybridmodels.predictors.base import Predictor, reinitialize_with_key
+from jaxhybridmodels.predictors.base import Predictor, reinitialize
 
 
 class NeuralNPolynomial(Predictor):
@@ -65,7 +65,7 @@ class NeuralNPolynomial(Predictor):
     A 3-term quadratic with two output channels backed by an MLP::
 
         coeff_net = MLPPredictor(in_size=3, out_size=6, width_size=8,
-                                 depth=2, activation_name="tanh", key=key)
+                                 depth=2, activation="tanh", key=key)
         npoly = NeuralNPolynomial(coeff_net=coeff_net,
                                   exponents=(0.0, 1.0, 2.0),
                                   in_size=3, out_size=2)
@@ -129,18 +129,22 @@ class NeuralNPolynomial(Predictor):
         coeffs_flat = jnp.asarray(self.coeff_net(x)).reshape((self.out_size * len(self.exponents),))
         coeffs = coeffs_flat.reshape((self.out_size, len(self.exponents)))
         basis = jnp.sum(x)
-        powers = basis ** jnp.asarray(self.exponents)
+        # One integer power per exponent, which lowers to repeated
+        # multiplication. A float power has a NaN derivative in its base at
+        # 0 ** 0, which a basis of exactly 0 (inputs at their midpoints, or a
+        # concentration starting at 0) would push into every gradient.
+        powers = jnp.stack([basis ** int(exponent) for exponent in self.exponents])
         return jnp.einsum("od,d->o", coeffs, powers)
 
-    def initialized_with_key(self, key: Array) -> NeuralNPolynomial:
+    def reinitialized(self, *, key: Array) -> NeuralNPolynomial:
         """Re-initialise the inner ``coeff_net``; keep the polynomial structure.
 
-        Calls straight through to :func:`reinitialize_with_key`, which
-        prefers the inner predictor's own ``initialized_with_key`` and falls
+        Calls straight through to :func:`reinitialize`, which
+        prefers the inner predictor's own ``reinitialized`` and falls
         back to elementwise sampling only when it offers no scheme.
         ``exponents``, ``in_size`` and ``out_size`` are static.
         """
-        new_coeff_net = cast(Predictor, reinitialize_with_key(self.coeff_net, key))
+        new_coeff_net = cast(Predictor, reinitialize(self.coeff_net, key=key))
         return NeuralNPolynomial(
             coeff_net=new_coeff_net,
             exponents=self.exponents,

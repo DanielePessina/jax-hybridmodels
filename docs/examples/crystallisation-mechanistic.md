@@ -20,6 +20,10 @@ It prints the four constants before and after the fit and per-channel
 metrics, and writes `parity_mechanistic.png` and
 `trajectories_mechanistic.png` to `examples/crystallisation/figures/`.
 
+XLA may print `Algebraic simplifier is likely stuck` to stderr while this compiles.
+It is harmless; see
+[Troubleshooting](/guide/troubleshooting#algebraic-simplifier-is-likely-stuck-in-stderr).
+
 ## The model
 
 The dataset, the moment equations and `state_to_output` are imported from
@@ -74,18 +78,18 @@ Seed 0, 80 generations of 64:
 
 | constant | init   | fitted |
 |----------|-------:|-------:|
-| `logA`   | 42.50  | 26.03  |
-| `gamma`  | 0.575  | 0.444  |
+| `logA`   | 42.50  | 25.92  |
+| `gamma`  | 0.575  | 0.442  |
 | `Ag`     | -12.50 | -9.14  |
-| `g`      | 2.250  | 3.198  |
+| `g`      | 2.250  | 3.174  |
 
 Against the hybrid model on the same data, from the default run of
 `train_kinetic.py`:
 
 | model                     | trained                  | best loss | conc $R^2$ | d43 $R^2$ |
 |---------------------------|--------------------------|----------:|-----------:|----------:|
-| hybrid, two MLPs          | 600 Adam steps           | 0.274     | 0.970      | 0.983     |
-| mechanistic, 4 constants  | 80 × 64 CMA-ES           | 1.230     | 0.884      | 0.404     |
+| hybrid, two MLPs          | 600 Adam steps           | 0.250     | 0.974      | 0.986     |
+| mechanistic, 4 constants  | 80 × 64 CMA-ES           | 1.244     | 0.885      | 0.405     |
 
 ![Fitted trajectories with CNT nucleation and power-law growth](assets/crystallisation/trajectories_mechanistic.png)
 

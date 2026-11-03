@@ -42,7 +42,7 @@ import jaxhybridmodels as hm
 import jaxhybridmodels.training.evosax as evosax_module
 import jaxhybridmodels.training.optax as optax_module
 from jaxhybridmodels.data import Dataset
-from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.losses import Pooling, masked_mse
 from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.penalties import (
     attach_penalty_state,
@@ -96,7 +96,7 @@ class Latent(hm.Predictor):
     def __call__(self, x: Array) -> Array:
         return self.c
 
-    def initialized_with_key(self, key: Array) -> Latent:
+    def reinitialized(self, *, key: Array) -> Latent:
         return self
 
 
@@ -169,7 +169,7 @@ TRAJECTORY = Objective(trajectory_penalty_fn=accumulated_penalty, trajectory_pen
 
 
 def test_evosax_ranks_by_the_trajectory_penalty():
-    config = EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5)
+    config = EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.5)
     result = train_with_evosax(
         embedded_model(latent_predictors(5.0)),
         embedded_dataset(),
@@ -298,10 +298,10 @@ def curriculum(temp_data):
     ``Parameter`` has a loss floor over the full window. Over the first
     observation every curve looks alike and the loss is far lower.
     """
-    short = TrainingPhase(10, lr=0.1, horizon=0.2)
+    short = TrainingPhase(steps=10, lr=0.1, horizon=0.2)
     both = parameter_model().fit(
         temp_data,
-        hm.OptaxTrainingConfig(phases=(short, TrainingPhase(15, lr=0.05))),
+        hm.OptaxTrainingConfig(phases=(short, TrainingPhase(steps=15, lr=0.05))),
         key=jr.key(0),
         verbose=False,
     )
@@ -323,8 +323,8 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
         decay_data,
         hm.OptaxTrainingConfig(
             phases=(
-                TrainingPhase(3, lr=0.05),
-                TrainingPhase(3, lr=1e-2, optimizer=raw, reset_optimizer=True),
+                TrainingPhase(steps=3, lr=0.05),
+                TrainingPhase(steps=3, lr=1e-2, optimizer=raw, reset_optimizer=True),
             )
         ),
         key=jr.key(0),
@@ -332,13 +332,74 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     )
     assert len(result.history.loss) == 6 and rate_of(result.model) != 0.3
 
-    with pytest.raises(ValueError, match="learning rate cannot be changed"):
-        hm.OptaxTrainingConfig(
-            phases=(
-                TrainingPhase(2, lr=1e-3, optimizer=raw),
-                TrainingPhase(2, lr=1e-2, optimizer=raw),
+    # The same raw instance keeps its own rate, so a new lr is refused with
+    # or without a reset: a reset rebuilds nothing it could write the rate to.
+    for reset in (False, True):
+        with pytest.raises(ValueError, match="keeps the learning rate it was built with"):
+            hm.OptaxTrainingConfig(
+                phases=(
+                    TrainingPhase(steps=2, lr=1e-3, optimizer=raw),
+                    TrainingPhase(steps=2, lr=1e-2, optimizer=raw, reset_optimizer=reset),
+                )
             )
+
+
+def test_without_restore_best_the_final_loss_is_measured_at_the_returned_model(decay_data):
+    """The last recorded loss predates the last update, so it is measured again."""
+    model = parameter_model()
+    config = hm.OptaxTrainingConfig(steps=5, lr=0.1, restore_best=False)
+    result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
+    assert result.best_step is None
+    returned = result.model.predict(decay_data)
+    expected = float(hm.compute_metrics(returned)["conc"].mse)
+    assert result.final_loss == pytest.approx(expected, rel=1e-4)
+    assert result.final_loss != result.history.loss[-1]
+
+
+def test_evosax_with_validation_keeps_a_good_start(decay_data):
+    """A short, wide search must not replace a start that validates better."""
+    model = parameter_model(rate=TRUE_RATE)
+    config = hm.EvosaxTrainingConfig(population_size=4, steps=2, init_sigma=3.0)
+    result = model.fit(decay_data, config, key=jr.key(0), validation=decay_data, verbose=False)
+    assert rate_of(result.model) == pytest.approx(TRUE_RATE, rel=1e-6)
+    # The validation loss reported is the start's own, not generation 0's.
+    assert result.measured_validation is not None and result.measured_validation < 1e-8
+
+
+def test_an_inject_hyperparams_rate_survives_a_reset_at_the_default_lr(decay_data):
+    """A phase that leaves lr at its default keeps the instance's own rate."""
+    injected = optax.inject_hyperparams(optax.sgd)(learning_rate=0.0)
+    config = hm.OptaxTrainingConfig(
+        phases=(
+            TrainingPhase(steps=2, optimizer=injected),
+            TrainingPhase(steps=2, optimizer=injected, reset_optimizer=True),
         )
+    )
+    result = parameter_model().fit(decay_data, config, key=jr.key(0), verbose=False)
+    assert rate_of(result.model) == pytest.approx(0.3, rel=1e-6)
+
+    # The same holds when a phase rebuilds its state for multiple shooting.
+    segmented = hm.OptaxTrainingConfig(
+        phases=(
+            TrainingPhase(steps=2, optimizer=injected, segments=2),
+            TrainingPhase(steps=2, optimizer=injected, reset_optimizer=True),
+        )
+    )
+    result = parameter_model().fit(decay_data, segmented, key=jr.key(0), verbose=False)
+    assert rate_of(result.model) == pytest.approx(0.3, rel=1e-6)
+
+
+def test_bootstrap_members_start_from_fresh_draws(decay_data):
+    """Every member's start is redrawn, so the spread includes the initialisation."""
+    model = network_model(jr.key(1))
+    config = hm.OptaxTrainingConfig(steps=1, lr=0.0)
+    members = model.fit_ensemble(
+        decay_data, config, n_members=2, bootstrap=True, key=jr.key(2), verbose=False
+    )
+    start = jax.tree.leaves(eqx.filter(model.predictors, eqx.is_inexact_array))
+    for member in members:
+        trained = jax.tree.leaves(eqx.filter(member.model.predictors, eqx.is_inexact_array))
+        assert any(not np.array_equal(a, b) for a, b in zip(start, trained, strict=True))
 
 
 def test_tournament_falls_back_when_every_attempt_fails(decay_data):
@@ -353,9 +414,10 @@ def test_tournament_falls_back_when_every_attempt_fails(decay_data):
             )
 
 
-def test_a_run_whose_every_attempt_fails_still_summarises(decay_data):
-    """Only the starting rate solves, so every redrawn attempt fails and the run
-    falls back to the start, trains at zero rate and must still summarise."""
+def test_the_tournament_keeps_the_start_and_summarises_failures(decay_data):
+    """Only the starting rate solves. Attempt 0 trains from it at zero rate and
+    wins; every redrawn attempt fails. A history whose every attempt failed must
+    still summarise."""
 
     def only_the_start(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any):
         ys = simulate_parameter(predictors, ts, covariates, y0, solver)
@@ -365,9 +427,18 @@ def test_a_run_whose_every_attempt_fails_still_summarises(decay_data):
         {"rate": hm.Parameter(0.3, bounds=(0.0, 1.0)), "offset": hm.Constant(0.0)}, only_the_start
     )
     config = hm.OptaxTrainingConfig(steps=3, lr=0.0, tournament_attempts=3, tournament_steps=1)
-    with pytest.warns(RuntimeWarning, match="all attempts failed"):
-        result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
-    assert "all 3 attempts failed" in result.summary()
+    result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
+    first, *redrawn = result.history.tournament_scores
+    assert math.isfinite(first) and all(math.isinf(score) for score in redrawn)
+    assert "2 failed" in result.summary()
+
+    failed = hm.FitResult(
+        model=model,
+        history=hm.FitHistory(loss=(1.0,), tournament_scores=(math.inf,) * 3),
+        best_step=0,
+        stop_reason="budget_exhausted",
+    )
+    assert "all 3 attempts failed" in failed.summary()
 
 
 def test_tournament_survives_equinox_runtime_failures(decay_data):
@@ -375,7 +446,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
     # tournament must treat it as a failed attempt, not crash the run.
     predictors = parameter_predictors()
 
-    def score_bucket(_predictors, _bp, _fraction):
+    def score_bucket(*_args):
         raise eqx.EquinoxRuntimeError("solver failed")
 
     with pytest.warns(RuntimeWarning, match="all attempts failed"):
@@ -393,6 +464,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
             key=jr.key(0),
             horizon=jnp.asarray(1.0),
             top_k=1,
+            pooling=Pooling("observations"),
         )
     assert ranked[0][0] == float("inf")
     assert scores == (float("inf"), float("inf"))
@@ -518,19 +590,19 @@ def test_predict_on_explicit_and_even_grids(decay_data):
     """``ts`` and ``n_points`` change the grid; each experiment still starts at its ``t0``."""
     model = parameter_model(TRUE_RATE)
     measured = model.predict(decay_data)
-    times = measured["b"].times
+    times = measured["b"].ts
     on_ts = model.predict(decay_data, ts=times)
     for exp_id in measured:
-        np.testing.assert_allclose(on_ts[exp_id].times, times)
-        assert on_ts[exp_id].observed == {} and on_ts[exp_id].observation_mask == {}
+        np.testing.assert_allclose(on_ts[exp_id].ts, times)
+        assert on_ts[exp_id].observed == {} and on_ts[exp_id].mask == {}
     np.testing.assert_allclose(on_ts["b"].outputs["conc"], measured["b"].outputs["conc"], atol=1e-4)
 
     even = model.predict(list(decay_data.experiments), n_points=9)
     for exp_id, experiment in even.items():
-        start, end = measured[exp_id].times[0], measured[exp_id].times[-1]
-        np.testing.assert_allclose(experiment.times, jnp.linspace(start, end, 9), rtol=1e-6)
+        start, end = measured[exp_id].ts[0], measured[exp_id].ts[-1]
+        np.testing.assert_allclose(experiment.ts, jnp.linspace(start, end, 9), rtol=1e-6)
         np.testing.assert_allclose(
-            experiment.outputs["conc"], jnp.exp(-TRUE_RATE * experiment.times), rtol=1e-3
+            experiment.outputs["conc"], jnp.exp(-TRUE_RATE * experiment.ts), rtol=1e-3
         )
     with pytest.raises(ValueError, match="measured grid"):
         hm.compute_metrics(even)
@@ -538,7 +610,7 @@ def test_predict_on_explicit_and_even_grids(decay_data):
     # simulate takes n_points for the same even grid over one experiment.
     first = decay_data.experiments[0]
     simulated = model.simulate(first, n_points=9)
-    np.testing.assert_allclose(simulated.times, even[first.exp_id].times, rtol=1e-6)
+    np.testing.assert_allclose(simulated.ts, even[first.exp_id].ts, rtol=1e-6)
     with pytest.raises(ValueError, match="not both"):
         model.simulate(first, ts=times, n_points=9)
     with pytest.raises(ValueError, match="needs experiment="):
@@ -574,9 +646,9 @@ def quadratic_data():
     return hm.make_dataset([experiment], output_channel_names=QUADRATIC_CHANNELS)
 
 
-def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
-    # Optax averages bucket losses with equal weight per bucket. Evosax must
-    # use the same average, or the two trainers optimise different objectives.
+def test_multi_bucket_fitness_pools_like_optax(quadratic_data):
+    # Optax weights each bucket's loss by its pooling share. Evosax must use
+    # the same shares, or the two trainers optimise different objectives.
     predictor = hm.Parameter(jnp.zeros(4))
     params, static = eqx.partition(predictor, trainable_mask(predictor))
     flat, unflatten = jfu.ravel_pytree(params)
@@ -587,6 +659,7 @@ def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
         static_predictor=static,
         unflatten=unflatten,
         bucket_payloads=(small, large),
+        shares=(jnp.asarray(0.25), jnp.asarray(0.75)),
         loss_fn=lambda _pred, bucket: bucket.n_obs.astype(jnp.float32),
         penalty_fn=lambda _p, _points: jnp.asarray(0.0),
         penalty_weight=0.0,
@@ -594,7 +667,7 @@ def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
         state_to_output=identity,
         solver=SOLVER,
     )
-    assert float(evaluate(flat)) == pytest.approx(2.0)
+    assert float(evaluate(flat)) == pytest.approx(0.25 * 1 + 0.75 * 3)
 
 
 def test_channel_weights_by_name_fit_only_the_named_channels(quadratic_data):
@@ -656,7 +729,7 @@ def test_stop_reason_follows_the_final_phase(decay_data, monkeypatch):
     # Phase 0 cannot improve (lr=0), so patience cuts it short. Phase 1
     # improves every step and runs to its budget.
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(10, lr=0.0), hm.TrainingPhase(3, lr=0.05)), patience=2
+        phases=(hm.TrainingPhase(steps=10, lr=0.0), hm.TrainingPhase(steps=3, lr=0.05)), patience=2
     )
     result = parameter_model().fit(decay_data, config, key=jr.key(5))
     assert result.history.phase.count(0) < 10
@@ -675,7 +748,7 @@ def evosax_fit(decay_data):
     console = _console()
     predictors = {**parameter_predictors(), "meta": hm.Constant((1.0, [2.0, 3.0]))}
     model = eqx.tree_at(lambda m: m.predictors, parameter_model(), predictors)
-    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5)
+    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.5)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(evosax_module, "live_display_available", lambda: True)
         patch.setattr(
@@ -714,7 +787,7 @@ def test_piped_output_gets_plain_lines(decay_data, capsys, monkeypatch):
     assert any(line.startswith("step 20/20") for line in lines)
     assert lines[-1].startswith("done: final loss")
 
-    config = hm.EvosaxTrainingConfig(population_size=4, steps=3, sigma_init=0.1)
+    config = hm.EvosaxTrainingConfig(population_size=4, steps=3, init_sigma=0.1)
     parameter_model().fit(decay_data, config, key=jr.key(0))
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "searching: 3 generations of 4 candidates"
@@ -856,7 +929,7 @@ def test_nested_constants_are_frozen_and_survive_a_restart():
     constant = hm.Constant((1.0, [2.0, 3.0], (4.0, 5.0)))
     assert constant.value[0].shape == () and constant.value[1].shape == (2,)
     assert not any(jax.tree_util.tree_leaves(hm.trainable_mask(constant)))
-    fresh = hm.predictors.reinitialize_pytree_with_key({"c": constant}, jr.key(0))["c"]
+    fresh = hm.predictors.reinitialize_pytree({"c": constant}, key=jr.key(0))["c"]
     for a, b in zip(
         jax.tree_util.tree_leaves(constant), jax.tree_util.tree_leaves(fresh), strict=True
     ):
@@ -892,7 +965,8 @@ def test_lr_schedule_counts_from_the_phase_start(decay_data):
     result = parameter_model().fit(
         decay_data,
         hm.OptaxTrainingConfig(
-            phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=held)), restore_best=False
+            phases=(TrainingPhase(steps=5, lr=0.0), TrainingPhase(steps=6, lr=held)),
+            restore_best=False,
         ),
         key=jr.key(0),
         verbose=False,
@@ -909,7 +983,8 @@ def test_lr_schedule_counts_from_the_phase_start(decay_data):
     again = parameter_model().fit(
         decay_data,
         hm.OptaxTrainingConfig(
-            phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=host)), restore_best=False
+            phases=(TrainingPhase(steps=5, lr=0.0), TrainingPhase(steps=6, lr=host)),
+            restore_best=False,
         ),
         key=jr.key(0),
         verbose=False,
@@ -924,11 +999,11 @@ def test_channel_selection_composes_with_a_plain_custom_loss(quadratic_data):
     """
 
     def plain(pred_obs, bp):
-        return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.y_observed) ** 2, 0.0))
+        return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.observed) ** 2, 0.0))
 
     names = quadratic_data.output_channel_names
     bp = quadratic_data.bucket_payloads[0]
-    pred = jnp.zeros_like(bp.y_observed)
+    pred = jnp.zeros_like(bp.observed)
     selected = Objective(loss=plain, channel_weights={"c2": 1.0}).loss_fn(names)
     assert float(selected(pred, bp)) == pytest.approx(float(THETA_STAR[2] ** 2))
     with pytest.raises(ValueError, match="channel_weights cannot be applied"):

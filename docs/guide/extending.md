@@ -43,6 +43,12 @@ selected channels, already sliced, so `{"conc": 1.0}` works with it; weights
 other than 1 raise, since they have to be applied inside the loss. See
 `jaxhybridmodels.losses.resolve_loss_fn`.
 
+A loss reduces one bucket, and the trainers add the buckets back up by what
+the loss averages over. A custom loss is taken as a mean over measured cells.
+Set `my_loss.pooling = "experiments"` for a mean over experiments, or `"sum"`
+for a summed likelihood; `jaxhybridmodels.losses.loss_pooling` reads it and
+`POOLING_KINDS` lists the choices.
+
 ## Optimisers
 
 `optimizer` on a config or `TrainingPhase` accepts:
@@ -95,7 +101,9 @@ def state_to_output(state):
     return strip_penalty_state(state, n=2)          # the loss never sees the accumulators
 
 def trajectory_penalty(full_state, bp):
-    return jnp.sum(penalty_integral(full_state, n=2))
+    # Summed over the two penalties, averaged over the bucket's experiments,
+    # so the trainers' bucket weights give the mean over every experiment.
+    return jnp.mean(jnp.sum(penalty_integral(full_state, n=2), axis=-1))
 
 objective = hm.Objective(
     trajectory_penalty_fn=trajectory_penalty, trajectory_penalty_weight=0.1
@@ -124,8 +132,8 @@ regulariser and the update:
 
 <<< @/../examples/custom_loop/train_custom_loop.py#loss
 
-`horizon` is the leading fraction of each time series the loss scores, and
-defaults to 1.0. A new value does not recompile. At the end, put the
+`horizon` is the fraction of each experiment's span the loss scores, from `t0`
+(or its first measurement) to its last measurement, and defaults to 1.0. A new value does not recompile. At the end, put the
 predictors back to get a model you can predict with and save:
 
 <<< @/../examples/custom_loop/train_custom_loop.py#put-back

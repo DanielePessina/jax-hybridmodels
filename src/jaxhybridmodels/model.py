@@ -79,7 +79,8 @@ class HybridModel(eqx.Module):
     other fields are static. Equinox tools work on it directly, for example
     ``eqx.tree_at(lambda m: m.predictors["rate"], model, new_rate)`` to swap
     one predictor, or ``eqx.filter_vmap`` over a function that builds models
-    from different keys.
+    from different keys. Fitting returns a new model; the original is
+    unchanged.
 
     Parameters
     ----------
@@ -97,8 +98,6 @@ class HybridModel(eqx.Module):
         ``output_channel_names`` of every dataset passed in.
     solver
         Integration settings, default ``SolverConfig()``.
-
-    Fitting returns a new model; the original is unchanged.
     """
 
     predictors: Any
@@ -313,10 +312,13 @@ class HybridModel(eqx.Module):
         ``verbose`` shows a live display of the run, and ``False`` runs
         quietly. ``ui`` is a display of your own and overrides ``verbose``.
 
-        With ``validation``, the validation data loss replaces the training
-        loss for choosing the returned step (Optax) or generation (Evosax),
-        and for ``patience``. It costs one extra forward pass over the
-        validation set per step or generation.
+        With ``validation``, the validation loss replaces the training loss
+        for choosing the returned step (Optax) or generation (Evosax), and
+        for ``patience``. It costs one extra forward pass over the
+        validation set per step or generation. The validation score is
+        always single shooting at the full horizon, so Optax picks the best
+        step across all phases: the returned model can come from an earlier
+        horizon or from a segmented phase.
 
         ``data`` and ``validation`` may be a ``Dataset`` or a sequence of
         experiments. ``simulate_fn`` and ``state_to_output`` shapes are
@@ -440,7 +442,7 @@ class HybridModel(eqx.Module):
         ``t0`` (or first observation) to its last observation, for smooth
         plots. ``ts`` gives one explicit grid for every experiment; it must
         not start before any experiment's start. Off the measured grid,
-        ``observed`` and ``observation_mask`` are empty. Each experiment
+        ``observed`` and ``mask`` are empty. Each experiment
         still integrates from its own start, so ``y0`` stays in place.
 
         ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
@@ -487,12 +489,23 @@ class HybridModel(eqx.Module):
                 raise ValueError(
                     "simulate: experiment= supplies y0, covariates and t0; do not pass them too"
                 )
-            measured = _per_experiment_arrays(experiment, tuple(experiment.channels)).ts
+            # The model's own channels, as predict and make_dataset use, so y0
+            # sits at the same time on every path.
+            absent = [name for name in self.output_channel_names if name not in experiment.channels]
+            if absent:
+                raise ValueError(
+                    f"simulate: experiment {experiment.exp_id!r} has no channel {absent}; it "
+                    f"needs every channel the model outputs, {list(self.output_channel_names)}"
+                )
+            measured = _per_experiment_arrays(experiment, self.output_channel_names).ts
             if ts is None:
                 ts = measured
             # y0 belongs to the experiment's own start: t0 when set, else its
-            # first observation time. Pin it so a caller's ts cannot move it.
-            start_time = experiment.t0 if experiment.t0 is not None else float(measured[0])
+            # first observation time. The measured axis already holds t0, in
+            # the axis's own precision, so a float32 rounding of t0 cannot put
+            # the start after the first time. Pin it so a caller's ts cannot
+            # move it.
+            start_time = float(measured[0])
             if n_points is not None:
                 ts = jnp.linspace(start_time, measured[-1], n_points, dtype=measured.dtype)
             y0, covariates, t0 = experiment.y0, experiment.covariates, start_time
@@ -529,7 +542,7 @@ class HybridModel(eqx.Module):
             output = jnp.asarray(self.state_to_output(state))
         self._check_output_shape(output.shape, state.shape, "simulate")
         return ExperimentPrediction(
-            times=times,
+            ts=times,
             outputs=dict(zip(self.output_channel_names, output.T, strict=True)),
             state=state,
         )

@@ -109,7 +109,7 @@ def _trajectory_grid_plot(
             label="observed",
         )
         ax.plot(
-            np.asarray(pred.times),
+            np.asarray(pred.ts),
             np.asarray(pred.outputs["Ca"]),
             color="C3",
             linestyle="--",
@@ -359,7 +359,7 @@ def main() -> None:
         steps=args.generations,
         init="lhs_box",
         init_box_extent=args.init_box_extent,
-        sigma_init=args.sigma_init,
+        init_sigma=args.sigma_init,
     )
     # The default mask already holds BoundScaler leaves fixed. Freezing every
     # BoundedPredictor on top leaves the trunk's two latent scalars.

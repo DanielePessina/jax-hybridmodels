@@ -7,8 +7,10 @@ First the mechanistic model, on data from a first-order Arrhenius law so it is
 well specified. ``k_ref`` and ``Ea_over_R`` are the whole of what it fits, so this
 is a complete posterior. With ``--last-layer``, the hybrid model too: the data
 come from the saturating rate law, and only the network's last layer is sampled.
-That posterior is conditional on the other layers, so its band is a lower bound
-on the network's uncertainty.
+That posterior is conditional on the other layers held at their fitted values,
+and its prior is centred on the fit, so its band shows the spread the last layer
+alone allows. It is usually narrower than the network's full uncertainty, but it
+is not a bound on it.
 
 Shows:
 
@@ -17,7 +19,7 @@ Shows:
 - BlackJAX window adaptation and NUTS, with chains on separate threads
 - R-hat and effective sample size from ``blackjax.diagnostics``
 - ``InferenceProblem.predict`` for a posterior predictive band
-- ``free=`` naming a network layer, and ``conditional_on`` saying what stayed fixed
+- ``estimate=`` naming a network layer, and ``conditional_on`` saying what stayed fixed
 
 Needs ``pip install jax-hybridmodels[bayes,examples]``. Run::
 
@@ -82,11 +84,23 @@ def sample(problem: hm.inference.InferenceProblem, key: Any, args: Any) -> tuple
     """Window adaptation then NUTS, one thread per chain. Returns ``[chain, draw, ...]``."""
 
     def one_chain(chain_key: Any) -> Any:
-        adapt_key, draw_key = jr.split(chain_key)
+        start_key, adapt_key, draw_key = jr.split(chain_key, 3)
+        # Each chain starts from its own point, scattered about twice the
+        # posterior's width around the fit (the preconditioned position has
+        # unit scale). R-hat compares chains, and chains that all start at the
+        # fit cannot show a second mode or a direction they never left.
+        leaves, treedef = jax.tree_util.tree_flatten(problem.position)
+        start = jax.tree_util.tree_unflatten(
+            treedef,
+            [
+                leaf + 2.0 * jr.normal(k, jnp.shape(leaf), jnp.result_type(leaf))
+                for leaf, k in zip(leaves, jr.split(start_key, len(leaves)), strict=True)
+            ],
+        )
         adaptation = blackjax.window_adaptation(blackjax.nuts, problem.log_density)
         (state, params), _ = adaptation.run(
             adapt_key,
-            problem.position,
+            start,
             num_steps=args.warmup,  # ty: ignore[unknown-argument]
         )
         kernel = blackjax.nuts(problem.log_density, **params)
@@ -112,7 +126,8 @@ def report(named: dict[str, Any], divergent: Any, truth: dict[str, float]) -> No
     print(f"  divergences: {int(np.asarray(divergent).sum())}")
     print(f"  {'value':<12} {'mean':>10} {'sd':>10} {'5%':>10} {'95%':>10} {'R-hat':>7} {'ESS':>7}")
     for name, value in named.items():
-        chains = jnp.squeeze(value)
+        # ``[chain, draw]``, kept two-dimensional even for one chain.
+        chains = jnp.reshape(value, jnp.shape(value)[:2])
         low, high = np.quantile(np.asarray(chains), [0.05, 0.95])
         rhat = float(potential_scale_reduction(chains))
         ess = float(effective_sample_size(chains))
@@ -161,7 +176,9 @@ def mechanistic_posterior(args: Any, key: Any) -> None:
 
     # region predict
     start = time.perf_counter()
-    predictive = problem.predict(positions, key=k_predict, n_draws=args.predict_draws)
+    predictive = problem.predict(
+        positions, key=k_predict, n_draws=args.predict_draws, quantiles=(0.05, 0.95)
+    )
     # endregion predict
     print(f"  {len(predictive.members)} predictive draws in {time.perf_counter() - start:.0f} s")
     run = predictive[exp_name(*CONDITIONS[0])]
@@ -179,8 +196,8 @@ def last_layer_posterior(args: Any, key: Any) -> None:
     hybrid, _ = build_models(k_model)
     config = hm.OptaxTrainingConfig(
         phases=(
-            hm.TrainingPhase(args.steps // 3, lr=1e-2, horizon=0.5),
-            hm.TrainingPhase(args.steps - args.steps // 3, lr=3e-3),
+            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, horizon=0.5),
+            hm.TrainingPhase(steps=args.steps - args.steps // 3, lr=3e-3),
         ),
     )
     result = hybrid.fit(dataset, config, key=k_fit, verbose=False)
@@ -201,7 +218,7 @@ def last_layer_posterior(args: Any, key: Any) -> None:
         dataset,
         log_prior=log_prior,
         noise="data",
-        free="g.inner.mlp.layers.2",
+        estimate="g.inner.mlp.layers.2",
     ).preconditioned()
     print(f"  conditional on: {', '.join(problem.conditional_on)}")
     # endregion last-layer
@@ -210,16 +227,20 @@ def last_layer_posterior(args: Any, key: Any) -> None:
     print(f"  {args.chains} chains in {time.perf_counter() - start:.0f} s")
     low, high = rhat_range(positions)
     print(f"  divergences: {int(np.asarray(divergent).sum())}; R-hat from {low:.3f} to {high:.3f}")
-    flat = jax.tree_util.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), positions)
-    weights = jax.tree_util.tree_map(lambda x: x[:: max(1, x.shape[0] // 100)], flat)
-    rates = jax.vmap(
-        lambda p: hm.evaluate_predictor(
-            problem.to_model(p).predictors["g"], {"c": jnp.asarray(1.0), "T": jnp.asarray(330.0)}
-        )
-    )(weights)
+    # The rate itself, per chain, so its R-hat and ESS read the quantity of
+    # interest rather than the whitened weights.
+    thinned = jax.tree_util.tree_map(lambda x: x[:, :: max(1, x.shape[1] // 100)], positions)
+
+    def rate_at(p: Any) -> Any:
+        g = problem.to_model(p).predictors["g"]
+        return hm.evaluate_predictor(g, {"c": jnp.asarray(1.0), "T": jnp.asarray(330.0)})
+
+    rates = jax.vmap(jax.vmap(rate_at))(thinned)
+    rhat = float(potential_scale_reduction(rates))
+    ess = float(effective_sample_size(rates))
     print(
         f"  g(c=1, T=330): {float(rates.mean()):.3f} +/- {float(rates.std()):.3f}, "
-        f"truth {float(true_g(1.0, 330.0)):.3f}"
+        f"truth {float(true_g(1.0, 330.0)):.3f}; R-hat {rhat:.3f}, ESS {ess:.0f}"
     )
 
 

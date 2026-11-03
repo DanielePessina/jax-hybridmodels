@@ -9,6 +9,7 @@ or a slow run.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import warnings
@@ -23,6 +24,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 import numpy as np
+import optax
 import pandas as pd
 import pytest
 from _models import (
@@ -48,6 +50,7 @@ from jaxhybridmodels.data import (
 from jaxhybridmodels.losses import (
     bal_mle,
     bal_mse,
+    loss_pooling,
     masked_mle,
     masked_mse,
     resolve_loss_fn,
@@ -74,8 +77,8 @@ from jaxhybridmodels.predictors import (
     KANPredictor,
     MLPPredictor,
     NeuralNPolynomial,
-    reinitialize_pytree_with_key,
-    reinitialize_with_key,
+    reinitialize,
+    reinitialize_pytree,
 )
 from jaxhybridmodels.predictors.kan import _scaffold_parts
 from jaxhybridmodels.profiles import (
@@ -96,6 +99,7 @@ from jaxhybridmodels.trainable import freeze_mask, trainable_mask
 from jaxhybridmodels.training.kernels import (
     apply_length_mask,
     build_bucket_step,
+    build_dataset_score,
     build_score_bucket,
 )
 from jaxhybridmodels.transforms import (
@@ -211,7 +215,7 @@ def test_a_horizon_change_does_not_recompile_training():
     # shape check before training; anything more is a retrace at a phase boundary.
     traces: list[Any] = []
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(5, lr=0.1, horizon=0.5), hm.TrainingPhase(5, lr=0.05))
+        phases=(hm.TrainingPhase(steps=5, lr=0.1, horizon=0.5), hm.TrainingPhase(steps=5, lr=0.05))
     )
     make_model(parameter_predictors(), _counting(traces)).fit(
         decay_dataset(), config, key=jr.key(0), verbose=False
@@ -347,6 +351,38 @@ def test_input_violation_is_a_width_normalised_hinge():
     assert float(hm.BoundScaler(((0.0, None),)).input_violation(jnp.array([-2.0]))) == 4.0
 
 
+def test_a_log_warp_on_one_bound_makes_steps_relative():
+    """With one bound, a log warp acts on the distance from it: ``low + exp(z)``.
+
+    A softplus is linear far from its bound, so Adam moves a value of 5000 by
+    about the learning rate per step. The log warp moves it by a fraction.
+    """
+
+    def train(warp: str) -> float:
+        parameter = hm.Parameter(5000.0, bounds=(0.0, None), warp=warp)
+        optimizer = optax.adam(1e-2)
+        latent = parameter.latent
+        state = optimizer.init(latent)
+
+        def loss(z: Array) -> Array:
+            return jnp.sum((eqx.tree_at(lambda p: p.latent, parameter, z).value - 6000.0) ** 2)
+
+        for _ in range(500):
+            update, state = optimizer.update(jax.grad(loss)(latent), state)
+            latent = optax.apply_updates(latent, update)
+        return float(eqx.tree_at(lambda p: p.latent, parameter, latent).value)
+
+    assert train("linear") < 5010.0
+    assert train("log") == pytest.approx(6000.0, rel=1e-4)
+    for bounds, value in (((1.0, None), 5.0), ((None, 2.0), 1.5)):
+        parameter = hm.Parameter(value, bounds=bounds, warp="log10")
+        assert float(parameter.value) == pytest.approx(value, rel=1e-6)
+        # At and past the bound the guarded inverse stays finite and keeps a slope.
+        edge = jnp.asarray(bounds[0] if bounds[0] is not None else bounds[1])
+        past = jax.grad(parameter.scaler.to_latent)(edge)
+        assert jnp.isfinite(parameter.scaler.to_latent(edge)) and float(past) != 0.0
+
+
 def test_array_parameter_takes_one_bound_per_element():
     parameter = hm.Parameter(
         [[0.2, 0.4], [-2.0, 0.8]], bounds=[(0.0, None), (None, 1.0), (None, None), (0.0, 1.0)]
@@ -470,7 +506,6 @@ def test_registering_a_solver_and_adjoint_makes_them_serialisable(monkeypatch):
         # Decay spans the remaining 50 steps, so the midpoint of the decay is step 75.
         ("warmup_cosine", {"warmup_epochs": 50}, {50: 1.0, 75: 0.5, 99: 0.0, 100: 0.0}),
         ("exponential", {"end_value": 0.01}, {0: 1.0, 100: 0.01, 500: 0.01}),
-        ("exponential", {"end_value": 0.0}, {0: 1.0, 100: 0.0, 500: 0.0}),
     ],
 )
 def test_annealing_schedule_values(kind, kwargs, values):
@@ -485,12 +520,15 @@ def test_annealing_schedule_values(kind, kwargs, values):
 
 PROFILES = {
     "constant": (constant_profile(3.5), {-2.0: 3.5, 9.0: 3.5}),
-    "step": (step_profile(before=1.0, after=4.0, jump_at=2.0), {1.9: 1.0, 2.0: 4.0, 5.0: 4.0}),
+    "step": (step_profile(before=1.0, after=4.0, at=2.0), {1.9: 1.0, 2.0: 4.0, 5.0: 4.0}),
     "ramp-up": (
-        ramp_profile(t0=1.0, t1=3.0, v0=10.0, v1=30.0),
+        ramp_profile(start=1.0, end=3.0, before=10.0, after=30.0),
         {0.0: 10.0, 1.0: 10.0, 2.0: 20.0, 3.0: 30.0, 7.0: 30.0},
     ),
-    "ramp-down": (ramp_profile(t0=1.0, t1=3.0, v0=30.0, v1=10.0), {0.0: 30.0, 2.0: 20.0}),
+    "ramp-down": (
+        ramp_profile(start=1.0, end=3.0, before=30.0, after=10.0),
+        {0.0: 30.0, 2.0: 20.0},
+    ),
     "piecewise": (
         piecewise_linear_profile(((0.0, 0.0), (1.0, 2.0), (3.0, 6.0))),
         {-1.0: 0.0, 0.5: 1.0, 2.0: 4.0, 4.0: 6.0},
@@ -517,7 +555,7 @@ def test_profile_parameters_can_be_traced_covariates():
     # Per-experiment ramp parameters arrive as traced covariates, and the
     # host-side knot check must step aside instead of raising.
     def ramp_at(t, lo, hi, t0, t1):
-        return ramp_profile(t0=t0, t1=t1, v0=lo, v1=hi)(t)
+        return ramp_profile(start=t0, end=t1, before=lo, after=hi)(t)
 
     covariates = jnp.array([[10.0, 30.0, 0.0, 4.0], [20.0, 40.0, 1.0, 5.0]])
     at_2 = jax.vmap(lambda c: ramp_at(2.0, *c))(covariates)
@@ -528,6 +566,48 @@ def test_profile_parameters_can_be_traced_covariates():
         return piecewise_linear_profile(knots)(jnp.asarray(0.0))
 
     assert jnp.isfinite(jax.jit(piecewise_at_zero)(jnp.asarray(0.5)))
+
+
+def test_a_short_pulse_is_seen_only_through_its_jump_ts():
+    """Without its breakpoints the adaptive solver steps clean over a pulse."""
+    pulse = piecewise_linear_profile(((3.975, 0.0), (4.0, 1.0), (4.025, 0.0)))
+    term = diffrax.ODETerm(lambda t, y, args: pulse(t) * jnp.ones(1))
+    solver = hm.SolverConfig()
+    ts = jnp.linspace(0.0, 10.0, 11)
+    blind = jnp.asarray(solver.diffeqsolve(term, ts, jnp.zeros(1)).ys)[-1, 0]
+    seen = jnp.asarray(solver.diffeqsolve(term, ts, jnp.zeros(1), jump_ts=pulse.jump_ts).ys)
+    seen = seen[-1, 0]
+    assert float(blind) < 1e-3
+    assert float(seen) == pytest.approx(0.025, rel=1e-4)
+
+    # A step whose time is a traced covariate passes its jump_ts through jit.
+    def after_step(at):
+        step = step_profile(at=at, before=0.0, after=1.0)
+        field = diffrax.ODETerm(lambda t, y, args: step(t) * jnp.ones(1))
+        solution = solver.diffeqsolve(field, ts, jnp.zeros(1), jump_ts=step.jump_ts)
+        return jnp.asarray(solution.ys)[-1, 0]
+
+    assert float(jax.jit(after_step)(jnp.asarray(5.3))) == pytest.approx(4.7, rel=1e-4)
+    # With jump_ts the switch time has its gradient: d/d(at) of (10 - at) is -1.
+    assert float(jax.grad(after_step)(jnp.asarray(5.3))) == pytest.approx(-1.0, rel=1e-3)
+
+    # A smooth profile has no jump times, and passing them is still fine.
+    flat = constant_profile(1.0)
+    field = diffrax.ODETerm(lambda t, y, args: flat(t) * jnp.ones(1))
+    whole = jnp.asarray(solver.diffeqsolve(field, ts, jnp.zeros(1), jump_ts=flat.jump_ts).ys)
+    assert float(whole[-1, 0]) == pytest.approx(10.0, rel=1e-5)
+
+
+def test_to_latent_is_exact_to_second_order_inside_the_box():
+    """A Hessian through a boxed input, as fisher(curvature="exact") takes, is right."""
+    for warp in ("linear", "log"):
+        scaler = hm.BoundScaler((0.5, 20.0), warp=warp)
+        x, h = jnp.asarray(0.6), jnp.asarray(1e-2)
+        f = scaler.to_latent
+        fd = (f(x + h) - 2 * f(x) + f(x - h)) / h**2
+        # Float32 differences are rough, but the old single-expression inverse
+        # gave 0 here, and -27 under log against about -100.
+        assert float(jax.grad(jax.grad(f))(x)) == pytest.approx(float(fd), rel=2e-2), warp
 
 
 def test_rng_fold_is_named_stable_and_pinned():
@@ -552,7 +632,7 @@ def test_python_lr_schedule_is_evaluated_on_the_host():
     def stepwise(step: Any) -> float:
         return 0.1 if step < 2 else 0.01
 
-    lrs = _scheduled_lrs(hm.TrainingPhase(4, lr=stepwise))
+    lrs = _scheduled_lrs(hm.TrainingPhase(steps=4, lr=stepwise))
     np.testing.assert_allclose(np.asarray(lrs), [0.1, 0.1, 0.01, 0.01], rtol=1e-6)
 
 
@@ -604,14 +684,14 @@ def test_sparse_channels_scatter_onto_a_sorted_union_grid():
     np.testing.assert_array_equal(
         bp.mask[0], [[True, False], [False, True], [True, False], [False, True]]
     )
-    observed = np.where(bp.mask[0], bp.y_observed[0], np.nan)
+    observed = np.where(bp.mask[0], bp.observed[0], np.nan)
     np.testing.assert_allclose(
         observed, [[10.0, np.nan], [np.nan, 100.0], [20.0, np.nan], [np.nan, 300.0]]
     )
     # Default variance is one; an array variance follows its timestamps.
-    assert float(bp.yvar[0, 0, 0]) == 1.0
-    assert float(bp.yvar[0, 1, 1]) == pytest.approx(0.1)
-    assert float(bp.yvar[0, 3, 1]) == pytest.approx(0.2)
+    assert float(bp.variance[0, 0, 0]) == 1.0
+    assert float(bp.variance[0, 1, 1]) == pytest.approx(0.1)
+    assert float(bp.variance[0, 3, 1]) == pytest.approx(0.2)
 
 
 @pytest.mark.parametrize(
@@ -630,7 +710,7 @@ def test_dtypes_survive_bucketing(ts_dtype, values_dtype, variance_dtype):
     )
     exp = hm.make_experiment(channels={"x": channel}, y0=[0.0])
     bp = hm.make_dataset([exp], output_channel_names=("x",)).bucket_payloads[0]
-    assert (bp.ts.dtype, bp.y_observed.dtype, bp.yvar.dtype) == (
+    assert (bp.ts.dtype, bp.observed.dtype, bp.variance.dtype) == (
         ts_dtype,
         values_dtype,
         variance_dtype,
@@ -702,6 +782,54 @@ def _lab_table() -> pd.DataFrame:
     )
 
 
+def test_integer_times_and_unsorted_tables_keep_their_meaning():
+    """Integer times still predict on a float grid, a table's rows are read in
+    time order, and a run whose covariate is missing raises."""
+    experiment = hm.make_experiment(
+        channels={"conc": hm.ChannelObs(ts=jnp.asarray([0, 2, 4]), values=jnp.ones(3))},
+        y0=[1.0],
+        exp_id="int",
+    )
+    model = make_model(parameter_predictors())
+    grid = jnp.asarray([0.5, 1.5, 2.5])
+    np.testing.assert_allclose(model.predict([experiment], ts=grid)["int"].ts, grid)
+    assert len(model.simulate(experiment, n_points=7).ts) == 7
+    other = hm.make_experiment(
+        channels={"other": hm.ChannelObs(ts=jnp.asarray([1.0]), values=jnp.ones(1))},
+        y0=[1.0],
+        exp_id="other",
+    )
+    with pytest.raises(ValueError, match="needs every channel the model outputs"):
+        model.simulate(other)
+
+    table = pd.DataFrame({"run": [1, 1, 1], "t": [2.0, 0.0, 1.0], "y": [0.3, 1.0, 0.6]})
+    first = lambda cov, ch: jnp.array([ch["y"].values[0]])  # noqa: E731
+    [run] = experiments_from_dataframe(
+        table, time="t", experiment="run", channels=["y"], y0_fn=first
+    )
+    np.testing.assert_allclose(run.channels["y"].ts, [0.0, 1.0, 2.0])
+    np.testing.assert_allclose(run.y0, [1.0])
+    for column in (np.full(3, np.nan, dtype=np.float32), pd.array([None] * 3, dtype="Float64")):
+        with pytest.raises(ValueError, match="missing"):
+            experiments_from_dataframe(
+                table.assign(T=column),
+                time="t",
+                experiment="run",
+                channels=["y"],
+                covariates=["T"],
+                y0=[1.0],
+            )
+    with pytest.raises(ValueError, match="missing"):
+        experiments_from_dataframe(
+            table.assign(T=np.nan),
+            time="t",
+            experiment="run",
+            channels=["y"],
+            covariates=["T"],
+            y0=[1.0],
+        )
+
+
 def test_experiments_from_dataframe_builds_one_experiment_per_run():
     experiments = experiments_from_dataframe(
         _lab_table(),
@@ -749,12 +877,14 @@ def _numbered(n: int) -> Dataset:
     "n, fractions, counts",
     [
         (10, {}, (8, 1, 1)),
-        # Floor for train and val; the remainder goes to test.
-        (13, {"train": 0.7, "val": 0.2, "test": 0.1}, (9, 2, 2)),
+        # Floor for train and validation; the remainder goes to test.
+        (13, {"train": 0.7, "validation": 0.2, "test": 0.1}, (9, 2, 2)),
         (17, {}, (13, 1, 3)),
         # An explicit zero stays zero, even when flooring leaves a remainder.
-        (10, {"train": 1.0, "val": 0.0, "test": 0.0}, (10, 0, 0)),
-        (4, {"train": 0.7, "val": 0.3, "test": 0.0}, (3, 1, 0)),
+        (10, {"train": 1.0, "validation": 0.0, "test": 0.0}, (10, 0, 0)),
+        (4, {"train": 0.7, "validation": 0.3, "test": 0.0}, (3, 1, 0)),
+        # 0.29 * 100 is 28.999999999999996 in binary, and still means 29.
+        (100, {"train": 0.29, "validation": 0.61, "test": 0.1}, (29, 61, 10)),
     ],
 )
 def test_split_partitions_experiments(n, fractions, counts):
@@ -777,8 +907,8 @@ def test_split_partitions_experiments(n, fractions, counts):
 
 def _two_channel_scored() -> tuple[jax.Array, BucketPayload]:
     bp = _two_channel().bucket_payloads[0]
-    offsets = jnp.arange(bp.y_observed.size, dtype=jnp.float32).reshape(bp.y_observed.shape)
-    return bp.y_observed + 0.1 * offsets, bp
+    offsets = jnp.arange(bp.observed.size, dtype=jnp.float32).reshape(bp.observed.shape)
+    return bp.observed + 0.1 * offsets, bp
 
 
 def test_channel_idx_and_channel_weights_compose_linearly():
@@ -829,8 +959,8 @@ def test_balanced_losses_weight_experiments_not_observations(loss_fn, decay_data
 
         probe = bp._replace(
             ts=extend(bp.ts),
-            y_observed=extend(bp.y_observed),
-            yvar=extend(bp.yvar),
+            observed=extend(bp.observed),
+            variance=extend(bp.variance),
             mask=extend(bp.mask).at[-1].set(False),
             covariates={k: extend(v) for k, v in bp.covariates.items()},
             y0=extend(bp.y0),
@@ -841,11 +971,11 @@ def test_balanced_losses_weight_experiments_not_observations(loss_fn, decay_data
 
 def test_likelihood_losses_read_the_observation_variance():
     pred, bp = _two_channel_scored()
-    low = bp._replace(yvar=jnp.full_like(bp.yvar, 0.5))
-    high = bp._replace(yvar=jnp.full_like(bp.yvar, 1.0))
+    low = bp._replace(variance=jnp.full_like(bp.variance, 0.5))
+    high = bp._replace(variance=jnp.full_like(bp.variance, 1.0))
     # Gaussian NLL: doubling the variance adds n log(2) / 2 and halves the
     # squared-error term.
-    se = jnp.where(bp.mask, (pred - bp.y_observed) ** 2, 0.0).sum()
+    se = jnp.where(bp.mask, (pred - bp.observed) ** 2, 0.0).sum()
     expected = 0.5 * bp.mask.sum() * jnp.log(2.0) - 0.5 * se
     np.testing.assert_allclose(masked_mle(pred, high) - masked_mle(pred, low), expected, atol=1e-4)
     assert not jnp.allclose(bal_mle(pred, low), bal_mle(pred, high))
@@ -863,15 +993,13 @@ def test_resolve_loss_fn_binds_channel_arguments():
 
     # A custom loss without channel arguments passes through untouched.
     def plain(pred_obs, bp):
-        return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.y_observed) ** 2, 0.0))
+        return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.observed) ** 2, 0.0))
 
     assert resolve_loss_fn(plain, None, None) is plain
     # With channel_idx the channels are sliced out before the call.
     assert float(resolve_loss_fn(plain, (0,), None)(big, bp)) == pytest.approx(
         float(
-            plain(
-                pred[..., :1], bp._replace(y_observed=bp.y_observed[..., :1], mask=bp.mask[..., :1])
-            )
+            plain(pred[..., :1], bp._replace(observed=bp.observed[..., :1], mask=bp.mask[..., :1]))
         )
     )
 
@@ -926,7 +1054,7 @@ def static_part(module: eqx.Module) -> eqx.Module:
 @family
 def test_restart_keeps_the_architecture_and_redraws_the_weights(build):
     predictor = build(jr.key(0))
-    fresh = predictor.initialized_with_key(jr.key(11))
+    fresh = predictor.reinitialized(key=jr.key(11))
     # Same architecture: same type and leaf shapes. (KAN derives a new
     # static seed from the key, so the static fields need not match.)
     assert type(fresh) is type(predictor)
@@ -934,7 +1062,7 @@ def test_restart_keeps_the_architecture_and_redraws_the_weights(build):
     assert any(
         not jnp.array_equal(a, b) for a, b in zip(arrays(predictor), arrays(fresh), strict=True)
     )
-    again = predictor.initialized_with_key(jr.key(11))
+    again = predictor.reinitialized(key=jr.key(11))
     assert all(jnp.array_equal(a, b) for a, b in zip(arrays(fresh), arrays(again), strict=True))
 
 
@@ -998,7 +1126,7 @@ def test_open_input_bounds_pass_inputs_through_unscaled():
 
 
 class Linear(hm.Predictor):
-    """No ``initialized_with_key``, so restarts take the generic leaf branch."""
+    """No ``reinitialized``, so restarts take the generic leaf branch."""
 
     weights: Array
     counter: Array
@@ -1009,11 +1137,11 @@ class Linear(hm.Predictor):
 
 def test_generic_restart_redraws_floats_and_keeps_integers():
     p = Linear(weights=jnp.ones((3, 2)), counter=jnp.asarray(5, dtype=jnp.int32))
-    a = reinitialize_with_key(p, jr.key(0))
+    a = reinitialize(p, key=jr.key(0))
     assert isinstance(a, Linear)
     assert not jnp.allclose(a.weights, p.weights)
     assert jnp.array_equal(a.counter, p.counter) and a.counter.dtype == jnp.int32
-    assert jnp.array_equal(reinitialize_with_key(p, jr.key(0)).weights, a.weights)
+    assert jnp.array_equal(reinitialize(p, key=jr.key(0)).weights, a.weights)
 
 
 def test_kan_scaffold_warmed_inside_jit_survives_a_second_trace():
@@ -1106,7 +1234,7 @@ class Latent(hm.Predictor):
     def __call__(self, x: Array) -> Array:
         return self.c
 
-    def initialized_with_key(self, key: Array) -> Latent:
+    def reinitialized(self, *, key: Array) -> Latent:
         return self
 
 
@@ -1338,10 +1466,10 @@ def _prediction(observed: dict[str, list[float]], predicted: dict[str, list[floa
     for exp_id, values in observed.items():
         obs = jnp.asarray(values)
         experiments[exp_id] = hm.ExperimentPrediction(
-            times=jnp.arange(obs.shape[0], dtype=jnp.float32),
+            ts=jnp.arange(obs.shape[0], dtype=jnp.float32),
             outputs={"x": jnp.asarray(predicted[exp_id])},
             observed={"x": obs},
-            observation_mask={"x": ~jnp.isnan(obs)},
+            mask={"x": ~jnp.isnan(obs)},
         )
     return hm.PredictionResult(experiments)
 
@@ -1449,6 +1577,43 @@ def test_evaluate_predictor_broadcasts_named_inputs():
     rate = BoundedPredictor(inner=Scalar(), input_keys=("T",), output_bounds=(0.0, None))
     assert hm.evaluate_predictor(rate, {"T": jnp.arange(4)}).shape == (4,)
     assert hm.evaluate_predictor(rate, {"T": 1}).shape == ()
+    # Outside its input box the network still answers, so it warns.
+    with pytest.warns(RuntimeWarning, match="a outside"):
+        hm.evaluate_predictor(bp, {"a": jnp.asarray([0.5, 1.5]), "b": 0.5})
+    # A key the predictor does not read is ignored, whatever its shape.
+    assert hm.evaluate_predictor(rate, {"T": jnp.arange(4), "junk": jnp.ones(3)}).shape == (4,)
+
+
+def test_a_polynomial_rate_has_a_finite_gradient_at_a_zero_basis():
+    """``0 ** 0`` has a NaN derivative as a float power; the integer power is exact."""
+    poly = npoly(jr.key(0))
+    grad = jax.grad(lambda x: jnp.sum(poly(x)))(jnp.zeros(IN))
+    assert bool(jnp.all(jnp.isfinite(grad)))
+
+
+def test_a_custom_module_restart_keeps_the_units_inside_it():
+    """The generic restart stops at a scaler, a Parameter or a bounded predictor."""
+
+    class Holder(hm.Predictor):
+        net: hm.BoundedPredictor
+        k: hm.Parameter
+
+        def __call__(self, x):
+            return self.net(x) * self.k.value
+
+    holder = Holder(
+        net=BoundedPredictor(
+            inner=mlp(jr.key(0)),
+            input_keys=("a", "b"),
+            input_bounds=((0, 10), (0, 5)),
+            output_bounds=(-2, 2),
+        ),
+        k=hm.Parameter(5000.0, bounds=(0.0, None)),
+    )
+    fresh = reinitialize_pytree({"h": holder}, key=jr.key(3))["h"]
+    assert float(fresh.k.value) == pytest.approx(5000.0)
+    np.testing.assert_array_equal(fresh.net.in_scaler.temperature, holder.net.in_scaler.temperature)
+    np.testing.assert_array_equal(fresh.k.scaler.temperature, holder.k.scaler.temperature)
 
 
 def test_pytree_restart_keeps_scalers_and_constants():
@@ -1468,7 +1633,7 @@ def test_pytree_restart_keeps_scalers_and_constants():
             [5000.0, 5000.0, 5000.0], bounds=[(1.0, 1e5), (0.0, None), (None, None)]
         ),
     }
-    fresh = reinitialize_pytree_with_key(predictors, jr.key(2))
+    fresh = reinitialize_pytree(predictors, key=jr.key(2))
     boxed, one_sided, unbounded = fresh["rates"].value.tolist()
     assert boxed != pytest.approx(5000.0) and 1.0 < boxed < 1e5
     assert (one_sided, unbounded) == pytest.approx((5000.0, 5000.0))
@@ -1479,8 +1644,8 @@ def test_pytree_restart_keeps_scalers_and_constants():
         rates: hm.Parameter
         net: BoundedPredictor
 
-    held = reinitialize_pytree_with_key(
-        Holder(rates=predictors["rates"], net=bounded(jr.key(3))), jr.key(2)
+    held = reinitialize_pytree(
+        Holder(rates=predictors["rates"], net=bounded(jr.key(3))), key=jr.key(2)
     )
     assert held.rates.value[1:].tolist() == pytest.approx([5000.0, 5000.0])
     assert float(held.net.out_scaler.temperature) == 1.0
@@ -1599,6 +1764,76 @@ def test_a_new_horizon_neither_retraces_nor_needs_saying():
             np.testing.assert_array_equal(a, b)
 
 
+def test_the_dataset_loss_pools_every_measurement_however_it_is_bucketed(decay_data):
+    """mse is the mean over all measurements, bal_mse over all experiments.
+
+    The four decay experiments sit in two buckets of different sizes, so an
+    equal weight per bucket would give a different number.
+    """
+    model = make_model(parameter_predictors())
+    predictions = model.predict(decay_data)
+    residuals = [
+        np.asarray(p.outputs["conc"] - p.observed["conc"])[np.asarray(p.mask["conc"])]
+        for p in predictions.values()
+    ]
+    expected = {
+        "mse": np.mean(np.concatenate(residuals) ** 2),
+        "bal_mse": np.mean([np.mean(r**2) for r in residuals]),
+        "mle": sum(np.sum(0.5 * (np.log(2 * np.pi * 1e-2) + r**2 / 1e-2)) for r in residuals),
+    }
+    for name, value in expected.items():
+        objective = hm.Objective(loss=name)
+        score_bucket = build_score_bucket(
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+            loss_fn=objective.loss_fn(CHANNELS),
+        )
+        pooling = objective.pooling(CHANNELS)
+        score = build_dataset_score(score_bucket, decay_data, pooling=pooling)
+        assert score(model.predictors) == pytest.approx(value, rel=1e-5), name
+
+    # A partial of a built-in pools as the built-in does.
+    assert loss_pooling(functools.partial(masked_mle, channel_idx=None)) == "sum"
+
+    # The trajectory penalty is a mean over a bucket's experiments, so each
+    # bucket's penalty share is its share of the experiments, whatever the
+    # loss: a bucket of unmeasured probes still counts.
+    probe = hm.make_experiment(
+        channels={"conc": hm.ChannelObs(ts=jnp.linspace(0.1, 3.0, 9), values=jnp.array([]))},
+        y0=[1.0],
+        t0=0.0,
+        covariates={"temp": 1.0},
+        exp_id="probe",
+    )
+    probed = hm.make_dataset([*decay_data.experiments, probe], output_channel_names=CHANNELS)
+    shares = hm.Objective(loss="mse").pooling(CHANNELS).shares(probed.bucket_payloads)
+    data_shares, penalty_shares = np.asarray(shares).T
+    assert data_shares.sum() == pytest.approx(1.0) and penalty_shares.sum() == pytest.approx(1.0)
+    sizes = np.array([bp.ts.shape[0] for bp in probed.bucket_payloads])
+    np.testing.assert_allclose(penalty_shares, sizes / sizes.sum())
+    assert data_shares.min() == 0.0 and penalty_shares.min() > 0.0
+
+
+def test_a_horizon_cuts_each_experiment_at_its_own_span(decay_data):
+    """Each experiment keeps the measurements in the first fraction of its own span.
+
+    Every experiment starts at t0 = 0 before its first measurement, which a
+    small horizon would once have cut away, scoring nothing.
+    """
+    kept = {}
+    for bp in decay_data.bucket_payloads:
+        for fraction in (0.01, 0.5, 1.0):
+            mask = apply_length_mask(bp, jnp.asarray(fraction)).mask[..., 0]
+            for row in range(bp.ts.shape[0]):
+                times = np.asarray(bp.ts[row])[np.asarray(mask[row])]
+                kept.setdefault(fraction, []).append(tuple(times.tolist()))
+    assert sorted(kept[0.01]) == [(0.25,), (0.5,), (0.5,), (1.0,)]
+    # Half of each span from t0 = 0: a to 1.0, b to 1.0, c to 0.75, d to 0.75.
+    assert sorted(kept[0.5]) == [(0.25, 0.75), (0.5,), (0.5, 1.0), (1.0,)]
+    assert sorted(len(times) for times in kept[1.0]) == [2, 2, 3, 3]
+
+
 def test_data_penalty_points_sit_at_observed_cells(temp_data):
     preds = network_predictors()
     (source,) = data_penalty_points(preds, temp_data)
@@ -1606,7 +1841,7 @@ def test_data_penalty_points_sit_at_observed_cells(temp_data):
     # Ten observed cells across the four experiments, one temp column.
     assert source.points.shape == (10, 1)
     assert set(np.asarray(source.points[:, 0]).tolist()) == {0.5, 1.0, 1.5}
-    # Horizon masking follows the loss's own prefix mask, cell for cell.
+    # Horizon masking follows the loss's own horizon mask, cell for cell.
     for fraction in (1.0, 0.5, 0.05):
         expected = jnp.concatenate(
             [
@@ -1662,5 +1897,7 @@ def test_default_mask_trains_networks_and_parameters_only():
 
     scalers_too = trainable_mask(predictors, train_scalers=True)
     assert scalers_too["rate"].in_scaler.temperature is True
+    # A Parameter's temperature only rescales its latent: training both is redundant.
+    assert scalers_too["k"].latent is True and scalers_too["k"].scaler.temperature is False
     assert not any(flags(scalers_too["offset"])), "a Constant is never trainable"
     assert not any(flags(trainable_mask(predictors, predicate=lambda _: False)))

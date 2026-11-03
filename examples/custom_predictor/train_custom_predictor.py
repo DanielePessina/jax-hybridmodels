@@ -8,7 +8,7 @@ once and held fixed; only the output weights and bias train.
 
 Shows:
 
-- a custom ``Predictor`` with static fields and ``initialized_with_key``
+- a custom ``Predictor`` with static fields and ``reinitialized``
 - ``HybridModel.fit(freeze=...)`` with dotted paths to hold the bank
 - the restart tournament (``tournament_attempts``)
 - ``hm.save`` / ``hm.load(like=...)`` round-trip through a template model
@@ -21,7 +21,7 @@ Run::
 
 Prints the learned rate against the truth before and after training, the
 save/load drift and metrics; writes ``figures/parity.png`` and
-``figures/trajectories.png``. About a minute on CPU.
+``figures/trajectories.png``. About 15 seconds on CPU.
 """
 
 # ruff: noqa: F722
@@ -159,13 +159,13 @@ class RandomFourierPredictor(hm.Predictor):
         features = jnp.sqrt(2.0 / self.n_features) * jnp.cos(x @ self.frequencies + self.phases)
         return features @ self.weights + self.bias
 
-    def initialized_with_key(self, key: Array) -> RandomFourierPredictor:
+    def reinitialized(self, *, key: Array) -> RandomFourierPredictor:
         """Re-init for the restart tournament: a fresh bank and readout.
 
         The tournament then puts frozen leaves back, so with the bank frozen
         only the readout is actually redrawn.
 
-        The default in ``reinitialize_with_key`` replaces every float
+        The default in ``reinitialize`` replaces every float
         leaf with a standard normal, which would give the bank the wrong
         scale and drop ``bandwidth`` on the floor. Rebuilding through
         ``__init__`` keeps the construction scheme in one place.
@@ -323,7 +323,7 @@ def main() -> None:
 
     # region fit
     # The tournament restarts the predictor three times through
-    # ``initialized_with_key`` and keeps the best start.
+    # ``reinitialized`` and keeps the best start.
     config = hm.OptaxTrainingConfig(
         steps=args.steps,
         lr=args.lr,

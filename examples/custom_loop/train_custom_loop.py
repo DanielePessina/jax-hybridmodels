@@ -4,8 +4,9 @@
 pieces in ``jaxhybridmodels.training.kernels``. When you need a loop it cannot
 express, compose the same pieces instead of forking the trainer. This
 script recovers a harmonic oscillator's frequency with a loop that weights
-each bucket's loss and gradients by its experiment count, which the stock
-trainer has no option for.
+each bucket's loss and gradients by its experiment count. The stock trainer
+weights a mean-type loss like this one by each bucket's measured cells; a
+custom loop can weight however it likes.
 
 Shows:
 
@@ -81,7 +82,7 @@ def state_to_output(state: Array) -> Array:
 
 def huber_loss(pred_obs: Array, bp) -> Array:
     """Masked Huber loss. Any ``(pred_obs, bp) -> scalar`` callable works."""
-    abs_res = jnp.abs(pred_obs - bp.y_observed)
+    abs_res = jnp.abs(pred_obs - bp.observed)
     delta = 0.1
     quadratic = jnp.minimum(abs_res, delta)
     loss = 0.5 * quadratic**2 + delta * (abs_res - quadratic)
@@ -98,8 +99,12 @@ def weight_decay(predictors, points):
 
 
 def bucket_weight(bp) -> float:
-    """Weight a bucket by its experiment count, so 3 experiments outweigh 1."""
-    return float(bp.y_observed.shape[0])
+    """Weight a bucket by its experiment count, so 3 experiments outweigh 1.
+
+    ``float(bp.mask.sum())`` would match the stock trainer, which weights a
+    mean-type loss by the measured cells in each bucket.
+    """
+    return float(bp.observed.shape[0])
 
 
 def build_dataset() -> hm.Dataset:

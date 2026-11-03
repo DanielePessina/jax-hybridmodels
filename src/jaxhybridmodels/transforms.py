@@ -5,9 +5,9 @@
 question.
 
 The *warp* decides what "halfway between the bounds" means. For a rate
-constant bounded by ``(1e-6, 1e2)``, a linear warp puts 99.999% of the
-latent range above ``1e-2`` and collapses the low end into an unresolvable
-sliver. ``"log10"`` puts the midpoint at ``1e-2`` instead of ``50``.
+constant bounded by ``(1e-6, 1e2)``, a linear warp puts 99.99% of the
+physical range above ``1e-2`` and collapses the low end into an
+unresolvable sliver. ``"log10"`` puts the midpoint at ``1e-2`` instead of ``50``.
 
 The *transform* is the squash that folds the latent line into the unit
 interval. It decides how fast the gradient dies once a predictor pushes
@@ -78,10 +78,11 @@ class BoundTransform(NamedTuple):
         ``d(inverse)/ds``. Builds the linear continuation that keeps
         ``to_latent`` differentiable for inputs that fall outside the box.
     knee : float
-        The latent at which ``forward`` reaches 0.95, where the physical
-        value enters the outer 5% of its box. Default for
+        The latent at which ``forward`` reaches 0.95, where the value enters
+        the outer 5% of its warped box (under a log warp, 5% of the box in
+        log units, not of the physical range). Default for
         ``BoundScaler.z_knee``. It must come from the transform: reusing
-        sigmoid's 2.944 for softsign would start charging at 12.5% from the
+        sigmoid's 2.944 for softsign would start charging at 12.7% from the
         bound instead of 5%.
     """
 
@@ -239,18 +240,26 @@ def check_bounds(bounds: tuple[tuple[float, float], ...], warp_name: str) -> Non
     """Validate ordered endpoints and the warp's domain.
 
     Signed infinities represent open endpoints; NaN and reversed endpoints
-    raise. Open intervals require a linear warp. Finite intervals with a
+    raise. With one finite endpoint, a warp acts on the distance from it,
+    which is always positive, so it must be a positive-only warp such as
+    ``"log"``. With none, the warp must be linear. Finite intervals with a
     positive-only warp require a strictly positive lower endpoint.
     """
     warp = WARPS[warp_name]
     for low, high in bounds:
         if math.isnan(low) or math.isnan(high) or low == math.inf or high == -math.inf:
             raise ValueError(f"BoundScaler bounds must be ordered and not NaN; got ({low}, {high})")
-        if (not math.isfinite(low) or not math.isfinite(high)) and warp_name != "linear":
-            raise ValueError("Open bounds require warp='linear'")
+        if not (math.isfinite(low) or math.isfinite(high)) and warp_name != "linear":
+            raise ValueError("Unbounded values require warp='linear'")
+        one_sided = math.isfinite(low) != math.isfinite(high)
+        if one_sided and warp_name != "linear" and not warp.requires_positive:
+            raise ValueError(
+                f"warp={warp_name!r} on one-sided bounds ({low}, {high}) would act on the "
+                "distance from the bound, which needs a positive-only warp such as 'log'"
+            )
         if low >= high:
             raise ValueError(f"BoundScaler bounds require low < high; got ({low}, {high}).")
-        if warp.requires_positive and low <= 0.0:
+        if warp.requires_positive and not one_sided and low <= 0.0:
             raise ValueError(
                 f"warp={warp_name!r} is undefined at or below zero, but bounds "
                 f"({low}, {high}) start at {low}. Raise the lower bound to a "

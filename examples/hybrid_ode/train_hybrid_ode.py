@@ -115,7 +115,7 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
             out_size=out_size,
             width_size=width,
             depth=2,
-            activation_name="softplus",
+            activation="softplus",
             key=key,
         )
     if kind == "kan":
@@ -212,10 +212,10 @@ def main() -> None:
 
     # ``temperature -> k``, evaluated once per experiment above the solver.
     # ``warp="log10"`` is what makes this read well: a linear box over
-    # ``(1e-3, 1)`` has midpoint ``0.5``, putting every rate in the data in
-    # the bottom 3% of the box, reachable only through large negative
-    # latents. Under ``log10`` the midpoint is ``0.032`` and the true range
-    # covers the middle of the box.
+    # ``(1e-3, 1)`` has midpoint ``0.5``, and the true rates, 0.0063 to
+    # 0.276, sit between 0.5% and 27.5% of the box, the two coldest levels in
+    # the bottom 3%, reached only through large negative latents. Under
+    # ``log10`` the midpoint is ``0.032`` and they spread over 27% to 81%.
     # ``input_bounds`` builds the default sigmoid scaler; ``out_scaler`` is
     # spelled out where the warp or squash differs from the default.
     # region predictors

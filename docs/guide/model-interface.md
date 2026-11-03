@@ -36,20 +36,26 @@ units by path, such as `{"omega": 0.9997, "damping": 0.0}`.
 
 `print(result.summary())` reports how the run ended, the loss by phase, each
 `Parameter`, and how much of each network's input box has a saturated output.
-The line `loss change over the last 10% of steps` shows whether a fit that ran out
-of budget had settled: on one reactor fit, it read -5% to -10% with a fitted
-constant still well off and under 0.1% once it had arrived. A saturated output is
-near its bound, where gradients vanish.
+The line `loss change over the last 10% of steps` (of the final phase, when there
+are several) shows whether a fit that ran out of budget had settled: on one
+reactor fit, it read -5% to -10% with a fitted constant still well off and under
+0.1% once it had arrived. It is a relative change, so it means nothing when the
+loss is near zero, as on noise-free data, and it can look flat while a slow,
+correlated direction is still far off. Also compare the final loss with the noise:
+for `"mse"` with the right model it should come close to the noise variance, and
+a loss several times larger means the fit or the model is not there yet. A
+saturated output is near its bound, where gradients vanish.
 `result.summary(experiments)` also predicts on the data and adds the metrics
-and the worst experiment per channel. A flagged parameter is where the bound
-penalty would charge it: the outer 5% of its box for the default sigmoid. The
+and the worst experiment per channel. A flagged parameter has its latent past
+the squash's knee, the outer 5% of its warped box for the default sigmoid. The
+bound penalty charges network outputs, never a `Parameter`. The
 network figure sweeps the whole declared box, so a large share can be harmless
 if the data never reaches those inputs.
 
 ## Predicting
 
 `predict` returns a `PredictionResult` keyed by experiment ID, in dataset
-order. Each entry has `times`, `outputs`, `observed` and `observation_mask`,
+order. Each entry has `ts`, `outputs`, `observed` and `mask`,
 all aligned on the experiment's own time axis; `observed` is NaN where a
 channel was not measured. Experiments without an ID are named
 `experiment_<index>`, and duplicate IDs raise. `predictions.to_dataframe()`
@@ -74,7 +80,7 @@ shared = fitted.predict(experiments, ts=jnp.linspace(0.0, 10.0, 200))  # one gri
 `n_points` spans each experiment from its `t0` (or first observation) to
 its last observation. `ts` must not start before any experiment's start.
 Each experiment still integrates from its own start, so `y0` stays in
-place. Off the measured grid, `observed` and `observation_mask` are empty.
+place. Off the measured grid, `observed` and `mask` are empty.
 For several models, `hm.predict_ensemble(models, data)` takes the same
 arguments and returns the mean with its spread; see
 [Ensembles](/guide/ensembles).
@@ -246,10 +252,10 @@ parameters as covariates and evaluate a profile inside the vector field.
 
 ```python
 temperature = hm.ramp_profile(
-    t0=covariates["heat_start"],
-    t1=covariates["heat_end"],
-    v0=covariates["temperature_initial"],
-    v1=covariates["temperature_final"],
+    start=covariates["heat_start"],
+    end=covariates["heat_end"],
+    before=covariates["temperature_initial"],
+    after=covariates["temperature_final"],
 )
 
 def vector_field(t, y, args):

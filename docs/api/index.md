@@ -12,7 +12,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Predictors: Trainable Components](/api/predictors)
 
-[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
+[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize`](/api/predictors#reinitialize), [`reinitialize_pytree`](/api/predictors#reinitialize_pytree)
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 
@@ -36,7 +36,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Losses: Masked & Balanced Objectives](/api/losses)
 
-[`masked_mse`](/api/losses#masked_mse), [`masked_mle`](/api/losses#masked_mle), [`bal_mse`](/api/losses#bal_mse), [`bal_mle`](/api/losses#bal_mle), [`LOSS_REGISTRY`](/api/losses#loss_registry), [`resolve_loss_fn`](/api/losses#resolve_loss_fn)
+[`masked_mse`](/api/losses#masked_mse), [`masked_mle`](/api/losses#masked_mle), [`bal_mse`](/api/losses#bal_mse), [`bal_mle`](/api/losses#bal_mle), [`LOSS_REGISTRY`](/api/losses#loss_registry), [`resolve_loss_fn`](/api/losses#resolve_loss_fn), [`loss_pooling`](/api/losses#loss_pooling), [`Pooling`](/api/losses#pooling), [`POOLING_KINDS`](/api/losses#pooling_kinds)
 
 ## [Trainable Masks: Freezing Leaves](/api/trainable)
 
@@ -52,7 +52,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Profiles: Time-Varying Inputs](/api/profiles)
 
-[`constant_profile`](/api/profiles#constant_profile), [`step_profile`](/api/profiles#step_profile), [`ramp_profile`](/api/profiles#ramp_profile), [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile)
+[`Profile`](/api/profiles#profile), [`constant_profile`](/api/profiles#constant_profile), [`step_profile`](/api/profiles#step_profile), [`ramp_profile`](/api/profiles#ramp_profile), [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile)
 
 ## [Schedules: Epoch-Scaled Annealing](/api/schedules)
 
