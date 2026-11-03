@@ -36,19 +36,14 @@ quantity uniformly (a quantity is either a covariate or
 <small>`from jaxhybridmodels.profiles import step_profile` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.step_profile`</small>
 
 ```python
-step_profile(
-    *,
-    before: 'ArrayLike',
-    after: 'ArrayLike',
-    jump_at: 'ArrayLike',
-) -> Profile
+step_profile(*, at: 'ArrayLike', before: 'ArrayLike', after: 'ArrayLike') -> 'Profile'
 ```
 
-Return ``t -> before if t < jump_at else after``: a step change.
+Return ``t -> before if t < at else after``: a step change.
 
 For a reactor, the moment a feed valve opens or a heater switches.
-Discontinuous at ``jump_at``; an adaptive solver sees a kink, so
-place the jump at a known event time or accept a short transient.
+Discontinuous at ``at``; an adaptive solver sees a kink, so place the
+jump at a known event time or accept a short transient.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L50)</small>
 
@@ -63,20 +58,21 @@ place the jump at a known event time or accept a short transient.
 ```python
 ramp_profile(
     *,
-    t0: 'ArrayLike',
-    t1: 'ArrayLike',
-    v0: 'ArrayLike',
-    v1: 'ArrayLike',
+    start: 'ArrayLike',
+    end: 'ArrayLike',
+    before: 'ArrayLike',
+    after: 'ArrayLike',
 ) -> Profile
 ```
 
-Return a flat-ramp-flat profile: ``v0`` until ``t0``, linear to ``v1`` by ``t1``, then flat.
+Return a flat-ramp-flat profile: ``before`` until ``start``, linear to ``after`` by ``end``.
 
 The reactor heat-up shape: hold at the initial set point, ramp to the
-final set point, hold there. Values before ``t0`` and after ``t1``
-are exactly the edge values (the two flat profiles on either edge).
+final set point, hold there. Values before ``start`` and after ``end``
+are exactly ``before`` and ``after``, the names ``step_profile`` uses
+for the same two levels.
 
-``t1 > t0`` is required; equal times would be a discontinuity. The
+``end > start`` is required; equal times would be a discontinuity. The
 check runs when the times are host-side values; inside ``jit``/``vmap``
 (per-experiment parameters from traced covariates) it is skipped, so
 the factory stays trace-safe.
@@ -102,4 +98,4 @@ knots. Constant on both edges (the first and last values extend
 outward). Knots must be strictly increasing in ``t`` and contain at
 least two entries.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L99)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L102)</small>

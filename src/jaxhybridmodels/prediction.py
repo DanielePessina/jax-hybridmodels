@@ -167,7 +167,7 @@ def _predict(
                     state_to_output=model.state_to_output,
                     solver=model.solver,
                 )
-            expected = bp.y_observed.shape
+            expected = bp.observed.shape
         else:
             if bool(jnp.any(grid[:, 0] < bp.ts[:, 0])):
                 raise ValueError(
@@ -206,16 +206,16 @@ def _predict(
             bucket_ts = np.asarray(dataset.bucket_payloads[b].ts[row])
             if bucket_ts.shape[0] != arrays.ts.shape[0]:
                 values = values[np.searchsorted(bucket_ts, np.asarray(arrays.ts, bucket_ts.dtype))]
-            observed = jnp.where(arrays.mask, arrays.y_observed, jnp.nan)
+            observed = jnp.where(arrays.mask, arrays.observed, jnp.nan)
             experiments[exp.exp_id] = ExperimentPrediction(
-                times=arrays.ts,
+                ts=arrays.ts,
                 outputs=dict(zip(names, values.T, strict=True)),
                 observed=dict(zip(names, observed.T, strict=True)),
-                observation_mask=dict(zip(names, arrays.mask.T, strict=True)),
+                mask=dict(zip(names, arrays.mask.T, strict=True)),
             )
         else:
             experiments[exp.exp_id] = ExperimentPrediction(
-                times=grid[row], outputs=dict(zip(names, values.T, strict=True))
+                ts=grid[row], outputs=dict(zip(names, values.T, strict=True))
             )
     return PredictionResult(experiments, tuple(buckets))
 
@@ -226,7 +226,7 @@ def predict_ensemble(
     *,
     ts: ArrayLike | None = None,
     n_points: int | None = None,
-    quantiles: Sequence[float] = (),
+    quantiles: Sequence[float] = (0.025, 0.975),
 ) -> PredictionResult:
     """Predict with every model and return the member mean, with the spread.
 
@@ -236,9 +236,10 @@ def predict_ensemble(
     ``ddof=0``; zero for one member), and ``members`` holds each model's
     own :class:`~jaxhybridmodels.PredictionResult`.
 
-    ``quantiles`` adds those levels across members to each experiment, such as
-    ``(0.05, 0.95)``. A posterior predictive is usually skewed, so an interval
-    from ``std`` alone can leave a bound's range.
+    ``quantiles`` adds those levels across members to each experiment, by
+    default a central 95% band; ``()`` leaves them out. A posterior predictive
+    is usually skewed, so an interval from ``std`` alone can leave a bound's
+    range.
 
     ``models`` holds ``HybridModel`` or ``FitResult`` objects, so the list
     ``fit_ensemble`` returns can be passed as is. They must share
@@ -265,10 +266,10 @@ def predict_ensemble(
     for exp_id, first in members[0].items():
         stacked = {name: jnp.stack([m[exp_id].outputs[name] for m in members]) for name in names}
         experiments[exp_id] = ExperimentPrediction(
-            times=first.times,
+            ts=first.ts,
             outputs={name: jnp.mean(values, axis=0) for name, values in stacked.items()},
             observed=first.observed,
-            observation_mask=first.observation_mask,
+            mask=first.mask,
             std={name: jnp.std(values, axis=0) for name, values in stacked.items()},
             quantiles=_member_quantiles(stacked, levels),
         )

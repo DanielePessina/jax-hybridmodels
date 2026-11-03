@@ -35,13 +35,10 @@ def parity_diagnostics(predictions: PredictionResult) -> dict[str, SimpleNamespa
     out: dict[str, SimpleNamespace] = {}
     for name, m in metrics.items():
         obs = np.concatenate(
-            [
-                np.asarray(e.observed[name])[np.asarray(e.observation_mask[name])]
-                for e in experiments
-            ]
+            [np.asarray(e.observed[name])[np.asarray(e.mask[name])] for e in experiments]
         )
         pred = np.concatenate(
-            [np.asarray(e.outputs[name])[np.asarray(e.observation_mask[name])] for e in experiments]
+            [np.asarray(e.outputs[name])[np.asarray(e.mask[name])] for e in experiments]
         )
         out[name] = SimpleNamespace(
             name=name, n=int(m.n), obs=obs, pred=pred, r2=float(m.r2), rmse=float(m.rmse)
@@ -164,12 +161,12 @@ def trajectory_plot(
     rows: list[dict[str, Any]] = []
     for experiment in experiments:
         measured = predictions[experiment.exp_id]
-        ts_obs = np.asarray(measured.times)
+        ts_obs = np.asarray(measured.ts)
         row: dict[str, Any] = {
             "exp_id": experiment.exp_id,
             "ts_obs": ts_obs,
             "observed": {c: np.asarray(measured.observed[c]) for c in channels},
-            "mask": {c: np.asarray(measured.observation_mask[c], dtype=bool) for c in channels},
+            "mask": {c: np.asarray(measured.mask[c], dtype=bool) for c in channels},
             "ts_pred": ts_obs,
             "y_pred": {c: np.asarray(measured.outputs[c]) for c in channels},
         }

@@ -128,7 +128,7 @@ def main() -> None:
     # endregion profile
     wald = fisher.intervals()
     for name, profile in profiles.items():
-        low, high = profile.interval
+        low, high = profile.bounds
         if low is None or high is None or abs(low - wald[name][0]) > 0.1 * (high - low):
             raise SystemExit(f"{name}: the profile should close near the Wald interval here")
 
@@ -158,7 +158,7 @@ def main() -> None:
     bayesian = hm.inference.make_problem(fit.model, data, log_prior=log_prior, noise="data")
     laplace = bayesian.optimize(target="posterior").problem.laplace()
     print(laplace.summary())
-    draws = bayesian.physical(laplace.sample(jr.key(2), 2000))
+    draws = bayesian.physical(laplace.sample(key=jr.key(2), n_draws=2000))
     print({name: f"{float(v.mean()):.4g} +- {float(v.std()):.3g}" for name, v in draws.items()})
     # endregion laplace
 

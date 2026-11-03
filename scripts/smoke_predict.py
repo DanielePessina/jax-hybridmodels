@@ -3,7 +3,7 @@
 Builds a tiny harmonic-oscillator dataset, defines a SPEC §4.2-shaped
 ``simulate_fn``, runs ``HybridModel.predict`` with a fixed scalar predictor
 (MLP -> sigmoid-bounded omega), and prints per-bucket prediction shapes
-and ``masked_mse`` losses against ``bp.y_observed``.
+and ``masked_mse`` losses against ``bp.observed``.
 
 Run:
     uv run python scripts/smoke_predict.py
@@ -99,7 +99,7 @@ def main() -> None:
     )
     print(f"dataset has {len(dataset.bucket_payloads)} bucket(s)")
     for i, bp in enumerate(dataset.bucket_payloads):
-        print(f"  bucket {i}: ts {bp.ts.shape}, y_observed {bp.y_observed.shape}")
+        print(f"  bucket {i}: ts {bp.ts.shape}, observed {bp.observed.shape}")
 
     solver = SolverConfig(
         solver=diffrax.Tsit5(),
@@ -114,7 +114,7 @@ def main() -> None:
         out_size=1,
         width_size=8,
         depth=1,
-        activation_name="tanh",
+        activation="tanh",
         key=jr.PRNGKey(7),
     )
     predictor = BoundedPredictor(

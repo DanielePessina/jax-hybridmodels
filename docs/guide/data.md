@@ -125,8 +125,8 @@ them.
 | Quantity | Shape |
 | --- | --- |
 | `bp.ts` | `[N, T]` |
-| `bp.y_observed` | `[N, T, D]` |
-| `bp.yvar` | `[N, T, D]` |
+| `bp.observed` | `[N, T, D]` |
+| `bp.variance` | `[N, T, D]` |
 | `bp.mask` | `[N, T, D]` |
 | scalar covariate | `[N]` |
 | vector covariate | `[N, K]` |
@@ -180,7 +180,7 @@ Split at the experiment level. Each result is re-bucketed independently:
 train, validation, test = hm.split_dataset(
     dataset,
     train=0.8,
-    val=0.1,
+    validation=0.1,
     test=0.1,
     key=jr.key(0),
 )

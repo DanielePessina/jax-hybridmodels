@@ -71,7 +71,7 @@ defaults to `Tsit5` with `rtol=1e-5`, `atol=1e-7` and 4096 steps; pass only
 the settings that differ.
 
 `t0=0.0` places the initial state before the first measurement at 0.2. The
-dataset adds an unobserved point at t0, so `predictions["oscillator"].times`
+dataset adds an unobserved point at t0, so `predictions["oscillator"].ts`
 has 21 entries for 20 measurements. Without `t0`, the initial state belongs to
 the first observation time.
 

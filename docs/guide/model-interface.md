@@ -49,7 +49,7 @@ if the data never reaches those inputs.
 ## Predicting
 
 `predict` returns a `PredictionResult` keyed by experiment ID, in dataset
-order. Each entry has `times`, `outputs`, `observed` and `observation_mask`,
+order. Each entry has `times`, `outputs`, `observed` and `mask`,
 all aligned on the experiment's own time axis; `observed` is NaN where a
 channel was not measured. Experiments without an ID are named
 `experiment_<index>`, and duplicate IDs raise. `predictions.to_dataframe()`
@@ -74,7 +74,7 @@ shared = fitted.predict(experiments, ts=jnp.linspace(0.0, 10.0, 200))  # one gri
 `n_points` spans each experiment from its `t0` (or first observation) to
 its last observation. `ts` must not start before any experiment's start.
 Each experiment still integrates from its own start, so `y0` stays in
-place. Off the measured grid, `observed` and `observation_mask` are empty.
+place. Off the measured grid, `observed` and `mask` are empty.
 For several models, `hm.predict_ensemble(models, data)` takes the same
 arguments and returns the mean with its spread; see
 [Ensembles](/guide/ensembles).
@@ -246,10 +246,10 @@ parameters as covariates and evaluate a profile inside the vector field.
 
 ```python
 temperature = hm.ramp_profile(
-    t0=covariates["heat_start"],
-    t1=covariates["heat_end"],
-    v0=covariates["temperature_initial"],
-    v1=covariates["temperature_final"],
+    start=covariates["heat_start"],
+    end=covariates["heat_end"],
+    before=covariates["temperature_initial"],
+    after=covariates["temperature_final"],
 )
 
 def vector_field(t, y, args):

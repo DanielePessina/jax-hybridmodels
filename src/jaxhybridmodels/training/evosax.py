@@ -29,7 +29,7 @@ parallel.
 Initial-population modes
 ------------------------
 ``"warm"``
-    CMA-ES starts with ``mean = flat`` and ``std = sigma_init``. Its
+    CMA-ES starts with ``mean = flat`` and ``std = init_sigma``. Its
     first ``ask`` produces the initial population.
 ``"uniform_box"``
     A per-individual ``flat + Uniform(-extent, extent)`` is built
@@ -161,7 +161,7 @@ class EvosaxTrainingConfig:
     init_box_extent
         Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``.
         Ignored by ``"warm"``.
-    sigma_init
+    init_sigma
         Initial CMA-ES step size. Used directly by ``"warm"`` and as the
         prior step size for the box-init modes. CMA-ES adapts it after
         the first ``tell``.
@@ -175,7 +175,7 @@ class EvosaxTrainingConfig:
     steps: int = 100
     init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
     init_box_extent: float = 2.0
-    sigma_init: float = 0.1
+    init_sigma: float = 0.1
     log_every: int = 1
 
     def __post_init__(self) -> None:
@@ -195,8 +195,8 @@ class EvosaxTrainingConfig:
             raise ValueError("EvosaxTrainingConfig.steps must be > 0")
         if not math.isfinite(self.init_box_extent) or self.init_box_extent < 0.0:
             raise ValueError("EvosaxTrainingConfig.init_box_extent must be finite and non-negative")
-        if not math.isfinite(self.sigma_init) or self.sigma_init <= 0.0:
-            raise ValueError("EvosaxTrainingConfig.sigma_init must be finite and positive")
+        if not math.isfinite(self.init_sigma) or self.init_sigma <= 0.0:
+            raise ValueError("EvosaxTrainingConfig.init_sigma must be finite and positive")
         if self.log_every < 1:
             raise ValueError("EvosaxTrainingConfig.log_every must be at least 1")
 
@@ -282,9 +282,9 @@ def _build_strategy(
 
     The strategy class comes from ``ALGORITHM_REGISTRY``. The returned
     ``params`` are the strategy's frozen hyperparameters with ``std_init``
-    set to ``config.sigma_init``.
+    set to ``config.init_sigma``.
 
-    The ``sigma_init`` override is a property of the CMA-ES family. A
+    The ``init_sigma`` override is a property of the CMA-ES family. A
     strategy whose ``default_params`` lacks ``std_init`` (e.g. many of
     evosax's gradient-free search strategies) cannot take the override, so
     it is refused with a message pointing at ``register_algorithm`` rather
@@ -293,11 +293,11 @@ def _build_strategy(
     strategy_cls = ALGORITHM_REGISTRY[config.algorithm]
     strategy = strategy_cls(population_size=config.population_size, solution=flat)
     try:
-        params = dataclasses.replace(strategy.default_params, std_init=config.sigma_init)
+        params = dataclasses.replace(strategy.default_params, std_init=config.init_sigma)
     except TypeError as exc:
         raise ValueError(
             f"EvosaxTrainingConfig.algorithm={config.algorithm!r} does not carry a "
-            "std_init hyperparameter, so config.sigma_init cannot be applied. "
+            "std_init hyperparameter, so config.init_sigma cannot be applied. "
             "Register a CMA-ES-family strategy (e.g. CMA_ES, Sep_CMA_ES, SimpleES) "
             "via register_algorithm(name, cls)."
         ) from exc

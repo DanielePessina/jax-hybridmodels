@@ -17,7 +17,7 @@ Shows:
 - BlackJAX window adaptation and NUTS, with chains on separate threads
 - R-hat and effective sample size from ``blackjax.diagnostics``
 - ``InferenceProblem.predict`` for a posterior predictive band
-- ``free=`` naming a network layer, and ``conditional_on`` saying what stayed fixed
+- ``estimate=`` naming a network layer, and ``conditional_on`` saying what stayed fixed
 
 Needs ``pip install jax-hybridmodels[bayes,examples]``. Run::
 
@@ -161,7 +161,9 @@ def mechanistic_posterior(args: Any, key: Any) -> None:
 
     # region predict
     start = time.perf_counter()
-    predictive = problem.predict(positions, key=k_predict, n_draws=args.predict_draws)
+    predictive = problem.predict(
+        positions, key=k_predict, n_draws=args.predict_draws, quantiles=(0.05, 0.95)
+    )
     # endregion predict
     print(f"  {len(predictive.members)} predictive draws in {time.perf_counter() - start:.0f} s")
     run = predictive[exp_name(*CONDITIONS[0])]
@@ -179,8 +181,8 @@ def last_layer_posterior(args: Any, key: Any) -> None:
     hybrid, _ = build_models(k_model)
     config = hm.OptaxTrainingConfig(
         phases=(
-            hm.TrainingPhase(args.steps // 3, lr=1e-2, horizon=0.5),
-            hm.TrainingPhase(args.steps - args.steps // 3, lr=3e-3),
+            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, horizon=0.5),
+            hm.TrainingPhase(steps=args.steps - args.steps // 3, lr=3e-3),
         ),
     )
     result = hybrid.fit(dataset, config, key=k_fit, verbose=False)
@@ -201,7 +203,7 @@ def last_layer_posterior(args: Any, key: Any) -> None:
         dataset,
         log_prior=log_prior,
         noise="data",
-        free="g.inner.mlp.layers.2",
+        estimate="g.inner.mlp.layers.2",
     ).preconditioned()
     print(f"  conditional on: {', '.join(problem.conditional_on)}")
     # endregion last-layer

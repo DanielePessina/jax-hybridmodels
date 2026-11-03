@@ -96,9 +96,9 @@ def make_data(key: Any) -> list[hm.Experiment]:
 SINGLE = hm.OptaxTrainingConfig(steps=900, lr=0.03)
 SEGMENTED = hm.OptaxTrainingConfig(
     phases=(
-        hm.TrainingPhase(300, lr=0.03, segments=10),
-        hm.TrainingPhase(300, lr=0.03, segments=4),
-        hm.TrainingPhase(300, lr=0.03),  # segments=1: single shooting
+        hm.TrainingPhase(steps=300, lr=0.03, segments=10),
+        hm.TrainingPhase(steps=300, lr=0.03, segments=4),
+        hm.TrainingPhase(steps=300, lr=0.03),  # segments=1: single shooting
     )
 )
 # endregion configs

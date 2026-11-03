@@ -36,7 +36,7 @@ parameters in forward mode, which is cheaper than reversing through the solve.
 curvature at the fit, which removes the correlations and scale differences that
 otherwise force a tiny step size and deep NUTS trees.
 
-The default target is the ``Parameter`` values. ``free=`` can name any subtree,
+The default target is the ``Parameter`` values. ``estimate=`` can name any subtree,
 such as a network's last layer. Whatever stays fixed is conditioned on, and
 ``InferenceProblem.conditional_on`` lists it: a posterior over a physical
 parameter with a fitted network held fixed is a conditional posterior, and the
@@ -277,9 +277,9 @@ class InferenceProblem:
     def _variance(self, bp: BucketPayload, noise: Mapping[str, Array]) -> Array:
         """The ``[N, T, D]`` observation variance: inferred if there is any, else the data's."""
         if not noise:
-            return bp.yvar
+            return bp.variance
         sigma = jnp.stack([noise[name] for name in self.dataset.output_channel_names], axis=-1)
-        return jnp.broadcast_to(sigma**2, bp.yvar.shape)
+        return jnp.broadcast_to(sigma**2, bp.variance.shape)
 
     def residuals(self, position: Any) -> Array:
         """Whitened residuals ``(prediction - observed) / sigma``, flattened over buckets.
@@ -302,7 +302,7 @@ class InferenceProblem:
         parts = []
         for bp in self.dataset.bucket_payloads:
             predicted, observed = _masked_safe(
-                self._predictions(tree[_PREDICTORS], bp), bp.y_observed, bp.mask
+                self._predictions(tree[_PREDICTORS], bp), bp.observed, bp.mask
             )
             variance = jnp.where(bp.mask, self._variance(bp, noise), 1.0)
             if noise_fixed:
@@ -333,7 +333,7 @@ class InferenceProblem:
                 total = total + self._log_likelihood(clean, bp, noise)
             else:
                 variance = self._variance(bp, noise)
-                total = total - _gaussian_nll_terms(clean, bp.y_observed, variance, bp.mask).sum()
+                total = total - _gaussian_nll_terms(clean, bp.observed, variance, bp.mask).sum()
         return jnp.where(finite & jnp.isfinite(total), total, -jnp.inf)
 
     def _log_jacobian(self, tree: Mapping[str, Any]) -> Array:
@@ -613,27 +613,27 @@ class InferenceProblem:
         )
 
     def fisher(
-        self, *, information: Literal["gauss_newton", "observed"] = "gauss_newton"
+        self, *, curvature: Literal["gauss_newton", "exact"] = "gauss_newton"
     ) -> FisherResult:
         """The Fisher information at the current position, with what it says about identifiability.
 
         Call it at the maximum likelihood, from :meth:`optimize`; it warns when the
         position is far from one. ``"gauss_newton"`` is ``J^T J`` of the whitened
         residuals, plus the noise terms when noise is inferred: the expected
-        information of the Gaussian likelihood. ``"observed"`` is the negative
-        Hessian of the log-likelihood, which also works with a custom
-        ``log_likelihood``.
+        information of the Gaussian likelihood. ``"exact"`` is the negative
+        Hessian of the log-likelihood, the observed information, which also works
+        with a custom ``log_likelihood``. ``laplace`` takes the same choice.
 
         The matrices are in latent coordinates, where the problem lives. Standard
         errors and intervals are reported in physical units by default.
         """
-        if information not in ("gauss_newton", "observed"):
+        if curvature not in ("gauss_newton", "exact"):
             raise ValueError(
-                f"fisher: information must be 'gauss_newton' or 'observed'; got {information!r}"
+                f"fisher: curvature must be 'gauss_newton' or 'exact'; got {curvature!r}"
             )
         problem = self._unwhitened()
         coordinates = problem._coordinates()
-        result = problem._fisher(coordinates, gauss_newton=information == "gauss_newton")
+        result = problem._fisher(coordinates, gauss_newton=curvature == "gauss_newton")
         problem._warn_if_not_at_optimum("fisher", "likelihood", coordinates, result.covariance)
         _warn_about_pinned("fisher", result.names, result.at_bound)
         return result
@@ -651,7 +651,7 @@ class InferenceProblem:
             eigenvectors=eigenvectors,
         )
 
-    def laplace(self, *, hessian: Literal["exact", "gauss_newton"] = "exact") -> LaplaceResult:
+    def laplace(self, *, curvature: Literal["exact", "gauss_newton"] = "exact") -> LaplaceResult:
         """A Gaussian approximation to the posterior over latents, at the current position.
 
         Call it at the posterior mode, from ``optimize(target="posterior")``; it warns
@@ -664,14 +664,16 @@ class InferenceProblem:
         ``sample`` draws positions that ``physical``, ``predict`` and ``to_arviz``
         take as they take a sampler's output.
         """
-        if hessian not in ("exact", "gauss_newton"):
-            raise ValueError(f"laplace: hessian must be 'exact' or 'gauss_newton'; got {hessian!r}")
+        if curvature not in ("exact", "gauss_newton"):
+            raise ValueError(
+                f"laplace: curvature must be 'exact' or 'gauss_newton'; got {curvature!r}"
+            )
         problem = self._unwhitened()
         problem._require_prior("laplace")
         coordinates = problem._coordinates("posterior")
         precision = problem._information(
             caller="laplace",
-            gauss_newton=hessian == "gauss_newton",
+            gauss_newton=curvature == "gauss_newton",
             target="posterior",
             coordinates=coordinates,
         )
@@ -941,7 +943,7 @@ class InferenceProblem:
         ts: ArrayLike | None = None,
         n_points: int | None = None,
         n_draws: int = 200,
-        quantiles: Sequence[float] = (0.05, 0.95),
+        quantiles: Sequence[float] = (0.025, 0.975),
         observation_noise: bool = False,
     ) -> PredictionResult:
         """Predict with draws from a chain and report their spread.
@@ -952,11 +954,12 @@ class InferenceProblem:
         defaults to the problem's own. ``ts`` and ``n_points`` are as for
         :meth:`HybridModel.predict`.
 
-        ``outputs`` is the mean over draws. ``std`` and ``quantiles`` describe the
-        model's uncertainty, a credible band for the noiseless trajectory. With
-        ``observation_noise``, they include measurement noise instead, an interval
-        for a new measurement. That needs a standard deviation inferred for each
-        channel, since the variances in data exist only at measured cells.
+        ``outputs`` is the mean over draws. ``std`` and ``quantiles``, by default a
+        central 95% band, describe the model's uncertainty: a credible band for the
+        noiseless trajectory. With ``observation_noise``, they include measurement
+        noise instead, an interval for a new measurement. That needs a standard
+        deviation inferred for each channel, since the variances in data exist only
+        at measured cells.
 
         A draw whose solve fails on this grid is dropped with a warning, so one bad
         draw on new data or a longer grid does not cost the others.
@@ -1347,8 +1350,8 @@ class _GaussianSummary:
     _to_physical: _PhysicalMap = dataclasses.field(repr=False)
     _to_position: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
 
-    def sample(self, key: Array, n: int) -> Any:
-        """``n`` draws from this Gaussian, as positions with a leading ``[n]`` axis.
+    def sample(self, *, key: Array, n_draws: int) -> Any:
+        """``n_draws`` draws from this Gaussian, as positions with a leading axis of that size.
 
         ``problem.physical``, ``problem.predict`` and, with an extra chain axis,
         ``problem.to_arviz`` take them as they take a sampler's output. From a
@@ -1358,8 +1361,10 @@ class _GaussianSummary:
         a prediction at new conditions.
         """
         check_key(key, f"{type(self).__name__}.sample")
-        if n < 1:
-            raise ValueError(f"{type(self).__name__}.sample: n must be positive; got {n}")
+        if n_draws < 1:
+            raise ValueError(
+                f"{type(self).__name__}.sample: n_draws must be positive; got {n_draws}"
+            )
         unbounded = [
             name for name, flag in zip(self.names, self._unbounded().tolist(), strict=True) if flag
         ]
@@ -1373,7 +1378,7 @@ class _GaussianSummary:
         # cannot fail on rounding in an ill-conditioned covariance.
         eigenvalues, eigenvectors = jnp.linalg.eigh(self.covariance)
         factor = eigenvectors * jnp.sqrt(jnp.clip(eigenvalues, 0.0))
-        draws = jr.normal(key, (n, len(self.names)), dtype=self.latent.dtype)
+        draws = jr.normal(key, (n_draws, len(self.names)), dtype=self.latent.dtype)
         return jax.vmap(self._to_position)(self.latent + draws @ factor.T)
 
     def _unbounded(self) -> Array:
@@ -1421,7 +1426,7 @@ class _GaussianSummary:
         spread = jnp.sqrt(jnp.clip(jnp.diagonal(self.covariance), jnp.finfo(float).tiny))
         return self.covariance / spread[:, None] / spread[None, :]
 
-    def intervals(self, confidence: float = 0.95) -> dict[str, tuple[float, float]]:
+    def intervals(self, *, confidence: float = 0.95) -> dict[str, tuple[float, float]]:
         """A Wald interval per entry, in physical units.
 
         Built in latent space and mapped through each value's transform, so it is
@@ -1498,9 +1503,9 @@ class _GaussianSummary:
             estimate=np.asarray(estimate), standard_error=spread.reshape(np.shape(estimate))
         )
 
-    def _table(self, title: str, confidence: float = 0.95) -> list[str]:
+    def _table(self, title: str, *, confidence: float = 0.95) -> list[str]:
         errors = self.standard_errors()
-        bounds = self.intervals(confidence)
+        bounds = self.intervals(confidence=confidence)
         width = max(len(name) for name in self.names)
         lines = [
             title,
@@ -1553,7 +1558,7 @@ class FisherResult(_GaussianSummary):
         smallest = float(self.eigenvalues[0])
         return float(self.eigenvalues[-1]) / smallest if smallest > 0.0 else math.inf
 
-    def unidentified(self, threshold: float = _UNIDENTIFIED) -> list[dict[str, float]]:
+    def unidentified(self, *, threshold: float = _UNIDENTIFIED) -> list[dict[str, float]]:
         """The directions the data does not constrain, as ``{name: loading}`` per direction.
 
         A direction counts when its eigenvalue is below ``threshold`` times the
@@ -1575,9 +1580,9 @@ class FisherResult(_GaussianSummary):
         loose = self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1]
         return jnp.any(loose[None, :] & (jnp.abs(self.eigenvectors) >= 1e-3), axis=1)
 
-    def summary(self, confidence: float = 0.95) -> str:
+    def summary(self, *, confidence: float = 0.95) -> str:
         """Estimates, standard errors, Wald intervals, correlations and identifiability."""
-        lines = self._table("Fisher information", confidence)
+        lines = self._table("Fisher information", confidence=confidence)
         lines.append(f"  Condition number {self.condition_number:.3g}")
         lines += [f"  Not identified: {_loading_text(d)}" for d in self.unidentified()]
         return "\n".join(lines)
@@ -1591,9 +1596,9 @@ class LaplaceResult(_GaussianSummary):
     position in ``names`` order.
     """
 
-    def summary(self, confidence: float = 0.95) -> str:
+    def summary(self, *, confidence: float = 0.95) -> str:
         """Posterior means, standard deviations, Wald intervals and correlations."""
-        return "\n".join(self._table("Laplace approximation", confidence))
+        return "\n".join(self._table("Laplace approximation", confidence=confidence))
 
 
 # Squash positions within this of 0 or 1 are in the tail, where a value may be
@@ -1817,14 +1822,14 @@ class _Profiler:
             name=name,
             confidence=self.confidence,
             threshold=self.threshold,
-            values=physical[:, index],
+            grid=physical[:, index],
             log_likelihood_ratio=np.array([p[1] for p in points]),
             others={
                 other: physical[:, i] for i, other in enumerate(coordinates.names) if i != index
             },
             converged=converged,
-            interval=(end(below, stopped_below), end(above, stopped_above)),
-            stopped=(stopped_below, stopped_above),
+            bounds=(end(below, stopped_below), end(above, stopped_above)),
+            stop_reasons=(stopped_below, stopped_above),
             at_bound=at_bound,
         )
 
@@ -1842,7 +1847,7 @@ class ProfileResult:
     threshold : float
         The chi-square(1) quantile for ``confidence``: the interval is where
         ``log_likelihood_ratio`` stays below it.
-    values : ndarray
+    grid : ndarray
         The profiled value at each point, physical and ascending, the maximum
         likelihood included.
     log_likelihood_ratio : ndarray
@@ -1854,9 +1859,9 @@ class ProfileResult:
     converged : ndarray
         Whether BFGS met its tolerances at each point, after one restart. The
         interval ignores points that did not.
-    interval : tuple[float | None, float | None]
+    bounds : tuple[float | None, float | None]
         The confidence interval's ends, ``None`` on a side that did not close.
-    stopped : tuple[str, str]
+    stop_reasons : tuple[str, str]
         Why each side, below and above, stopped. ``"threshold"`` closed it. The
         others leave it open: ``"bound"`` (the value reached its bound, so the data
         do not bound it), ``"max_points"`` (still inside; raise ``max_points``),
@@ -1872,29 +1877,29 @@ class ProfileResult:
     name: str
     confidence: float
     threshold: float
-    values: np.ndarray
+    grid: np.ndarray
     log_likelihood_ratio: np.ndarray
     others: dict[str, np.ndarray]
     converged: np.ndarray
-    interval: tuple[float | None, float | None]
-    stopped: tuple[str, str]
+    bounds: tuple[float | None, float | None]
+    stop_reasons: tuple[str, str]
     at_bound: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @property
     def identifiable(self) -> bool:
         """Whether both sides closed at the threshold."""
-        return self.stopped == ("threshold", "threshold")
+        return self.stop_reasons == ("threshold", "threshold")
 
     def summary(self) -> str:
         """One line: the interval, and why a side that did not close stopped."""
-        low, high = self.interval
+        low, high = self.bounds
         shown = (
             f"[{'open' if low is None else f'{low:.4g}'}, "
             f"{'open' if high is None else f'{high:.4g}'}]"
         )
         notes = [
             f"{side} {_STOP_REASONS[reason]}"
-            for side, reason in zip(("below", "above"), self.stopped, strict=True)
+            for side, reason in zip(("below", "above"), self.stop_reasons, strict=True)
             if reason != "threshold"
         ]
         unconverged = int((~self.converged).sum())
@@ -1922,7 +1927,7 @@ class DerivedQuantity:
     standard_error: np.ndarray
 
     def interval(
-        self, confidence: float = 0.95, *, side: Literal["both", "lower", "upper"] = "both"
+        self, *, confidence: float = 0.95, side: Literal["both", "lower", "upper"] = "both"
     ) -> tuple[np.ndarray, np.ndarray]:
         """A Wald interval, ``estimate`` plus or minus ``z`` standard errors.
 
@@ -2008,7 +2013,7 @@ def make_problem(
     *,
     log_prior: Callable[[Any, Mapping[str, Array]], Array] | None,
     noise: Literal["data"] | Mapping[str, Parameter],
-    free: Sequence[FreezeSpec] | FreezeSpec | None = None,
+    estimate: Sequence[FreezeSpec] | FreezeSpec | None = None,
     log_likelihood: Callable[[Array, BucketPayload, Mapping[str, Array]], Array] | None = None,
     gradient: Literal["auto", "forward", "reverse"] = "auto",
 ) -> InferenceProblem:
@@ -2039,10 +2044,10 @@ def make_problem(
         positive. Below about 1e-6 the likelihood's variance floor flattens the density,
         so keep the lower bound above that. With ``log_likelihood`` its keys are
         free-form, such as an AR(1) coefficient.
-    free : str | type | Callable | Sequence | None
-        What to sample, in the syntax of ``fit(freeze=...)``. ``None`` means every
-        ``Parameter``. A dotted path can name a network part, such as
-        ``"g.inner.mlp.layers.2"``.
+    estimate : str | type | Callable | Sequence | None
+        What to infer, named in the syntax ``fit(freeze=...)`` uses, though it
+        selects rather than excludes. ``None`` means every ``Parameter``. A dotted
+        path can name a network part, such as ``"g.inner.mlp.layers.2"``.
     log_likelihood : Callable | None
         Replaces the Gaussian: ``(pred_obs, bp, noise) -> scalar``, called once per
         bucket and summed. ``pred_obs`` is ``[N, T, D]``, and ``bp.mask`` says
@@ -2064,9 +2069,9 @@ def make_problem(
     noise_map = _check_noise(noise, dataset, custom=log_likelihood is not None)
 
     base = trainable_mask(predictors)
-    free_mask = _free_mask(predictors, base, free)
+    free_mask = _free_mask(predictors, base, estimate)
     if not any(jtu.tree_leaves(free_mask)):
-        raise ValueError("make_problem: free= selects no trainable leaf; nothing to sample")
+        raise ValueError("make_problem: estimate= selects no trainable leaf; nothing to infer")
     tree = {_PREDICTORS: predictors, _NOISE: noise_map}
     mask = {_PREDICTORS: free_mask, _NOISE: trainable_mask(noise_map)}
     if log_prior is flat_prior:
@@ -2120,20 +2125,21 @@ def make_problem(
     return problem
 
 
-def _free_mask(predictors: Any, base: Any, free: Any) -> Any:
-    """``base`` narrowed to what ``free`` matches, reusing ``freeze_mask``'s matching."""
-    if free is None:
+def _free_mask(predictors: Any, base: Any, estimate: Any) -> Any:
+    """``base`` narrowed to what ``estimate`` matches, reusing ``freeze_mask``'s matching."""
+    if estimate is None:
         leaves = jtu.tree_leaves(predictors, is_leaf=_is_parameter)
         if not any(_is_parameter(leaf) for leaf in leaves):
             raise ValueError(
-                "make_problem: this model has no Parameter to sample. Name a network part with "
-                "free=, such as a last layer, or use fit_ensemble for whole-network uncertainty."
+                "make_problem: this model has no Parameter to infer. Name a network part "
+                "with estimate=, such as a last layer, or use fit_ensemble for "
+                "whole-network uncertainty."
             )
-        free = Parameter
+        estimate = Parameter
     try:
-        unmatched = freeze_mask(predictors, free, mask=base)
+        unmatched = freeze_mask(predictors, estimate, mask=base)
     except ValueError as exc:
-        exc.add_note("make_problem: free= takes the same entries as fit(freeze=...).")
+        exc.add_note("make_problem: estimate= takes the same entries as fit(freeze=...).")
         raise
     return jtu.tree_map(lambda in_base, kept: in_base and not kept, base, unmatched)
 
@@ -2171,7 +2177,8 @@ def _warn_on_default_variance(dataset: Dataset) -> None:
     """Warn for channels whose every measured variance equals the unset default of 1.0."""
     for d, name in enumerate(dataset.output_channel_names):
         if all(
-            bool(jnp.all(bp.yvar[..., d][bp.mask[..., d]] == 1.0)) for bp in dataset.bucket_payloads
+            bool(jnp.all(bp.variance[..., d][bp.mask[..., d]] == 1.0))
+            for bp in dataset.bucket_payloads
         ):
             warnings.warn(
                 f"make_problem: every variance in channel {name!r} is 1.0, the default for "

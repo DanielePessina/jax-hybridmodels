@@ -8,7 +8,7 @@ first step. :func:`annealing_schedule` returns such a callable
 baked in. Scale it into a learning rate for a phase, or use it to ramp a
 penalty weight in a custom loop:
 
-    phase = hm.TrainingPhase(steps, lr=lambda step: 1e-2 * cosine(step))
+    phase = hm.TrainingPhase(steps=steps, lr=lambda step: 1e-2 * cosine(step))
 
     penalty_weight = 0.5 * annealing_schedule("linear", total_epochs=steps)(step)
 

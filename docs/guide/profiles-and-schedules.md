@@ -17,10 +17,10 @@ import jaxhybridmodels as hm
 
 def simulate_fn(predictors, ts, covariates, y0, solver):
     temperature = hm.ramp_profile(
-        t0=covariates["heat_start"],
-        t1=covariates["heat_end"],
-        v0=covariates["temperature_initial"],
-        v1=covariates["temperature_final"],
+        start=covariates["heat_start"],
+        end=covariates["heat_end"],
+        before=covariates["temperature_initial"],
+        after=covariates["temperature_final"],
     )
 
     def vector_field(t, y, args):
@@ -39,11 +39,11 @@ The built-in factories are:
 | Factory | Behaviour |
 | --- | --- |
 | [`constant_profile`](/api/profiles#constant_profile) | Returns the same value for every `t`. |
-| [`step_profile`](/api/profiles#step_profile) | Returns `before` before `jump_at`, then `after`. |
-| [`ramp_profile`](/api/profiles#ramp_profile) | Holds `v0`, ramps linearly to `v1`, then holds `v1`. |
+| [`step_profile`](/api/profiles#step_profile) | Returns `before` until `at`, then `after`. |
+| [`ramp_profile`](/api/profiles#ramp_profile) | Holds `before` until `start`, ramps linearly to `after` by `end`, then holds it. |
 | [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile) | Interpolates knots and extends the first and last values outward. |
 
-`ramp_profile` requires `t1 > t0`; `piecewise_linear_profile` requires at
+`ramp_profile` requires `end > start`; `piecewise_linear_profile` requires at
 least two strictly increasing knots. Concrete arguments are checked when the
 profile is built; traced covariates skip the check and stay JIT-safe.
 

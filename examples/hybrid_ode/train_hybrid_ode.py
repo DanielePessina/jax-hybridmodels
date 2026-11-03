@@ -115,7 +115,7 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
             out_size=out_size,
             width_size=width,
             depth=2,
-            activation_name="softplus",
+            activation="softplus",
             key=key,
         )
     if kind == "kan":

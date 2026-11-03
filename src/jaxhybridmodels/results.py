@@ -30,7 +30,7 @@ class ExperimentPrediction:
 
     ``outputs`` maps each channel name to its ``[T]`` prediction.
     ``observed`` holds the measurements on the same grid, NaN where a cell
-    was not measured, and ``observation_mask`` says which cells were. Both
+    was not measured, and ``mask`` says which cells were. Both
     are empty when the times are not the measured grid: for
     :meth:`HybridModel.simulate`, and for ``predict`` with ``ts=`` or
     ``n_points=``. ``simulate`` fills ``state`` with the full ``[T, S]``
@@ -38,10 +38,10 @@ class ExperimentPrediction:
     only by :func:`~jaxhybridmodels.predict_ensemble`.
     """
 
-    times: Array
+    ts: Array
     outputs: dict[str, Array]
     observed: dict[str, Array] = field(default_factory=dict)
-    observation_mask: dict[str, Array] = field(default_factory=dict)
+    mask: dict[str, Array] = field(default_factory=dict)
     state: Array | None = None
     std: dict[str, Array] = field(default_factory=dict)
     quantiles: dict[str, dict[float, Array]] = field(default_factory=dict)
@@ -113,12 +113,12 @@ class PredictionResult(Mapping[str, ExperimentPrediction]):
                 missing = np.full(values.shape, np.nan)
                 table = {
                     "experiment_id": exp_id,
-                    "time": np.asarray(experiment.times),
+                    "time": np.asarray(experiment.ts),
                     "channel": channel,
                     "prediction": np.asarray(values),
                     "observed": np.asarray(experiment.observed.get(channel, missing)),
                     "is_observed": np.asarray(
-                        experiment.observation_mask.get(channel, np.zeros(values.shape, bool))
+                        experiment.mask.get(channel, np.zeros(values.shape, bool))
                     ),
                 }
                 if with_std:

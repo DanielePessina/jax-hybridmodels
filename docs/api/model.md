@@ -213,7 +213,7 @@ an even grid of that many points over its own time span, from its
 ``t0`` (or first observation) to its last observation, for smooth
 plots. ``ts`` gives one explicit grid for every experiment; it must
 not start before any experiment's start. Off the measured grid,
-``observed`` and ``observation_mask`` are empty. Each experiment
+``observed`` and ``mask`` are empty. Each experiment
 still integrates from its own start, so ``y0`` stays in place.
 
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
@@ -440,10 +440,10 @@ pandas: ``pip install jax-hybridmodels[pandas]``.
 
 ```python
 ExperimentPrediction(
-    times: 'Array',
+    ts: 'Array',
     outputs: 'dict[str, Array]',
     observed: 'dict[str, Array]' = <factory>,
-    observation_mask: 'dict[str, Array]' = <factory>,
+    mask: 'dict[str, Array]' = <factory>,
     state: 'Array | None' = None,
     std: 'dict[str, Array]' = <factory>,
     quantiles: 'dict[str, dict[float, Array]]' = <factory>,
@@ -454,7 +454,7 @@ One experiment's times, named outputs, and optional observed values.
 
 ``outputs`` maps each channel name to its ``[T]`` prediction.
 ``observed`` holds the measurements on the same grid, NaN where a cell
-was not measured, and ``observation_mask`` says which cells were. Both
+was not measured, and ``mask`` says which cells were. Both
 are empty when the times are not the measured grid: for
 [`HybridModel.simulate`](/api/model#hybridmodelsimulate), and for ``predict`` with ``ts=`` or
 ``n_points=``. ``simulate`` fills ``state`` with the full ``[T, S]``

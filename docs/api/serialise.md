@@ -86,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L478)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L483)</small>
 
 ---
 

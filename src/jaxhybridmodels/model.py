@@ -440,7 +440,7 @@ class HybridModel(eqx.Module):
         ``t0`` (or first observation) to its last observation, for smooth
         plots. ``ts`` gives one explicit grid for every experiment; it must
         not start before any experiment's start. Off the measured grid,
-        ``observed`` and ``observation_mask`` are empty. Each experiment
+        ``observed`` and ``mask`` are empty. Each experiment
         still integrates from its own start, so ``y0`` stays in place.
 
         ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
@@ -529,7 +529,7 @@ class HybridModel(eqx.Module):
             output = jnp.asarray(self.state_to_output(state))
         self._check_output_shape(output.shape, state.shape, "simulate")
         return ExperimentPrediction(
-            times=times,
+            ts=times,
             outputs=dict(zip(self.output_channel_names, output.T, strict=True)),
             state=state,
         )

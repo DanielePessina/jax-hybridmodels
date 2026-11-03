@@ -93,7 +93,7 @@ def compute_metrics(
     predictions : PredictionResult
         From ``HybridModel.predict`` or ``predict_ensemble`` (which is
         scored on its member mean), or any mapping from experiment ID to
-        a record with ``outputs``, ``observed`` and ``observation_mask``
+        a record with ``outputs``, ``observed`` and ``mask``
         dicts keyed by channel. Only cells the mask marks as measured
         count. Channels are read from the first experiment's ``outputs``.
     by : {"channel", "experiment"}
@@ -120,7 +120,7 @@ def compute_metrics(
     experiments = list(predictions.values())
     if not experiments:
         raise ValueError("compute_metrics needs at least one experiment")
-    if not experiments[0].observation_mask:
+    if not experiments[0].mask:
         raise ValueError(
             "compute_metrics needs observed values; pass the result of predict() on the "
             "measured grid, not simulate() or predict(ts=...) / predict(n_points=...)"
@@ -136,7 +136,7 @@ def compute_metrics(
 
 def _channel_metrics(name: str, experiments: Sequence[Any]) -> ChannelMetrics:
     """One channel's statistics over the measured cells of ``experiments``, pooled."""
-    mask = jnp.concatenate([jnp.ravel(e.observation_mask[name]) for e in experiments])
+    mask = jnp.concatenate([jnp.ravel(e.mask[name]) for e in experiments])
     observed = jnp.concatenate([jnp.ravel(e.observed[name]) for e in experiments])
     predicted = jnp.concatenate([jnp.ravel(e.outputs[name]) for e in experiments])
     # Unobserved cells hold NaN; zero them before any arithmetic so a

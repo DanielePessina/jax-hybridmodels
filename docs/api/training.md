@@ -146,7 +146,7 @@ stores ``phases``::
 | `patience` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
 | `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. The running minimum resets whenever the horizon changes, since tracked losses over different horizons are not comparable and the shortest horizon would otherwise always own the minimum. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L209)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L208)</small>
 
 <a id="optaxtrainingconfigtotal_steps"></a>
 
@@ -154,7 +154,7 @@ stores ``phases``::
 
 Step budget summed over every phase.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L313)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L312)</small>
 
 ---
 
@@ -166,8 +166,8 @@ Step budget summed over every phase.
 
 ```python
 TrainingPhase(
-    steps: 'int',
     *,
+    steps: 'int',
     lr: 'float | optax.Schedule' = 0.001,
     optimizer: 'OptimizerSpec' = 'adamw',
     horizon: 'float' = 1.0,
@@ -243,7 +243,7 @@ A solver error or a non-finite loss after the first step ends the run: it
 warns and returns the best parameters so far, with ``stop_reason``
 ``"diverged"``. On the first step there is nothing to return, so it raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1165)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1168)</small>
 
 ---
 
@@ -261,7 +261,7 @@ EvosaxTrainingConfig(
     steps: 'int' = 100,
     init: "Literal['warm', 'uniform_box', 'lhs_box']" = 'warm',
     init_box_extent: 'float' = 2.0,
-    sigma_init: 'float' = 0.1,
+    init_sigma: 'float' = 0.1,
     log_every: 'int' = 1,
 ) -> None
 ```
@@ -282,7 +282,7 @@ no phases: the run is a flat loop, so every field is a scalar.
 | `steps` |  | Number of generations, run in sequence. Named like the Optax config's ``steps``: one generation is one Evosax step. |
 | `init` |  | Initial-population scheme, one of ``"warm"``, ``"uniform_box"``, ``"lhs_box"``. The module docstring explains the difference. |
 | `init_box_extent` |  | Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``. Ignored by ``"warm"``. |
-| `sigma_init` |  | Initial CMA-ES step size. Used directly by ``"warm"`` and as the prior step size for the box-init modes. CMA-ES adapts it after the first ``tell``. |
+| `init_sigma` |  | Initial CMA-ES step size. Used directly by ``"warm"`` and as the prior step size for the box-init modes. CMA-ES adapts it after the first ``tell``. |
 | `log_every` |  | UI heartbeat cadence. Honoured only by the Rich UIs; the silent and recording UIs see every generation. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L138)</small>

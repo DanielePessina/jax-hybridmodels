@@ -128,7 +128,7 @@ def main() -> None:
         out_size=len(EXPONENTS),
         width_size=16,
         depth=2,
-        activation_name="tanh",
+        activation="tanh",
         key=k_model,
     )
     rate = hm.BoundedPredictor(

@@ -136,10 +136,10 @@ def _integrate_ramp(
     differentiates and vmaps like the rest of the model.
     """
     T_profile = hm.ramp_profile(
-        t0=covariates["ramp_t0"],
-        t1=covariates["ramp_t1"],
-        v0=covariates["T_lo"],
-        v1=covariates["T_hi"],
+        start=covariates["ramp_t0"],
+        end=covariates["ramp_t1"],
+        before=covariates["T_lo"],
+        after=covariates["T_hi"],
     )
 
     def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
@@ -200,7 +200,7 @@ def build_predictors(*, key: Array) -> tuple[ArrheniusKinetics, hm.BoundedPredic
             out_size=1,
             width_size=16,
             depth=1,
-            activation_name="relu",
+            activation="relu",
             key=k_residual,
         ),
         output_bounds=RES_LOG10_BOUNDS,

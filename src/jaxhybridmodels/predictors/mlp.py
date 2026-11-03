@@ -60,7 +60,7 @@ class MLPPredictor(Predictor):
         Input / output dimensionality (static).
     width_size, depth : int
         Hidden width and number of hidden layers (static).
-    activation_name : str
+    activation : str
         Key into ``_ACTIVATION_MAP``; stored as a string rather than the
         callable so the module is JSON-serialisable.
     """
@@ -70,7 +70,7 @@ class MLPPredictor(Predictor):
     out_size: int = eqx.field(static=True)
     width_size: int = eqx.field(static=True)
     depth: int = eqx.field(static=True)
-    activation_name: str = eqx.field(static=True)
+    activation: str = eqx.field(static=True)
 
     def __init__(
         self,
@@ -80,27 +80,27 @@ class MLPPredictor(Predictor):
         width_size: int,
         depth: int,
         key: Array,
-        activation_name: str = "tanh",
+        activation: str = "tanh",
     ) -> None:
         """Build the MLP, materialising the activation callable from its name.
 
         ``key`` is required, not defaulted, so reproducibility never rests
-        on a hidden global RNG. ``activation_name`` must be a key of
+        on a hidden global RNG. ``activation`` must be a key of
         ``_ACTIVATION_MAP``; an unknown name raises, listing the supported
         set.
         """
-        activation = _resolve_activation(activation_name)
+        resolved = _resolve_activation(activation)
         self.in_size = int(in_size)
         self.out_size = int(out_size)
         self.width_size = int(width_size)
         self.depth = int(depth)
-        self.activation_name = activation_name
+        self.activation = activation
         self.mlp = eqx.nn.MLP(
             in_size=self.in_size,
             out_size=self.out_size,
             width_size=self.width_size,
             depth=self.depth,
-            activation=activation,
+            activation=resolved,
             key=key,
         )
 
@@ -112,10 +112,10 @@ class MLPPredictor(Predictor):
         """
         return jnp.asarray(self.mlp(x))
 
-    def initialized_with_key(self, key: Array) -> MLPPredictor:
+    def reinitialized(self, *, key: Array) -> MLPPredictor:
         """Return a fresh ``MLPPredictor`` with the same architecture, new weights.
 
-        The re-init protocol consumed by :func:`reinitialize_with_key` and
+        The re-init protocol consumed by :func:`reinitialize` and
         by the tournament when it restarts a stalled attempt.
         Re-instantiating beats reinitialising leaves in place because
         ``eqx.nn.MLP`` owns its per-layer init (LeCun-uniform weights
@@ -127,7 +127,7 @@ class MLPPredictor(Predictor):
             out_size=self.out_size,
             width_size=self.width_size,
             depth=self.depth,
-            activation_name=self.activation_name,
+            activation=self.activation,
             key=key,
         )
 

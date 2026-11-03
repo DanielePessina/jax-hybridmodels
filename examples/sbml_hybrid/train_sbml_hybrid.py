@@ -128,7 +128,7 @@ def main() -> None:
     # region model
     vmax = hm.BoundedPredictor(
         inner=hm.MLPPredictor(
-            in_size=1, out_size=1, width_size=16, depth=2, activation_name="tanh", key=k_model
+            in_size=1, out_size=1, width_size=16, depth=2, activation="tanh", key=k_model
         ),
         input_keys=("dose",),
         input_bounds=(0.03, 0.5),

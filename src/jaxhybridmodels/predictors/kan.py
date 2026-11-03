@@ -231,7 +231,7 @@ class KANPredictor(Predictor):
         y = merged(x[None, :])
         return jnp.asarray(y[0])
 
-    def initialized_with_key(self, key: Array) -> KANPredictor:
+    def reinitialized(self, *, key: Array) -> KANPredictor:
         """Return a same-architecture KANPredictor with freshly initialised parameters.
 
         The re-init protocol used by the tournament. Building a new

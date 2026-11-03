@@ -195,15 +195,15 @@ class BucketPayload(NamedTuple):
     ------
     ts : Float[Array, "N T"]
         Per-experiment union-timestamp axis, sorted ascending row-wise.
-    y_observed : Float[Array, "N T D"]
+    observed : Float[Array, "N T D"]
         Channel observations scattered onto ``ts``. Cells where the channel
         was not observed at that timestamp hold ``0.0``; consumers must read
         ``mask`` to know which entries are real.
-    yvar : Float[Array, "N T D"]
+    variance : Float[Array, "N T D"]
         Per-observation variance (used by MLE losses). Defaults to ``1.0``
         at unobserved cells so masked positions never divide by zero.
     mask : Bool[Array, "N T D"]
-        ``True`` where the corresponding ``y_observed`` cell came from a
+        ``True`` where the corresponding ``observed`` cell came from a
         real ``ChannelObs`` entry, ``False`` where the union axis carries a
         time at which that channel was not measured. Every loss reads this
         to know which cells count.
@@ -223,8 +223,8 @@ class BucketPayload(NamedTuple):
     """
 
     ts: Float[Array, "N T"]
-    y_observed: Float[Array, "N T D"]
-    yvar: Float[Array, "N T D"]
+    observed: Float[Array, "N T D"]
+    variance: Float[Array, "N T D"]
     mask: Bool[Array, "N T D"]
     covariates: dict[str, Array]
     y0: Float[Array, "N S"]
@@ -686,17 +686,17 @@ class _ExperimentArrays(NamedTuple):
     ----------
     ts : Float[Array, "T"]
         Sorted union timestamp axis.
-    y_observed : Float[Array, "T D"]
+    observed : Float[Array, "T D"]
         Channel values scattered onto ``ts``; ``0.0`` at unobserved cells.
-    yvar : Float[Array, "T D"]
+    variance : Float[Array, "T D"]
         Per-cell variance; ``1.0`` at unobserved cells (read only via mask).
     mask : Bool[Array, "T D"]
         ``True`` iff cell ``[t, d]`` came from a real ``ChannelObs`` entry.
     """
 
     ts: Float[Array, " T"]
-    y_observed: Float[Array, "T D"]
-    yvar: Float[Array, "T D"]
+    observed: Float[Array, "T D"]
+    variance: Float[Array, "T D"]
     mask: Bool[Array, "T D"]
 
 
@@ -704,7 +704,7 @@ def _per_experiment_arrays(
     experiment: Experiment,
     output_channel_names: tuple[str, ...],
 ) -> _ExperimentArrays:
-    """Build the per-experiment union-axis tensors ``(ts, y_observed, yvar, mask)``.
+    """Build the per-experiment union-axis tensors ``(ts, observed, variance, mask)``.
 
     Computes ``T = len(union(ts_c) for c in output_channel_names)``,
     allocates ``[T]`` and ``[T, D]`` host buffers, then scatters each
@@ -778,8 +778,8 @@ def _per_experiment_arrays(
         else np.dtype(np.float32)
     )
 
-    y_observed = np.zeros((T, D), dtype=val_dtype)
-    yvar = np.ones((T, D), dtype=var_dtype)
+    observed = np.zeros((T, D), dtype=val_dtype)
+    variance = np.ones((T, D), dtype=var_dtype)
     mask = np.zeros((T, D), dtype=bool)
 
     for d, (ts_np, values_np, variance_np) in enumerate(channel_arrays):
@@ -792,14 +792,14 @@ def _per_experiment_arrays(
             continue
         for t, v, var in zip(ts_np.tolist(), values_np.tolist(), variance_np.tolist(), strict=True):
             idx = ts_to_idx[float(np.asarray(t, dtype=key_dtype))]
-            y_observed[idx, d] = v
-            yvar[idx, d] = var
+            observed[idx, d] = v
+            variance[idx, d] = var
             mask[idx, d] = True
 
     return _ExperimentArrays(
         ts=jnp.asarray(np.asarray(sorted_ts, dtype=ts_dtype)),
-        y_observed=jnp.asarray(y_observed),
-        yvar=jnp.asarray(yvar),
+        observed=jnp.asarray(observed),
+        variance=jnp.asarray(variance),
         mask=jnp.asarray(mask),
     )
 
@@ -955,17 +955,17 @@ def _pad_to_length(arrays: _ExperimentArrays, target: int, exp_id: str) -> _Expe
             )
         times = np.insert(times, gap + 1, midpoint)
     rows = np.searchsorted(times, original.astype(times.dtype))
-    width = arrays.y_observed.shape[1]
-    y_observed = np.zeros((target, width), dtype=arrays.y_observed.dtype)
-    yvar = np.ones((target, width), dtype=arrays.yvar.dtype)
+    width = arrays.observed.shape[1]
+    observed = np.zeros((target, width), dtype=arrays.observed.dtype)
+    variance = np.ones((target, width), dtype=arrays.variance.dtype)
     mask = np.zeros((target, width), dtype=bool)
-    y_observed[rows] = np.asarray(arrays.y_observed)
-    yvar[rows] = np.asarray(arrays.yvar)
+    observed[rows] = np.asarray(arrays.observed)
+    variance[rows] = np.asarray(arrays.variance)
     mask[rows] = np.asarray(arrays.mask)
     return _ExperimentArrays(
         ts=jnp.asarray(times),
-        y_observed=jnp.asarray(y_observed),
-        yvar=jnp.asarray(yvar),
+        observed=jnp.asarray(observed),
+        variance=jnp.asarray(variance),
         mask=jnp.asarray(mask),
     )
 
@@ -985,8 +985,8 @@ def _stack_bucket(
     mask = jnp.stack([a.mask for a in arrays], axis=0)
     return BucketPayload(
         ts=jnp.stack([a.ts for a in arrays], axis=0),
-        y_observed=jnp.stack([a.y_observed for a in arrays], axis=0),
-        yvar=jnp.stack([a.yvar for a in arrays], axis=0),
+        observed=jnp.stack([a.observed for a in arrays], axis=0),
+        variance=jnp.stack([a.variance for a in arrays], axis=0),
         mask=mask,
         covariates={
             k: jnp.stack([jnp.asarray(exp.covariates[k]) for exp in experiments], axis=0)
@@ -1007,7 +1007,7 @@ def describe_buckets(dataset: Dataset) -> str:
     """
     lines = [f"{len(dataset.bucket_payloads)} bucket(s)"]
     for i, bp in enumerate(dataset.bucket_payloads):
-        n, t, d = bp.y_observed.shape
+        n, t, d = bp.observed.shape
         lines.append(
             f"  bucket {i}: N={n:2d} experiments, T={t:3d} timestamps, "
             f"D={d} channels, mask {float(bp.mask.mean()):.2f} full"
@@ -1125,38 +1125,38 @@ def make_dataset(
     )
 
 
-def _validate_fractions(train: float, val: float, test: float) -> None:
+def _validate_fractions(train: float, validation: float, test: float) -> None:
     """Reject split fractions that are out of range or do not sum to one.
 
     Called before the source-experiments check, so a caller who gets both
     wrong hears about the fractions first.
     """
-    if any(f < 0.0 or f > 1.0 for f in (train, val, test)):
-        raise ValueError("train, val, and test fractions must each be in [0, 1]")
-    total = train + val + test
+    if any(f < 0.0 or f > 1.0 for f in (train, validation, test)):
+        raise ValueError("train, validation, and test fractions must each be in [0, 1]")
+    total = train + validation + test
     if not np.isclose(total, 1.0):
-        raise ValueError(f"train + val + test fractions must sum to 1.0, got {total}")
+        raise ValueError(f"train + validation + test fractions must sum to 1.0, got {total}")
 
 
-def _split_counts(n: int, train: float, val: float, test: float) -> tuple[int, int, int]:
+def _split_counts(n: int, train: float, validation: float, test: float) -> tuple[int, int, int]:
     """Experiment counts per split, preserving explicitly empty splits.
 
-    For the normal three-way split, train and val floor and test takes the
+    For the normal three-way split, train and validation floor and test takes the
     remainder. When ``test == 0.0``, test is forced to stay empty and any
     rounding remainder is assigned to the larger fractional remainder of
-    train or val.
+    train or validation.
 
     A positive fraction that floors to zero is refused. An empty split reads
     downstream as "no validation needed" rather than "lost to rounding", so a
     caller who means it has to ask for ``0.0`` explicitly.
     """
     n_train = int(np.floor(train * n))
-    n_val = int(np.floor(val * n))
+    n_val = int(np.floor(validation * n))
     if test == 0.0:
         remainder = n - n_train - n_val
         if remainder:
             fractional_train = train * n - n_train
-            fractional_val = val * n - n_val
+            fractional_val = validation * n - n_val
             if fractional_train >= fractional_val:
                 n_train += remainder
             else:
@@ -1167,7 +1167,7 @@ def _split_counts(n: int, train: float, val: float, test: float) -> tuple[int, i
 
     for name, frac, count in (
         ("train", train, n_train),
-        ("val", val, n_val),
+        ("validation", validation, n_val),
         ("test", test, n_test),
     ):
         if frac > 0.0 and count == 0:
@@ -1284,7 +1284,7 @@ def split_dataset(
     dataset: Dataset,
     *,
     train: float = 0.8,
-    val: float = 0.1,
+    validation: float = 0.1,
     test: float = 0.1,
     key: Array,
 ) -> tuple[Dataset, Dataset, Dataset]:
@@ -1294,7 +1294,7 @@ def split_dataset(
     from scratch, so its bucket structure suits its own contents rather than
     the original bucket boundaries.
 
-    Counts use ``floor(train*n)`` and ``floor(val*n)``, with test taking the
+    Counts use ``floor(train*n)`` and ``floor(validation*n)``, with test taking the
     remainder so the sizes sum to ``n``. An empty split comes back with no
     payloads and no experiments, so it cannot be split again.
 
@@ -1302,7 +1302,7 @@ def split_dataset(
     ----------
     dataset
         Source dataset. Must carry its experiments, or this raises.
-    train, val, test
+    train, validation, test
         Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``).
     key
         Required ``jr.PRNGKey`` for the permutation, never defaulted, so
@@ -1311,9 +1311,9 @@ def split_dataset(
     Returns
     -------
     tuple[Dataset, Dataset, Dataset]
-        ``(train_dataset, val_dataset, test_dataset)``.
+        ``(train_dataset, validation_dataset, test_dataset)``.
     """
-    _validate_fractions(train, val, test)
+    _validate_fractions(train, validation, test)
 
     experiments = dataset.experiments
     if not experiments:
@@ -1323,7 +1323,7 @@ def split_dataset(
         )
 
     n = len(experiments)
-    n_train, n_val, n_test = _split_counts(n, train, val, test)
+    n_train, n_val, n_test = _split_counts(n, train, validation, test)
     perm = np.asarray(jr.permutation(key, n)).tolist()
     splits_idx = (
         perm[:n_train],

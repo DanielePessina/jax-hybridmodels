@@ -98,7 +98,7 @@ def parameter_predictors(rate: float = 0.3) -> dict[str, Any]:
 def network_predictors(key: Array | None = None) -> dict[str, Any]:
     key = jr.key(0) if key is None else key
     inner = hm.MLPPredictor(
-        in_size=1, out_size=1, width_size=4, depth=1, activation_name="tanh", key=key
+        in_size=1, out_size=1, width_size=4, depth=1, activation="tanh", key=key
     )
     rate = hm.BoundedPredictor(
         inner=inner, input_keys=("temp",), input_bounds=((0.0, 2.0),), output_bounds=((0.05, 3.0),)

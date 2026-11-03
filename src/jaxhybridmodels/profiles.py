@@ -9,7 +9,7 @@ profile itself is a pure callable ``t -> Array`` used inside the user's
 vector field:
 
     def vector_field(t, y, args):
-        T = ramp_profile(t0=t0, t1=t1, v0=25.0, v1=60.0)(t)  # flat, ramp, flat
+        T = ramp_profile(start=t0, end=t1, before=25.0, after=60.0)(t)  # flat, ramp, flat
         ...
 
 Everything here is a pure JAX function, safe under ``jit``, ``vmap``
@@ -47,51 +47,54 @@ def constant_profile(value: ArrayLike) -> Profile:
     return profile
 
 
-def step_profile(*, before: ArrayLike, after: ArrayLike, jump_at: ArrayLike) -> Profile:
-    """Return ``t -> before if t < jump_at else after``: a step change.
+def step_profile(*, at: ArrayLike, before: ArrayLike, after: ArrayLike) -> Profile:
+    """Return ``t -> before if t < at else after``: a step change.
 
     For a reactor, the moment a feed valve opens or a heater switches.
-    Discontinuous at ``jump_at``; an adaptive solver sees a kink, so
-    place the jump at a known event time or accept a short transient.
+    Discontinuous at ``at``; an adaptive solver sees a kink, so place the
+    jump at a known event time or accept a short transient.
     """
 
     def profile(t: ArrayLike) -> Array:
-        return jnp.where(jnp.asarray(t) < jump_at, jnp.asarray(before), jnp.asarray(after))
+        return jnp.where(jnp.asarray(t) < at, jnp.asarray(before), jnp.asarray(after))
 
     return profile
 
 
-def ramp_profile(*, t0: ArrayLike, t1: ArrayLike, v0: ArrayLike, v1: ArrayLike) -> Profile:
-    """Return a flat-ramp-flat profile: ``v0`` until ``t0``, linear to ``v1`` by ``t1``, then flat.
+def ramp_profile(
+    *, start: ArrayLike, end: ArrayLike, before: ArrayLike, after: ArrayLike
+) -> Profile:
+    """Return a flat-ramp-flat profile: ``before`` until ``start``, linear to ``after`` by ``end``.
 
     The reactor heat-up shape: hold at the initial set point, ramp to the
-    final set point, hold there. Values before ``t0`` and after ``t1``
-    are exactly the edge values (the two flat profiles on either edge).
+    final set point, hold there. Values before ``start`` and after ``end``
+    are exactly ``before`` and ``after``, the names ``step_profile`` uses
+    for the same two levels.
 
-    ``t1 > t0`` is required; equal times would be a discontinuity. The
+    ``end > start`` is required; equal times would be a discontinuity. The
     check runs when the times are host-side values; inside ``jit``/``vmap``
     (per-experiment parameters from traced covariates) it is skipped, so
     the factory stays trace-safe.
     """
     try:
-        degenerate = bool(jnp.asarray(t1) <= jnp.asarray(t0))
+        degenerate = bool(jnp.asarray(end) <= jnp.asarray(start))
     except jax.errors.TracerBoolConversionError:
         degenerate = False
     if degenerate:
         raise ValueError(
-            f"ramp_profile requires t1 > t0, got t0={t0}, t1={t1}; "
+            f"ramp_profile requires end > start, got start={start}, end={end}; "
             "equal times would be a discontinuity."
         )
 
-    start, end = jnp.asarray(t0), jnp.asarray(t1)
-    low, high = jnp.asarray(v0), jnp.asarray(v1)
+    t_start, t_end = jnp.asarray(start), jnp.asarray(end)
+    low, high = jnp.asarray(before), jnp.asarray(after)
 
     def profile(t: ArrayLike) -> Array:
-        rate = (high - low) / (end - start)
+        rate = (high - low) / (t_end - t_start)
         # jnp.minimum/maximum, not min()/max(): the edge values may be
         # traced (per-experiment parameters from covariates), and the
         # Python builtins would bool-convert a tracer.
-        return jnp.clip(low + rate * (t - start), jnp.minimum(low, high), jnp.maximum(low, high))
+        return jnp.clip(low + rate * (t - t_start), jnp.minimum(low, high), jnp.maximum(low, high))
 
     return profile
 

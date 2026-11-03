@@ -30,7 +30,7 @@ output is exactly the midpoint whatever the key. Hidden layers stay random.
 
 ```python
 inner = hm.MLPPredictor(
-    in_size=2, out_size=1, width_size=64, depth=1, activation_name="relu", key=key
+    in_size=2, out_size=1, width_size=64, depth=1, activation="relu", key=key
 ).with_zero_final_head()
 ```
 

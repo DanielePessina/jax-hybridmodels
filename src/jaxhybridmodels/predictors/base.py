@@ -29,7 +29,7 @@ rate is one more tuple entry.
 
 The trainable component handed to training kernels is therefore a
 ``PyTree[eqx.Module]``: a tuple by convention, but any pytree shape
-works. :func:`reinitialize_pytree_with_key` walks that pytree and gives
+works. :func:`reinitialize_pytree` walks that pytree and gives
 each ``eqx.Module`` leaf an independent subkey, so identical-shape
 siblings get different fresh weights when the tournament restarts a run.
 """
@@ -64,8 +64,8 @@ __all__ = (
     "BoundedPredictor",
     "Constant",
     "Parameter",
-    "reinitialize_with_key",
-    "reinitialize_pytree_with_key",
+    "reinitialize",
+    "reinitialize_pytree",
 )
 
 
@@ -83,9 +83,9 @@ class Predictor(eqx.Module):
     Dynamic leaves must be JAX float arrays and static fields must be
     JSON-encodable, so the module round-trips through
     ``eqx.tree_serialise_leaves``. Optionally implement
-    ``initialized_with_key(self, key) -> Self`` to control how the
+    ``reinitialized(self, *, key) -> Self`` to control how the
     tournament restarts your weights; without it,
-    :func:`reinitialize_with_key` replaces every float leaf with a
+    :func:`reinitialize` replaces every float leaf with a
     standard-normal sample, which skews any considered init scheme.
 
     Do not subclass to add bound handling or named inputs.
@@ -165,7 +165,7 @@ class Constant(eqx.Module):
 
         self.value = convert(value)
 
-    def initialized_with_key(self, key: Array) -> Constant:
+    def reinitialized(self, *, key: Array) -> Constant:
         """Keep fixed values unchanged when restarting a model."""
         return self
 
@@ -740,7 +740,7 @@ class Parameter(eqx.Module):
         """Current value in physical units, with the shape given at construction."""
         return self.scaler.from_latent(self.latent).reshape(self.shape)
 
-    def initialized_with_key(self, key: Array) -> Parameter:
+    def reinitialized(self, *, key: Array) -> Parameter:
         """Draw a fresh standard-normal latent for each element with two finite bounds.
 
         A standard-normal latent lands across the middle of a finite box,
@@ -960,10 +960,10 @@ class BoundedPredictor(Predictor):
         )
         return self.out_scaler.from_latent(z_out)
 
-    def initialized_with_key(self, key: Array) -> BoundedPredictor:
+    def reinitialized(self, *, key: Array) -> BoundedPredictor:
         """Re-initialise ``inner`` only, leaving both scalers untouched.
 
-        Without this method, ``reinitialize_with_key`` takes its generic
+        Without this method, ``reinitialize`` takes its generic
         branch and replaces every inexact leaf, ``BoundScaler.temperature``
         included, with a sample from ``N(0, 1)``. A temperature near zero
         or negative inverts and blows up both ``to_latent`` and
@@ -977,24 +977,24 @@ class BoundedPredictor(Predictor):
         return eqx.tree_at(
             lambda bp: bp.inner,
             self,
-            reinitialize_with_key(self.inner, key),
+            reinitialize(self.inner, key=key),
         )
 
 
-def reinitialize_with_key(predictor: eqx.Module, key: Array) -> eqx.Module:
+def reinitialize(predictor: eqx.Module, *, key: Array) -> eqx.Module:
     """Return a fresh copy of ``predictor`` with its float leaves re-initialised.
 
     Single-Module helper. If ``predictor`` implements
-    ``initialized_with_key`` (a ``self -> key -> self`` method for classes
+    ``reinitialized`` (a ``self -> key -> self`` method for classes
     that want their own re-init scheme, such as a KAN that has to rebuild
     its grid), this delegates to it. Otherwise every inexact-array leaf is
     replaced with a standard-normal sample of matching shape and dtype.
 
     For a *pytree* of predictors, the convention at the ``simulate_fn``
-    boundary, use :func:`reinitialize_pytree_with_key`.
+    boundary, use :func:`reinitialize_pytree`.
     """
-    if hasattr(predictor, "initialized_with_key"):
-        return cast(eqx.Module, predictor.initialized_with_key(key))
+    if hasattr(predictor, "reinitialized"):
+        return cast(eqx.Module, predictor.reinitialized(key=key))
 
     leaves, treedef = jtu.tree_flatten(predictor)
     inexact_indices = [i for i, leaf in enumerate(leaves) if eqx.is_inexact_array(leaf)]
@@ -1008,7 +1008,7 @@ def reinitialize_with_key(predictor: eqx.Module, key: Array) -> eqx.Module:
     return cast(eqx.Module, jtu.tree_unflatten(treedef, new_leaves))
 
 
-def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
+def reinitialize_pytree(predictors: Any, *, key: Array) -> Any:
     """Per-``eqx.Module``-leaf re-initialisation across a ``predictors`` pytree.
 
     Used by the training tournament to escape bad initial weights: when
@@ -1023,14 +1023,14 @@ def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
     Accepts any pytree shape ``jax.tree_util`` can walk, including a bare
     ``eqx.Module``. Returns a structurally identical pytree with fresh
     weights on every unit it finds. A unit is a ``Predictor``, a module with
-    its own ``initialized_with_key``, or a module holding neither, such as an
+    its own ``reinitialized``, or a module holding neither, such as an
     ``eqx.nn.MLP``. A plain container module of predictors is walked into,
     as a dict is, so a ``Parameter`` inside it keeps its own rule: only
     boxed entries are redrawn.
     """
 
     def _has_own_rule(node: Any) -> bool:
-        return isinstance(node, Predictor) or hasattr(node, "initialized_with_key")
+        return isinstance(node, Predictor) or hasattr(node, "reinitialized")
 
     def _is_module(node: Any) -> bool:
         if not isinstance(node, eqx.Module):
@@ -1052,7 +1052,7 @@ def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
 
     def _per_leaf(node: Any) -> Any:
         if _is_module(node):
-            return reinitialize_with_key(node, next(keys_iter))
+            return reinitialize(node, key=next(keys_iter))
         return node
 
     return jtu.tree_map(_per_leaf, predictors, is_leaf=_is_module)

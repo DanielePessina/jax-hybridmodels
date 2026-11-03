@@ -307,8 +307,8 @@ channels. Experiments come back in order of first appearance.
 ```python
 BucketPayload(
     ts: ForwardRef("Float[Array, 'N T']"),
-    y_observed: ForwardRef("Float[Array, 'N T D']"),
-    yvar: ForwardRef("Float[Array, 'N T D']"),
+    observed: ForwardRef("Float[Array, 'N T D']"),
+    variance: ForwardRef("Float[Array, 'N T D']"),
     mask: ForwardRef("Bool[Array, 'N T D']"),
     covariates: ForwardRef('dict[str, Array]'),
     y0: ForwardRef("Float[Array, 'N S']"),
@@ -331,15 +331,15 @@ the lightest pytree container JAX already recognises.
 
 ts : Float[Array, "N T"]
     Per-experiment union-timestamp axis, sorted ascending row-wise.
-y_observed : Float[Array, "N T D"]
+observed : Float[Array, "N T D"]
     Channel observations scattered onto ``ts``. Cells where the channel
     was not observed at that timestamp hold ``0.0``; consumers must read
     ``mask`` to know which entries are real.
-yvar : Float[Array, "N T D"]
+variance : Float[Array, "N T D"]
     Per-observation variance (used by MLE losses). Defaults to ``1.0``
     at unobserved cells so masked positions never divide by zero.
 mask : Bool[Array, "N T D"]
-    ``True`` where the corresponding ``y_observed`` cell came from a
+    ``True`` where the corresponding ``observed`` cell came from a
     real ``ChannelObs`` entry, ``False`` where the union axis carries a
     time at which that channel was not measured. Every loss reads this
     to know which cells count.
@@ -529,7 +529,7 @@ split_dataset(
     dataset: 'Dataset',
     *,
     train: 'float' = 0.8,
-    val: 'float' = 0.1,
+    validation: 'float' = 0.1,
     test: 'float' = 0.1,
     key: 'Array',
 ) -> tuple[Dataset, Dataset, Dataset]
@@ -541,7 +541,7 @@ Splitting happens at the ``Experiment`` level and each split is bucketed
 from scratch, so its bucket structure suits its own contents rather than
 the original bucket boundaries.
 
-Counts use ``floor(train*n)`` and ``floor(val*n)``, with test taking the
+Counts use ``floor(train*n)`` and ``floor(validation*n)``, with test taking the
 remainder so the sizes sum to ``n``. An empty split comes back with no
 payloads and no experiments, so it cannot be split again.
 
@@ -550,14 +550,14 @@ payloads and no experiments, so it cannot be split again.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `dataset` |  | Source dataset. Must carry its experiments, or this raises. |
-| `train, val, test` |  | Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``). |
+| `train, validation, test` |  | Fractions in ``[0, 1]`` summing to ``1.0`` (within ``np.isclose``). |
 | `key` |  | Required ``jr.PRNGKey`` for the permutation, never defaulted, so reproducibility does not rest on a hidden global. |
 
 **Returns**
 
 | Item | Type | Description |
 | --- | --- | --- |
-| `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, val_dataset, test_dataset)``. |
+| `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, validation_dataset, test_dataset)``. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1283)</small>
 

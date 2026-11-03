@@ -86,7 +86,7 @@ def _select(
     indices: Array,
 ) -> tuple[Array, Array, Array]:
     p = pred_obs[..., indices]
-    y = bp.y_observed[..., indices]
+    y = bp.observed[..., indices]
     m = bp.mask[..., indices].astype(bool)
     return p, y, m
 
@@ -139,7 +139,7 @@ def masked_mse(
 ) -> Array:
     """Mean squared error reduced over a single global denominator.
 
-    Computes ``sum(mask * weights * (pred - y_observed)**2) / max(mask.sum(), 1)``
+    Computes ``sum(mask * weights * (pred - observed)**2) / max(mask.sum(), 1)``
     over the selected channels. A long-trajectory experiment adds terms to
     the numerator and the denominator in proportion, and gets no explicit
     per-experiment weighting. Use ``bal_mse`` when you want that weighting.
@@ -150,7 +150,7 @@ def masked_mse(
         Predicted output channels, one ``[T, D]`` block per experiment in
         the bucket, from ``state_to_output(simulate_fn(...))``.
     bp : BucketPayload
-        Bucket data. Reads ``mask`` and ``y_observed``.
+        Bucket data. Reads ``mask`` and ``observed``.
     channel_idx
         Trailing-axis indices to keep. ``None`` keeps all ``D`` channels.
     channel_weights
@@ -175,7 +175,7 @@ def masked_mle(
     """Total Gaussian negative log-likelihood across the bucket.
 
     Sums the pointwise Gaussian negative log-likelihood (variance from
-    ``bp.yvar``) over the time axis, giving one NLL per experiment and
+    ``bp.variance``) over the time axis, giving one NLL per experiment and
     channel, shape ``[N, D]``. Multiplies by the per-channel ``weights`` and
     sums those.
 
@@ -185,7 +185,7 @@ def masked_mle(
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    var = bp.yvar[..., indices]
+    var = bp.variance[..., indices]
     nll = _gaussian_nll_terms(p, y, var, m)
     nll_per_exp_channel = nll.sum(axis=1)
     return (nll_per_exp_channel * weights[None, :]).sum()
@@ -235,13 +235,13 @@ def bal_mle(
 
     Averages over time within each observed experiment, then over those
     experiments. Same reduction as ``bal_mse``, with
-    ``_gaussian_nll_terms`` (which reads ``bp.yvar``) in place of the
+    ``_gaussian_nll_terms`` (which reads ``bp.variance``) in place of the
     pointwise squared error. Experiments with no observations in any selected
     channel are excluded from the outer mean.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    var = bp.yvar[..., indices]
+    var = bp.variance[..., indices]
     nll = _gaussian_nll_terms(p, y, var, m)
     sum_nll = nll.sum(axis=1)
     count = jnp.maximum(m.sum(axis=1), 1)
@@ -334,10 +334,10 @@ def resolve_loss_fn(
     def projected_loss(pred_obs: Array, bp: BucketPayload) -> Array:
         _validate_channel_idx(channel_idx, int(pred_obs.shape[-1]))
         p = pred_obs[..., indices]
-        y = bp.y_observed[..., indices]
-        var = bp.yvar[..., indices]
+        y = bp.observed[..., indices]
+        var = bp.variance[..., indices]
         m = bp.mask[..., indices]
-        return loss(p, bp._replace(y_observed=y, yvar=var, mask=m))
+        return loss(p, bp._replace(observed=y, variance=var, mask=m))
 
     return projected_loss
 

@@ -34,7 +34,7 @@ def main() -> None:
             out_size=2,
             width_size=8,
             depth=2,
-            activation_name="tanh",
+            activation="tanh",
             key=jr.PRNGKey(0),
         ),
         out_scaler=BoundScaler(bounds=((1e8, 1e14), (1e-8, 1e-4)), transform="sigmoid"),

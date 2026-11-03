@@ -33,7 +33,7 @@ masked_mse(
 
 Mean squared error reduced over a single global denominator.
 
-Computes ``sum(mask * weights * (pred - y_observed)**2) / max(mask.sum(), 1)``
+Computes ``sum(mask * weights * (pred - observed)**2) / max(mask.sum(), 1)``
 over the selected channels. A long-trajectory experiment adds terms to
 the numerator and the denominator in proportion, and gets no explicit
 per-experiment weighting. Use ``bal_mse`` when you want that weighting.
@@ -43,7 +43,7 @@ per-experiment weighting. Use ``bal_mse`` when you want that weighting.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `pred_obs` | `Float[Array, "N T D"]` | Predicted output channels, one ``[T, D]`` block per experiment in the bucket, from ``state_to_output(simulate_fn(...))``. |
-| `bp` | `BucketPayload` | Bucket data. Reads ``mask`` and ``y_observed``. |
+| `bp` | `BucketPayload` | Bucket data. Reads ``mask`` and ``observed``. |
 | `channel_idx` |  | Trailing-axis indices to keep. ``None`` keeps all ``D`` channels. |
 | `channel_weights` |  | Per-channel multipliers; length must match ``channel_idx`` (or ``D`` when ``channel_idx`` is ``None``). |
 
@@ -70,7 +70,7 @@ masked_mle(
 Total Gaussian negative log-likelihood across the bucket.
 
 Sums the pointwise Gaussian negative log-likelihood (variance from
-``bp.yvar``) over the time axis, giving one NLL per experiment and
+``bp.variance``) over the time axis, giving one NLL per experiment and
 channel, shape ``[N, D]``. Multiplies by the per-channel ``weights`` and
 sums those.
 
@@ -135,7 +135,7 @@ Per-experiment-balanced Gaussian NLL.
 
 Averages over time within each observed experiment, then over those
 experiments. Same reduction as ``bal_mse``, with
-``_gaussian_nll_terms`` (which reads ``bp.yvar``) in place of the
+``_gaussian_nll_terms`` (which reads ``bp.variance``) in place of the
 pointwise squared error. Experiments with no observations in any selected
 channel are excluded from the outer mean.
 

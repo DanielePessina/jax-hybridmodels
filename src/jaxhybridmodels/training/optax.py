@@ -57,7 +57,7 @@ from jaxhybridmodels.penalties import (
     data_penalty_points,
     select_penalty_points,
 )
-from jaxhybridmodels.predictors.base import reinitialize_pytree_with_key
+from jaxhybridmodels.predictors.base import reinitialize_pytree
 from jaxhybridmodels.results import FitHistory, FitResult, StopReason
 from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
@@ -160,10 +160,9 @@ class TrainingPhase:
         the two depends on the data's scale. Ignored when ``segments=1``.
     """
 
-    steps: int
-    # ``steps`` may be positional (``TrainingPhase(200, lr=1e-2)``); the rest
-    # are keyword-only so a stray positional cannot land in the wrong field.
+    # Every field is keyword-only, ``steps`` included, as on the configs.
     _: KW_ONLY
+    steps: int
     lr: float | optax.Schedule = 1e-3
     optimizer: OptimizerSpec = "adamw"
     horizon: float = 1.0
@@ -286,9 +285,9 @@ class OptaxTrainingConfig:
             if self.phases:
                 raise ValueError("Use steps= or phases=, not both")
             # None means "not given"; fall back to the TrainingPhase defaults.
-            default = TrainingPhase(steps)
+            default = TrainingPhase(steps=steps)
             phase = TrainingPhase(
-                steps,
+                steps=steps,
                 lr=default.lr if lr is None else lr,
                 optimizer=default.optimizer if optimizer is None else optimizer,
             )
@@ -680,11 +679,7 @@ def _shared_tournament(
             # guess is always a candidate and is never thrown away. The others
             # redraw, one subkey per Module leaf, so identical-shape sibling
             # predictors get genuinely different fresh weights.
-            fresh = (
-                predictors
-                if attempt == 0
-                else reinitialize_pytree_with_key(predictors, attempt_key)
-            )
+            fresh = predictors if attempt == 0 else reinitialize_pytree(predictors, key=attempt_key)
             # Re-init draws every Module leaf, frozen ones included. Put the
             # frozen leaves back, so a frozen pre-trained subtree (or a
             # default-frozen BoundScaler) keeps its values instead of being

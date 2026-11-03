@@ -287,7 +287,7 @@ config = hm.EvosaxTrainingConfig(
     steps=200,            # generations
     init="lhs_box",       # Latin hypercube over the start box
     init_box_extent=0.5,  # half-width of that box, in latent units
-    sigma_init=0.3,       # CMA-ES initial step size
+    init_sigma=0.3,       # CMA-ES initial step size
 )
 result = model.fit(experiments, config, objective=objective, key=key)
 result.history.loss       # best-so-far loss, one entry per generation

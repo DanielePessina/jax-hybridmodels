@@ -12,7 +12,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Predictors: Trainable Components](/api/predictors)
 
-[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
+[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize`](/api/predictors#reinitialize), [`reinitialize_pytree`](/api/predictors#reinitialize_pytree)
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 

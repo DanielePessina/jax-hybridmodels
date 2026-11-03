@@ -16,7 +16,7 @@
 - A failed fit names the experiments that failed, by re-solving with `throw` off, and
   says when more `max_steps` will not help.
 - `BoundedPredictor(input_warp=, output_warp=)` warps a scaler built from bounds.
-- `reinitialize_with_key` and `reinitialize_pytree_with_key` are top-level exports.
+- `reinitialize` and `reinitialize_pytree` are top-level exports.
 - `InferenceProblem.physical` takes leading sample axes.
 - `FitResult.summary()` and `SavedRun.summary()` report how the run ended, the
   loss by phase, each `Parameter` with any near a bound, and how much of each
@@ -110,7 +110,7 @@
   Optax only. It raises `RuntimeError` when every seed fails.
 - `HybridModel.predict(data, *, ts=None, n_points=None)`: `n_points` gives
   each experiment an even grid over its own span, `ts` one grid for all.
-  Off the measured grid, `observed` and `observation_mask` are empty.
+  Off the measured grid, `observed` and `mask` are empty.
 - `hm.predict_ensemble(models, data, *, ts=None, n_points=None)` returns a
   `PredictionResult` of the member mean. `models` holds `HybridModel`s or
   the `FitResult`s from `fit_ensemble`. `ExperimentPrediction.std` holds
@@ -302,8 +302,9 @@
   `build_dataset_score`'s `channel_names=` is now `output_channel_names=`,
   the name the rest of the API uses.
 - **Breaking.** `BoundScaler(bounds, *, ...)`: every option after `bounds`
-  is keyword-only. `step_profile(*, before, after, jump_at)` and
-  `ramp_profile(*, t0, t1, v0, v1)` are keyword-only.
+  is keyword-only. `step_profile(*, at, before, after)` and
+  `ramp_profile(*, start, end, before, after)` are keyword-only, and name
+  the two levels alike.
 - **Breaking.** `make_dataset` raises on duplicate `exp_id` and names empty
   IDs `experiment_<i>`, adding a `_<n>` suffix when an explicit ID already
   uses that name.
@@ -355,11 +356,17 @@ Migration for code written against the earlier API:
 | `load_run(path, predictors_template=..., optax_cls=...)` | `run = hm.load(path, like=build_model())`; `run.model`, `run.history`, `run.config` |
 | `hm.save_predictors` / `hm.load_predictors(path, template)` | `hm.save(path, model)` / `hm.load(path, like=model).model`, or `jaxhybridmodels.serialise.load_predictors(path, like=template)` |
 | `build_apply_update(optimizer, mask)` | `build_apply_update(optimizer=optimizer, trainable=mask)` |
-| `step_profile(a, b, t)` | `step_profile(before=a, after=b, jump_at=t)` |
+| `step_profile(a, b, t)` | `step_profile(at=t, before=a, after=b)` |
+| `ramp_profile(t0, t1, v0, v1)` | `ramp_profile(start=t0, end=t1, before=v0, after=v1)` |
 | `print_metrics(compute_metrics(predictions))` | `print_metrics(predictions)` |
 | `model.fit(make_dataset(exps, ...), ...)` | `model.fit(exps, ...)` |
 | `model.simulate(ts=..., y0=exp.y0, covariates=exp.covariates, t0=exp.t0)` | `model.simulate(exp, ts=...)` |
 | `SolverConfig(solver=diffrax.Tsit5(), rtol=1e-5, atol=1e-7, max_steps=4096, dt0=None)` | `SolverConfig()` |
+| `bp.y_observed`, `bp.yvar` in a custom loss | `bp.observed`, `bp.variance`, as on `ChannelObs` |
+| `MLPPredictor(..., activation_name="tanh")` | `MLPPredictor(..., activation="tanh")` |
+| `predictor.initialized_with_key(key)`, `reinitialize_with_key(p, key)`, `reinitialize_pytree_with_key(p, key)` | `predictor.reinitialized(key=key)`, `reinitialize(p, key=key)`, `reinitialize_pytree(p, key=key)` |
+| `split_dataset(data, train=0.8, val=0.1, test=0.1, key=key)` | `split_dataset(data, train=0.8, validation=0.1, test=0.1, key=key)` |
+| `EvosaxTrainingConfig(sigma_init=0.3)` | `EvosaxTrainingConfig(init_sigma=0.3)` |
 
 ### Fixed
 

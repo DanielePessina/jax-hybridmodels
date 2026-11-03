@@ -151,10 +151,10 @@ def main() -> None:
     # A two-sided 90% interval has a one-sided 95% bound at each end. The fastest
     # plausible rate gives the shortest plausible shelf life.
     profile = mle.profile("log_k25", confidence=0.90)
-    slowest, fastest = profile.interval
+    slowest, fastest = profile.bounds
     if slowest is None or fastest is None:
         raise SystemExit(
-            f"the data do not bound the rate, so no claim can be set: {profile.stopped}"
+            f"the data do not bound the rate, so no claim can be set: {profile.stop_reasons}"
         )
     estimate = shelf_life(math.exp(float(mle.physical(mle.position)["log_k25"])))
     lower = shelf_life(math.exp(fastest))
@@ -167,7 +167,7 @@ def main() -> None:
     # The delta method gives the same kind of bound for any function of the values,
     # in one line, but assumes the shelf life itself is close to Gaussian.
     life = fisher.derived(lambda values: shelf_life(jnp.exp(values["log_k25"])))
-    wald, _ = life.interval(0.95, side="lower")
+    wald, _ = life.interval(confidence=0.95, side="lower")
     print(f"  delta method: {float(life.estimate):.1f} ± {float(life.standard_error):.1f} months,")
     print(f"  one-sided 95% lower bound {float(wald):.1f} months")
     # endregion delta-method
@@ -175,7 +175,7 @@ def main() -> None:
     # region band
     # Draws from the estimate's sampling distribution carry its uncertainty into
     # any function of it: here the shelf life, and the potency curve at 25 °C.
-    draws = fisher.sample(jr.key(2), 4000)
+    draws = fisher.sample(key=jr.key(2), n_draws=4000)
     sampled = shelf_life(np.exp(np.asarray(mle.physical(draws)["log_k25"])))
     storage = hm.make_experiment(
         channels={"potency": hm.ChannelObs(ts=jnp.asarray([0.0]), values=jnp.asarray([1.0]))},
@@ -184,7 +184,9 @@ def main() -> None:
         exp_id="25 C",
     )
     months = jnp.linspace(0.0, 48.0, 97)
-    band = mle.predict(draws, [storage], ts=months, n_draws=400, key=jr.key(3))["25 C"]
+    band = mle.predict(
+        draws, [storage], ts=months, n_draws=400, quantiles=(0.05, 0.95), key=jr.key(3)
+    )["25 C"]
     # endregion band
     print(f"  from 4000 draws: 5th percentile {np.percentile(sampled, 5):.1f} months")
 

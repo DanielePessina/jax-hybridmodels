@@ -64,8 +64,9 @@ or a list of `HybridModel`s. `pred` is a `PredictionResult` whose outputs
 are the member mean, so
 `compute_metrics` scores the mean. Each experiment's `std` holds the
 per-channel standard deviation across members (`ddof=0`), and
-`pred.members` holds each model's own result. `to_dataframe()` adds a
-`std` column. `ts=` and `n_points=` work as in
+`pred.members` holds each model's own result. `quantiles` holds the 2.5%
+and 97.5% levels across members, a central 95% band; pass `quantiles=` for
+others. `to_dataframe()` adds a `std` column and one per level. `ts=` and `n_points=` work as in
 [`predict`](/guide/model-interface#predicting), so
 `hm.predict_ensemble(results, data, n_points=200)` gives a smooth mean
 curve with its band.

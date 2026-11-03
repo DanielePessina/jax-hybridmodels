@@ -100,7 +100,7 @@ def transport(c: Array, c_in: Array) -> Array:
 def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) -> diffrax.Solution:
     """Integrate the discretised tube for a rate ``g_fn(c, T) * c``."""
     temp, feed = covariates["T"], covariates["c_feed"]
-    c_in = hm.step_profile(before=feed, after=0.3 * feed, jump_at=T_DROP)
+    c_in = hm.step_profile(before=feed, after=0.3 * feed, at=T_DROP)
 
     def vector_field(t, c, args):
         return transport(c, c_in(t)) - g_fn(c, temp) * c
@@ -181,7 +181,7 @@ def build_models(key: Array) -> tuple[hm.HybridModel, hm.HybridModel]:
     # region models
     net = hm.BoundedPredictor(
         inner=hm.MLPPredictor(
-            in_size=2, out_size=1, width_size=16, depth=2, activation_name="tanh", key=key
+            in_size=2, out_size=1, width_size=16, depth=2, activation="tanh", key=key
         ),
         input_keys=("c", "T"),
         input_bounds=((0.0, 2.2), (300.0, 360.0)),
@@ -226,8 +226,8 @@ def plot(args, dataset, hybrid, mechanistic) -> None:
         sim_m = mechanistic.simulate(experiment=exp, ts=dense)
         for ax, name in zip(row, CHANNELS, strict=True):
             obs = pred_h[exp.exp_id]
-            mask = np.asarray(obs.observation_mask[name])
-            ax.plot(np.asarray(obs.times)[mask], np.asarray(obs.observed[name])[mask], "ko", ms=3)
+            mask = np.asarray(obs.mask[name])
+            ax.plot(np.asarray(obs.ts)[mask], np.asarray(obs.observed[name])[mask], "ko", ms=3)
             ax.plot(dense, sim_h.outputs[name], color="tab:red", label="hybrid")
             ax.plot(dense, sim_m.outputs[name], color="tab:blue", ls="--", label="first order")
             ax.set_title(f"{exp_name(temp, feed)}, {name}", fontsize=9)
@@ -291,8 +291,8 @@ def main() -> None:
     config = hm.OptaxTrainingConfig(
         phases=(
             # Fit the start-up front first, then the whole run with the feed drop.
-            hm.TrainingPhase(args.steps // 3, lr=1e-2, horizon=0.5),
-            hm.TrainingPhase(args.steps - args.steps // 3, lr=3e-3),
+            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, horizon=0.5),
+            hm.TrainingPhase(steps=args.steps - args.steps // 3, lr=3e-3),
         ),
     )
     # endregion fit

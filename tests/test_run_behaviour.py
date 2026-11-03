@@ -96,7 +96,7 @@ class Latent(hm.Predictor):
     def __call__(self, x: Array) -> Array:
         return self.c
 
-    def initialized_with_key(self, key: Array) -> Latent:
+    def reinitialized(self, *, key: Array) -> Latent:
         return self
 
 
@@ -169,7 +169,7 @@ TRAJECTORY = Objective(trajectory_penalty_fn=accumulated_penalty, trajectory_pen
 
 
 def test_evosax_ranks_by_the_trajectory_penalty():
-    config = EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5)
+    config = EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.5)
     result = train_with_evosax(
         embedded_model(latent_predictors(5.0)),
         embedded_dataset(),
@@ -298,10 +298,10 @@ def curriculum(temp_data):
     ``Parameter`` has a loss floor over the full window. Over the first
     observation every curve looks alike and the loss is far lower.
     """
-    short = TrainingPhase(10, lr=0.1, horizon=0.2)
+    short = TrainingPhase(steps=10, lr=0.1, horizon=0.2)
     both = parameter_model().fit(
         temp_data,
-        hm.OptaxTrainingConfig(phases=(short, TrainingPhase(15, lr=0.05))),
+        hm.OptaxTrainingConfig(phases=(short, TrainingPhase(steps=15, lr=0.05))),
         key=jr.key(0),
         verbose=False,
     )
@@ -323,8 +323,8 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
         decay_data,
         hm.OptaxTrainingConfig(
             phases=(
-                TrainingPhase(3, lr=0.05),
-                TrainingPhase(3, lr=1e-2, optimizer=raw, reset_optimizer=True),
+                TrainingPhase(steps=3, lr=0.05),
+                TrainingPhase(steps=3, lr=1e-2, optimizer=raw, reset_optimizer=True),
             )
         ),
         key=jr.key(0),
@@ -335,8 +335,8 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     with pytest.raises(ValueError, match="learning rate cannot be changed"):
         hm.OptaxTrainingConfig(
             phases=(
-                TrainingPhase(2, lr=1e-3, optimizer=raw),
-                TrainingPhase(2, lr=1e-2, optimizer=raw),
+                TrainingPhase(steps=2, lr=1e-3, optimizer=raw),
+                TrainingPhase(steps=2, lr=1e-2, optimizer=raw),
             )
         )
 
@@ -528,19 +528,19 @@ def test_predict_on_explicit_and_even_grids(decay_data):
     """``ts`` and ``n_points`` change the grid; each experiment still starts at its ``t0``."""
     model = parameter_model(TRUE_RATE)
     measured = model.predict(decay_data)
-    times = measured["b"].times
+    times = measured["b"].ts
     on_ts = model.predict(decay_data, ts=times)
     for exp_id in measured:
-        np.testing.assert_allclose(on_ts[exp_id].times, times)
-        assert on_ts[exp_id].observed == {} and on_ts[exp_id].observation_mask == {}
+        np.testing.assert_allclose(on_ts[exp_id].ts, times)
+        assert on_ts[exp_id].observed == {} and on_ts[exp_id].mask == {}
     np.testing.assert_allclose(on_ts["b"].outputs["conc"], measured["b"].outputs["conc"], atol=1e-4)
 
     even = model.predict(list(decay_data.experiments), n_points=9)
     for exp_id, experiment in even.items():
-        start, end = measured[exp_id].times[0], measured[exp_id].times[-1]
-        np.testing.assert_allclose(experiment.times, jnp.linspace(start, end, 9), rtol=1e-6)
+        start, end = measured[exp_id].ts[0], measured[exp_id].ts[-1]
+        np.testing.assert_allclose(experiment.ts, jnp.linspace(start, end, 9), rtol=1e-6)
         np.testing.assert_allclose(
-            experiment.outputs["conc"], jnp.exp(-TRUE_RATE * experiment.times), rtol=1e-3
+            experiment.outputs["conc"], jnp.exp(-TRUE_RATE * experiment.ts), rtol=1e-3
         )
     with pytest.raises(ValueError, match="measured grid"):
         hm.compute_metrics(even)
@@ -548,7 +548,7 @@ def test_predict_on_explicit_and_even_grids(decay_data):
     # simulate takes n_points for the same even grid over one experiment.
     first = decay_data.experiments[0]
     simulated = model.simulate(first, n_points=9)
-    np.testing.assert_allclose(simulated.times, even[first.exp_id].times, rtol=1e-6)
+    np.testing.assert_allclose(simulated.ts, even[first.exp_id].ts, rtol=1e-6)
     with pytest.raises(ValueError, match="not both"):
         model.simulate(first, ts=times, n_points=9)
     with pytest.raises(ValueError, match="needs experiment="):
@@ -666,7 +666,7 @@ def test_stop_reason_follows_the_final_phase(decay_data, monkeypatch):
     # Phase 0 cannot improve (lr=0), so patience cuts it short. Phase 1
     # improves every step and runs to its budget.
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(10, lr=0.0), hm.TrainingPhase(3, lr=0.05)), patience=2
+        phases=(hm.TrainingPhase(steps=10, lr=0.0), hm.TrainingPhase(steps=3, lr=0.05)), patience=2
     )
     result = parameter_model().fit(decay_data, config, key=jr.key(5))
     assert result.history.phase.count(0) < 10
@@ -685,7 +685,7 @@ def evosax_fit(decay_data):
     console = _console()
     predictors = {**parameter_predictors(), "meta": hm.Constant((1.0, [2.0, 3.0]))}
     model = eqx.tree_at(lambda m: m.predictors, parameter_model(), predictors)
-    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, sigma_init=0.5)
+    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.5)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(evosax_module, "live_display_available", lambda: True)
         patch.setattr(
@@ -724,7 +724,7 @@ def test_piped_output_gets_plain_lines(decay_data, capsys, monkeypatch):
     assert any(line.startswith("step 20/20") for line in lines)
     assert lines[-1].startswith("done: final loss")
 
-    config = hm.EvosaxTrainingConfig(population_size=4, steps=3, sigma_init=0.1)
+    config = hm.EvosaxTrainingConfig(population_size=4, steps=3, init_sigma=0.1)
     parameter_model().fit(decay_data, config, key=jr.key(0))
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "searching: 3 generations of 4 candidates"
@@ -866,7 +866,7 @@ def test_nested_constants_are_frozen_and_survive_a_restart():
     constant = hm.Constant((1.0, [2.0, 3.0], (4.0, 5.0)))
     assert constant.value[0].shape == () and constant.value[1].shape == (2,)
     assert not any(jax.tree_util.tree_leaves(hm.trainable_mask(constant)))
-    fresh = hm.predictors.reinitialize_pytree_with_key({"c": constant}, jr.key(0))["c"]
+    fresh = hm.predictors.reinitialize_pytree({"c": constant}, key=jr.key(0))["c"]
     for a, b in zip(
         jax.tree_util.tree_leaves(constant), jax.tree_util.tree_leaves(fresh), strict=True
     ):
@@ -902,7 +902,8 @@ def test_lr_schedule_counts_from_the_phase_start(decay_data):
     result = parameter_model().fit(
         decay_data,
         hm.OptaxTrainingConfig(
-            phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=held)), restore_best=False
+            phases=(TrainingPhase(steps=5, lr=0.0), TrainingPhase(steps=6, lr=held)),
+            restore_best=False,
         ),
         key=jr.key(0),
         verbose=False,
@@ -919,7 +920,8 @@ def test_lr_schedule_counts_from_the_phase_start(decay_data):
     again = parameter_model().fit(
         decay_data,
         hm.OptaxTrainingConfig(
-            phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=host)), restore_best=False
+            phases=(TrainingPhase(steps=5, lr=0.0), TrainingPhase(steps=6, lr=host)),
+            restore_best=False,
         ),
         key=jr.key(0),
         verbose=False,
@@ -934,11 +936,11 @@ def test_channel_selection_composes_with_a_plain_custom_loss(quadratic_data):
     """
 
     def plain(pred_obs, bp):
-        return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.y_observed) ** 2, 0.0))
+        return jnp.sum(jnp.where(bp.mask, (pred_obs - bp.observed) ** 2, 0.0))
 
     names = quadratic_data.output_channel_names
     bp = quadratic_data.bucket_payloads[0]
-    pred = jnp.zeros_like(bp.y_observed)
+    pred = jnp.zeros_like(bp.observed)
     selected = Objective(loss=plain, channel_weights={"c2": 1.0}).loss_fn(names)
     assert float(selected(pred, bp)) == pytest.approx(float(THETA_STAR[2] ** 2))
     with pytest.raises(ValueError, match="channel_weights cannot be applied"):

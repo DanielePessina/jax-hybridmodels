@@ -176,7 +176,7 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     ("lr-without-steps", lambda: hm.OptaxTrainingConfig(lr=0.1), ValueError, "need steps="),
     (
         "lr-with-phases",
-        lambda: hm.OptaxTrainingConfig(lr=0.1, phases=(hm.TrainingPhase(1),)),
+        lambda: hm.OptaxTrainingConfig(lr=0.1, phases=(hm.TrainingPhase(steps=1),)),
         ValueError,
         "per TrainingPhase",
     ),
@@ -188,30 +188,30 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     ),
     (
         "steps-and-phases",
-        lambda: hm.OptaxTrainingConfig(steps=1, phases=(hm.TrainingPhase(1),)),
+        lambda: hm.OptaxTrainingConfig(steps=1, phases=(hm.TrainingPhase(steps=1),)),
         ValueError,
         "not both",
     ),
-    ("zero-steps", lambda: hm.TrainingPhase(0), ValueError, "at least 1"),
-    ("bad-horizon", lambda: hm.TrainingPhase(1, horizon=2.0), ValueError, "horizon"),
-    ("zero-segments", lambda: hm.TrainingPhase(1, segments=0), ValueError, "segments"),
-    ("float-segments", lambda: hm.TrainingPhase(1, segments=2.5), TypeError, "segments"),  # ty: ignore[invalid-argument-type]
+    ("zero-steps", lambda: hm.TrainingPhase(steps=0), ValueError, "at least 1"),
+    ("bad-horizon", lambda: hm.TrainingPhase(steps=1, horizon=2.0), ValueError, "horizon"),
+    ("zero-segments", lambda: hm.TrainingPhase(steps=1, segments=0), ValueError, "segments"),
+    ("float-segments", lambda: hm.TrainingPhase(steps=1, segments=2.5), TypeError, "segments"),  # ty: ignore[invalid-argument-type]
     (
         "negative-continuity",
-        lambda: hm.TrainingPhase(1, segments=2, continuity_weight=-1.0),
+        lambda: hm.TrainingPhase(steps=1, segments=2, continuity_weight=-1.0),
         ValueError,
         "continuity_weight",
     ),
     (
         "ends-segmented",
-        lambda: hm.OptaxTrainingConfig(phases=(hm.TrainingPhase(1, segments=4),)),
+        lambda: hm.OptaxTrainingConfig(phases=(hm.TrainingPhase(steps=1, segments=4),)),
         ValueError,
         "single shooting",
     ),
     (
         "optimizer-change-no-reset",
         lambda: hm.OptaxTrainingConfig(
-            phases=(hm.TrainingPhase(1), hm.TrainingPhase(1, optimizer="adabelief"))
+            phases=(hm.TrainingPhase(steps=1), hm.TrainingPhase(steps=1, optimizer="adabelief"))
         ),
         ValueError,
         "reset_optimizer",
@@ -434,36 +434,38 @@ _INF = float("inf")
 
 INVALID = [
     # TrainingPhase
-    pytest.param(lambda: TrainingPhase(0), "steps", id="phase-steps-0"),
-    pytest.param(lambda: TrainingPhase(-1), "steps", id="phase-steps-negative"),
-    pytest.param(lambda: TrainingPhase(2, lr=-1.0), "lr", id="phase-lr-negative"),
-    pytest.param(lambda: TrainingPhase(2, lr=_NAN), "lr", id="phase-lr-nan"),
+    pytest.param(lambda: TrainingPhase(steps=0), "steps", id="phase-steps-0"),
+    pytest.param(lambda: TrainingPhase(steps=-1), "steps", id="phase-steps-negative"),
+    pytest.param(lambda: TrainingPhase(steps=2, lr=-1.0), "lr", id="phase-lr-negative"),
+    pytest.param(lambda: TrainingPhase(steps=2, lr=_NAN), "lr", id="phase-lr-nan"),
     # A ready-made transformation owns its learning rate, so a schedule
     # paired with one would be accepted and then ignored.
     pytest.param(
-        lambda: TrainingPhase(2, lr=optax.constant_schedule(1e-3), optimizer=optax.sgd(1e-3)),
+        lambda: TrainingPhase(steps=2, lr=optax.constant_schedule(1e-3), optimizer=optax.sgd(1e-3)),
         "owns its learning rate",
         id="phase-schedule-with-raw-optimizer",
     ),
     # The horizon indexes a prefix of the observation times: zero scores
     # nothing, above one claims more timestamps than exist.
-    pytest.param(lambda: TrainingPhase(2, horizon=0.0), "horizon", id="phase-horizon-0"),
-    pytest.param(lambda: TrainingPhase(2, horizon=-0.1), "horizon", id="phase-horizon-neg"),
-    pytest.param(lambda: TrainingPhase(2, horizon=1.5), "horizon", id="phase-horizon-1.5"),
-    pytest.param(lambda: TrainingPhase(2, penalty_weight=-1.0), "non-negative", id="phase-pw-neg"),
-    pytest.param(lambda: TrainingPhase(2, penalty_weight=_NAN), "finite", id="phase-pw-nan"),
-    pytest.param(lambda: TrainingPhase(2, penalty_weight=_INF), "finite", id="phase-pw-inf"),
+    pytest.param(lambda: TrainingPhase(steps=2, horizon=0.0), "horizon", id="phase-horizon-0"),
+    pytest.param(lambda: TrainingPhase(steps=2, horizon=-0.1), "horizon", id="phase-horizon-neg"),
+    pytest.param(lambda: TrainingPhase(steps=2, horizon=1.5), "horizon", id="phase-horizon-1.5"),
+    pytest.param(
+        lambda: TrainingPhase(steps=2, penalty_weight=-1.0), "non-negative", id="phase-pw-neg"
+    ),
+    pytest.param(lambda: TrainingPhase(steps=2, penalty_weight=_NAN), "finite", id="phase-pw-nan"),
+    pytest.param(lambda: TrainingPhase(steps=2, penalty_weight=_INF), "finite", id="phase-pw-inf"),
     # OptaxTrainingConfig: the phase schedule. Zero phases would run nothing
     # and return an empty history with no hint why.
     pytest.param(lambda: OptaxTrainingConfig(), "steps= for one phase", id="optax-no-phases"),
     pytest.param(lambda: OptaxTrainingConfig(phases=()), "steps= for one phase", id="optax-empty"),
     pytest.param(
-        lambda: OptaxTrainingConfig(steps=2, phases=(TrainingPhase(3),)),
+        lambda: OptaxTrainingConfig(steps=2, phases=(TrainingPhase(steps=3),)),
         "steps= or phases=",
         id="optax-steps-and-phases",
     ),
     pytest.param(
-        lambda: OptaxTrainingConfig(phases=(TrainingPhase(2),), lr=1e-2),
+        lambda: OptaxTrainingConfig(phases=(TrainingPhase(steps=2),), lr=1e-2),
         "per TrainingPhase",
         id="optax-phases-with-shorthand-lr",
     ),
@@ -472,7 +474,7 @@ INVALID = [
     # without a reset used to be accepted and silently keep the old one.
     pytest.param(
         lambda: OptaxTrainingConfig(
-            phases=(TrainingPhase(2), TrainingPhase(2, optimizer="adabelief"))
+            phases=(TrainingPhase(steps=2), TrainingPhase(steps=2, optimizer="adabelief"))
         ),
         "reset_optimizer",
         id="optax-switch-without-reset",
@@ -531,7 +533,7 @@ INVALID = [
     pytest.param(lambda: EvosaxTrainingConfig(population_size=0), "population_size"),
     pytest.param(lambda: EvosaxTrainingConfig(steps=0), "steps", id="evo-steps-0"),
     pytest.param(lambda: EvosaxTrainingConfig(init_box_extent=-1.0), "init_box_extent"),
-    pytest.param(lambda: EvosaxTrainingConfig(sigma_init=0.0), "sigma_init"),
+    pytest.param(lambda: EvosaxTrainingConfig(init_sigma=0.0), "init_sigma"),
     pytest.param(lambda: EvosaxTrainingConfig(log_every=0), "log_every"),
     # SolverConfig
     pytest.param(lambda: _solver(rtol=0.0), "rtol", id="solver-rtol-0"),
@@ -566,7 +568,11 @@ INVALID = [
     pytest.param(lambda: annealing_schedule("cosine", total_epochs=10, init_value=0.0), "init"),
     pytest.param(lambda: annealing_schedule("cosine", total_epochs=10, end_value=1.5), "end"),
     pytest.param(lambda: annealing_schedule("nope", total_epochs=10), "kind", id="schedule-kind"),
-    pytest.param(lambda: ramp_profile(t0=3.0, t1=3.0, v0=0.0, v1=1.0), "t1", id="ramp-t1"),
+    pytest.param(
+        lambda: ramp_profile(start=3.0, end=3.0, before=0.0, after=1.0),
+        "end > start",
+        id="ramp-end",
+    ),
     pytest.param(lambda: piecewise_linear_profile(((0.0, 1.0),)), "at least two", id="pw-one"),
     pytest.param(
         lambda: piecewise_linear_profile(((0.0, 1.0), (1.0, 2.0), (0.5, 3.0))),
@@ -583,10 +589,10 @@ def test_invalid_configuration_raises(build, match):
 
 
 def test_configs_reject_stray_positional_arguments():
-    """Only ``TrainingPhase.steps`` may be positional."""
-    assert hm.TrainingPhase(5, lr=1e-3).steps == 5
+    """Every config field is keyword-only, ``TrainingPhase.steps`` included."""
+    assert hm.TrainingPhase(steps=5, lr=1e-3).steps == 5
     with pytest.raises(TypeError):
-        hm.TrainingPhase(5, 1e-3)  # ty: ignore[too-many-positional-arguments]
+        hm.TrainingPhase(5)  # ty: ignore[too-many-positional-arguments, missing-argument]
     with pytest.raises(TypeError):
         hm.OptaxTrainingConfig(5)  # ty: ignore[too-many-positional-arguments]
     with pytest.raises(TypeError):
@@ -781,13 +787,15 @@ def _numbered(n: int) -> Dataset:
 @pytest.mark.parametrize(
     "dataset, fractions, match",
     [
-        pytest.param(_numbered(10), {"train": 0.5, "val": 0.2, "test": 0.2}, "sum", id="sum"),
-        pytest.param(_numbered(10), {"train": 0.5, "val": -0.2, "test": 0.7}, r"\[0, 1\]"),
-        pytest.param(_numbered(10), {"train": 1.2, "val": 0.0, "test": -0.2}, r"\[0, 1\]"),
+        pytest.param(
+            _numbered(10), {"train": 0.5, "validation": 0.2, "test": 0.2}, "sum", id="sum"
+        ),
+        pytest.param(_numbered(10), {"train": 0.5, "validation": -0.2, "test": 0.7}, r"\[0, 1\]"),
+        pytest.param(_numbered(10), {"train": 1.2, "validation": 0.0, "test": -0.2}, r"\[0, 1\]"),
         # A positive fraction that floors to zero experiments would silently
         # drop a split the caller asked for.
-        pytest.param(_numbered(7), {}, "val fraction", id="n7-val-empty"),
-        pytest.param(_numbered(3), {}, "val fraction", id="n3-val-empty"),
+        pytest.param(_numbered(7), {}, "validation fraction", id="n7-val-empty"),
+        pytest.param(_numbered(3), {}, "validation fraction", id="n3-val-empty"),
         pytest.param(
             Dataset(bucket_payloads=(), output_channel_names=("c",), covariate_names=()),
             {},
@@ -820,7 +828,7 @@ def test_bootstrap_rejects_bad_inputs(dataset, n, match):
 
 def test_metrics_refuse_results_without_observations():
     bare = hm.PredictionResult(
-        {"a": hm.ExperimentPrediction(times=jnp.zeros(1), outputs={"x": jnp.zeros(1)})}
+        {"a": hm.ExperimentPrediction(ts=jnp.zeros(1), outputs={"x": jnp.zeros(1)})}
     )
     with pytest.raises(ValueError, match="observed values"):
         hm.compute_metrics(bare)
@@ -830,8 +838,8 @@ def test_metrics_refuse_results_without_observations():
 
 def _two_channel_scored() -> tuple[jax.Array, BucketPayload]:
     bp = _two_channel().bucket_payloads[0]
-    offsets = jnp.arange(bp.y_observed.size, dtype=jnp.float32).reshape(bp.y_observed.shape)
-    return bp.y_observed + 0.1 * offsets, bp
+    offsets = jnp.arange(bp.observed.size, dtype=jnp.float32).reshape(bp.observed.shape)
+    return bp.observed + 0.1 * offsets, bp
 
 
 @pytest.mark.parametrize(
@@ -968,7 +976,7 @@ def mlp(key: Array) -> MLPPredictor:
     [
         (
             lambda: MLPPredictor(
-                in_size=1, out_size=1, width_size=2, depth=1, activation_name="nope", key=jr.key(0)
+                in_size=1, out_size=1, width_size=2, depth=1, activation="nope", key=jr.key(0)
             ),
             "not supported",
         ),
@@ -1106,7 +1114,7 @@ def test_freeze_mask_rejects_entries_that_match_nothing(freeze, error, match):
 def test_bounded_predictor_names_missing_inputs():
     """A misspelled input key lists the keys the predictor needs."""
     inner = hm.MLPPredictor(
-        in_size=1, out_size=1, width_size=4, depth=1, activation_name="tanh", key=jr.key(0)
+        in_size=1, out_size=1, width_size=4, depth=1, activation="tanh", key=jr.key(0)
     )
     rate = hm.BoundedPredictor(
         inner=inner, input_keys=("temp",), input_bounds=(0.0, 2.0), output_bounds=(0.05, 3.0)
@@ -1148,7 +1156,7 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
             make_model(predictors, simulate_pressure),
             temp_data,
             hm.OptaxTrainingConfig(
-                phases=(TrainingPhase(1), TrainingPhase(1, penalty_weight=1e-2))
+                phases=(TrainingPhase(steps=1), TrainingPhase(steps=1, penalty_weight=1e-2))
             ),
             key=jr.key(0),
         )

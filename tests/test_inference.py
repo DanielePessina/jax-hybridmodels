@@ -251,9 +251,9 @@ def test_a_custom_likelihood_can_restate_the_gaussian(linear):
 
     def gaussian(pred_obs: Any, bp: Any, noise: Any) -> Any:
         cells = jstats.norm.logpdf(
-            jnp.where(bp.mask, bp.y_observed, 0.0),
+            jnp.where(bp.mask, bp.observed, 0.0),
             pred_obs,
-            jnp.sqrt(jnp.where(bp.mask, bp.yvar, 1.0)),
+            jnp.sqrt(jnp.where(bp.mask, bp.variance, 1.0)),
         )
         return jnp.sum(jnp.where(bp.mask, cells, 0.0))
 
@@ -274,7 +274,7 @@ def test_the_documented_ar1_likelihood_is_the_multivariate_normal(x64):
 
     def ar1(pred_obs: Any, bp: Any, noise: Any) -> Any:
         sigma, rho = noise["sigma"], noise["rho"]
-        residual = bp.y_observed[..., 0] - pred_obs[..., 0]
+        residual = bp.observed[..., 0] - pred_obs[..., 0]
         innovation = residual[:, 1:] - rho * residual[:, :-1]
         variance = sigma**2 * (1 - rho**2)
         first = jstats.norm.logpdf(residual[:, 0], 0.0, sigma)
@@ -355,7 +355,7 @@ def test_mixed_models_state_what_they_condition_on(x64):
         experiments,
         log_prior=normal_prior,
         noise="data",
-        free=["k", "net.inner.mlp.layers.1"],
+        estimate=["k", "net.inner.mlp.layers.1"],
     )
     named = set(last_layer.physical(last_layer.position))
     assert named == {"k", "net.inner.mlp.layers.1.weight", "net.inner.mlp.layers.1.bias"}
@@ -660,7 +660,7 @@ def _bad_problem(**overrides: Any) -> Any:
             id="forward-prior",
         ),
         pytest.param({"noise": {"y": hm.Parameter(0.1)}}, ValueError, "positive", id="noise-sign"),
-        pytest.param({"free": "nope"}, ValueError, "nope", id="free-path"),
+        pytest.param({"estimate": "nope"}, ValueError, "nope", id="estimate-path"),
         pytest.param({"log_prior": flat_prior}, ValueError, "improper", id="flat-prior-open-bound"),
         pytest.param(
             {"model": linear_model(hm.Constant(0.5))}, ValueError, "no Parameter", id="nothing"
@@ -705,13 +705,13 @@ def test_posterior_predictive_matches_the_closed_form(linear):
     assert len(result.members) == 400
     long = result["long"]
     last = -1
-    t_last = float(long.times[last])
+    t_last = float(long.ts[last])
     assert float(long.outputs["y"][last]) == pytest.approx(mean * t_last, abs=4 * sd * t_last / 15)
     assert float(long.std["y"][last]) == pytest.approx(sd * t_last, rel=0.2)
-    low, high = (float(long.quantiles["y"][q][last]) for q in (0.05, 0.95))
-    assert high - low == pytest.approx(2 * 1.6449 * sd * t_last, rel=0.2)
+    low, high = (float(long.quantiles["y"][q][last]) for q in (0.025, 0.975))
+    assert high - low == pytest.approx(2 * 1.96 * sd * t_last, rel=0.2)
     frame = result.to_dataframe()
-    assert {"q0.05", "q0.95", "std"} <= set(frame.columns)
+    assert {"q0.025", "q0.975", "std"} <= set(frame.columns)
 
 
 def test_observation_noise_widens_the_interval_by_the_noise(x64):
@@ -808,11 +808,12 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     fisher = optimum.problem.fisher()
     assert float(fisher.estimate[0]) == pytest.approx(mle, rel=1e-6)
     assert fisher.standard_errors()["k"] == pytest.approx(error, rel=1e-6)
-    observed = optimum.problem.fisher(information="observed")
+    observed = optimum.problem.fisher(curvature="exact")
     assert observed.standard_errors()["k"] == pytest.approx(error, rel=1e-6)
-    low, high = fisher.intervals(0.95)["k"]
+    low, high = fisher.intervals(confidence=0.95)["k"]
     assert (low, high) == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
-    estimates = np.asarray(optimum.problem.physical(fisher.sample(jr.key(4), 4000))["k"])
+    draws = fisher.sample(key=jr.key(4), n_draws=4000)
+    estimates = np.asarray(optimum.problem.physical(draws)["k"])
     assert estimates.mean() == pytest.approx(mle, abs=4 * error / np.sqrt(4000))
     assert estimates.std() == pytest.approx(error, rel=0.05)
     assert "Condition number" in fisher.summary()
@@ -821,7 +822,7 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     doubled = fisher.derived(lambda values: 2.0 * values["k"])
     assert float(doubled.estimate) == pytest.approx(2 * mle, rel=1e-6)
     assert float(doubled.standard_error) == pytest.approx(2 * error, rel=1e-6)
-    low, high = fisher.derived(lambda values: values["k"]).interval(0.95, side="lower")
+    low, high = fisher.derived(lambda values: values["k"]).interval(confidence=0.95, side="lower")
     assert float(low) == pytest.approx(mle - 1.644854 * error, rel=1e-6) and high == np.inf
 
     bayesian = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
@@ -829,7 +830,7 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     mean, sd = conjugate(ts, ys)
     assert float(laplace.estimate[0]) == pytest.approx(mean, rel=1e-6)
     assert laplace.standard_errors()["k"] == pytest.approx(sd, rel=1e-6)
-    draws = laplace.sample(jr.key(5), 4000)
+    draws = laplace.sample(key=jr.key(5), n_draws=4000)
     values = np.asarray(bayesian.physical(draws)["k"])
     assert values.shape == (4000,)
     assert values.mean() == pytest.approx(mean, abs=4 * sd / np.sqrt(4000))
@@ -837,7 +838,8 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     band = bayesian.predict(draws, key=jr.key(6), n_draws=50)
     assert set(band) == {e.exp_id for e in experiments}
     whitened = bayesian.optimize(target="posterior").problem.preconditioned()
-    again = np.asarray(whitened.physical(whitened.laplace().sample(jr.key(5), 4000))["k"])
+    redrawn = whitened.laplace().sample(key=jr.key(5), n_draws=4000)
+    again = np.asarray(whitened.physical(redrawn)["k"])
     assert again == pytest.approx(values, rel=1e-8)
 
 
@@ -865,7 +867,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     result = problem.fisher()
     assert result.standard_errors()["k"] == pytest.approx(least_squares(ts, ys)[1], rel=1e-6)
     assert result.standard_errors(latent=True)["k"] != pytest.approx(result.standard_errors()["k"])
-    low, high = result.intervals(0.95)["k"]
+    low, high = result.intervals(confidence=0.95)["k"]
     centre = float(result.estimate[0])
     # Built in the latent and mapped back, so it leans up as log k does and stays in bounds.
     assert 0.01 < low < centre < high < 10.0 and high - centre > centre - low
@@ -895,7 +897,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     sigma = float(noisy.physical(noisy.position)["noise.y"])
     expected = sigma / np.sqrt(2 * ys.size)
     assert noisy.fisher().standard_errors()["noise.y"] == pytest.approx(expected, rel=1e-6)
-    assert noisy.fisher(information="observed").standard_errors()["noise.y"] == pytest.approx(
+    assert noisy.fisher(curvature="exact").standard_errors()["noise.y"] == pytest.approx(
         expected, rel=1e-6
     )
 
@@ -911,7 +913,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     assert np.isinf(together.derived(lambda values: values["a"]).standard_error)
     assert together.intervals()["a"] == (-np.inf, np.inf)
     with pytest.raises(ValueError, match="do not constrain"):
-        together.sample(jr.key(0), 10)
+        together.sample(key=jr.key(0), n_draws=10)
     assert "Not identified: " in together.summary()
 
 
@@ -945,9 +947,9 @@ def test_a_profile_closes_where_the_closed_form_says_and_compiles_once(linear):
     # BFGS objective is compiled once per problem and reused for every point.
     assert len(traces) - before < with_compile
     assert profile.identifiable and profile.converged.all()
-    assert profile.stopped == ("threshold", "threshold")
-    assert profile.interval == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
-    assert list(profile.values) == sorted(profile.values)
+    assert profile.stop_reasons == ("threshold", "threshold")
+    assert profile.bounds == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
+    assert list(profile.grid) == sorted(profile.grid)
     assert profile.log_likelihood_ratio.min() == pytest.approx(0.0, abs=1e-9)
     assert "95% profile interval" in profile.summary() and first.name == "k"
 
@@ -958,10 +960,10 @@ def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
     problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
     profiles = problem.profiles()
     assert set(profiles) == {"a", "b"}
-    assert profiles["a"].interval == (None, None) and not profiles["a"].identifiable
-    assert profiles["a"].stopped == ("bound", "bound") and not profiles["a"].at_bound
+    assert profiles["a"].bounds == (None, None) and not profiles["a"].identifiable
+    assert profiles["a"].stop_reasons == ("bound", "bound") and not profiles["a"].at_bound
     # b compensates for a along the whole profile, keeping the product fixed.
-    product_along = profiles["a"].values * profiles["a"].others["b"]
+    product_along = profiles["a"].grid * profiles["a"].others["b"]
     assert np.ptp(product_along) == pytest.approx(0.0, abs=1e-5)
     assert "reaches its bound" in profiles["a"].summary()
     # Profiling b, a compensates until it is pinned, and only then does the profile
@@ -983,15 +985,15 @@ def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
     model = linear_model(hm.Parameter(mle - 4.0 * error, bounds=(0.5 * mle, bound)))
     problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
     profile = problem.profile("k")
-    assert profile.stopped == ("threshold", "bound")
+    assert profile.stop_reasons == ("threshold", "bound")
     threshold = scipy_stats.chi2.ppf(0.95, 1)
     expected = mle - float(np.sqrt(threshold * error**2 + (bound - mle) ** 2))
-    low, high = profile.interval
+    low, high = profile.bounds
     # Not exact: the ratio is quadratic about the unconstrained optimum, not about
     # the estimate on the bound, so its root is only nearly linear in the value.
     # Bisecting the bracket close to the threshold keeps that error small.
     assert high is None and low == pytest.approx(expected, rel=1e-3)
-    assert list(profile.values) == sorted(profile.values)
+    assert list(profile.grid) == sorted(profile.grid)
     # The curvature in the squash's tail says nothing about k, so Fisher reports
     # no number for it rather than a misleading one.
     with pytest.warns(RuntimeWarning, match="sit against their bounds"):

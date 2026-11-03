@@ -23,8 +23,8 @@ from jaxhybridmodels.predictors.base import (
     Constant,
     Parameter,
     Predictor,
-    reinitialize_pytree_with_key,
-    reinitialize_with_key,
+    reinitialize,
+    reinitialize_pytree,
 )
 from jaxhybridmodels.predictors.kan import KANPredictor
 from jaxhybridmodels.predictors.mlp import MLPPredictor
@@ -39,6 +39,6 @@ __all__ = [
     "NeuralNPolynomial",
     "Parameter",
     "Predictor",
-    "reinitialize_pytree_with_key",
-    "reinitialize_with_key",
+    "reinitialize_pytree",
+    "reinitialize",
 ]

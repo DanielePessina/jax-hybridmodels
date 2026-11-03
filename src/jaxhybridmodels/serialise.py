@@ -451,6 +451,9 @@ def _coerce_tuple_fields(cls: type, kwargs: dict[str, Any]) -> dict[str, Any]:
     return coerced
 
 
+_RENAMED_FIELDS = {"sigma_init": "init_sigma"}
+
+
 def _build_training_config(raw: dict[str, Any] | None) -> Any:
     """Rebuild a training config from its tagged dict.
 
@@ -468,6 +471,8 @@ def _build_training_config(raw: dict[str, Any] | None) -> Any:
     # 0.2 kept the display switch on the config. It never affected a result,
     # so dropping it cannot change the configuration a run was trained with.
     fields = {name: value for name, value in fields.items() if name != "verbose"}
+    # 0.2 names renamed for 0.3, mapped so a 0.2 run still loads.
+    fields = {_RENAMED_FIELDS.get(name, name): value for name, value in fields.items()}
     kwargs = _filter_dataclass_kwargs(cls, fields)
     kwargs = _coerce_tuple_fields(cls, kwargs)
     if "phases" in kwargs:

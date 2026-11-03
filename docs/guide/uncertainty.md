@@ -51,13 +51,13 @@ trainable leaves left fixed, and `make_problem` warns when there are any.
 
 | Model and method | What it gives | What it conditions on |
 | --- | --- | --- |
-| `Parameter`s only, default `free=` | Full posterior over the model's fitted values | Solver settings, `y0` |
-| `Parameter`s and a network, default `free=` | `p(theta \| weights, data)` | The fitted weights, which can make it too narrow and off centre |
-| `free=` naming a last layer | Posterior over that layer | Every other layer, so a lower bound on the network's uncertainty |
+| `Parameter`s only, default `estimate=` | Full posterior over the model's fitted values | Solver settings, `y0` |
+| `Parameter`s and a network, default `estimate=` | `p(theta \| weights, data)` | The fitted weights, which can make it too narrow and off centre |
+| `estimate=` naming a last layer | Posterior over that layer | Every other layer, so a lower bound on the network's uncertainty |
 | `fit_ensemble` | Spread across independent fits | Nothing is sampled: members are not posterior draws |
 
 A model with only networks has no `Parameter`, so the default raises. Name a layer
-with `free=`, or use [ensembles](/guide/ensembles):
+with `estimate=`, or use [ensembles](/guide/ensembles):
 
 <<< @/../examples/tubular_reactor/sample_tubular_reactor.py#last-layer
 
@@ -109,7 +109,7 @@ likelihood for one channel on a grid that is regular and fully measured:
 ```python
 def ar1(pred_obs, bp, noise):
     sigma, rho = noise["sigma"], noise["rho"]
-    residual = bp.y_observed[..., 0] - pred_obs[..., 0]
+    residual = bp.observed[..., 0] - pred_obs[..., 0]
     innovation = residual[:, 1:] - rho * residual[:, :-1]
     variance = sigma**2 * (1 - rho**2)
     first = jstats.norm.logpdf(residual[:, 0], 0.0, sigma)
@@ -228,7 +228,7 @@ log_A: 95% profile interval [16.91, 17.29]
 Here they match the Wald intervals, because this likelihood is close to Gaussian.
 Where it is not, the profile is the one to trust, and it does not depend on how the
 model is parametrised. A side that does not close is reported as `None`, and
-`profile.stopped` says why: the value reached its bound, so the data do not bound
+`profile.stop_reasons` says why: the value reached its bound, so the data do not bound
 it; the walk ran out of `max_points`; the model stopped solving; or BFGS did not
 converge where the ratio crossed. Only a converged crossing closes a side.
 `profile.others` holds every other value along the profile, which shows what
@@ -237,7 +237,7 @@ compensates.
 The information is computed in the latent coordinates the problem uses, and
 reported in physical units. Standard errors use the delta method. A Wald interval
 is built in the latent and mapped back, so it leans the way a log warp does and
-stays inside a `Parameter`'s bounds. `information="observed"` uses the negative
+stays inside a `Parameter`'s bounds. `curvature="exact"` uses the negative
 Hessian of the log-likelihood instead of the Gauss-Newton `J^T J`, and is the one
 that works with a custom `log_likelihood`.
 
@@ -284,7 +284,7 @@ of the values. `fn` takes the dict that `physical` returns and must use
 
 ```python
 life = fisher.derived(lambda values: jnp.log(1 / 0.9) / jnp.exp(values["log_k25"]))
-low, _ = life.interval(0.95, side="lower")  # one-sided 95% lower bound
+low, _ = life.interval(confidence=0.95, side="lower")  # one-sided 95% lower bound
 ```
 
 It assumes the quantity is close to Gaussian. For a bound that does not, profile
