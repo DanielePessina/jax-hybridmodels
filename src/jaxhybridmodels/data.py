@@ -54,7 +54,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
-from jaxtyping import Array, Bool, Float, Int
+from jaxtyping import Array, ArrayLike, Bool, Float, Int
 
 
 class ChannelObs(eqx.Module):
@@ -231,6 +231,41 @@ class BucketPayload(NamedTuple):
     n_obs: Int[Array, ""]
 
 
+def row_horizons(ts: Array, observed_rows: Array) -> Array:
+    """The smallest ``horizon`` at which each row is scored, ``[N, T]``.
+
+    ``ts`` is ``[N, T]`` and ``observed_rows`` is ``[N, T]``, true where any
+    channel was measured. An experiment's timeline runs from its first row
+    (``t0`` when set, else the first measurement) to its last measurement,
+    and a row's horizon is how far along that span it lies, from 0 to 1.
+    Each experiment is measured against its own span, so one long
+    experiment in a bucket does not shift the cutoff of the others, and the
+    rows a bucket adds for ``t0`` or for ``max_buckets`` padding do not
+    count.
+
+    Rows up to the first measurement get 0, so every horizon scores it:
+    otherwise an experiment that starts at ``t0`` well before its first
+    measurement would score nothing at a small horizon, and train nothing.
+    The last measurement gets exactly 1, with no rounding at the edge.
+    """
+    start = ts[:, :1]
+    last = jnp.max(jnp.where(observed_rows, ts, -jnp.inf), axis=1, keepdims=True)
+    span = last - start
+    has_span = span > 0
+    position = jnp.where(has_span, (ts - start) / jnp.where(has_span, span, 1.0), 0.0)
+    first = jnp.min(jnp.where(observed_rows, position, jnp.inf), axis=1, keepdims=True)
+    return jnp.where(position <= first, 0.0, position)
+
+
+def horizon_rows(ts: Array, observed_rows: Array, horizon: ArrayLike) -> Array:
+    """Which rows fall in the first ``horizon`` of their experiment's timeline.
+
+    ``[N, T]`` booleans; see :func:`row_horizons`. ``horizon`` may be traced.
+    """
+    horizons = row_horizons(ts, observed_rows)
+    return horizons <= jnp.asarray(horizon, dtype=horizons.dtype)
+
+
 class Dataset(eqx.Module):
     """All buckets of a dataset, as pure data.
 
@@ -302,6 +337,9 @@ def make_experiment(
     (already JAX arrays) and the channels, returning ``Float[Array, "S"]``.
     Where the observed channels are the whole state, a typical hook is
     ``lambda c, ch: jnp.array([ch["x"].values[0], ch["v"].values[0]])``.
+    The state belongs to the experiment's start: ``t0`` when set, else the
+    earliest time of any channel. ``values[0]`` is that state only when the
+    channel's ``ts`` is sorted and the channel was measured at that start.
     Unobserved state components are constructed there too, a population
     moment initialised to zero being the common case.
 
@@ -755,8 +793,19 @@ def _per_experiment_arrays(
             if ts_dtypes
             else np.dtype(np.float32)
         )
-    for ts_np, _values_np, _variance_np in channel_arrays:
-        union_ts.update(float(np.asarray(t, dtype=key_dtype)) for t in ts_np.tolist())
+    for ch_name, (ts_np, _values_np, _variance_np) in zip(
+        output_channel_names, channel_arrays, strict=True
+    ):
+        keys = {float(np.asarray(t, dtype=key_dtype)) for t in ts_np.tolist()}
+        if len(keys) < len(ts_np):
+            # Two distinct times of one channel round onto one key, so one
+            # measurement would silently overwrite the other.
+            raise ValueError(
+                f"Experiment {experiment.exp_id!r}: channel {ch_name!r} has times that "
+                f"coincide in {key_dtype}, the least precise time dtype among its channels. "
+                "Give every channel's ts the same dtype"
+            )
+        union_ts.update(keys)
 
     if experiment.t0 is not None:
         start = float(np.asarray(experiment.t0, dtype=key_dtype))

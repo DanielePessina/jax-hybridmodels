@@ -51,6 +51,7 @@ from jaxhybridmodels.data import (
     Dataset,
     make_bootstrap_dataset,
 )
+from jaxhybridmodels.losses import Pooling
 from jaxhybridmodels.objective import Objective, ResolvedObjective, resolve_objective
 from jaxhybridmodels.penalties import (
     PenaltyPointSource,
@@ -473,21 +474,19 @@ def _build_step_update(
     optimizer: optax.GradientTransformation,
     trainable: Any,
 ) -> Callable[..., tuple[Any, Any]]:
-    """Fused per-step tail: average, merge the bound penalty, and optimise.
+    """Fused per-step tail: merge the bound penalty, and optimise.
 
     One jitted ``step_update(predictors, acc_grads, penalty_grads,
-    n_buckets, opt_state) -> (predictors, opt_state)`` that normalises by
-    bucket count, adds the penalty grads and applies the optimiser update.
+    opt_state) -> (predictors, opt_state)`` that adds the penalty grads to
+    the pooled data gradient and applies the optimiser update.
     Each eager per-leaf tree operation dispatches one compiled kernel per
     parameter leaf. On CPU that measured ~2 ms per tree walk for a small
     MLP, several times the ODE solve itself, so folding them into the
-    optimiser kernel removes most of the Python-side step cost without
-    changing the math: the averaging and the penalty merge run in the
-    same order, so the optimiser sees bit-identical gradients.
+    optimiser kernel removes most of the Python-side step cost.
 
-    ``n_buckets`` stays a traced argument rather than a closure because a
-    bootstrap ensemble re-buckets every resample: closing over the source
-    dataset's count would silently average with the wrong denominator.
+    The bucket gradients arrive already weighted by their pooling shares
+    (:meth:`~jaxhybridmodels.losses.Pooling.shares`), so their sum is the
+    gradient of the dataset loss and nothing is divided here.
     """
 
     @eqx.filter_jit
@@ -495,12 +494,11 @@ def _build_step_update(
         predictors: Any,
         acc_grads: Any,
         penalty_grads: Any,
-        n_buckets: Array,
         opt_state: Any,
     ) -> tuple[Any, Any]:
-        avg_grads = jax.tree.map(lambda a, p: a / n_buckets + p, acc_grads, penalty_grads)
+        grads = jax.tree.map(jnp.add, acc_grads, penalty_grads)
         params = eqx.filter(predictors, trainable)
-        updates, new_opt_state = optimizer.update(avg_grads, opt_state, params)
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
         return eqx.apply_updates(predictors, updates), new_opt_state
 
     return step_update
@@ -512,13 +510,15 @@ def _training_step(
     bucket_step: Callable[..., tuple[Array, Any]],
     horizon: Array,
     trainable: Any,
-) -> tuple[Array, Any, int]:
-    """One training step: every bucket, gradients accumulated, raw sums back.
+    shares: tuple[Array, ...],
+) -> tuple[Array, Any]:
+    """One training step: every bucket, gradients accumulated.
 
-    Returns ``(total_loss, acc_grads, n_buckets)``, the **raw** sum of
-    per-bucket losses and gradients, not yet divided. The caller merges
-    the bound-penalty gradients and normalises inside the fused
-    ``step_update`` kernel (:func:`_build_step_update`), so the per-step
+    Returns ``(total_loss, acc_grads)``, the sums over buckets of each
+    bucket's loss and gradient scaled by its pooling share, which are the
+    loss over the whole dataset and its gradient. The caller merges the
+    bound-penalty gradients inside the fused ``step_update`` kernel
+    (:func:`_build_step_update`), so the per-step
     Python side never walks the parameter tree. The first bucket's
     gradients seed the accumulator directly instead of adding to a
     ``zeros_like`` tree, which saves one per-leaf pass per step.
@@ -529,18 +529,16 @@ def _training_step(
     """
     acc_grads: Any = None
     total_loss = jnp.asarray(0.0)
-    n_buckets = 0
-    for bp in dataset.bucket_payloads:
-        loss, grads = bucket_step(predictors, bp, horizon)
+    for bp, share in zip(dataset.bucket_payloads, shares, strict=True):
+        loss, grads = bucket_step(predictors, bp, horizon, share)
         if acc_grads is None:
             acc_grads = grads
         else:
             acc_grads = jax.tree.map(jnp.add, acc_grads, grads)
         total_loss = total_loss + loss
-        n_buckets += 1
     if acc_grads is None:  # defensive; callers validate a non-empty dataset
         acc_grads = jax.tree.map(jnp.zeros_like, eqx.filter(predictors, trainable))
-    return total_loss, acc_grads, n_buckets
+    return total_loss, acc_grads
 
 
 def _shooting_training_step(
@@ -550,25 +548,27 @@ def _shooting_training_step(
     shooting: ShootingKernels,
     horizon: Array,
     weight: Array,
-) -> tuple[Array, Array, Any, tuple[Array, ...], int]:
+    shares: tuple[Array, ...],
+) -> tuple[Array, Array, Any, tuple[Array, ...]]:
     """:func:`_training_step` for a segmented phase.
 
-    Returns ``(data_sum, continuity_sum, predictor_grads, node_grads,
-    n_buckets)``: the predictor gradients are summed over buckets as in
-    :func:`_training_step`, while each bucket's node gradient belongs to that
-    bucket's nodes alone.
+    Returns ``(data_sum, continuity_sum, predictor_grads, node_grads)``,
+    each bucket scaled by its pooling share: the predictor gradients are
+    summed over buckets as in :func:`_training_step`, while each bucket's
+    node gradient belongs to that bucket's nodes alone.
     """
     acc_grads: Any = None
     node_grads: list[Array] = []
     data_sum, gap_sum = jnp.asarray(0.0), jnp.asarray(0.0)
-    for bp, z, scale in zip(dataset.bucket_payloads, nodes.z, nodes.scale, strict=True):
+    buckets = zip(dataset.bucket_payloads, nodes.z, nodes.scale, shares, strict=True)
+    for bp, z, scale, share in buckets:
         (_, (data, gap)), (grads, z_grads) = shooting.step(
-            predictors, z, scale, bp, horizon, weight
+            predictors, z, scale, bp, horizon, weight, share
         )
         acc_grads = grads if acc_grads is None else jax.tree.map(jnp.add, acc_grads, grads)
         node_grads.append(z_grads)
         data_sum, gap_sum = data_sum + data, gap_sum + gap
-    return data_sum, gap_sum, acc_grads, tuple(node_grads), len(node_grads)
+    return data_sum, gap_sum, acc_grads, tuple(node_grads)
 
 
 def _build_shooting_update(
@@ -576,7 +576,7 @@ def _build_shooting_update(
 ) -> Callable[..., tuple[Any, tuple[Array, ...], Any]]:
     """:func:`_build_step_update` for a segmented phase, which also moves the nodes.
 
-    ``update(predictors, z, acc_grads, node_grads, penalty_grads, n_buckets,
+    ``update(predictors, z, acc_grads, node_grads, penalty_grads,
     opt_state) -> (predictors, z, opt_state)``. The optimiser state covers
     ``(trainable predictors, z)``, so it is initialised afresh whenever a
     phase starts new nodes.
@@ -589,13 +589,9 @@ def _build_shooting_update(
         acc_grads: Any,
         node_grads: tuple[Array, ...],
         penalty_grads: Any,
-        n_buckets: Array,
         opt_state: Any,
     ) -> tuple[Any, tuple[Array, ...], Any]:
-        grads = (
-            jax.tree.map(lambda a, p: a / n_buckets + p, acc_grads, penalty_grads),
-            jax.tree.map(lambda g: g / n_buckets, node_grads),
-        )
+        grads = (jax.tree.map(jnp.add, acc_grads, penalty_grads), node_grads)
         params = (eqx.filter(predictors, trainable), z)
         updates, new_state = optimizer.update(grads, opt_state, params)
         predictor_updates, node_updates = cast(tuple[Any, Any], updates)
@@ -637,6 +633,7 @@ def _shared_tournament(
     key: Array,
     horizon: Array,
     top_k: int,
+    pooling: Pooling,
     ui: TrainingUI | None = None,
     segmented: _Segmented | None = None,
 ) -> _Tournament:
@@ -672,6 +669,7 @@ def _shared_tournament(
     last_error: BaseException | None = None
     scored: list[tuple[float, Any]] = []
     scores: list[float] = []
+    shares = pooling.shares(dataset.bucket_payloads, horizon)
     for attempt in range(tournament_attempts):
         attempt_key = fold(key, f"tournament_attempt_{attempt}")
         try:
@@ -700,6 +698,7 @@ def _shared_tournament(
                     steps=tournament_steps,
                     lr=tournament_lr,
                     horizon=horizon,
+                    shares=shares,
                 )
             else:
                 candidate, score = _segmented_attempt(
@@ -711,6 +710,7 @@ def _shared_tournament(
                     steps=tournament_steps,
                     lr=tournament_lr,
                     horizon=horizon,
+                    shares=shares,
                 )
             score_value = float(score)
             if not math.isfinite(score_value):
@@ -759,30 +759,25 @@ def _single_attempt(
     steps: int,
     lr: float,
     horizon: Array,
+    shares: tuple[Array, ...],
 ) -> tuple[Any, Array]:
     """Train one tournament attempt by single shooting, and score it."""
     opt_state = optimizer.init(eqx.filter(candidate, trainable))
     _set_tournament_lr(opt_state, lr)
     for _ in range(steps):
-        _loss, acc_grads, n_buckets = _training_step(
-            candidate, dataset, bucket_step, horizon, trainable
+        _loss, acc_grads = _training_step(
+            candidate, dataset, bucket_step, horizon, trainable, shares
         )
-        denom = float(max(n_buckets, 1))
-
-        def _normalised(g: Array, _d: float = denom) -> Array:
-            return g / _d
-
-        avg_grads = jax.tree.map(_normalised, acc_grads)
-        candidate, opt_state = apply_update(candidate, avg_grads, opt_state)
+        candidate, opt_state = apply_update(candidate, acc_grads, opt_state)
 
     # Forward-only scorer, not bucket_step, whose discarded backward pass
     # roughly tripled the cost of a scoring sweep. Scores the data term
     # (including any configured trajectory penalty, as the phases charge it),
     # so a candidate wins on fit.
     score = jnp.asarray(0.0)
-    for bp in dataset.bucket_payloads:
-        score = score + score_bucket(candidate, bp, horizon)
-    return candidate, score / max(len(dataset.bucket_payloads), 1)
+    for bp, share in zip(dataset.bucket_payloads, shares, strict=True):
+        score = score + score_bucket(candidate, bp, horizon, share)
+    return candidate, score
 
 
 class _Segmented(NamedTuple):
@@ -804,14 +799,15 @@ def _segmented_attempt(
     steps: int,
     lr: float,
     horizon: Array,
+    shares: tuple[Array, ...],
 ) -> tuple[Any, Array]:
     """Train one tournament attempt with segments, and score it on data plus gaps."""
     nodes = initial_nodes(candidate, dataset, segmented.kernels.segments, segmented.simulate)
     opt_state = optimizer.init((eqx.filter(candidate, trainable), nodes.z))
     _set_tournament_lr(opt_state, lr)
     for _ in range(steps):
-        _, _, acc_grads, node_grads, n_buckets = _shooting_training_step(
-            candidate, nodes, dataset, segmented.kernels, horizon, segmented.weight
+        _, _, acc_grads, node_grads = _shooting_training_step(
+            candidate, nodes, dataset, segmented.kernels, horizon, segmented.weight, shares
         )
         no_penalty = jax.tree.map(jnp.zeros_like, acc_grads)
         candidate, z, opt_state = segmented.update(
@@ -820,15 +816,17 @@ def _segmented_attempt(
             acc_grads,
             node_grads,
             no_penalty,
-            jnp.asarray(n_buckets, dtype=jnp.int32),
             opt_state,
         )
         nodes = nodes._replace(z=z)
     score = jnp.asarray(0.0)
-    for bp, z, scale in zip(dataset.bucket_payloads, nodes.z, nodes.scale, strict=True):
-        data, gap = segmented.kernels.value(candidate, z, scale, bp, horizon, segmented.weight)
+    buckets = zip(dataset.bucket_payloads, nodes.z, nodes.scale, shares, strict=True)
+    for bp, z, scale, share in buckets:
+        data, gap = segmented.kernels.value(
+            candidate, z, scale, bp, horizon, segmented.weight, share
+        )
         score = score + data + gap
-    return candidate, score / max(len(dataset.bucket_payloads), 1)
+    return candidate, score
 
 
 class _Tournament(NamedTuple):
@@ -978,13 +976,12 @@ def _warmup_compile(
 
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
     zero_weight = jnp.asarray(0.0)
-    n_buckets_arg = jnp.asarray(len(bucket_payloads), dtype=jnp.int32)
     # Compile the loop's non-bucket kernels here (one call each) so the run
     # starts with every kernel warm. ``last_grads`` is a real gradient from
     # the warm-up pass; the values are irrelevant, only the shapes.
     warm_penalty, _ = penalty_step(predictors, zero_weight, penalty_points)
     jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
-    updated, opt_state = step_update(predictors, last_grads, last_grads, n_buckets_arg, opt_state)
+    updated, opt_state = step_update(predictors, last_grads, last_grads, opt_state)
     jax.block_until_ready(updated)  # type: ignore[no-untyped-call]
     # The tournament's forward-only scorer gets its first trace here too.
     if score_bucket is not None:
@@ -1002,7 +999,7 @@ def _warmup_compile(
         jax.block_until_ready(warm_loss)  # type: ignore[no-untyped-call]
     warm_penalty, _ = penalty_step(updated, zero_weight, penalty_points)
     jax.block_until_ready(warm_penalty)  # type: ignore[no-untyped-call]
-    updated, opt_state = step_update(updated, last_grads, last_grads, n_buckets_arg, opt_state)
+    updated, opt_state = step_update(updated, last_grads, last_grads, opt_state)
     jax.block_until_ready(updated)  # type: ignore[no-untyped-call]
     # The tournament's forward-only scorer reads the same post-update
     # predictors; settle it too so a scoring sweep never re-traces.
@@ -1322,7 +1319,9 @@ def _train_with_optax(
             ui=ui_,
         )
         select_score = (
-            None if validation is None else build_dataset_score(kernels.score_bucket, validation)
+            None
+            if validation is None
+            else build_dataset_score(kernels.score_bucket, validation, pooling=kernels.pooling)
         )
 
         tournament: tuple[float, ...] = ()
@@ -1342,6 +1341,7 @@ def _train_with_optax(
                 key=fold(key, "tournament"),
                 horizon=horizon,
                 top_k=1,
+                pooling=kernels.pooling,
                 ui=ui_,
                 segmented=_first_phase_segments(config, kernels),
             )
@@ -1422,7 +1422,6 @@ def _run_phases(
     opt_state = optimizer.init(eqx.filter(predictors, trainable))
     step_update = kernels.step_update
     step_update_optimizer = optimizer
-    n_buckets_arg = jnp.asarray(len(dataset.bucket_payloads), dtype=jnp.int32)
 
     losses_history: list[float] = []
     penalties: list[float] = []
@@ -1477,6 +1476,9 @@ def _run_phases(
         continuity_weight = jnp.asarray(float(phase.continuity_weight))
 
         horizon = jnp.asarray(phase.horizon)
+        # What each bucket's loss counts for in the dataset loss. Depends on
+        # the horizon, so it is recomputed per phase, on the host.
+        shares = kernels.pooling.shares(dataset.bucket_payloads, horizon)
         weight = _phase_penalty_weight(phase, kernels.objective)
         # Traced, not closed over: a Python float that changed per phase
         # would retrace ``bucket_step`` at every phase boundary. Same reason
@@ -1508,15 +1510,13 @@ def _run_phases(
             try:
                 gap_total = jnp.asarray(0.0)
                 if shooting is None:
-                    total_loss, acc_grads, n_buckets = _training_step(
-                        predictors, dataset, kernels.bucket_step, horizon, trainable
+                    total_loss, acc_grads = _training_step(
+                        predictors, dataset, kernels.bucket_step, horizon, trainable, shares
                     )
                 else:
                     assert nodes is not None
-                    total_loss, gap_total, acc_grads, node_grads, n_buckets = (
-                        _shooting_training_step(
-                            predictors, nodes, dataset, shooting, horizon, continuity_weight
-                        )
+                    total_loss, gap_total, acc_grads, node_grads = _shooting_training_step(
+                        predictors, nodes, dataset, shooting, horizon, continuity_weight, shares
                     )
                 avg_penalty, penalty_grads = kernels.penalty_step(
                     predictors, penalty_weight, phase_points
@@ -1524,13 +1524,13 @@ def _run_phases(
                 # Dispatch the update before blocking on the loss values. Both
                 # float() calls are host syncs; reading them first left the
                 # accelerator idle through the Python bookkeeping every step.
-                # The fused kernel averages the accumulator, merges the penalty
+                # The fused kernel merges the penalty
                 # grads (charged once per step, not once per bucket) and runs
                 # the optimiser update in a single launch.
                 previous_predictors = predictors
                 if shooting is None:
                     predictors, opt_state = step_update(
-                        predictors, acc_grads, penalty_grads, n_buckets_arg, opt_state
+                        predictors, acc_grads, penalty_grads, opt_state
                     )
                 else:
                     assert nodes is not None
@@ -1540,17 +1540,16 @@ def _run_phases(
                         acc_grads,
                         node_grads,
                         penalty_grads,
-                        n_buckets_arg,
                         opt_state,
                     )
                     nodes = nodes._replace(z=z)
 
-                # History and early stopping follow the per-bucket-averaged
-                # loss (the data term plus any configured trajectory penalty):
+                # History and early stopping follow the pooled dataset loss
+                # (the data term plus any configured trajectory penalty):
                 # tracking the bound-penalty weight too would let "best" move
                 # when only the penalty weight changed.
-                loss_value = float(total_loss / float(max(n_buckets, 1)))
-                gap_value = float(gap_total / float(max(n_buckets, 1)))
+                loss_value = float(total_loss)
+                gap_value = float(gap_total)
                 penalty_value = float(avg_penalty)
                 if not all(map(math.isfinite, (loss_value, gap_value, penalty_value))):
                     # One bad step poisons the weights through its gradient, so
@@ -1651,9 +1650,11 @@ class _Kernels:
     ``shooting`` holds the multiple-shooting kernels for each segment count
     the schedule uses, ``simulate`` the never-raising solve the nodes start
     on, and ``shooting_update`` the segmented update for ``optimizer``.
+    ``pooling`` weights each bucket's loss into the dataset loss.
     """
 
     objective: Objective
+    pooling: Pooling
     bucket_step: Callable[..., tuple[Array, Any]]
     penalty_step: Callable[..., tuple[Array, Any]]
     score_bucket: Callable[..., Array]
@@ -1779,12 +1780,12 @@ def _build_training_kernels(
             grads,
             tuple(g for _, g, _ in per_bucket),
             grads,
-            jnp.asarray(len(per_bucket), dtype=jnp.int32),
             opt_state,
         )
         jax.block_until_ready(warm)  # type: ignore[no-untyped-call]
     return _Kernels(
         objective=objective,
+        pooling=resolved.pooling,
         bucket_step=bucket_step,
         penalty_step=penalty_step,
         score_bucket=score_bucket,
@@ -1865,7 +1866,7 @@ def _fit_ensemble(
         select_score = (
             None
             if validation_set is None
-            else build_dataset_score(kernels.score_bucket, validation_set)
+            else build_dataset_score(kernels.score_bucket, validation_set, pooling=kernels.pooling)
         )
 
         lr, horizon = _tournament_settings(config)
@@ -1885,6 +1886,7 @@ def _fit_ensemble(
                 key=seed_key,
                 horizon=horizon,
                 top_k=top_k,
+                pooling=kernels.pooling,
                 ui=ui_,
                 segmented=_first_phase_segments(config, kernels),
             )

@@ -97,6 +97,7 @@ from jaxhybridmodels.trainable import freeze_mask, trainable_mask
 from jaxhybridmodels.training.kernels import (
     apply_length_mask,
     build_bucket_step,
+    build_dataset_score,
     build_score_bucket,
 )
 from jaxhybridmodels.transforms import (
@@ -503,7 +504,6 @@ def test_registering_a_solver_and_adjoint_makes_them_serialisable(monkeypatch):
         # Decay spans the remaining 50 steps, so the midpoint of the decay is step 75.
         ("warmup_cosine", {"warmup_epochs": 50}, {50: 1.0, 75: 0.5, 99: 0.0, 100: 0.0}),
         ("exponential", {"end_value": 0.01}, {0: 1.0, 100: 0.01, 500: 0.01}),
-        ("exponential", {"end_value": 0.0}, {0: 1.0, 100: 0.0, 500: 0.0}),
     ],
 )
 def test_annealing_schedule_values(kind, kwargs, values):
@@ -564,6 +564,28 @@ def test_profile_parameters_can_be_traced_covariates():
         return piecewise_linear_profile(knots)(jnp.asarray(0.0))
 
     assert jnp.isfinite(jax.jit(piecewise_at_zero)(jnp.asarray(0.5)))
+
+
+def test_a_short_pulse_is_seen_only_through_its_jump_ts():
+    """Without its breakpoints the adaptive solver steps clean over a pulse."""
+    pulse = piecewise_linear_profile(((3.975, 0.0), (4.0, 1.0), (4.025, 0.0)))
+    term = diffrax.ODETerm(lambda t, y, args: pulse(t) * jnp.ones(1))
+    solver = hm.SolverConfig()
+    ts = jnp.linspace(0.0, 10.0, 11)
+    blind = jnp.asarray(solver.diffeqsolve(term, ts, jnp.zeros(1)).ys)[-1, 0]
+    seen = jnp.asarray(solver.diffeqsolve(term, ts, jnp.zeros(1), jump_ts=pulse.jump_ts).ys)
+    seen = seen[-1, 0]
+    assert float(blind) < 1e-3
+    assert float(seen) == pytest.approx(0.025, rel=1e-4)
+
+    # A step whose time is a traced covariate passes its jump_ts through jit.
+    def after_step(at):
+        step = step_profile(at=at, before=0.0, after=1.0)
+        field = diffrax.ODETerm(lambda t, y, args: step(t) * jnp.ones(1))
+        solution = solver.diffeqsolve(field, ts, jnp.zeros(1), jump_ts=step.jump_ts)
+        return jnp.asarray(solution.ys)[-1, 0]
+
+    assert float(jax.jit(after_step)(jnp.asarray(5.3))) == pytest.approx(4.7, rel=1e-4)
 
 
 def test_rng_fold_is_named_stable_and_pinned():
@@ -1633,6 +1655,55 @@ def test_a_new_horizon_neither_retraces_nor_needs_saying():
             np.testing.assert_array_equal(a, b)
 
 
+def test_the_dataset_loss_pools_every_measurement_however_it_is_bucketed(decay_data):
+    """mse is the mean over all measurements, bal_mse over all experiments.
+
+    The four decay experiments sit in two buckets of different sizes, so an
+    equal weight per bucket would give a different number.
+    """
+    model = make_model(parameter_predictors())
+    predictions = model.predict(decay_data)
+    residuals = [
+        np.asarray(p.outputs["conc"] - p.observed["conc"])[np.asarray(p.mask["conc"])]
+        for p in predictions.values()
+    ]
+    expected = {
+        "mse": np.mean(np.concatenate(residuals) ** 2),
+        "bal_mse": np.mean([np.mean(r**2) for r in residuals]),
+        "mle": sum(np.sum(0.5 * (np.log(2 * np.pi * 1e-2) + r**2 / 1e-2)) for r in residuals),
+    }
+    for name, value in expected.items():
+        objective = hm.Objective(loss=name)
+        score_bucket = build_score_bucket(
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+            loss_fn=objective.loss_fn(CHANNELS),
+        )
+        pooling = objective.pooling(CHANNELS)
+        score = build_dataset_score(score_bucket, decay_data, pooling=pooling)
+        assert score(model.predictors) == pytest.approx(value, rel=1e-5), name
+
+
+def test_a_horizon_cuts_each_experiment_at_its_own_span(decay_data):
+    """Each experiment keeps the measurements in the first fraction of its own span.
+
+    Every experiment starts at t0 = 0 before its first measurement, which a
+    small horizon would once have cut away, scoring nothing.
+    """
+    kept = {}
+    for bp in decay_data.bucket_payloads:
+        for fraction in (0.01, 0.5, 1.0):
+            mask = apply_length_mask(bp, jnp.asarray(fraction)).mask[..., 0]
+            for row in range(bp.ts.shape[0]):
+                times = np.asarray(bp.ts[row])[np.asarray(mask[row])]
+                kept.setdefault(fraction, []).append(tuple(times.tolist()))
+    assert sorted(kept[0.01]) == [(0.25,), (0.5,), (0.5,), (1.0,)]
+    # Half of each span from t0 = 0: a to 1.0, b to 1.0, c to 0.75, d to 0.75.
+    assert sorted(kept[0.5]) == [(0.25, 0.75), (0.5,), (0.5, 1.0), (1.0,)]
+    assert sorted(len(times) for times in kept[1.0]) == [2, 2, 3, 3]
+
+
 def test_data_penalty_points_sit_at_observed_cells(temp_data):
     preds = network_predictors()
     (source,) = data_penalty_points(preds, temp_data)
@@ -1640,7 +1711,7 @@ def test_data_penalty_points_sit_at_observed_cells(temp_data):
     # Ten observed cells across the four experiments, one temp column.
     assert source.points.shape == (10, 1)
     assert set(np.asarray(source.points[:, 0]).tolist()) == {0.5, 1.0, 1.5}
-    # Horizon masking follows the loss's own prefix mask, cell for cell.
+    # Horizon masking follows the loss's own horizon mask, cell for cell.
     for fraction in (1.0, 0.5, 0.05):
         expected = jnp.concatenate(
             [

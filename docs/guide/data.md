@@ -77,6 +77,10 @@ experiments = hm.experiments_from_dataframe(
 )
 ```
 
+The `y0_fn` there reads the first measured concentration, which is the
+starting state only when every run measures it at its first time. `y0` belongs to
+`t0` when set, else to the earliest time of any channel.
+
 A list names each channel or covariate after its column; a mapping renames.
 `t0` may be one number or a column, and `y0` one shared state or a mapping
 `{exp_id: state}`. Experiments come back in order of first appearance, with

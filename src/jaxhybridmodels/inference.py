@@ -642,7 +642,7 @@ class InferenceProblem:
         matrix = self._information(
             caller="fisher", gauss_newton=gauss_newton, target="likelihood", coordinates=coordinates
         )
-        covariance, eigenvalues, eigenvectors = _pseudo_inverse(matrix, _UNIDENTIFIED)
+        covariance, eigenvalues, eigenvectors = _scaled_pseudo_inverse(matrix, _UNIDENTIFIED)
         return FisherResult(
             **coordinates.summary_fields(covariance),
             _to_position=self._position_from(coordinates),
@@ -969,6 +969,15 @@ class InferenceProblem:
         if n_draws < 1:
             raise ValueError(f"InferenceProblem.predict: n_draws must be positive; got {n_draws}")
         channels = self.dataset.output_channel_names
+        if observation_noise and self._log_likelihood is not None:
+            # A custom likelihood gives its noise entries its own meaning (a
+            # variance, a Student-t scale, an AR coefficient), so adding them as
+            # Gaussian standard deviations would draw from the wrong model.
+            raise ValueError(
+                "InferenceProblem.predict: observation_noise draws Gaussian noise, which a "
+                "custom log_likelihood does not define; draw new measurements from your "
+                "own noise model on the noiseless predictions instead"
+            )
         if observation_noise and not set(channels) <= set(self._mask[_NOISE]):
             raise ValueError(
                 "InferenceProblem.predict: observation_noise needs noise inferred for every "
@@ -1278,6 +1287,34 @@ def _pseudo_inverse(matrix: Array, cutoff: float) -> tuple[Array, Array, Array]:
     return (eigenvectors * scale) @ eigenvectors.T, eigenvalues, eigenvectors
 
 
+def _unit_scale(matrix: Array) -> Array:
+    """``1 / sqrt(diag)``, the scaling that gives ``matrix`` a unit diagonal.
+
+    An entry with no information keeps a scale of 1: its row is zero anyway,
+    so it shows up as a null direction along that entry alone.
+    """
+    diagonal = jnp.diagonal(matrix)
+    positive = diagonal > 0.0
+    return jnp.where(positive, 1.0 / jnp.sqrt(jnp.where(positive, diagonal, 1.0)), 1.0)
+
+
+def _scaled_pseudo_inverse(matrix: Array, cutoff: float) -> tuple[Array, Array, Array]:
+    """:func:`_pseudo_inverse` of the information scaled to a unit diagonal.
+
+    The eigenvalues of the raw latent information depend on how each value
+    reaches its latent: changing a bound or a warp rescales a row and column,
+    which moves the condition number and can push an identified value under the
+    cutoff. Scaling to a unit diagonal, the correlation form of the information,
+    removes that, so the condition number and the identifiability test depend
+    on the data and the model only. The returned eigenvectors are in the scaled
+    coordinates, and the inverse is mapped back to the latents.
+    """
+    scale = _unit_scale(matrix)
+    scaled = matrix * scale[:, None] * scale[None, :]
+    inverse, eigenvalues, eigenvectors = _pseudo_inverse(scaled, cutoff)
+    return inverse * scale[:, None] * scale[None, :], eigenvalues, eigenvectors
+
+
 def _loadings(vector: Array, names: Sequence[str]) -> dict[str, float]:
     """The entries a direction loads on, largest first, leaving out loadings below 0.1."""
     values = np.asarray(vector)
@@ -1544,8 +1581,11 @@ class FisherResult(_GaussianSummary):
     """The Fisher information at a position, from :meth:`InferenceProblem.fisher`.
 
     ``information`` is the latent ``[P, P]`` information, and ``covariance`` its
-    inverse with unconstrained directions left out. ``eigenvalues`` ascend, and the
-    columns of ``eigenvectors`` are the matching directions over ``names``.
+    inverse with unconstrained directions left out. ``eigenvalues`` and
+    ``eigenvectors`` belong to the information scaled to a unit diagonal, its
+    correlation form, so they do not change when a bound or a warp rescales a
+    latent. ``eigenvalues`` ascend, and the columns of ``eigenvectors`` are the
+    matching directions over ``names``.
     """
 
     information: Array = dataclasses.field(kw_only=True)
@@ -1570,8 +1610,10 @@ class FisherResult(_GaussianSummary):
         return [_loadings(self.eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)]
 
     def _loose_directions(self) -> Array:
+        # Back from the scaled coordinates to latent directions, unit length.
         loose = np.asarray(self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1])
-        return self.eigenvectors[:, loose]
+        directions = _unit_scale(self.information)[:, None] * self.eigenvectors[:, loose]
+        return directions / jnp.linalg.norm(directions, axis=0, keepdims=True)
 
     def _unbounded(self) -> Array:
         # Any loading on an unconstrained direction makes that entry's variance
@@ -1663,10 +1705,12 @@ class _Profiler:
             # is huge and meaningless, and a step sized from it would jump clean
             # across the box.
             first_step = min(first_step, 1.0)
-        # Find which way the squash position moves when the latent rises: up for
-        # two bounds or a lower one, down for an upper one alone.
-        rising = float(positions(coordinates.flat.at[index].set(1.0))[index]) > float(
-            positions(coordinates.flat.at[index].set(-1.0))[index]
+        # Find which way the value moves when the latent rises: up for two bounds,
+        # a lower one or none, down for an upper one alone. The squash position
+        # moves the same way, except for an unbounded value, where it is flat.
+        to_physical = coordinates.to_physical
+        rising = float(to_physical(coordinates.flat.at[index].set(1.0))[index]) > float(
+            to_physical(coordinates.flat.at[index].set(-1.0))[index]
         )
 
         def reached_bound(x: Array, direction: float) -> bool:
@@ -1797,8 +1841,11 @@ class _Profiler:
             outside_value = float(coordinates.to_physical(outside_x)[index])
             return inside_value + weight * (outside_value - inside_value)
 
-        (below, stopped_below), (above, stopped_above) = walk(-1.0), walk(1.0)
-        points = [*reversed(below), (coordinates.flat, 0.0, True), *above]
+        # Walk down and up in the latent, then order the two sides by physical
+        # value: a value with only an upper bound falls as its latent rises.
+        down, up = walk(-1.0), walk(1.0)
+        (lower, stopped_lower), (upper, stopped_upper) = (down, up) if rising else (up, down)
+        points = [*reversed(lower), (coordinates.flat, 0.0, True), *upper]
         physical = np.asarray(jax.vmap(coordinates.to_physical)(jnp.stack([p[0] for p in points])))
         converged = np.array([p[2] for p in points])
         # Another value pinned at any converged point could not move further to
@@ -1828,8 +1875,8 @@ class _Profiler:
                 other: physical[:, i] for i, other in enumerate(coordinates.names) if i != index
             },
             converged=converged,
-            bounds=(end(below, stopped_below), end(above, stopped_above)),
-            stop_reasons=(stopped_below, stopped_above),
+            bounds=(end(lower, stopped_lower), end(upper, stopped_upper)),
+            stop_reasons=(stopped_lower, stopped_upper),
             at_bound=at_bound,
         )
 
@@ -2041,8 +2088,7 @@ def make_problem(
         ``"data"`` trusts the variances in the data, and warns for a channel left
         at the default of 1.0. A mapping infers a standard deviation per channel,
         each a ``Parameter`` naming its starting value and bounds, which must keep it
-        positive. Below about 1e-6 the likelihood's variance floor flattens the density,
-        so keep the lower bound above that. With ``log_likelihood`` its keys are
+        positive. With ``log_likelihood`` its keys are
         free-form, such as an AR(1) coefficient.
     estimate : str | type | Callable | Sequence | None
         What to infer, named in the syntax ``fit(freeze=...)`` uses, though it

@@ -27,7 +27,7 @@ x'' = -\omega^2 x - c\,x', \qquad c = 0.1 \text{ (known)}
 $$
 
 The state is $(x, v)$, and only the position $x$ is measured: 61 samples
-over five cycles, with noise of standard deviation 0.05. The truth is
+over about 4.8 cycles, with noise of standard deviation 0.05. The truth is
 $\omega = 1$.
 
 <<< @/../examples/multiple_shooting/oscillator.py#model
@@ -46,7 +46,9 @@ Each schedule runs 900 steps:
 
 <<< @/../examples/multiple_shooting/oscillator.py#configs
 
-Ten segments of six samples give a wrong frequency half a cycle to go wrong
+Ten segments of seven samples each, sharing one sample with the next, span 3
+time units: half a cycle at the true frequency, and 0.84 of one at the
+starting guess of 1.75. That is how long a wrong frequency has to go wrong
 before the next segment starts afresh from its own node. Four segments
 follow, then single shooting:
 

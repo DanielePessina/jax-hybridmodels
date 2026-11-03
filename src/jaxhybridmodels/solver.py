@@ -18,7 +18,7 @@ from typing import Any
 import diffrax
 import equinox as eqx
 import jax.numpy as jnp
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 SOLVER_REGISTRY: dict[str, type[diffrax.AbstractSolver[Any]]] = {
     "Tsit5": diffrax.Tsit5,
@@ -201,7 +201,9 @@ class SolverConfig(eqx.Module):
         self.dcoeff = dcoeff
         self.throw = throw
 
-    def stepsize_controller(self) -> diffrax.PIDController:
+    def stepsize_controller(
+        self, *, jump_ts: ArrayLike | None = None
+    ) -> diffrax.AbstractStepSizeController:
         """Build the adaptive step-size controller this config describes.
 
         Removes a coercion every caller had to remember: diffrax broadcasts
@@ -213,14 +215,23 @@ class SolverConfig(eqx.Module):
         I-control, so this reproduces the ``PIDController(rtol, atol)`` the
         examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
         step-size oscillation on stiff problems.
+
+        ``jump_ts`` are times where the vector field jumps or bends. The
+        controller is wrapped in ``diffrax.ClipStepSizeController``, which
+        ends a step exactly on each and restarts the solver there.
         """
         atol = jnp.asarray(self.atol) if isinstance(self.atol, tuple) else self.atol
-        return diffrax.PIDController(
+        controller = diffrax.PIDController(
             rtol=self.rtol,
             atol=atol,
             pcoeff=self.pcoeff,
             icoeff=self.icoeff,
             dcoeff=self.dcoeff,
+        )
+        if jump_ts is None:
+            return controller
+        return diffrax.ClipStepSizeController(
+            controller, jump_ts=jnp.atleast_1d(jnp.asarray(jump_ts, dtype=float))
         )
 
     def diffeqsolve(
@@ -229,6 +240,8 @@ class SolverConfig(eqx.Module):
         ts: Array,
         y0: Array,
         args: Any = None,
+        *,
+        jump_ts: ArrayLike | None = None,
     ) -> diffrax.Solution:
         """Run the solve this config describes, so ``simulate_fn`` stays thin.
 
@@ -258,6 +271,13 @@ class SolverConfig(eqx.Module):
         args
             Optional static-or-traced value passed to the vector field's
             ``args`` (e.g. the predictors pytree, for Backsolve).
+        jump_ts
+            Times where the vector field jumps or bends, such as a
+            :class:`~jaxhybridmodels.profiles.Profile`'s ``jump_ts``. The
+            solver ends a step on each instead of stepping across it, which
+            a short pulse would otherwise pass unseen. May be traced, so a
+            breakpoint can come from a covariate. Times outside ``ts`` are
+            ignored.
 
         Returns
         -------
@@ -274,7 +294,7 @@ class SolverConfig(eqx.Module):
             y0=y0,
             args=args,
             saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=self.stepsize_controller(),
+            stepsize_controller=self.stepsize_controller(jump_ts=jump_ts),
             adjoint=self.adjoint,
             max_steps=self.max_steps,
             throw=self.throw,

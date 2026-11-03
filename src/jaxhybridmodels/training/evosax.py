@@ -206,6 +206,7 @@ def _build_single_eval(
     static_predictor: Any,
     unflatten: Callable[[Array], Any],
     bucket_payloads: tuple[BucketPayload, ...],
+    shares: tuple[Array, ...],
     simulate_fn: Callable[..., Array],
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
@@ -224,9 +225,10 @@ def _build_single_eval(
     and the resolved loss. The bucket loop unrolls inside the trace, so
     the multi-bucket forward pass becomes one fused kernel.
 
-    Loss aggregation across buckets is a simple average, matching the Optax
-    training step. Each bucket therefore contributes one equally weighted
-    term, regardless of how many distinct timestamp lengths the dataset has.
+    Each bucket's loss is weighted by its pooling share
+    (:meth:`~jaxhybridmodels.losses.Pooling.shares`), as in the Optax
+    training step, so the fitness is the loss over the whole dataset however
+    the experiments were split into buckets.
 
     The bound penalty evaluates at ``penalty_points``, the per-leaf point
     arrays selected host-side by the caller (the output of
@@ -245,17 +247,19 @@ def _build_single_eval(
 
         total = jnp.asarray(0.0)
         solved = jnp.asarray(True)
-        for bp in bucket_payloads:
+        for bp, share in zip(bucket_payloads, shares, strict=True):
             full_state = simulate_bucket(predictor, bp, simulate_fn=simulate_fn, solver=solver)
             # The loss reads measured cells only, so a solve that fails after the
             # last measurement could still score finite. Any non-finite state is a
             # failure, as it is for inference.
             solved = solved & jnp.all(jnp.isfinite(full_state))
             pred_obs = jax.vmap(state_to_output)(full_state)
-            total = total + loss_fn(pred_obs, bp)
+            bucket_loss = loss_fn(pred_obs, bp)
             if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-                total = total + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp)
-        total = total / float(max(len(bucket_payloads), 1))
+                bucket_loss = bucket_loss + trajectory_penalty_weight * trajectory_penalty_fn(
+                    full_state, bp
+                )
+            total = total + share * bucket_loss
         if penalty_weight > 0.0:
             # The search roams the latent space with nothing holding it in
             # range, and the squash keeps the physical output legal however
@@ -544,7 +548,10 @@ def _train_with_evosax(
             trajectory_penalty_weight=objective.trajectory_penalty_weight,
         )
         select_score = build_dataset_score(
-            score_bucket, validation, output_channel_names=dataset.output_channel_names
+            score_bucket,
+            validation,
+            pooling=resolved.pooling,
+            output_channel_names=dataset.output_channel_names,
         )
 
     # One failed solve must not raise for the whole vmapped population, so
@@ -558,6 +565,7 @@ def _train_with_evosax(
             static_predictor=static_predictors,
             unflatten=unflatten,
             bucket_payloads=bucket_payloads,
+            shares=resolved.pooling.shares(bucket_payloads),
             simulate_fn=simulate_fn,
             state_to_output=state_to_output,
             solver=population_solver,

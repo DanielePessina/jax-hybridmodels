@@ -95,6 +95,12 @@ rate = hm.BoundedPredictor(
 Pass `in_scaler=hm.BoundScaler(...)` and `out_scaler=...` instead when you
 need a non-default `transform` or `warp`.
 
+A boxed input reaches the network through the inverse squash, a logit of its
+position in the box. That map is not affine: it compresses the middle of the
+box and stretches the edges. An input that sits on its bound, such as a
+concentration starting at 0, therefore sees the largest sensitivity, so keep
+the input box a little wider than the values the solver meets.
+
 Call it with a mapping or a rank-1 array:
 
 ```python

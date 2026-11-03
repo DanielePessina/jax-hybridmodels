@@ -234,12 +234,19 @@ converge where the ratio crossed. Only a converged crossing closes a side.
 `profile.others` holds every other value along the profile, which shows what
 compensates.
 
+The threshold is the $\chi^2_1$ quantile. When the best fit sits at a bound, the
+likelihood ratio follows $\tfrac12\chi^2_0 + \tfrac12\chi^2_1$ instead (Self and
+Liang, 1987), so the side that closes has about 97.5% coverage rather than 95%:
+the interval is conservative there.
+
 The information is computed in the latent coordinates the problem uses, and
 reported in physical units. Standard errors use the delta method. A Wald interval
 is built in the latent and mapped back, so it leans the way a log warp does and
 stays inside a `Parameter`'s bounds. `curvature="exact"` uses the negative
 Hessian of the log-likelihood instead of the Gauss-Newton `J^T J`, and is the one
-that works with a custom `log_likelihood`.
+that works with a custom `log_likelihood`. The condition number and the
+not-identified test read the information scaled to a unit diagonal, its
+correlation form, so changing a bound or a warp does not move them.
 
 A correlation of 0.999 says the data fix a combination of the two. `log A` and `E`
 trade off along the rates' temperature dependence. Centring the law at a reference

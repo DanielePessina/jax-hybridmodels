@@ -27,7 +27,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaxhybridmodels.data import BucketPayload, Dataset
-from jaxhybridmodels.losses import resolve_loss_fn
+from jaxhybridmodels.losses import Pooling, loss_pooling, resolve_loss_fn
 from jaxhybridmodels.penalties import (
     PenaltyPointSource,
     bound_penalty,
@@ -138,6 +138,15 @@ class Objective:
         )
         return resolve_loss_fn(self.loss, channel_idx, channel_weights)
 
+    def pooling(self, output_channel_names: Sequence[str]) -> Pooling:
+        """How this objective's per-bucket losses add up to the dataset loss.
+
+        See :func:`~jaxhybridmodels.losses.loss_pooling`. Only the channels
+        the loss reads are counted.
+        """
+        channel_idx, _ = _channel_selection(self.channel_weights, tuple(output_channel_names))
+        return Pooling(loss_pooling(self.loss), channel_idx)
+
     @property
     def bound_penalty_fn(self) -> Callable[[Any, tuple[Array, ...]], Array]:
         """``penalty_fn`` when set, else :func:`~jaxhybridmodels.penalties.bound_penalty`."""
@@ -156,13 +165,15 @@ class Objective:
 class ResolvedObjective:
     """An objective matched against one dataset and predictors pytree.
 
-    ``loss_fn`` is the bound ``(pred_obs, bp) -> scalar``; ``sources`` and
+    ``loss_fn`` is the bound ``(pred_obs, bp) -> scalar`` and ``pooling`` how
+    its per-bucket values add up; ``sources`` and
     ``extras`` are the measured and extra penalty points, one per
     ``BoundedPredictor`` in traversal order. Host-side only.
     """
 
     objective: Objective
     loss_fn: Callable[[Array, BucketPayload], Array]
+    pooling: Pooling
     sources: tuple[PenaltyPointSource | None, ...]
     extras: tuple[Array, ...]
 
@@ -188,7 +199,13 @@ def resolve_objective(
         # ``penalty_fn`` owns its points and needs no coverage check.
         enabled=penalty_on and objective.penalty_fn is None,
     )
-    return ResolvedObjective(objective=objective, loss_fn=loss_fn, sources=sources, extras=extras)
+    return ResolvedObjective(
+        objective=objective,
+        loss_fn=loss_fn,
+        pooling=objective.pooling(dataset.output_channel_names),
+        sources=sources,
+        extras=extras,
+    )
 
 
 def _check_weight(name: str, value: float) -> None:

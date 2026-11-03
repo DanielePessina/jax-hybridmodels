@@ -59,7 +59,7 @@ def annealing_schedule(
         ``"exponential"``. The exponential kind decays geometrically with
         the per-epoch rate *derived* from ``(init_value, end_value,
         total_epochs)``, so its end point and run length are honoured like
-        every other kind.
+        every other kind. It needs ``end_value > 0``.
     total_epochs : int
         Run length in steps (one step == one epoch). Must be at least 1.
     init_value : float
@@ -91,6 +91,13 @@ def annealing_schedule(
     if not 0.0 <= end_value <= init_value:
         raise ValueError(
             f"annealing_schedule: end_value={end_value} must lie in [0, init_value={init_value}]"
+        )
+    if kind == "exponential" and end_value == 0.0:
+        # A geometric decay never reaches zero, and the stand-in used to be a
+        # straight line under the exponential name.
+        raise ValueError(
+            "annealing_schedule: an exponential decay needs end_value > 0, since it never "
+            "reaches zero; use kind='linear' or 'cosine' to end at 0"
         )
     if kind == "warmup_cosine" and not 0 <= warmup_epochs < total_epochs:
         raise ValueError(
@@ -136,15 +143,6 @@ def _optax_schedule(
     # point, so the curve lands exactly on end_value at step == total_epochs
     # (same contract as every other kind). optax's exponential_decay does
     # not flatten past its budget, so clamp the tail at end_value.
-    # Optax treats a zero decay rate as a no-op, so use the finite-endpoint
-    # schedule directly for the one endpoint that a geometric sequence cannot
-    # reach stably in finite precision.
-    if end_value == 0.0:
-        return optax.linear_schedule(
-            init_value=init_value,
-            end_value=end_value,
-            transition_steps=total_epochs,
-        )
     rate = (end_value / init_value) ** (1.0 / total_epochs)
     raw = optax.exponential_decay(
         init_value=init_value,

@@ -16,6 +16,7 @@ separately from any training kernel.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -237,9 +238,13 @@ def predict_ensemble(
     own :class:`~jaxhybridmodels.PredictionResult`.
 
     ``quantiles`` adds those levels across members to each experiment, by
-    default a central 95% band; ``()`` leaves them out. A posterior predictive
-    is usually skewed, so an interval from ``std`` alone can leave a bound's
-    range.
+    default a central 95% band; ``()`` leaves them out. They interpolate
+    linearly between members, so with few members a 95% band sits near the
+    smallest and largest. A posterior predictive is usually skewed, so an
+    interval from ``std`` alone can leave a bound's range.
+
+    A member that predicts a non-finite value anywhere is left out of the
+    statistics, with a warning, and still appears in ``members``.
 
     ``models`` holds ``HybridModel`` or ``FitResult`` objects, so the list
     ``fit_ensemble`` returns can be passed as is. They must share
@@ -262,9 +267,28 @@ def predict_ensemble(
     members = tuple(
         _predict(m, dataset, ts=grid, n_points=n_points, caller="predict_ensemble") for m in models
     )
+    # A member whose solve fails anywhere would turn the mean, spread and band
+    # into NaN wherever it fails, so it is left out of the statistics.
+    finite = [
+        all(bool(jnp.all(jnp.isfinite(out))) for p in m.values() for out in p.outputs.values())
+        for m in members
+    ]
+    if not all(finite):
+        dropped = [i for i, ok in enumerate(finite) if not ok]
+        warnings.warn(
+            f"predict_ensemble: members {dropped} predict non-finite values on this grid and "
+            "are left out of the mean, std and quantiles"
+            if any(finite)
+            else "predict_ensemble: every member predicts non-finite values on this grid",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    # With no finite member there is nothing to leave out, and the NaN result
+    # says so.
+    kept = [m for m, ok in zip(members, finite, strict=True) if ok] or list(members)
     experiments: dict[str, ExperimentPrediction] = {}
     for exp_id, first in members[0].items():
-        stacked = {name: jnp.stack([m[exp_id].outputs[name] for m in members]) for name in names}
+        stacked = {name: jnp.stack([m[exp_id].outputs[name] for m in kept]) for name in names}
         experiments[exp_id] = ExperimentPrediction(
             ts=first.ts,
             outputs={name: jnp.mean(values, axis=0) for name, values in stacked.items()},
@@ -274,7 +298,7 @@ def predict_ensemble(
             quantiles=_member_quantiles(stacked, levels),
         )
     buckets = tuple(
-        jnp.mean(jnp.stack([m.buckets[b] for m in members]), axis=0)
+        jnp.mean(jnp.stack([m.buckets[b] for m in kept]), axis=0)
         for b in range(len(dataset.bucket_payloads))
     )
     return PredictionResult(experiments, buckets, members)

@@ -843,6 +843,76 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     assert again == pytest.approx(values, rel=1e-8)
 
 
+@pytest.mark.parametrize(
+    ("rate", "bounds", "warp", "profiled"),
+    [
+        pytest.param(50.0, (0.0, None), "linear", True, id="far-above-a-lower-bound"),
+        pytest.param(-50.0, (None, 0.0), "linear", True, id="far-below-an-upper-bound"),
+        pytest.param(-5.0, (None, 0.0), "linear", True, id="below-an-upper-bound"),
+        pytest.param(1e13, (0.0, None), "log", False, id="log-warp-far-out"),
+    ],
+)
+def test_a_value_far_from_its_only_bound_is_free(x64, rate, bounds, warp, profiled):
+    """The far side of a one-sided bound is not a bound.
+
+    The standard error and the profile interval are the closed-form ones, and a
+    value with only an upper bound reports its interval low end first.
+    """
+    experiments, ts, ys = measurements(rate)
+    mle, error = least_squares(ts, ys)
+    model = linear_model(hm.Parameter(rate, bounds=bounds, warp=warp))
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    fisher = problem.fisher()
+    assert fisher.standard_errors()["k"] == pytest.approx(error, rel=1e-5)
+    if not profiled:
+        return
+    profile = problem.profile("k")
+    assert profile.stop_reasons == ("threshold", "threshold")
+    assert profile.bounds == pytest.approx(
+        (mle - 1.959964 * error, mle + 1.959964 * error), abs=0.01 * error
+    )
+    assert np.all(np.diff(profile.grid) > 0)
+
+
+def test_the_condition_number_ignores_how_a_value_is_bounded(x64):
+    """Rescaling a latent through its bounds leaves the identifiability readout alone."""
+    experiments, *_ = measurements()
+    numbers = []
+    for bounds in (None, (0.0, 1e4)):
+        model = linear_model(hm.Parameter(TRUE_RATE, bounds=bounds))
+        noise = {"y": hm.Parameter(SIGMA, bounds=(1e-3, 1.0))}
+        problem = make_problem(model, experiments, log_prior=None, noise=noise)
+        numbers.append(problem.optimize().problem.fisher().condition_number)
+    assert numbers[0] == pytest.approx(numbers[1], rel=1e-4)
+
+
+def test_a_tiny_measurement_variance_is_not_floored(x64):
+    """Data in small units keep their likelihood: every curvature agrees."""
+    rate, sigma = 1e-4, 1e-7
+    experiments = [
+        hm.make_experiment(
+            channels={
+                "y": hm.ChannelObs(
+                    ts=jnp.asarray(grid),
+                    values=rate * jnp.asarray(grid),
+                    variance=sigma**2,
+                )
+            },
+            y0=[0.0],
+            t0=0.0,
+            exp_id=name,
+        )
+        for name, grid in GRIDS.items()
+    ]
+    ts = np.concatenate([np.asarray(grid) for grid in GRIDS.values()])
+    model = linear_model(hm.Parameter(2e-4, bounds=(0.0, 1e-3)))
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    expected = sigma / np.sqrt(np.sum(ts**2))
+    for curvature in ("gauss_newton", "exact"):
+        error = problem.fisher(curvature=curvature).standard_errors()["k"]
+        assert error == pytest.approx(expected, rel=1e-4), curvature
+
+
 def product_field(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
     return predictors["a"].value * predictors["b"].value * jnp.ones_like(y)
 

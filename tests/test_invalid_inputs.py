@@ -567,6 +567,9 @@ INVALID = [
     ),
     pytest.param(lambda: annealing_schedule("cosine", total_epochs=10, init_value=0.0), "init"),
     pytest.param(lambda: annealing_schedule("cosine", total_epochs=10, end_value=1.5), "end"),
+    pytest.param(
+        lambda: annealing_schedule("exponential", total_epochs=10, end_value=0.0), "end_value > 0"
+    ),
     pytest.param(lambda: annealing_schedule("nope", total_epochs=10), "kind", id="schedule-kind"),
     pytest.param(
         lambda: ramp_profile(start=3.0, end=3.0, before=0.0, after=1.0),

@@ -137,10 +137,13 @@ class MLPPredictor(Predictor):
         Hidden layers keep their LeCun-uniform init, so the feature
         transformation stays non-degenerate; only the readout is zeroed.
         Inside a ``BoundedPredictor`` the resulting zero latent maps
-        through ``out_scaler.from_latent(0)`` to the exact midpoint of the
-        physical output box, a known-good start independent of the key.
-        That matters when rate bounds span decades, where an unlucky
-        readout draw can stall the solver on step one.
+        through ``out_scaler.from_latent(0)`` to the midpoint of the box in
+        warped space, the same start whatever the key. That is the
+        arithmetic midpoint under a linear warp and the geometric mean
+        under ``log`` or ``log10``. For a one-sided bound it is
+        ``edge + log 2`` under a linear warp and ``edge + 1`` under ``log``.
+        A fixed start matters when rate bounds span decades, where an
+        unlucky readout draw can stall the solver on step one.
 
         Structurally identical predictor; only the trailing
         ``eqx.nn.Linear``'s ``weight`` and ``bias`` change.

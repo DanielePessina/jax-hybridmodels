@@ -49,7 +49,7 @@ import jax.tree_util as jtu
 from jax.typing import ArrayLike
 from jaxtyping import Array
 
-from jaxhybridmodels.data import Dataset
+from jaxhybridmodels.data import Dataset, row_horizons
 
 if TYPE_CHECKING:
     from jaxhybridmodels.predictors import BoundedPredictor
@@ -252,17 +252,15 @@ class PenaltyPointSource(NamedTuple):
     ----------
     points : Float[Array, "G n_inputs"]
         The measured input vectors.
-    cell_ts : Int[Array, " G"]
-        Timestamp index of each cell inside its own experiment.
-    cell_T : Int[Array, " G"]
-        Length of that experiment's time grid. ``cell_ts`` and ``cell_T``
-        let :func:`length_mask_keep` apply the loss's prefix mask to the
+    cell_horizon : Float[Array, " G"]
+        The smallest training horizon at which each cell is scored (see
+        :func:`~jaxhybridmodels.data.row_horizons`). It lets
+        :func:`length_mask_keep` apply the loss's horizon mask to the
         penalty, so the two never disagree about which points are live.
     """
 
     points: Array
-    cell_ts: Array
-    cell_T: Array
+    cell_horizon: Array
 
 
 def box_grid(in_scaler: Any, n_per_dim: int = 5) -> Array:
@@ -344,8 +342,7 @@ def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPoint
             sources.append(None)
             continue
         point_chunks: list[Array] = []
-        ts_chunks: list[Array] = []
-        t_chunks: list[Array] = []
+        horizon_chunks: list[Array] = []
         for bp in dataset.bucket_payloads:
             vectors = jnp.stack([bp.covariates[key] for key in keys], axis=-1)
             if vectors.ndim != 2:
@@ -354,50 +351,44 @@ def data_penalty_points(predictors: Any, dataset: Dataset) -> tuple[PenaltyPoint
                     "must be scalar per experiment (constant in time); got shape "
                     f"{vectors.shape} for input_keys {keys!r}"
                 )
-            observed = jnp.argwhere(bp.mask.any(axis=-1))
+            observed_rows = bp.mask.any(axis=-1)
+            observed = jnp.argwhere(observed_rows)
             if observed.shape[0] == 0:
                 continue
             point_chunks.append(vectors[observed[:, 0]])
-            ts_chunks.append(observed[:, 1])
-            t_chunks.append(jnp.full(observed.shape[0], bp.ts.shape[1], dtype=observed.dtype))
+            horizons = row_horizons(bp.ts, observed_rows)
+            horizon_chunks.append(horizons[observed[:, 0], observed[:, 1]])
         if not point_chunks:
             sources.append(
                 PenaltyPointSource(
                     points=jnp.zeros((0, len(keys))),
-                    cell_ts=jnp.zeros(0, jnp.int32),
-                    cell_T=jnp.zeros(0, jnp.int32),
+                    cell_horizon=jnp.zeros(0),
                 )
             )
             continue
         sources.append(
             PenaltyPointSource(
                 points=jnp.concatenate(point_chunks),
-                cell_ts=jnp.concatenate(ts_chunks),
-                cell_T=jnp.concatenate(t_chunks),
+                cell_horizon=jnp.concatenate(horizon_chunks),
             )
         )
     return tuple(sources)
 
 
 def length_mask_keep(source: PenaltyPointSource, horizon: float) -> Array:
-    """Boolean keep-vector over a source's cells, matching the loss's prefix mask.
+    """Boolean keep-vector over a source's cells, matching the loss's horizon mask.
 
-    Applies the same prefix semantics :func:`~jaxhybridmodels.training.kernels.apply_length_mask`
-    gives the loss: a cell is kept when its timestamp index is below
-    ``ceil(T * horizon)``, clamped at 1 so a phase never scores nothing.
-    The penalty therefore follows the curriculum exactly, disagreeing with
-    the loss about which points are live only by mistake.
+    Applies the rule :func:`~jaxhybridmodels.training.kernels.apply_length_mask`
+    gives the loss: a cell is kept when it lies in the first ``horizon`` of
+    its experiment's timeline, and each experiment's first measurement is
+    always kept. The penalty therefore follows the curriculum exactly.
 
     ``horizon`` must be a Python float, not a traced array:
     the keep-vector is used to *index* the gathered points, and JAX rejects
     boolean indexing with tracers. The penalty kernel retraces only when
     the horizon changes (a phase boundary), never per step.
     """
-    cutoff = jnp.maximum(
-        jnp.ceil(jnp.float32(source.cell_T) * horizon).astype(jnp.int32),
-        jnp.int32(1),
-    )
-    return source.cell_ts < cutoff
+    return source.cell_horizon <= jnp.asarray(horizon, dtype=source.cell_horizon.dtype)
 
 
 def resolve_penalty_points(
@@ -711,11 +702,13 @@ def trajectory_saturation_penalty(state: Array, out_scaler: Any) -> Array:
     where the model actually predicted, not across a synthetic grid.
 
     It works near the knee, which is where it should catch a predictor
-    drifting into saturation. Deep in saturation it cannot: the outputs it
-    reads have rounded onto the bound, so the latents rebuilt from them stop
-    growing, and the charge caps (about 25 for the sigmoid in float32) with
-    a vanishing gradient. Where the latents themselves are at hand, charge
-    ``out_scaler.saturation`` on them instead, which has neither limit.
+    drifting into saturation, and fades soon after. ``to_latent`` continues
+    linearly once the box position passes ``1 - 1e-3`` (``|z| ≈ 6.9`` for
+    the sigmoid), so the latent rebuilt from an output stops growing near
+    7.9 and the charge caps near 24.6. From about ``|z| = 8`` the gradient
+    is small (0.45 at 10, against 14 when charged on the latent itself).
+    Where the latents are at hand, charge ``out_scaler.saturation`` on them
+    instead, which has no cap.
 
     ``state`` is ``[..., T, D]`` (or ``[..., T, S]`` projected to the
     predictor's channel); ``out_scaler`` is the ``BoundScaler`` whose

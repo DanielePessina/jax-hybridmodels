@@ -37,11 +37,16 @@ The study stores the drug at 40, 50, 60 and 70 °C and assays it 7 times over
 three months, with a 1% assay standard deviation. The data are drawn from a
 known truth: 90% potency after 30 months at 25 °C, and $E_a$ of 100 kJ/mol.
 
-The law is written around 25 °C, so $\log k_{25}$ is the parameter the label
-needs, and its interval is the shelf life's interval. Written as
-$A \exp(-E_a / RT)$ instead, the same information would be spread over two
-parameters correlated at 0.999; the
-[identifiability example](/guide/uncertainty#without-sampling) shows that case.
+The law is written around 25 °C because $\log k_{25}$ is the parameter the
+label needs, so its interval is the shelf life's interval. It does not remove
+the correlation: 25 °C lies outside the 40 to 70 °C the data cover, and the
+Fisher output below still shows -0.989. Only a reference temperature inside
+the data decorrelates the two constants, as the
+[identifiability example](/guide/uncertainty#without-sampling) shows; written
+as $A \exp(-E_a / RT)$, they would be correlated at 0.999.
+
+The initial potency is fixed at $y_0 = 1$, so the bound below ignores any
+uncertainty in it. A real ICH Q1E analysis fits the intercept too.
 
 <<< @/../examples/shelf_life/shelf_life.py#model
 

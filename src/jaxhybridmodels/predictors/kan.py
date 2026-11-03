@@ -255,7 +255,10 @@ class KANPredictor(Predictor):
         The final head is the readout layer at index ``len(hidden_widths)``.
         Zeroing its four trainable arrays makes it produce
         ``zeros(out_size)`` for any input, which inside a
-        ``BoundedPredictor`` maps to the midpoint of the physical box.
+        ``BoundedPredictor`` maps to the midpoint of the box in warped space:
+        the geometric mean under a ``log`` warp, and ``edge + log 2`` for a
+        one-sided bound under a linear warp (see
+        :meth:`MLPPredictor.with_zero_final_head`).
 
         Earlier layers keep their jaxkan-default init, so the feature
         transformation stays non-degenerate. Same intent as

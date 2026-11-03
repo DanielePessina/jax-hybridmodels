@@ -20,13 +20,20 @@ does not divide by zero.
 
 Variants in this module
 -----------------------
-- ``masked_*`` uses a single denominator across the whole bucket. This is
-  the same as concatenating every observation into one flat vector and
-  reducing that.
+- ``mse`` is the mean over every measured cell, and ``mle`` the summed
+  Gaussian negative log-likelihood.
 - ``bal_*`` normalises per experiment. Each experiment contributes its own
-  per-channel average across time, then the bucket takes the mean over the
-  ``N`` axis. Use it when experiments differ widely in observation count
-  and you do not want long trajectories to dominate the gradient.
+  per-channel average across time, then the experiments are averaged. Use
+  it when experiments differ widely in observation count and you do not
+  want long trajectories to dominate the gradient. ``bal_*`` adds the
+  channels where ``mse`` averages them, so it is about ``D`` times larger
+  for ``D`` channels.
+
+Each function here reduces one bucket. The trainers put the buckets back
+together with :class:`Pooling`, weighting each bucket by what its value is
+an average over (see :func:`loss_pooling`). So ``mse`` over a dataset is
+the mean over all its measurements, and ``bal_mse`` the mean over all its
+experiments, however the experiments were split into buckets.
 
 All four accept ``channel_idx`` (which trailing-``D`` indices to keep) and
 ``channel_weights`` (per-channel multipliers, length matching
@@ -40,12 +47,13 @@ resolves them to this pair.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import NamedTuple
 
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, ArrayLike, Float
 
-from jaxhybridmodels.data import BucketPayload
+from jaxhybridmodels.data import BucketPayload, horizon_rows
 
 
 def _validate_channel_idx(channel_idx: tuple[int, ...], total_channels: int) -> None:
@@ -116,14 +124,15 @@ def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
 
     Every input that could be NaN at a masked-out cell is replaced with a
     benign value before any arithmetic, and only then gated by the mask.
-    ``var_safe`` swaps masked variance for ``1.0``; ``var_stable`` clips at
-    ``1e-12`` so a real but tiny variance still gives finite ``log`` and
-    division.
+    ``var_safe`` swaps masked variance for ``1.0``. ``var_stable`` clips at
+    the smallest positive float only to keep an underflowed variance out of
+    ``log(0)``. A larger floor would change the likelihood of data measured
+    in small units, where a variance of 1e-14 is real.
 
     Same ``[N, T, D]`` shape as the inputs, exactly zero where masked out.
     """
     var_safe = jnp.where(m, var, 1.0)
-    var_stable = jnp.maximum(var_safe, 1e-12)
+    var_stable = jnp.maximum(var_safe, jnp.finfo(jnp.result_type(var_safe)).tiny)
     p_safe, y_safe = _masked_safe(p, y, m)
     log_term = jnp.where(m, 0.5 * jnp.log(2.0 * jnp.pi * var_stable), 0.0)
     sq_term = jnp.where(m, 0.5 * (p_safe - y_safe) ** 2 / var_stable, 0.0)
@@ -260,6 +269,85 @@ LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
     "bal_mle": bal_mle,
 }
 """Short name to loss function, so an ``Objective`` can name its loss as a string."""
+
+POOLING_KINDS = ("observations", "experiments", "sum")
+"""How a loss's per-bucket values combine into the loss over the whole dataset."""
+
+_BUILTIN_POOLING: tuple[tuple[Callable[..., Array], str], ...] = (
+    (masked_mse, "observations"),
+    (masked_mle, "sum"),
+    (bal_mse, "experiments"),
+    (bal_mle, "experiments"),
+)
+
+
+def loss_pooling(loss: Callable[..., Array] | str) -> str:
+    """How ``loss`` combines across buckets: one of :data:`POOLING_KINDS`.
+
+    Each bucket is scored on its own, so the trainers need to know what a
+    bucket's value is an average over to put the buckets back together:
+
+    - ``"observations"``: a mean over measured cells (``mse``). Buckets are
+      weighted by their measured-cell count, which gives the mean over every
+      measurement in the dataset.
+    - ``"experiments"``: a mean over experiments (``bal_mse``, ``bal_mle``).
+      Buckets are weighted by how many measured experiments they hold, so
+      every experiment counts the same across the dataset.
+    - ``"sum"``: already a sum (``mle``). Bucket values are added.
+
+    A custom loss declares its kind with a ``pooling`` attribute, for example
+    ``my_loss.pooling = "sum"``, and defaults to ``"observations"``.
+    """
+    if isinstance(loss, str):
+        loss = LOSS_REGISTRY[loss.lower().strip()]
+    kind = next((k for fn, k in _BUILTIN_POOLING if fn is loss), None)
+    if kind is None:
+        kind = getattr(loss, "pooling", "observations")
+    if kind not in POOLING_KINDS:
+        raise ValueError(f"loss pooling must be one of {POOLING_KINDS}; got {kind!r}")
+    return kind
+
+
+class Pooling(NamedTuple):
+    """How to weight each bucket's loss so that the buckets add up to one loss.
+
+    Build it with :meth:`jaxhybridmodels.Objective.pooling`. ``channel_idx``
+    is the objective's channel selection, so only the channels the loss
+    reads are counted.
+    """
+
+    kind: str
+    channel_idx: tuple[int, ...] | None = None
+
+    def weight(self, bp: BucketPayload) -> Array:
+        """What one bucket's loss is an average over, after any horizon mask."""
+        mask = bp.mask if self.channel_idx is None else bp.mask[..., jnp.asarray(self.channel_idx)]
+        if self.kind == "observations":
+            return mask.sum().astype(float)
+        if self.kind == "experiments":
+            return mask.any(axis=(1, 2)).sum().astype(float)
+        return jnp.asarray(1.0)
+
+    def shares(
+        self, buckets: Sequence[BucketPayload], horizon: ArrayLike = 1.0
+    ) -> tuple[Array, ...]:
+        """Each bucket's multiplier, so that ``sum(share * bucket_loss)`` is the dataset loss.
+
+        The shares of a mean-type loss add up to 1. With ``"sum"`` every
+        share is 1. A dataset with nothing measured inside ``horizon`` gets
+        equal shares, so the loss stays defined. Computed on the host, once
+        per dataset and horizon, not per step.
+        """
+        if self.kind == "sum":
+            return tuple(jnp.asarray(1.0) for _ in buckets)
+        weights = []
+        for bp in buckets:
+            keep = horizon_rows(bp.ts, bp.mask.any(axis=-1), horizon)
+            weights.append(float(self.weight(bp._replace(mask=bp.mask & keep[:, :, None]))))
+        total = sum(weights)
+        if total <= 0.0:
+            return tuple(jnp.asarray(1.0 / len(buckets)) for _ in buckets)
+        return tuple(jnp.asarray(w / total) for w in weights)
 
 
 def resolve_loss_fn(

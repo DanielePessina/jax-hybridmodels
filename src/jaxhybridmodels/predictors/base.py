@@ -481,11 +481,13 @@ class BoundScaler(eqx.Module):
         """Where each latent sits between its bounds, on the squash's ``[0, 1]`` scale.
 
         0 is the lower bound and 1 the upper. A value with two finite bounds
-        reads off its squash. One with one finite bound uses the softplus slope,
-        which is 0 at that bound and 1 far from it, so the bound end is 0 for a
-        lower bound and 1 for an upper one. An unbounded value is 0.5. Near 0 or
-        1 the value's gradient vanishes, whatever its physical scale or warp:
-        that is what "pinned" means for inference.
+        reads off its squash. One with one finite bound uses half the sigmoid
+        of its latent, which follows the value's gradient into the bound: 0 at
+        a lower bound, rising to 0.5 far from it (and 1 down to 0.5 for an
+        upper bound). The far side has no bound, so it stops at the middle and
+        never reads as one. An unbounded value is 0.5. Near 0 or 1 the
+        value's gradient vanishes, whatever its physical scale or warp: that
+        is what "pinned" means for inference.
         """
 
         def component(v: Array, i: int) -> Array:
@@ -495,8 +497,8 @@ class BoundScaler(eqx.Module):
                 return BOUND_TRANSFORMS[self.transform].forward(v / temperature)
             if not (math.isfinite(low) or math.isfinite(high)):
                 return jnp.full_like(v, 0.5)
-            slope = jax.nn.sigmoid(v / temperature)
-            return slope if math.isfinite(low) else 1.0 - slope
+            half = 0.5 * jax.nn.sigmoid(v / temperature)
+            return half if math.isfinite(low) else 1.0 - half
 
         latent = jnp.asarray(latent)
         if len(self.bounds) == 1 or self._uniform:
@@ -516,9 +518,10 @@ class BoundScaler(eqx.Module):
             return BOUND_TRANSFORMS[self.transform].inverse(position) * temperature
         if not (math.isfinite(low) or math.isfinite(high)):
             raise ValueError("latent_at_position: an unbounded component has no squash position")
-        # The softplus slope is the sigmoid, so its inverse is the logit.
-        logit = jnp.log(position) - jnp.log1p(-position)
-        return (logit if math.isfinite(low) else -logit) * temperature
+        # Half the sigmoid, so the inverse is the logit of twice the distance
+        # from the bound end. Only positions on the bound's half exist.
+        slope = 2.0 * (position if math.isfinite(low) else 1.0 - position)
+        return (jnp.log(slope) - jnp.log1p(-slope)) * temperature
 
     def to_latent(self, x: Array) -> Array:
         """Map a physical value to its latent representative.
@@ -545,9 +548,17 @@ class BoundScaler(eqx.Module):
         The continuation reports direction, not magnitude. Pair it with
         :meth:`input_violation` when an input can leave its box.
         """
+        return self._map(self._guard_positive(x), inverse=True)
+
+    def _guard_positive(self, x: Array) -> Array:
+        """Refuse a non-positive input to a boxed component under a positive-only warp.
+
+        Only a box warps the value itself. One finite bound warps the distance
+        from it, which the guarded inverse continues past the edge. Raises on
+        concrete input; traced input raises through ``eqx.error_if`` or becomes
+        NaN inside inference, which counts that as a rejected proposal.
+        """
         warp = WARPS[self.warp]
-        # Only a box warps the value itself. One finite bound warps the
-        # distance from it, which the guarded inverse continues past the edge.
         boxed = [math.isfinite(low) and math.isfinite(high) for low, high in self.bounds]
         if warp.requires_positive and any(boxed):
             checked = x if all(boxed) else self._components_last(x)[..., np.flatnonzero(boxed)]
@@ -566,7 +577,7 @@ class BoundScaler(eqx.Module):
                     )
                 else:
                     x = jnp.where(nonpositive, jnp.nan, x)
-        return self._map(x, inverse=True)
+        return x
 
     def input_violation(self, x: Array) -> Array:
         """Scalar squared hinge on how far ``x`` fell outside ``bounds``.
@@ -620,8 +631,12 @@ class BoundScaler(eqx.Module):
         ``edge + exp(z / T)``: a log parametrisation whose relative slope stays
         1, so a small value there is not stuck and costs nothing.
         """
-        terms = self._saturation_terms(z)
-        return jnp.mean(terms) if terms.size else jnp.asarray(0.0)
+        # The mean runs over the charged components only, so uncharged
+        # one-sided outputs do not dilute the weight.
+        boxed = [i for i, (low, high) in enumerate(self.bounds) if math.isfinite(low + high)]
+        if not boxed:
+            return jnp.asarray(0.0)
+        return jnp.mean(self._saturation_terms(z)[..., np.asarray(boxed)])
 
     def _saturation_terms(self, z: Array) -> Array:
         """The squared overshoot per component, ``saturation`` before its mean."""
@@ -655,7 +670,7 @@ class BoundScaler(eqx.Module):
             return self.to_latent(x)
         if len(self.bounds) == 1:
             return jnp.asarray(x)
-        x = jnp.atleast_1d(x)
+        x = self._guard_positive(jnp.atleast_1d(x))
         parts = [
             self._component(x[..., i], i, inverse=True)
             if all(map(math.isfinite, pair))
@@ -771,11 +786,15 @@ class BoundedPredictor(Predictor):
 
     Three stages
     ------------
-    1. **Normalise the input.** ``in_scaler.scale_inputs`` maps each input
-       from its physical range onto an unbounded latent, so the network
-       receives numbers of comparable size whether the input was a
-       temperature in the tens or a concentration in the thousandths.
-       Inputs with an open bound pass through unchanged.
+    1. **Normalise the input.** ``in_scaler.scale_inputs`` maps each boxed
+       input from its physical range onto an unbounded latent through the
+       inverse squash, a logit of its position in the box, so the network
+       sees the same scale whether the input was a temperature in the tens
+       or a concentration in the thousandths. The map is not affine: it
+       compresses the middle of the box and stretches the edges, so an
+       input sitting on its bound (a concentration starting at 0) has the
+       largest sensitivity. Inputs with an open bound pass through
+       unchanged.
     2. **Run the network.** The trainable ``inner`` ``Predictor`` maps
        latent to latent. It is handed no bound information at all.
     3. **Squash the output.** ``out_scaler.from_latent`` maps the

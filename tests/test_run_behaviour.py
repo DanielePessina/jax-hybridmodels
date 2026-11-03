@@ -42,7 +42,7 @@ import jaxhybridmodels as hm
 import jaxhybridmodels.training.evosax as evosax_module
 import jaxhybridmodels.training.optax as optax_module
 from jaxhybridmodels.data import Dataset
-from jaxhybridmodels.losses import masked_mse
+from jaxhybridmodels.losses import Pooling, masked_mse
 from jaxhybridmodels.objective import Objective
 from jaxhybridmodels.penalties import (
     attach_penalty_state,
@@ -385,7 +385,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
     # tournament must treat it as a failed attempt, not crash the run.
     predictors = parameter_predictors()
 
-    def score_bucket(_predictors, _bp, _fraction):
+    def score_bucket(*_args):
         raise eqx.EquinoxRuntimeError("solver failed")
 
     with pytest.warns(RuntimeWarning, match="all attempts failed"):
@@ -403,6 +403,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
             key=jr.key(0),
             horizon=jnp.asarray(1.0),
             top_k=1,
+            pooling=Pooling("observations"),
         )
     assert ranked[0][0] == float("inf")
     assert scores == (float("inf"), float("inf"))
@@ -584,9 +585,9 @@ def quadratic_data():
     return hm.make_dataset([experiment], output_channel_names=QUADRATIC_CHANNELS)
 
 
-def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
-    # Optax averages bucket losses with equal weight per bucket. Evosax must
-    # use the same average, or the two trainers optimise different objectives.
+def test_multi_bucket_fitness_pools_like_optax(quadratic_data):
+    # Optax weights each bucket's loss by its pooling share. Evosax must use
+    # the same shares, or the two trainers optimise different objectives.
     predictor = hm.Parameter(jnp.zeros(4))
     params, static = eqx.partition(predictor, trainable_mask(predictor))
     flat, unflatten = jfu.ravel_pytree(params)
@@ -597,6 +598,7 @@ def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
         static_predictor=static,
         unflatten=unflatten,
         bucket_payloads=(small, large),
+        shares=(jnp.asarray(0.25), jnp.asarray(0.75)),
         loss_fn=lambda _pred, bucket: bucket.n_obs.astype(jnp.float32),
         penalty_fn=lambda _p, _points: jnp.asarray(0.0),
         penalty_weight=0.0,
@@ -604,7 +606,7 @@ def test_multi_bucket_fitness_averages_like_optax(quadratic_data):
         state_to_output=identity,
         solver=SOLVER,
     )
-    assert float(evaluate(flat)) == pytest.approx(2.0)
+    assert float(evaluate(flat)) == pytest.approx(0.25 * 1 + 0.75 * 3)
 
 
 def test_channel_weights_by_name_fit_only_the_named_channels(quadratic_data):

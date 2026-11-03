@@ -54,7 +54,10 @@ import jaxhybridmodels as hm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import apply_default_style  # noqa: E402
 
-# Tube and flow. Residence time L / u = 1; Peclet number u L / D = 100.
+# Tube and flow. Residence time L / u = 1; Peclet number u L / D = 100. The
+# upwind scheme below adds numerical dispersion of about u DZ / 2 = 0.01, as
+# much again as D, so the discretised tube behaves as Peclet about 50. The data
+# and the model share the scheme, so the fit is unaffected.
 LENGTH, VELOCITY, DISPERSION = 1.0, 1.0, 0.01
 N_CELLS = 50
 DZ = LENGTH / N_CELLS
@@ -72,9 +75,10 @@ CONDITIONS = ((310.0, 2.0), (320.0, 1.0), (325.0, 1.5), (335.0, 2.0), (345.0, 0.
 NOISE_STD = 0.01
 T_REF = 330.0
 
-# Not stiff at this resolution: the fastest mode is dispersion, about
-# 4 D / DZ^2 = 100 per unit time, so explicit Tsit5 needs a few hundred
-# steps. Halving DZ quadruples that rate; past roughly 200 cells an implicit
+# Not stiff at this resolution: the fastest mode decays at about
+# 4 D / DZ^2 + 2 u / DZ = 100 + 100 = 200 per unit time, dispersion plus upwind
+# advection, so explicit Tsit5 needs a few hundred steps. Refining DZ raises
+# the dispersion part as 1 / DZ^2; past roughly 200 cells an implicit
 # solver such as Kvaerno3 wins. RecursiveCheckpoint keeps the backward pass
 # through the network in the vector field at O(log steps) memory; the
 # default DirectAdjoint stores every step and compiles in time that grows
@@ -91,7 +95,13 @@ def true_g(c: ArrayLike, temp: ArrayLike) -> Array:
 
 # region pde
 def transport(c: Array, c_in: Array) -> Array:
-    """Upwind advection and central dispersion, inlet held at ``c_in``, zero-gradient outlet."""
+    """Upwind advection and central dispersion, inlet held at ``c_in``, zero-gradient outlet.
+
+    The ghost cell at ``c_in`` makes the inlet close to a Dirichlet condition,
+    ``c(0) = c_in``, rather than Danckwerts, which would balance the feed flux
+    against advection plus dispersion. The zero-gradient outlet is the
+    Danckwerts outlet condition.
+    """
     left = jnp.concatenate([c_in[None], c[:-1]])
     right = jnp.concatenate([c[1:], c[-1:]])
     return -VELOCITY * (c - left) / DZ + DISPERSION * (left - 2.0 * c + right) / DZ**2
@@ -105,8 +115,10 @@ def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) 
     def vector_field(t, c, args):
         return transport(c, c_in(t)) - g_fn(c, temp) * c
 
-    # The framework reads the state at ``ts`` from the Solution's ``ys``.
-    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
+    # The framework reads the state at ``ts`` from the Solution's ``ys``. The
+    # feed steps at ``T_DROP``, so the solver ends a step there instead of
+    # stepping across the jump.
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0, jump_ts=c_in.jump_ts)
     # endregion pde
 
 

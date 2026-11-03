@@ -31,17 +31,25 @@ def simulate_fn(predictors, ts, covariates, y0, solver):
         rate = predictors["rate"](inputs)
         return physics_rhs(t, y, rate)
 
-    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0).ys
+    return solver.diffeqsolve(
+        diffrax.ODETerm(vector_field), ts, y0, jump_ts=temperature.jump_ts
+    ).ys
 ```
+
+`jump_ts` lists the times where a profile jumps or its slope changes. An
+adaptive solver assumes the vector field is smooth, so without them it rejects
+steps around a step change, and it can step over a pulse shorter than a step
+without seeing it. Passed to `diffeqsolve`, they end a step on each. Join
+several profiles' times with `jnp.concatenate`.
 
 The built-in factories are:
 
-| Factory | Behaviour |
-| --- | --- |
-| [`constant_profile`](/api/profiles#constant_profile) | Returns the same value for every `t`. |
-| [`step_profile`](/api/profiles#step_profile) | Returns `before` until `at`, then `after`. |
-| [`ramp_profile`](/api/profiles#ramp_profile) | Holds `before` until `start`, ramps linearly to `after` by `end`, then holds it. |
-| [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile) | Interpolates knots and extends the first and last values outward. |
+| Factory | Behaviour | `jump_ts` |
+| --- | --- | --- |
+| [`constant_profile`](/api/profiles#constant_profile) | Returns the same value for every `t`. | none |
+| [`step_profile`](/api/profiles#step_profile) | Returns `before` until `at`, then `after`. | `at` |
+| [`ramp_profile`](/api/profiles#ramp_profile) | Holds `before` until `start`, ramps linearly to `after` by `end`, then holds it. | `start`, `end` |
+| [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile) | Interpolates knots and extends the first and last values outward. | every knot |
 
 `ramp_profile` requires `end > start`; `piecewise_linear_profile` requires at
 least two strictly increasing knots. Concrete arguments are checked when the

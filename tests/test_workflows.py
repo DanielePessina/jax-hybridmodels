@@ -971,13 +971,17 @@ def test_segments_assemble_into_the_single_solve(oscillator_data):
         shoot_bucket,
     )
 
-    # Segment counts clamp to what the samples can hold, two samples each.
+    # Every count up to T - 1 is honoured, and every sample is supplied by
+    # exactly one segment, in order.
     assert [segment_layout(n, k).segments for n, k in ((41, 8), (10, 4), (5, 9), (2, 3))] == [
         8,
-        3,
+        4,
         4,
         1,
     ]
+    for n, k in ((10, 4), (41, 8), (7, 6)):
+        layout = segment_layout(n, k)
+        np.testing.assert_array_equal(layout.samples[layout.segment, layout.position], np.arange(n))
     model = oscillator(1.3)
     bp = oscillator_data.bucket_payloads[0]
     simulate = build_checked_simulation(simulate_fn=oscillator_fn, solver=model.solver)
