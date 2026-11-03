@@ -128,10 +128,12 @@ class TrainingPhase:
         a ready-made transformation instance. Names and factories are
         wrapped in ``optax.inject_hyperparams``, so a phase boundary or a
         schedule can move the learning rate without a rebuild. A ready-made
-        instance keeps the learning rate it was built with, unless it was
-        itself built with ``optax.inject_hyperparams``, so a phase that
-        changes ``lr`` on a plain instance raises: pass a new instance,
-        built at the new rate, with ``reset_optimizer``. A phase that
+        instance owns its learning rate: the first phase and the tournament
+        run at the rate it was built with, whatever ``lr`` says. Built with
+        ``optax.inject_hyperparams``, a later phase that changes ``lr``
+        writes the new rate into it. On a plain instance such a change
+        raises: pass a new instance, built at the new rate, with
+        ``reset_optimizer``. A phase that
         changes the optimiser must set ``reset_optimizer``, because
         optimiser state belongs to the optimiser that built it.
     horizon : float
@@ -618,13 +620,33 @@ def _init_shooting_state(
     predictors: Any,
     nodes: Nodes,
     trainable: Any,
-    lr: float,
+    lr: float | None,
 ) -> Any:
-    """A fresh optimiser state over ``(trainable predictors, nodes)``, at ``lr``."""
+    """A fresh optimiser state over ``(trainable predictors, nodes)``, at ``lr``.
+
+    ``None`` keeps the rate the optimiser was built with, as a ready-made
+    instance's own rate must be kept unless the phase changed it.
+    """
     opt_state = optimizer.init((eqx.filter(predictors, trainable), nodes.z))
-    if _optimiser_state_supports_lr(opt_state):
+    if lr is not None and _optimiser_state_supports_lr(opt_state):
         _set_lr(opt_state, lr)
     return opt_state
+
+
+def _phase_lr(config: OptaxTrainingConfig, phase_idx: int) -> float | None:
+    """The rate to write into a fresh optimiser state for this phase, or None.
+
+    A name or factory is built at the phase's ``lr``, so writing it is a no-op
+    kept for clarity. A ready-made instance owns its rate: the phase's ``lr``
+    is written only when this phase changed it, so the ``TrainingPhase``
+    default never overrides the rate the instance was built with.
+    """
+    phase = config.phases[phase_idx]
+    if not isinstance(phase.optimizer, optax.GradientTransformation):
+        return _start_lr(phase.lr)
+    if phase_idx > 0 and phase.lr != config.phases[phase_idx - 1].lr:
+        return _start_lr(phase.lr)
+    return None
 
 
 def _shared_tournament(
@@ -638,7 +660,7 @@ def _shared_tournament(
     trainable: Any,
     tournament_attempts: int,
     tournament_steps: int,
-    tournament_lr: float,
+    tournament_lr: float | None,
     key: Array,
     horizon: Array,
     top_k: int,
@@ -646,6 +668,7 @@ def _shared_tournament(
     ui: TrainingUI | None = None,
     segmented: _Segmented | None = None,
     keep_start: bool = True,
+    penalty_grads: Callable[[Any], Any] | None = None,
 ) -> _Tournament:
     """Warm-start selection: train several fresh inits briefly, keep the best ``top_k``.
 
@@ -658,7 +681,8 @@ def _shared_tournament(
     penalty (the phases charge it too) and *excluding* the bound penalty:
     that regulariser is charged once per step regardless of the data, so
     scoring on it too would let a candidate win by drifting where the
-    penalty likes rather than by fitting.
+    penalty likes rather than by fitting. ``penalty_grads`` still charges it
+    while an attempt trains, as the first phase will.
 
     Returns the ``top_k`` candidates ranked ascending by score, and every
     attempt's score in attempt order. Ties keep the earlier attempt (stable
@@ -716,6 +740,7 @@ def _shared_tournament(
                     lr=tournament_lr,
                     horizon=horizon,
                     shares=shares,
+                    penalty_grads=penalty_grads,
                 )
             else:
                 candidate, score = _segmented_attempt(
@@ -728,6 +753,7 @@ def _shared_tournament(
                     lr=tournament_lr,
                     horizon=horizon,
                     shares=shares,
+                    penalty_grads=penalty_grads,
                 )
             score_value = float(score)
             if not math.isfinite(score_value):
@@ -758,13 +784,14 @@ def _shared_tournament(
     return _Tournament(scored[:top_k], tuple(scores))
 
 
-def _set_tournament_lr(opt_state: Any, lr: float) -> None:
+def _set_tournament_lr(opt_state: Any, lr: float | None) -> None:
     """Set the tournament's rate where the optimiser can take it.
 
     A raw optimiser keeps its own baked-in rate. ``_tournament_settings`` warns
-    about that once, and only when ``tournament_lr`` was set.
+    about that once, and only when ``tournament_lr`` was set. ``None`` keeps a
+    ready-made instance's own rate.
     """
-    if _optimiser_state_supports_lr(opt_state):
+    if lr is not None and _optimiser_state_supports_lr(opt_state):
         _set_lr(opt_state, lr)
 
 
@@ -778,17 +805,25 @@ def _single_attempt(
     optimizer: optax.GradientTransformation,
     trainable: Any,
     steps: int,
-    lr: float,
+    lr: float | None,
     horizon: Array,
     shares: tuple[Array, ...],
+    penalty_grads: Callable[[Any], Any] | None = None,
 ) -> tuple[Any, Array]:
-    """Train one tournament attempt by single shooting, and score it."""
+    """Train one tournament attempt by single shooting, and score it.
+
+    ``penalty_grads(predictors)`` is the bound penalty's gradient, charged as
+    the first phase charges it, so an attempt cannot drift into saturation
+    during its burst; the score leaves the penalty out.
+    """
     opt_state = optimizer.init(eqx.filter(candidate, trainable))
     _set_tournament_lr(opt_state, lr)
     for _ in range(steps):
         _loss, acc_grads = _training_step(
             candidate, dataset, bucket_step, horizon, trainable, shares
         )
+        if penalty_grads is not None:
+            acc_grads = jax.tree.map(jnp.add, acc_grads, penalty_grads(candidate))
         candidate, opt_state = apply_update(candidate, acc_grads, opt_state)
 
     # Forward-only scorer, not bucket_step, whose discarded backward pass
@@ -818,11 +853,15 @@ def _segmented_attempt(
     optimizer: optax.GradientTransformation,
     trainable: Any,
     steps: int,
-    lr: float,
+    lr: float | None,
     horizon: Array,
     shares: tuple[Array, ...],
+    penalty_grads: Callable[[Any], Any] | None = None,
 ) -> tuple[Any, Array]:
-    """Train one tournament attempt with segments, and score it on data plus gaps."""
+    """Train one tournament attempt with segments, and score it on data plus gaps.
+
+    ``penalty_grads`` as for :func:`_single_attempt`.
+    """
     nodes = initial_nodes(candidate, dataset, segmented.kernels.segments, segmented.simulate)
     opt_state = optimizer.init((eqx.filter(candidate, trainable), nodes.z))
     _set_tournament_lr(opt_state, lr)
@@ -830,13 +869,17 @@ def _segmented_attempt(
         _, _, acc_grads, node_grads = _shooting_training_step(
             candidate, nodes, dataset, segmented.kernels, horizon, segmented.weight, shares
         )
-        no_penalty = jax.tree.map(jnp.zeros_like, acc_grads)
+        penalty = (
+            jax.tree.map(jnp.zeros_like, acc_grads)
+            if penalty_grads is None
+            else penalty_grads(candidate)
+        )
         candidate, z, opt_state = segmented.update(
             candidate,
             nodes.z,
             acc_grads,
             node_grads,
-            no_penalty,
+            penalty,
             opt_state,
         )
         nodes = nodes._replace(z=z)
@@ -857,7 +900,7 @@ class _Tournament(NamedTuple):
     scores: tuple[float, ...]
 
 
-def _tournament_settings(config: OptaxTrainingConfig) -> tuple[float, Array]:
+def _tournament_settings(config: OptaxTrainingConfig) -> tuple[float | None, Array]:
     """The tournament's learning rate and horizon, both from the first phase by default.
 
     The winner goes on to train in the first phase, so the attempts train
@@ -879,8 +922,33 @@ def _tournament_settings(config: OptaxTrainingConfig) -> tuple[float, Array]:
             RuntimeWarning,
             stacklevel=3,
         )
-    lr = _start_lr(first.lr) if config.tournament_lr is None else config.tournament_lr
+    # A ready-made instance trains its attempts at its own rate unless
+    # tournament_lr says otherwise.
+    lr = _phase_lr(config, 0) if config.tournament_lr is None else config.tournament_lr
     return lr, jnp.asarray(first.horizon)
+
+
+def _tournament_penalty(
+    config: OptaxTrainingConfig,
+    kernels: _Kernels,
+    sources: tuple[PenaltyPointSource | None, ...],
+) -> Callable[[Any], Any] | None:
+    """The first phase's bound-penalty gradient, for training tournament attempts.
+
+    ``None`` when that phase does not charge the penalty, so attempts skip
+    the kernel.
+    """
+    first = config.phases[0]
+    weight = _phase_penalty_weight(first, kernels.objective)
+    if weight == 0.0:
+        return None
+    points = select_penalty_points(sources, kernels.extras, first.horizon)
+    weight_ = jnp.asarray(weight)
+
+    def grads(predictors: Any) -> Any:
+        return kernels.penalty_step(predictors, weight_, points)[1]
+
+    return grads
 
 
 def _first_phase_segments(config: OptaxTrainingConfig, kernels: _Kernels) -> _Segmented | None:
@@ -1065,12 +1133,10 @@ def _begin_phase(
         optimizer = _build_optimizer(phase.optimizer, _start_lr(phase.lr))
         opt_state = optimizer.init(eqx.filter(predictors, trainable))
         # A ready-made instance built with inject_hyperparams starts at its own
-        # rate. Write this phase's in only when the phase changed lr, as the
-        # path without a reset does, so an lr left at its default never
-        # overrides the rate the instance was built with.
-        changed = phase.lr != config.phases[phase_idx - 1].lr
-        if changed and _optimiser_state_supports_lr(opt_state):
-            _set_lr(opt_state, _start_lr(phase.lr))
+        # rate; _phase_lr writes this phase's only when the phase changed it.
+        lr = _phase_lr(config, phase_idx)
+        if lr is not None and _optimiser_state_supports_lr(opt_state):
+            _set_lr(opt_state, lr)
         return optimizer, opt_state
     if callable(phase.lr):
         # A scheduled phase writes its learning rate before every step, and
@@ -1369,6 +1435,7 @@ def _train_with_optax(
         tournament: tuple[float, ...] = ()
         if _tournament_enabled(config):
             lr, horizon = _tournament_settings(config)
+            penalty = _tournament_penalty(config, kernels, kernels.sources)
             ranked, tournament = _shared_tournament(
                 predictors,
                 dataset,
@@ -1386,6 +1453,7 @@ def _train_with_optax(
                 pooling=kernels.pooling,
                 ui=ui_,
                 segmented=_first_phase_segments(config, kernels),
+                penalty_grads=penalty,
             )
             predictors = ranked[0][1]
 
@@ -1512,7 +1580,7 @@ def _run_phases(
             if fresh or phase.reset_optimizer:
                 assert nodes is not None
                 opt_state = _init_shooting_state(
-                    optimizer, predictors, nodes, trainable, _start_lr(phase.lr)
+                    optimizer, predictors, nodes, trainable, _phase_lr(config, phase_idx)
                 )
         continuity_weight = jnp.asarray(float(phase.continuity_weight))
 
@@ -1548,6 +1616,10 @@ def _run_phases(
         for step in range(phase.steps):
             if lrs is not None:
                 _set_lr(opt_state, lrs[step])
+            # The parameters this step evaluates. The update is dispatched before
+            # the loss is read, so a non-finite loss surfaces after ``predictors``
+            # already holds the next values; the diagnosis must re-solve these.
+            step_start = predictors
             try:
                 gap_total = jnp.asarray(0.0)
                 if shooting is None:
@@ -1608,7 +1680,7 @@ def _run_phases(
                 # Nothing was measured, so there is nothing to hand back.
                 if not losses_history:
                     raise
-                failure = f"{failure_summary(exc)} {describe_failure(exc, predictors)}".strip()
+                failure = f"{failure_summary(exc)} {describe_failure(exc, step_start)}".strip()
                 break
             last_measured = previous_predictors
             losses_history.append(loss_value)
@@ -1658,11 +1730,11 @@ def _run_phases(
     if not losses_history:
         final_loss = float("nan")
     elif config.restore_best and best.best_step is not None:
-        # ``best.best_loss`` was measured at ``best.best_predictors`` (the
-        # pre-update parameters of the best step), so it labels the model
-        # that is about to come back. ``history[-1]`` is the last step's
-        # loss, which describes a different model.
-        final_loss = best.best_loss
+        # The best step's training loss, measured at ``best.best_predictors``
+        # (the pre-update parameters of that step), so it labels the model
+        # that is about to come back. ``best.best_loss`` is the validation
+        # score when there is a validation set, so read the history instead.
+        final_loss = losses_history[best.best_step]
     elif failure is None:
         # The last recorded loss was measured one update before the returned
         # parameters, so measure them once more, on the last phase's terms.
@@ -1781,7 +1853,7 @@ def _build_training_kernels(
         # Optax steps take reverse-mode gradients, which diffrax's forward
         # mode refuses with an error about while loops that never names it.
         raise ValueError(
-            "train_with_optax: SolverConfig(adjoint=ForwardMode()) supports forward-mode "
+            "fit: SolverConfig(adjoint=ForwardMode()) supports forward-mode "
             "derivatives only, and training takes reverse-mode gradients. Use Direct, "
             "RecursiveCheckpoint or Backsolve for fitting; ForwardMode suits "
             'make_problem(gradient="forward").'
@@ -1866,7 +1938,7 @@ def _build_training_kernels(
         # node shapes differ.
         nodes = Nodes(tuple(z for z, _, _ in per_bucket), tuple(s for *_, s in per_bucket))
         opt_state = _init_shooting_state(
-            optimizer, predictors, nodes, trainable, _start_lr(first.lr)
+            optimizer, predictors, nodes, trainable, _phase_lr(config, 0)
         )
         grads = eqx.filter(predictors, trainable)
         warm, _, _ = shooting_update(
@@ -1987,6 +2059,12 @@ def _fit_ensemble(
                 ui=ui_,
                 segmented=_first_phase_segments(config, kernels),
                 keep_start=False,
+                # A resample gathers its own measured penalty points.
+                penalty_grads=_tournament_penalty(
+                    config,
+                    kernels,
+                    data_penalty_points(predictors, data_) if bootstrap else kernels.sources,
+                ),
             )
 
         # (training data, seed) per member. The key labels are the ones the

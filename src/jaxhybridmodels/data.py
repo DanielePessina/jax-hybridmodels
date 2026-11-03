@@ -236,7 +236,8 @@ def row_horizons(ts: Array, observed_rows: Array) -> Array:
 
     ``ts`` is ``[N, T]`` and ``observed_rows`` is ``[N, T]``, true where any
     channel was measured. An experiment's timeline runs from its first row
-    (``t0`` when set, else the first measurement) to its last measurement,
+    (``t0`` when set, else the earliest time of any output channel) to its
+    last measurement,
     and a row's horizon is how far along that span it lies, from 0 to 1.
     Each experiment is measured against its own span, so one long
     experiment in a bucket does not shift the cutoff of the others. A ``t0``

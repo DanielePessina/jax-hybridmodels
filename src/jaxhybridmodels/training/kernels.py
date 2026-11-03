@@ -410,10 +410,16 @@ def build_dataset_score(
     shares = pooling.shares(buckets, full_horizon)
 
     def score(predictors: Any) -> float:
-        value = sum(
-            float(score_bucket(predictors, bp, full_horizon, share))
-            for bp, share in zip(buckets, shares, strict=True)
+        # Summed on the device and read once: a host read per bucket would
+        # serialise the sweep, which runs every step with validation.
+        total = sum(
+            (
+                score_bucket(predictors, bp, full_horizon, share)
+                for bp, share in zip(buckets, shares, strict=True)
+            ),
+            start=jnp.asarray(0.0),
         )
+        value = float(total)
         if not math.isfinite(value):
             raise FloatingPointError("validation loss is not finite")
         return value

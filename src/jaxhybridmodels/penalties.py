@@ -220,6 +220,12 @@ def clip_ste(x: Array, lo: float | Array, hi: float | Array) -> Array:
     the data loss asks for, including "go further out of bounds", forever.
     Pair it with :func:`box_violation` on the pre-clip value for the
     restoring force.
+
+    Not for a model you pass to :mod:`jaxhybridmodels.inference`. There the
+    gradient is taken as the likelihood's own, and wherever the clip is
+    active it is wrong, so ``optimize`` can stop off the maximum and Fisher
+    and Laplace curvatures are wrong. Use :func:`softclip`, whose gradient
+    is exact.
     """
     return x + jax.lax.stop_gradient(jnp.clip(x, lo, hi) - x)
 

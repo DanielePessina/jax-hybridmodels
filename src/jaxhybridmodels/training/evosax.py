@@ -34,9 +34,12 @@ Initial-population modes
 ``"uniform_box"``
     A per-individual ``flat + Uniform(-extent, extent)`` is built
     host-side and **evaluated directly in generation 0**, bypassing
-    CMA-ES's first ``ask``. The strategy is still initialised with
-    ``mean = flat``, so the following ``tell`` updates its mean and
-    covariance consistently with the rest of the run.
+    CMA-ES's first ``ask``. The strategy is initialised with ``mean =
+    flat`` and a step size of ``extent / sqrt(3)``, the standard deviation
+    of that box, so the following ``tell`` reads the injected offsets as
+    steps of their true size. With ``init_sigma`` there, a box wider than
+    the step size reads as huge steps and the next generation spreads far
+    past the box.
 ``"lhs_box"``
     Same shape as ``uniform_box`` with offsets from
     ``scipy.stats.qmc.LatinHypercube``, computed host-side (``scipy`` is
@@ -163,9 +166,9 @@ class EvosaxTrainingConfig:
         Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``.
         Ignored by ``"warm"``.
     init_sigma
-        Initial CMA-ES step size. Used directly by ``"warm"`` and as the
-        prior step size for the box-init modes. CMA-ES adapts it after
-        the first ``tell``.
+        Initial CMA-ES step size for ``"warm"``. The box-init modes start
+        at the box's own standard deviation, ``init_box_extent / sqrt(3)``,
+        instead. CMA-ES adapts it after the first ``tell``.
     log_every
         UI heartbeat cadence. Honoured only by the Rich UIs; the silent
         and recording UIs see every generation.
@@ -286,7 +289,8 @@ def _build_strategy(
 
     The strategy class comes from ``ALGORITHM_REGISTRY``. The returned
     ``params`` are the strategy's frozen hyperparameters with ``std_init``
-    set to ``config.init_sigma``.
+    set to ``config.init_sigma``, or to the box's standard deviation,
+    ``init_box_extent / sqrt(3)``, for a box-init population.
 
     The ``init_sigma`` override is a property of the CMA-ES family. A
     strategy whose ``default_params`` lacks ``std_init`` (e.g. many of
@@ -296,8 +300,15 @@ def _build_strategy(
     """
     strategy_cls = ALGORITHM_REGISTRY[config.algorithm]
     strategy = strategy_cls(population_size=config.population_size, solution=flat)
+    # A box-init population is told to the strategy as its first generation,
+    # so the step size must match the box's spread, not init_sigma.
+    sigma = (
+        config.init_box_extent / math.sqrt(3.0)
+        if config.init in ("uniform_box", "lhs_box") and config.init_box_extent > 0.0
+        else config.init_sigma
+    )
     try:
-        params = dataclasses.replace(strategy.default_params, std_init=config.init_sigma)
+        params = dataclasses.replace(strategy.default_params, std_init=sigma)
     except TypeError as exc:
         raise ValueError(
             f"EvosaxTrainingConfig.algorithm={config.algorithm!r} does not carry a "
@@ -400,8 +411,9 @@ class _EvosaxRun:
     individual and is empty without a validation set. ``best_step`` indexes
     both at the returned predictors. ``failure`` says why the run ended early
     on a solver error or a non-finite fitness, and is ``None`` otherwise.
-    ``selected_loss`` is the training fitness of the candidate validation
-    chose, ``None`` without validation.
+    ``selected_loss`` and ``selected_validation`` are the training fitness and
+    validation score of the candidate validation chose, which may be the
+    starting point, and ``None`` without validation.
     """
 
     predictors: Any
@@ -411,6 +423,7 @@ class _EvosaxRun:
     best_step: int
     failure: str | None = None
     selected_loss: float | None = None
+    selected_validation: float | None = None
 
 
 def train_with_evosax(
@@ -495,6 +508,7 @@ def train_with_evosax(
         best_step=run.best_step,
         stop_reason="budget_exhausted" if run.failure is None else "diverged",
         measured_loss=run.selected_loss,
+        measured_validation=run.selected_validation,
     )
 
 
@@ -621,7 +635,11 @@ def _train_with_evosax(
         selected_flat = best_flat
         selected_loss = best_loss
         if select_score is not None:
-            best_selection = select_score(rebuild(best_flat))
+            try:
+                best_selection = select_score(rebuild(best_flat))
+            except (*FIT_FAILURES, FloatingPointError):
+                # A start that does not validate is simply not a candidate.
+                best_selection = math.inf
 
         history: list[float] = []
         failed: list[int] = []
@@ -722,4 +740,5 @@ def _train_with_evosax(
             best_step=best_step,
             failure=failure,
             selected_loss=None if select_score is None else selected_loss,
+            selected_validation=None if select_score is None else best_selection,
         )

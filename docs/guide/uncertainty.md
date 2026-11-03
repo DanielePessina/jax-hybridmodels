@@ -193,6 +193,12 @@ acceptance rate like x64's. That is one easy, well-specified problem, so it does
 not show float32 is safe in general. Tightening `rtol` from 1e-5 to 1e-7 did not
 move that posterior beyond Monte Carlo error.
 
+Every method here trusts the model's gradient as the likelihood's own. A model
+that uses `clip_ste` has a deliberately wrong gradient wherever the clip is
+active, so use `softclip` there instead. Through `SaveAt(ts)`, diffrax's `Dopri8`
+gave gradients about 1e-5 off in a check where `Tsit5` stayed near 1e-9, so keep
+to `Tsit5` or a stiff solver for Fisher, Laplace and profile work.
+
 ## Without sampling
 
 `log_prior=None` gives a problem with only the likelihood, for frequentist work.
@@ -243,7 +249,7 @@ converge where the ratio crossed. Only a converged crossing closes a side.
 `profile.others` holds every other value along the profile, which shows what
 compensates.
 
-The threshold is the $\chi^2_1$ quantile. When the best fit sits at a bound, the
+The threshold is the $\chi^2_1$ quantile. When the true value lies on a bound, the
 likelihood ratio follows $\tfrac12\chi^2_0 + \tfrac12\chi^2_1$ instead (Self and
 Liang, 1987), so the side that closes has about 97.5% coverage rather than 95%:
 the interval is conservative there.

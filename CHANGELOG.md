@@ -203,9 +203,10 @@
   shared time grid, so a short horizon after `t0` could score nothing.
 - The Fisher condition number and the not-identified test read the
   information scaled to a unit diagonal, so a change of bound or warp no
-  longer moves them. A value the data barely see on its own, whose latent
-  standard error passes 1e3 times its latent's size, is also listed as not
-  identified, with an infinite standard error.
+  longer moves them. A bounded value the data barely see on its own, whose
+  latent standard error passes 1e3, is also listed as not identified, with an
+  infinite standard error. A value against its bound is reported as pinned,
+  never as unidentified, and `sample` holds it at its estimate.
 - A multiple-shooting phase uses the number of segments asked for, up to
   `T - 1`, with lengths that differ by at most one step.
 - `annealing_schedule("exponential", ...)` needs `end_value > 0`. With 0 it
@@ -410,6 +411,21 @@ Migration for code written against the earlier API:
 
 ### Fixed
 
+- A profile closes a side only when the other values are really at their
+  maximum, by the Newton decrement of the inner problem. BFGS could stall on a
+  value the data barely constrain and close a side that is open.
+- A Fisher information that is exactly zero gave a standard error of 0; it is
+  now unbounded. `correlation()` gives `nan` for an unconstrained entry, whose
+  pseudo-inverse correlation could have the wrong sign.
+- A profile under the algebraic or softsign squash reports reaching a bound
+  instead of running out of points.
+- A ready-made optimiser keeps its own rate in the tournament and in
+  segmented phases, and tournament attempts train with the bound penalty, as
+  the first phase does.
+- A failed step is diagnosed at the parameters it evaluated, not the ones
+  after its update. Evosax with validation reports the start's own validation
+  score when the start wins, and a box-init population starts CMA-ES at the
+  box's spread instead of `init_sigma`.
 - The inverse squash on a boxed input was exact only to first order, so a
   Hessian through a `BoundedPredictor` input that depends on the fitted
   values, as `fisher(curvature="exact")` and `laplace()` take, came out

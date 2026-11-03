@@ -653,7 +653,7 @@ dynamic field is ``params``, everything else is static.
 | `hidden_widths` | `tuple[int, ...]` | Widths of the hidden KAN layers in order. Static; combined with ``in_size`` and ``out_size`` to form ``layer_dims = [in_size, *hidden_widths, out_size]``. |
 | `grid_size` | `int` | Number of spline grid intervals (``G``). Static; passed as ``required_parameters['G']`` to jaxkan. |
 | `basis` | `str` | Layer-type code, one of ``"spline"`` or ``"base"``. Static. |
-| `grid_range` | `tuple[float, float]` | The input interval the spline grid covers, jaxkan's ``grid_range``. The basis sums to 1 inside it and fades to 0 a few grid cells outside, leaving only the silu residual. Inside a ``BoundedPredictor`` a boxed input arrives as a logit, which reaches about +-2.9 for the inner 90% of the box. The default ``(-3, 3)`` covers that, where jaxkan's own ``(-1, 1)`` would cover only the middle 46%. Static. |
+| `grid_range` | `tuple[float, float]` | The input interval the spline grid covers, jaxkan's ``grid_range``. The basis sums to 1 inside it and fades to 0 a few grid cells outside, leaving only the silu residual. Inside a ``BoundedPredictor`` a boxed input arrives as a logit, which reaches about +-2.9 for the inner 90% of the box. The default ``(-3, 3)`` covers that, where jaxkan's own ``(-1, 1)`` would cover only the middle 46%. A KAN fed inputs already in ``[-1, 1]``, outside a ``BoundedPredictor``, fits better with ``(-1, 1)``, where its grid cells are three times finer. Static. |
 | `seed` | `int` | Integer seed used to build the underlying jaxkan model and to recreate its rng-state on demand inside ``__call__``. Derived from the user-supplied ``key`` at construction; static thereafter. |
 | `params` | `nnx.State` | The one dynamic field. The ``nnx.Param`` slice of the KAN's state, all float arrays. Trainable, and round-trips through ``eqx.tree_serialise_leaves``. |
 
@@ -676,7 +676,7 @@ unit spline scales, Glorot-uniform residual weights and zero bias),
 which leaf-level normal sampling would replace with a badly scaled
 scheme.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/kan.py#L254)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/kan.py#L256)</small>
 
 <a id="kanpredictorwith_zero_final_head"></a>
 
@@ -701,7 +701,7 @@ transformation stays non-degenerate. Same intent as
 [`MLPPredictor.with_zero_final_head`](/api/predictors#mlppredictorwith_zero_final_head) over a different
 parameterisation.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/kan.py#L274)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/kan.py#L276)</small>
 
 ---
 

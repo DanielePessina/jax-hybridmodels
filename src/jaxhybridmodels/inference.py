@@ -113,10 +113,17 @@ _OPTIMUM_TOLERANCE = 0.1
 _UNIDENTIFIED = 1e-8
 # The scale-free test above sees only directions the data cannot separate. A value
 # the data barely see, with tiny information and no correlation to anything, passes
-# it, so a latent standard error beyond this many times the latent's own size, or
-# beyond this many latent units, marks it unidentified too. The squash and the warps
-# keep latents of order 1 to 10, so such an interval spans the whole range.
+# it. A latent standard error beyond this many latent units marks such a value
+# unidentified too, for a value whose latent has a fixed scale: a box, where the
+# squash spans its range within about +-10, or a log-warped one-sided bound, where
+# a latent unit is a factor of e. An unbounded value or a one-sided linear one has
+# its latent in physical units, where no fixed cutoff means anything, so only the
+# collinearity test applies to it.
 _WEAK = 1e3
+# A profile point closes a side only when the log-likelihood could rise by no more
+# than this by re-optimising the other values further: a hundredth of the 95%
+# threshold's 1.92.
+_NEWTON_DECREMENT = 0.02
 
 
 def flat_prior(predictors: Any, noise: Mapping[str, Array]) -> Array:
@@ -817,7 +824,15 @@ class InferenceProblem:
         return _Profiler(
             coordinates=coordinates,
             parameters=parameters,
-            spreads=fisher.standard_errors(latent=True),
+            # The raw latent spread, finite even where the summary reports inf:
+            # it only sizes the first step, and a weakly seen value needs a long one.
+            spreads=dict(
+                zip(
+                    fisher.names,
+                    np.sqrt(np.maximum(np.diagonal(np.asarray(fisher.covariance)), 0.0)).tolist(),
+                    strict=True,
+                )
+            ),
             objective=problem._profile_objective,
             best=float(
                 problem._scalar("likelihood", coordinates.unravel, forward=False)(coordinates.flat)
@@ -1149,6 +1164,26 @@ class _PhysicalMap:
             highs.append(pairs[:, 1])
         return np.concatenate(lows), np.concatenate(highs)
 
+    def scaled(self, flat: Array) -> np.ndarray:
+        """Entries whose latent has a fixed scale: a box, or a log-warped one-sided bound.
+
+        Elsewhere, an unbounded value or a one-sided linear one, the latent is in
+        the value's own units.
+        """
+        tree = eqx.combine(self.unravel(flat), self.static)
+        flags = []
+        for _, leaf in _free_leaves(tree, self.mask):
+            size = int(np.size(leaf.value if _is_parameter(leaf) else leaf))
+            if not _is_parameter(leaf):
+                flags.append(np.zeros(size, dtype=bool))
+                continue
+            pairs = np.broadcast_to(np.array(leaf.scaler.bounds, dtype=float), (size, 2))
+            box = np.isfinite(pairs).all(axis=1)
+            one_sided = np.isfinite(pairs).sum(axis=1) == 1
+            logged = leaf.scaler.warp in ("log", "log10")
+            flags.append(box | (one_sided & logged))
+        return np.concatenate(flags)
+
 
 @dataclass(frozen=True)
 class _Coordinates:
@@ -1234,6 +1269,7 @@ class _Coordinates:
             "covariance": covariance,
             "slopes": self.slopes,
             "at_bound": self.at_bound != "",
+            "scaled": self.to_physical.scaled(self.flat),
             "limits": self.limits,
             "_to_physical": self.to_physical,
         }
@@ -1355,7 +1391,9 @@ class OptimizeResult:
         The gradient of the log-likelihood or log-posterior at the optimum, per
         entry as ``physical`` names it, taken in the latent coordinates the search
         runs in. Near zero at a maximum. An entry that stays large points at the
-        value BFGS could not settle, for instance one against its bound.
+        value BFGS could not settle. A value against its bound shows a gradient
+        near zero too, since the squash is flat there; ``fisher`` and the
+        profile flag those.
     gradient_norm : float
         The largest entry of ``gradient`` in size, a one-number convergence check.
         How small is small depends on the curvature: ``fisher`` and ``laplace``
@@ -1390,6 +1428,7 @@ class _GaussianSummary:
     covariance: Array
     slopes: Array
     at_bound: np.ndarray = dataclasses.field(kw_only=True)
+    scaled: np.ndarray = dataclasses.field(kw_only=True, repr=False)
     limits: tuple[np.ndarray, np.ndarray] = dataclasses.field(kw_only=True, repr=False)
     _to_physical: _PhysicalMap = dataclasses.field(repr=False)
     _to_position: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
@@ -1418,9 +1457,30 @@ class _GaussianSummary:
                 "their spread is unbounded; fix or reparametrise them, or add a prior and "
                 "use laplace"
             )
+        # A value against its bound has no Gaussian spread: its latent sits in the
+        # squash's tail, where a draw would land anywhere in the box. It is held
+        # at its estimate, and the others are drawn from their Gaussian given it.
+        pinned = np.asarray(self.at_bound, dtype=bool)
+        covariance = self.covariance
+        if pinned.any():
+            names = [name for name, flag in zip(self.names, pinned, strict=True) if flag]
+            warnings.warn(
+                f"{type(self).__name__}.sample: {names} sit against their bounds, so they "
+                "are held at their estimates and the others are drawn given them; "
+                "profile them for their uncertainty",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            free = ~pinned
+            cross = covariance[np.ix_(free, pinned)]
+            conditional = (
+                covariance[np.ix_(free, free)]
+                - cross @ jnp.linalg.pinv(covariance[np.ix_(pinned, pinned)]) @ cross.T
+            )
+            covariance = jnp.zeros_like(covariance).at[np.ix_(free, free)].set(conditional)
         # A square root from the eigendecomposition, which, unlike a Cholesky factor,
         # cannot fail on rounding in an ill-conditioned covariance.
-        eigenvalues, eigenvectors = jnp.linalg.eigh(self.covariance)
+        eigenvalues, eigenvectors = jnp.linalg.eigh(covariance)
         factor = eigenvectors * jnp.sqrt(jnp.clip(eigenvalues, 0.0))
         draws = jr.normal(key, (n_draws, len(self.names)), dtype=self.latent.dtype)
         return jax.vmap(self._to_position)(self.latent + draws @ factor.T)
@@ -1465,10 +1525,14 @@ class _GaussianSummary:
 
         Physical and latent correlations are the same here, since each physical
         value is a monotone function of its own latent and the delta method only
-        rescales each entry.
+        rescales each entry. An entry with unbounded spread gets ``nan``: the
+        pseudo-inverse describes only the directions the data constrain, so its
+        correlation there could even have the wrong sign.
         """
         spread = jnp.sqrt(jnp.clip(jnp.diagonal(self.covariance), jnp.finfo(float).tiny))
-        return self.covariance / spread[:, None] / spread[None, :]
+        correlation = self.covariance / spread[:, None] / spread[None, :]
+        unbounded = self._unbounded()
+        return jnp.where(unbounded[:, None] | unbounded[None, :], jnp.nan, correlation)
 
     def intervals(self, *, confidence: float = 0.95) -> dict[str, tuple[float, float]]:
         """A Wald interval per entry, in physical units.
@@ -1554,7 +1618,7 @@ class _GaussianSummary:
         lines = [
             title,
             f"  {'':{width}}  {'estimate':>11}  {'std error':>11}  "
-            f"{int(confidence * 100)}% interval",
+            f"{round(confidence * 100)}% interval",
         ]
         for i, name in enumerate(self.names):
             low, high = bounds[name]
@@ -1612,11 +1676,18 @@ class FisherResult(_GaussianSummary):
         information, is below ``threshold`` times the largest. Loadings below 0.1
         in size are left out, so each dict names the values that trade off along
         it, such as two rates whose product is all the data sees. A value the data
-        barely see on its own, whose latent standard error passes 1e3 times its
-        latent's size (and 1e3 latent units), is listed alone as ``{name: 1.0}``.
+        barely see on its own is listed alone as ``{name: 1.0}`` when its latent
+        has a fixed scale (a box, or a log-warped one-sided bound) and its latent
+        standard error passes 1e3. An unbounded value has no such scale, so only
+        its collinearity is tested.
         """
-        loose = np.asarray(self.eigenvalues < threshold * self.eigenvalues[-1])
+        # At or below, so an information that is exactly zero counts as loose.
+        loose = np.asarray(self.eigenvalues <= threshold * self.eigenvalues[-1])
         directions = [_loadings(self.eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)]
+        # A direction along pinned values only is their flat squash, reported as
+        # pinned instead.
+        pinned = {name for name, flag in zip(self.names, self.at_bound, strict=True) if flag}
+        directions = [d for d in directions if not set(d) <= pinned]
         listed = {name for direction in directions for name in direction}
         weak = np.asarray(self._weak())
         directions += [
@@ -1627,14 +1698,21 @@ class FisherResult(_GaussianSummary):
         return directions
 
     def _weak(self) -> Array:
-        """Entries whose latent standard error spans far more than any latent range."""
+        """Entries whose latent standard error spans far more than any latent range.
+
+        A value against its bound is left out: its latent spread is huge because
+        the squash is flat there, not because the data cannot see it, and it is
+        reported as pinned instead.
+        """
         spread = jnp.sqrt(jnp.clip(jnp.diagonal(self.covariance), 0.0))
-        return spread > _WEAK * jnp.maximum(1.0, jnp.abs(self.latent))
+        bounded = jnp.asarray(self.scaled, dtype=bool)
+        weak = bounded & (spread > _WEAK)
+        return weak & ~jnp.asarray(self.at_bound, dtype=bool)
 
     def _loose_directions(self) -> Array:
         # Back from the scaled coordinates to latent directions, unit length, and
         # one axis per weakly seen entry.
-        loose = np.asarray(self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1])
+        loose = np.asarray(self.eigenvalues <= _UNIDENTIFIED * self.eigenvalues[-1])
         directions = _unit_scale(self.information)[:, None] * self.eigenvectors[:, loose]
         directions = directions / jnp.linalg.norm(directions, axis=0, keepdims=True)
         axes = jnp.eye(len(self.names), dtype=directions.dtype)[:, np.asarray(self._weak())]
@@ -1644,9 +1722,12 @@ class FisherResult(_GaussianSummary):
         # Any loading on an unconstrained direction makes that entry's variance
         # unbounded, not only the loadings large enough to list. 1e-3 is well above
         # the rounding in the eigenvectors of a near-null direction.
-        loose = self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1]
+        loose = self.eigenvalues <= _UNIDENTIFIED * self.eigenvalues[-1]
         collinear = jnp.any(loose[None, :] & (jnp.abs(self.eigenvectors) >= 1e-3), axis=1)
-        return collinear | self._weak()
+        # A pinned value is reported as pinned, not as unconstrained: its flat
+        # squash, not the data, is what leaves its own row near zero.
+        pinned = jnp.asarray(self.at_bound, dtype=bool)
+        return (collinear & ~pinned) | self._weak()
 
     def summary(self, *, confidence: float = 0.95) -> str:
         """Estimates, standard errors, Wald intervals, correlations and identifiability."""
@@ -1746,10 +1827,18 @@ class _Profiler:
 
             Only that bound counts. An estimate pinned at its upper bound must
             still walk down, since the data may bound it from below. Read on the
-            squash's scale, so a one-sided bound counts too.
+            squash's scale, so a one-sided bound counts too. The algebraic and
+            softsign squashes approach their edges so slowly that a walk would
+            run out of points first, so a value within a relative 1e-5 of the
+            bound counts as well: the walk only gets there while the ratio is
+            still under the threshold, so the data leave that side open.
             """
-            side = _edge_side(float(positions(x)[index]))
-            return side == ("upper" if (direction > 0) == rising else "lower")
+            target = "upper" if (direction > 0) == rising else "lower"
+            if _edge_side(float(positions(x)[index])) == target:
+                return True
+            edge = high if target == "upper" else low
+            value = float(coordinates.to_physical(x)[index])
+            return math.isfinite(edge) and abs(value - edge) <= 1e-5 * max(1.0, abs(edge))
 
         def solve_at(x: Array, fixed: Array) -> _Maximum:
             found = _maximise(
@@ -1771,6 +1860,33 @@ class _Profiler:
                     max_steps=self.max_steps,
                 )
             return found
+
+        def settled(found: _Maximum, fixed: Array) -> bool:
+            """Is ``found`` a maximum over the other values, not just a stalled search?
+
+            BFGS stops when a step changes the objective by less than its
+            tolerance, which a value the data barely constrain can satisfy far from
+            its maximum: its gradient is tiny, but so is its curvature, so the
+            distance to go is not. The Newton decrement ``g' H^-1 g / 2`` is how
+            much the log-likelihood would still rise; a crossing counts only when
+            it is small and the curvature is that of a maximum.
+            """
+            free = ~np.asarray(fixed_entry)
+            if not free.any():
+                return True
+            args = (fixed_entry, fixed)
+            try:
+                hessian = np.asarray(
+                    jax.hessian(lambda flat: self.objective(flat, args))(found.position)
+                )[np.ix_(free, free)]
+            except (TypeError, ValueError, NotImplementedError):
+                # No second derivative through this solve: BFGS's own test stands.
+                return True
+            gradient = np.asarray(found.gradient)[free]
+            if not np.all(np.isfinite(hessian)) or np.linalg.eigvalsh(hessian)[0] <= 0.0:
+                return False
+            decrement = 0.5 * float(gradient @ np.linalg.solve(hessian, gradient))
+            return decrement <= _NEWTON_DECREMENT
 
         def narrow(
             inside: Array, inside_ratio: float, outside: Array, outside_ratio: float
@@ -1835,7 +1951,7 @@ class _Profiler:
                     points.append((new, math.inf, False))
                     return points, "solve_failed"
                 if new_ratio > self.threshold:
-                    if not found.converged:
+                    if not (found.converged and settled(found, fixed)):
                         # A ratio from an unfinished search can only be too high, so
                         # it cannot show the data close this side.
                         points.append((new, new_ratio, False))
@@ -1982,7 +2098,7 @@ class ProfileResult:
             notes.append(f"{unconverged} points did not converge")
         notes += [f"{other} pinned at its {side} bound" for other, side in self.at_bound.items()]
         note = "".join(f"; {text}" for text in notes)
-        return f"{self.name}: {int(self.confidence * 100)}% profile interval {shown}{note}"
+        return f"{self.name}: {round(self.confidence * 100)}% profile interval {shown}{note}"
 
 
 @dataclass(frozen=True)

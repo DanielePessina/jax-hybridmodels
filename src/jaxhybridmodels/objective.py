@@ -60,8 +60,11 @@ class Objective:
         starts. A named channel with weight ``0.0`` contributes no error.
         Under ``"mse"`` its cells still count in the denominator, so
         ``{"a": 1.0, "b": 0.0}`` scales the loss of ``{"a": 1.0}`` by
-        ``cells(a) / cells(a and b)``. ``"bal_*"`` and ``"mle"`` reduce per
-        channel, so there a zero weight is the same as leaving the name out.
+        ``cells(a) / cells(a and b)``. ``"mle"`` sums, so there a zero
+        weight is the same as leaving the name out. ``"bal_*"`` averages over
+        experiments, and one measured only in a zero-weight channel still
+        counts in that average, so the loss is scaled by the share of
+        experiments measured in the weighted channels.
     penalty_weight : float
         Weight on the bound-saturation penalty, relative to the pooled data
         loss. Under ``"mle"`` that loss is a sum over every measurement, so

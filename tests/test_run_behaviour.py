@@ -362,6 +362,8 @@ def test_evosax_with_validation_keeps_a_good_start(decay_data):
     config = hm.EvosaxTrainingConfig(population_size=4, steps=2, init_sigma=3.0)
     result = model.fit(decay_data, config, key=jr.key(0), validation=decay_data, verbose=False)
     assert rate_of(result.model) == pytest.approx(TRUE_RATE, rel=1e-6)
+    # The validation loss reported is the start's own, not generation 0's.
+    assert result.measured_validation is not None and result.measured_validation < 1e-8
 
 
 def test_an_inject_hyperparams_rate_survives_a_reset_at_the_default_lr(decay_data):
@@ -374,6 +376,16 @@ def test_an_inject_hyperparams_rate_survives_a_reset_at_the_default_lr(decay_dat
         )
     )
     result = parameter_model().fit(decay_data, config, key=jr.key(0), verbose=False)
+    assert rate_of(result.model) == pytest.approx(0.3, rel=1e-6)
+
+    # The same holds when a phase rebuilds its state for multiple shooting.
+    segmented = hm.OptaxTrainingConfig(
+        phases=(
+            TrainingPhase(steps=2, optimizer=injected, segments=2),
+            TrainingPhase(steps=2, optimizer=injected, reset_optimizer=True),
+        )
+    )
+    result = parameter_model().fit(decay_data, segmented, key=jr.key(0), verbose=False)
     assert rate_of(result.model) == pytest.approx(0.3, rel=1e-6)
 
 

@@ -898,6 +898,12 @@ def test_a_value_pinned_at_its_only_bound_profiles_away_from_it(x64, warp):
     assert profile.stop_reasons == ("bound", "threshold")
     high = mle + np.sqrt(3.841459 * error**2 + (edge - mle) ** 2)
     assert profile.bounds[1] == pytest.approx(high, abs=0.01 * error)
+    # A pinned value has no Gaussian spread, so sample holds it at its estimate.
+    with pytest.warns(RuntimeWarning, match="sit against"):
+        fisher = problem.fisher()
+    with pytest.warns(RuntimeWarning, match="held at their estimates"):
+        draws = problem.physical(fisher.sample(key=jr.key(0), n_draws=20))["k"]
+    np.testing.assert_allclose(draws, float(fisher.estimate[0]))
 
 
 def test_the_condition_number_ignores_how_a_value_is_bounded(x64):
@@ -923,7 +929,9 @@ def test_a_value_the_data_barely_see_is_not_identified(x64):
     experiments, *_ = measurements()
     model = hm.HybridModel.from_vector_field(
         vector_field=faint_field,
-        predictors={"k": hm.Parameter(0.7), "b": hm.Parameter(0.5)},
+        # b lives in a box, so its latent has a fixed scale and a latent
+        # spread in the thousands means the data cannot place it at all.
+        predictors={"k": hm.Parameter(0.7), "b": hm.Parameter(0.5, bounds=(-10.0, 10.0))},
         state_to_output=identity,
         output_channel_names=("y",),
         solver=SOLVER,
@@ -1037,6 +1045,31 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     with pytest.raises(ValueError, match="do not constrain"):
         together.sample(key=jr.key(0), n_draws=10)
     assert "Not identified: " in together.summary()
+    # The pseudo-inverse sees only the identified directions, so a correlation
+    # there would have the wrong sign: it is left out.
+    assert np.isnan(np.asarray(together.correlation())[0, 1])
+    assert "Strongest correlations" not in together.summary()
+
+    # With both values open above, a's lower side is open: b grows without limit.
+    # BFGS can stall on b's flat direction and look converged; the Newton
+    # decrement test keeps it from closing the side.
+    open_product = product_model(hm.Parameter(1.0, bounds=(0.0, None)))
+    open_problem = (
+        make_problem(open_product, experiments, log_prior=None, noise="data").optimize().problem
+    )
+    assert open_problem.profile("a").stop_reasons[0] != "threshold"
+
+    # A value the model never uses has zero information: unbounded, not certain.
+    unused = make_problem(
+        linear_model(hm.Parameter(0.7), unused=hm.Parameter(0.5)),
+        experiments,
+        log_prior=None,
+        noise="data",
+        estimate="unused",
+    )
+    blank = unused.fisher()
+    assert blank.standard_errors()["unused"] == np.inf
+    assert blank.unidentified() == [{"unused": 1.0}]
 
 
 def test_a_profile_closes_where_the_closed_form_says_and_compiles_once(linear):

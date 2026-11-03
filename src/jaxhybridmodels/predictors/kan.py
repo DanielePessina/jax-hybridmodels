@@ -147,7 +147,9 @@ class KANPredictor(Predictor):
         ``BoundedPredictor`` a boxed input arrives as a logit, which reaches
         about +-2.9 for the inner 90% of the box. The default ``(-3, 3)``
         covers that, where jaxkan's own ``(-1, 1)`` would cover only the
-        middle 46%. Static.
+        middle 46%. A KAN fed inputs already in ``[-1, 1]``, outside a
+        ``BoundedPredictor``, fits better with ``(-1, 1)``, where its grid
+        cells are three times finer. Static.
     seed : int
         Integer seed used to build the underlying jaxkan model and to
         recreate its rng-state on demand inside ``__call__``. Derived from
