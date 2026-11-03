@@ -118,8 +118,8 @@ class MLPPredictor(Predictor):
         The re-init protocol consumed by :func:`reinitialize` and
         by the tournament when it restarts a stalled attempt.
         Re-instantiating beats reinitialising leaves in place because
-        ``eqx.nn.MLP`` owns its per-layer init (LeCun-uniform weights
-        scaled by fan-in, zero biases), which leaf-level normal sampling
+        ``eqx.nn.MLP`` owns its per-layer init (weights and biases
+        uniform in +-1/sqrt(fan_in)), which leaf-level normal sampling
         would replace with a badly scaled scheme.
         """
         return MLPPredictor(
@@ -134,7 +134,7 @@ class MLPPredictor(Predictor):
     def with_zero_final_head(self) -> MLPPredictor:
         """Return a copy whose final ``Linear`` layer's weight and bias are zero.
 
-        Hidden layers keep their LeCun-uniform init, so the feature
+        Hidden layers keep their uniform init, so the feature
         transformation stays non-degenerate; only the readout is zeroed.
         Inside a ``BoundedPredictor`` the resulting zero latent maps
         through ``out_scaler.from_latent(0)`` to the midpoint of the box in

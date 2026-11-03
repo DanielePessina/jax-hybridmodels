@@ -85,5 +85,7 @@ hides XLA's other errors too, and level 2 does not remove this message.
 The `like=` model passed to `load` (or template passed to `load_predictors`)
 must be built with the same container, predictor classes, sizes, bounds,
 warps, activation names and output channels as the saved model. `load`
-names the part that differs. See
+names the part that differs. It also needs the same precision: a run saved
+with `jax_enable_x64` off does not load with it on, and one saved with it on
+loads with it off only rounded to float32, with a warning. See
 [Saving and loading](/guide/serialization).

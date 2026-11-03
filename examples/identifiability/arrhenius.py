@@ -114,7 +114,7 @@ def main() -> None:
     # region fisher
     fit = textbook_model().fit(data, CONFIG, key=jr.key(1), verbose=False)
     problem = hm.inference.make_problem(fit.model, data, log_prior=None, noise="data")
-    mle = problem.optimize()  # the fit averages buckets, so it is close but not the MLE
+    mle = problem.optimize()  # Adam's finite budget leaves the fit close to the MLE, not at it
     fisher = mle.problem.fisher()
     print(fisher.summary())
     # endregion fisher

@@ -56,7 +56,17 @@ def my_loss(pred_obs, bp, *, channel_idx=None, channel_weights=None):
         pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights
     )
     return data + my_extra_term(pred_obs, bp)
+
+
+my_loss.pooling = "experiments"
 ```
+
+Each bucket is scored on its own, and `pooling` says how the buckets add up
+to the loss over the dataset, one of `jaxhybridmodels.losses.POOLING_KINDS`:
+`"observations"` for a mean over
+measured cells, the default for a custom loss; `"experiments"` for a mean over
+experiments, as here, since `bal_mle` is one; `"sum"` for a summed likelihood.
+`jaxhybridmodels.losses.loss_pooling` reads it.
 
 `channel_weights` keyed by channel name scores only the channels it names,
 so `{"concentration": 1.0}` fits one channel of several. A sequence gives
@@ -133,8 +143,10 @@ That is 200 steps at `lr=1e-2` scored on the first half of every
 trajectory, then 800 at `lr=1e-3` scored on all of it. Mixing `steps=`
 with `phases=` raises. `config.total_steps` sums the phases.
 
-**`horizon`**, in `(0, 1]`, is the fraction of each trajectory the loss
-scores. The solver still integrates the whole trajectory. Fitting the early
+**`horizon`**, in `(0, 1]`, is the fraction of each experiment's own span the
+loss scores, from `t0` (or its first measurement) to its last measurement.
+Each experiment's first measurement is always scored, and the rows a bucket
+adds for padding do not count. The solver still integrates the whole trajectory. Fitting the early
 dynamics first keeps a diverging tail from swamping the gradient. It is a
 runtime mask, so changing it between phases costs no recompile.
 

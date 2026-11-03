@@ -69,6 +69,7 @@ def _build_kan(
     grid_size: int,
     basis: str,
     seed: int,
+    grid_range: tuple[float, float] = (-1.0, 1.0),
 ) -> Any:
     """Construct a ``jaxkan.models.KAN`` from the static architecture fields.
 
@@ -79,7 +80,7 @@ def _build_kan(
     return _JaxKAN(
         layer_dims=[in_size, *hidden_widths, out_size],
         layer_type=basis,
-        required_parameters={"k": _SPLINE_ORDER_K, "G": grid_size},
+        required_parameters={"k": _SPLINE_ORDER_K, "G": grid_size, "grid_range": grid_range},
         seed=seed,
     )
 
@@ -92,6 +93,7 @@ def _scaffold_parts(
     grid_size: int,
     basis: str,
     seed: int,
+    grid_range: tuple[float, float] = (-1.0, 1.0),
 ) -> tuple[Any, tuple[Any, ...]]:
     """Cached ``(graphdef, rest_states)`` for one KAN architecture.
 
@@ -110,7 +112,7 @@ def _scaffold_parts(
     tracers and the next trace raises ``UnexpectedTracerError``.
     """
     with jax.ensure_compile_time_eval():
-        scaffold = _build_kan(in_size, out_size, hidden_widths, grid_size, basis, seed)
+        scaffold = _build_kan(in_size, out_size, hidden_widths, grid_size, basis, seed, grid_range)
         graphdef, _params, *rest_states = nnx.split(scaffold, nnx.Param, ...)
         rest = tuple(jax.tree.map(jnp.asarray, rest_states))
     return graphdef, rest
@@ -138,6 +140,14 @@ class KANPredictor(Predictor):
         ``required_parameters['G']`` to jaxkan.
     basis : str
         Layer-type code, one of ``"spline"`` or ``"base"``. Static.
+    grid_range : tuple[float, float]
+        The input interval the spline grid covers, jaxkan's ``grid_range``.
+        The basis sums to 1 inside it and fades to 0 a few grid cells
+        outside, leaving only the silu residual. Inside a
+        ``BoundedPredictor`` a boxed input arrives as a logit, which reaches
+        about +-2.9 for the inner 90% of the box, so the default ``(-1, 1)``
+        covers only the middle 46% of it: widen it to ``(-3, 3)`` to give
+        the edges of the box a spline too. Static.
     seed : int
         Integer seed used to build the underlying jaxkan model and to
         recreate its rng-state on demand inside ``__call__``. Derived from
@@ -154,6 +164,7 @@ class KANPredictor(Predictor):
     grid_size: int = eqx.field(static=True)
     basis: str = eqx.field(static=True)
     seed: int = eqx.field(static=True)
+    grid_range: tuple[float, float] = eqx.field(static=True)
     # ``nnx.State`` is generic over ``MutableMapping[K, V]``. The concrete
     # parameterisation is internal to flax-nnx and not part of this package's
     # public API, so the annotation stays at ``Any, Any``: it keeps the type
@@ -168,6 +179,7 @@ class KANPredictor(Predictor):
         hidden_widths: tuple[int, ...] = (8,),
         grid_size: int = 5,
         basis: str = "spline",
+        grid_range: tuple[float, float] = (-1.0, 1.0),
         key: Array,
     ) -> None:
         """Build the KAN, split off its Param state, and pin the rest as static config.
@@ -184,6 +196,9 @@ class KANPredictor(Predictor):
         self.hidden_widths = tuple(int(w) for w in hidden_widths)
         self.grid_size = int(grid_size)
         self.basis = basis
+        self.grid_range = (float(grid_range[0]), float(grid_range[1]))
+        if not self.grid_range[0] < self.grid_range[1]:
+            raise ValueError(f"KANPredictor grid_range must be increasing; got {grid_range}")
         self.seed = _seed_from_key(key)
 
         model = self._build_model(self.seed)
@@ -193,7 +208,10 @@ class KANPredictor(Predictor):
         # nnx.split returns ``(GraphDef, State, *State)``, variadic in the
         # number of filters, hence the trailing star unpack.
         _, params, *_ = nnx.split(model, nnx.Param, ...)
-        self.params = params
+        # jaxkan builds its weights in float32 whatever the x64 flag, so a
+        # float64 run would quantise every gradient step at 1e-7. Cast to the
+        # default float, as every other predictor's weights are.
+        self.params = jax.tree.map(lambda leaf: jnp.asarray(leaf, dtype=float), params)
 
     def _build_model(self, seed: int) -> Any:
         """Construct a fresh ``jaxkan.models.KAN`` matching this predictor's static config."""
@@ -204,6 +222,7 @@ class KANPredictor(Predictor):
             self.grid_size,
             self.basis,
             seed,
+            self.grid_range,
         )
 
     def __call__(self, x: Float[Array, " in_size"]) -> Float[Array, " out_size"]:
@@ -225,6 +244,7 @@ class KANPredictor(Predictor):
             self.grid_size,
             self.basis,
             self.seed,
+            self.grid_range,
         )
         merged = nnx.merge(graphdef, self.params, *rest_states)
         # Add/strip the batch axis required by jaxkan's per-layer matmuls.
@@ -236,9 +256,10 @@ class KANPredictor(Predictor):
 
         The re-init protocol used by the tournament. Building a new
         ``KANPredictor`` rather than editing ``self.params`` keeps jaxkan's
-        per-layer init in charge (truncated-normal spline weights, ones
-        bias, identity residual), which leaf-level normal sampling would
-        replace with a badly scaled scheme.
+        per-layer init in charge (normal basis coefficients with sd 0.1,
+        unit spline scales, Glorot-uniform residual weights and zero bias),
+        which leaf-level normal sampling would replace with a badly scaled
+        scheme.
         """
         return KANPredictor(
             in_size=self.in_size,
@@ -246,6 +267,7 @@ class KANPredictor(Predictor):
             hidden_widths=self.hidden_widths,
             grid_size=self.grid_size,
             basis=self.basis,
+            grid_range=self.grid_range,
             key=key,
         )
 

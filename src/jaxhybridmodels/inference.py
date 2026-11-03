@@ -20,9 +20,9 @@ to the posterior. ``log_prior=None`` is enough for all but the last.
 
 Three things make this density differ from the training loss.
 
-- It sums over buckets. The trainers average them, which tempers even the
-  ``"mle"`` loss by one over the number of buckets, and makes a posterior depend
-  on how experiments happened to be grouped.
+- It is the likelihood itself. The trainers minimise ``Objective.loss``, which
+  matches it only for ``loss="mle"`` with the data's variances: ``"mse"`` weighs
+  every measurement the same whatever its variance.
 - The position holds latents, while priors are written on physical values, so
   the change-of-variables term is added here for every free ``Parameter``.
   Leaving it out would imply a prior nobody chose, with mass piled at the bounds.
@@ -575,7 +575,8 @@ class InferenceProblem:
 
         Fisher information and profiles describe the likelihood at its maximum, and a
         Laplace approximation the posterior at its mode. A training fit is close but
-        not there, because it averages the loss over buckets. The search runs in the
+        not there: the optimiser stops after a finite budget, and a loss other than
+        ``"mle"`` has a different minimum when the variances differ. The search runs in the
         latent coordinates, so a ``Parameter`` stays inside its bounds; the posterior
         mode is therefore the mode of the density over latents.
 
@@ -2123,12 +2124,15 @@ def make_problem(
     if log_prior is flat_prior:
         _check_flat_prior(tree, mask)
 
+    # A Parameter is named as everywhere else, without its ``.latent`` field.
     conditional_on = tuple(
-        _path_to_dotted(path)
-        for (path, in_base), in_free in zip(
-            jtu.tree_flatten_with_path(base)[0], jtu.tree_leaves(free_mask), strict=True
+        dict.fromkeys(
+            _path_to_dotted(path).removesuffix(".latent")
+            for (path, in_base), in_free in zip(
+                jtu.tree_flatten_with_path(base)[0], jtu.tree_leaves(free_mask), strict=True
+            )
+            if in_base and not in_free
         )
-        if in_base and not in_free
     )
     if conditional_on:
         shown = ", ".join(conditional_on[:4]) + (", ..." if len(conditional_on) > 4 else "")

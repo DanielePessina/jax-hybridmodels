@@ -286,6 +286,8 @@ FitResult(
     history: 'FitHistory',
     best_step: 'int | None',
     stop_reason: 'StopReason',
+    *,
+    measured_loss: 'float | None' = None,
 ) -> None
 ```
 
@@ -304,12 +306,15 @@ the run (it warned, and the model holds the best parameters so far), else
 
 #### `FitResult.final_loss`
 
-The training loss recorded at the returned parameters.
+The training loss at the returned parameters.
 
-``history.loss[best_step]``, or the last entry when ``best_step`` is
-None. ``fit_ensemble`` ranks its members by it.
+``measured_loss`` when the trainer measured it there: after the last
+update with ``restore_best=False``, and for an Evosax candidate chosen
+by validation, whose own fitness is not the best-so-far in
+``history.loss``. Else ``history.loss[best_step]``, or the last entry
+when ``best_step`` is None.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L193)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L194)</small>
 
 <a id="fitresultsummary"></a>
 
@@ -332,7 +337,7 @@ charge it: the outer 5% of its box for the default sigmoid. The network
 figure covers the whole declared box, including inputs no experiment
 reached, so a large share can be harmless if the data never goes there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L205)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L211)</small>
 
 ---
 

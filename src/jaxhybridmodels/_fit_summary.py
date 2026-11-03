@@ -41,7 +41,8 @@ _MIN_TREND_WINDOW = 2
 
 def format_fit_summary(run: Any, *, data: Any = None) -> str:
     """Build the report for a ``FitResult`` or ``SavedRun``; see ``FitResult.summary``."""
-    lines = _run_lines(run.history, run.best_step, run.stop_reason)
+    measured = getattr(run, "measured_loss", None)
+    lines = _run_lines(run.history, run.best_step, run.stop_reason, measured)
     lines += _phase_lines(run.history)
     lines += _parameter_lines(run.model.predictors)
     lines += _network_lines(run.model.predictors)
@@ -50,7 +51,12 @@ def format_fit_summary(run: Any, *, data: Any = None) -> str:
     return "\n".join(lines)
 
 
-def _run_lines(history: FitHistory, best_step: int | None, stop_reason: str | None) -> list[str]:
+def _run_lines(
+    history: FitHistory,
+    best_step: int | None,
+    stop_reason: str | None,
+    measured: float | None = None,
+) -> list[str]:
     if not history.loss:
         return ["Run: no fit recorded"]
     # Only Optax records a phase per step; Evosax leaves it empty.
@@ -58,14 +64,18 @@ def _run_lines(history: FitHistory, best_step: int | None, stop_reason: str | No
     returned = "the last one" if best_step is None else f"{unit[:-1]} {best_step}"
     reason = _STOP_TEXT.get(stop_reason or "", str(stop_reason))
     at = -1 if best_step is None else best_step
+    # The recorded loss, unless the trainer measured the returned parameters
+    # themselves: after the last update, or a candidate chosen by validation.
+    final = history.loss[at] if measured is None else measured
     lines = [
         f"Run: {reason}",
         f"  {len(history.loss)} {unit} recorded; returned {returned}",
-        f"  loss {history.loss[0]:.4e} at the start, {history.loss[at]:.4e} at the returned point",
+        f"  loss {history.loss[0]:.4e} at the start, {final:.4e} at the returned point",
     ]
     trend = _loss_trend(history)
     if trend is not None:
-        lines.append(f"  loss change over the last 10% of {unit}: {trend:+.2%}")
+        span = "the final phase" if len(set(history.phase)) > 1 else unit
+        lines.append(f"  loss change over the last 10% of {span}: {trend:+.2%}")
     if history.validation_loss:
         lines.append(f"  validation loss {history.validation_loss[at]:.4e} at the returned point")
     if any(history.penalty):

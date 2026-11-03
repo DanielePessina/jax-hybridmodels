@@ -125,11 +125,13 @@ class TrainingPhase:
         optax.clip_by_global_norm(1.0), optax.adamw(learning_rate))``), or
         a ready-made transformation instance. Names and factories are
         wrapped in ``optax.inject_hyperparams``, so a phase boundary or a
-        schedule can move the learning rate without a rebuild. A raw
-        instance cannot be re-hyperparametrised, so a phase that changes
-        ``lr`` with a raw instance must set ``reset_optimizer``. A phase
-        that changes the optimiser must set it too, because optimiser state
-        belongs to the optimiser that built it.
+        schedule can move the learning rate without a rebuild. A ready-made
+        instance keeps the learning rate it was built with, unless it was
+        itself built with ``optax.inject_hyperparams``, so a phase that
+        changes ``lr`` on a plain instance raises: pass a new instance,
+        built at the new rate, with ``reset_optimizer``. A phase that
+        changes the optimiser must set ``reset_optimizer``, because
+        optimiser state belongs to the optimiser that built it.
     horizon : float
         Fraction of each experiment's timeline the loss looks at, in
         ``(0, 1]``. It masks the **loss**, never the integration: the
@@ -337,22 +339,22 @@ def _validate_optimizer_transitions(config: OptaxTrainingConfig) -> None:
                 "Optimiser state is specific to the optimiser that built it, so switching "
                 "without a reset would keep running the previous one."
             )
-        # A raw transformation's learning rate is baked in, and the state it
-        # carries into this phase has nowhere to write a new one. Refused here,
-        # before any training, rather than when the phase starts.
-        keeps_state = not phase.reset_optimizer and phase.segments == before.segments
+        # A raw transformation's learning rate is baked in, and neither its
+        # state nor a reset of the same instance has anywhere to write a new
+        # one. Refused here, before any training, rather than ignored.
         if (
-            keeps_state
-            and not callable(phase.lr)
+            not callable(phase.lr)
             and phase.lr != before.lr
+            and phase.optimizer is before.optimizer
             and isinstance(phase.optimizer, optax.GradientTransformation)
             and not _optimiser_state_supports_lr(phase.optimizer.init(jnp.zeros(())))
         ):
             raise ValueError(
-                f"OptaxTrainingConfig: phase {idx} changes lr with a raw "
-                "optax.GradientTransformation, whose learning rate cannot be changed. "
-                "Set reset_optimizer=True on that phase to rebuild it, or pass an "
-                "optimiser name or factory so the learning rate stays injectable."
+                f"OptaxTrainingConfig: phase {idx} changes lr with the same raw "
+                "optax.GradientTransformation, which keeps the learning rate it was "
+                "built with. Pass a new instance built at the new rate (with "
+                "reset_optimizer=True), or an optimiser name or factory so the "
+                "learning rate stays injectable."
             )
 
 
@@ -636,6 +638,7 @@ def _shared_tournament(
     pooling: Pooling,
     ui: TrainingUI | None = None,
     segmented: _Segmented | None = None,
+    keep_start: bool = True,
 ) -> _Tournament:
     """Warm-start selection: train several fresh inits briefly, keep the best ``top_k``.
 
@@ -655,7 +658,10 @@ def _shared_tournament(
     sort), so the result stays a deterministic function of ``key``.
     ``top_k=1`` reproduces the single-best behaviour the main loop uses.
 
-    Attempt 0 starts from ``predictors`` as given; the others redraw.
+    With ``keep_start``, attempt 0 starts from ``predictors`` as given and the
+    others redraw, so a fit never loses a good starting guess. An ensemble
+    passes ``False``, so every member starts from a fresh draw, as its
+    spread needs.
 
     An attempt that raises a diffrax error or a non-finite score is dropped,
     scored ``inf``, and the next key tried. If every attempt fails, the
@@ -677,7 +683,11 @@ def _shared_tournament(
             # guess is always a candidate and is never thrown away. The others
             # redraw, one subkey per Module leaf, so identical-shape sibling
             # predictors get genuinely different fresh weights.
-            fresh = predictors if attempt == 0 else reinitialize_pytree(predictors, key=attempt_key)
+            fresh = (
+                predictors
+                if attempt == 0 and keep_start
+                else reinitialize_pytree(predictors, key=attempt_key)
+            )
             # Re-init draws every Module leaf, frozen ones included. Put the
             # frozen leaves back, so a frozen pre-trained subtree (or a
             # default-frozen BoundScaler) keeps its values instead of being
@@ -889,13 +899,16 @@ def _objective_changed(config: OptaxTrainingConfig, phase_idx: int) -> bool:
 
     ``TrainingPhase.horizon`` masks the loss to a prefix, and ``segments``
     replaces the single solve with segments started from nodes, so a change in
-    either means the losses either side of the boundary are not comparable.
+    either means the losses either side of the boundary are not comparable. A
+    segmented phase's score includes the gap term weighted by
+    ``continuity_weight``, so a change of weight there counts too.
     Phase 0 has no predecessor and so never counts as a change.
     """
     if phase_idx == 0:
         return False
     phase, before = config.phases[phase_idx], config.phases[phase_idx - 1]
-    return phase.horizon != before.horizon or phase.segments != before.segments
+    reweighted = phase.segments > 1 and phase.continuity_weight != before.continuity_weight
+    return phase.horizon != before.horizon or phase.segments != before.segments or reweighted
 
 
 def _has_weak_scalar_trainable(predictors: Any, trainable: Any) -> bool:
@@ -1039,7 +1052,12 @@ def _begin_phase(
     phase = config.phases[phase_idx]
     if phase.reset_optimizer or phase.segments != config.phases[phase_idx - 1].segments:
         optimizer = _build_optimizer(phase.optimizer, _start_lr(phase.lr))
-        return optimizer, optimizer.init(eqx.filter(predictors, trainable))
+        opt_state = optimizer.init(eqx.filter(predictors, trainable))
+        # A ready-made instance built with inject_hyperparams starts at its own
+        # rate; write this phase's into it, as the segmented reset does.
+        if _optimiser_state_supports_lr(opt_state):
+            _set_lr(opt_state, _start_lr(phase.lr))
+        return optimizer, opt_state
     if callable(phase.lr):
         # A scheduled phase writes its learning rate before every step, and
         # TrainingPhase has refused a schedule on a raw optimiser.
@@ -1055,9 +1073,9 @@ def _begin_phase(
             raise ValueError(
                 "OptaxTrainingConfig: phase "
                 f"{phase_idx} changes lr with a raw optax.GradientTransformation "
-                "that cannot be re-hyperparametrised. Set "
-                f"reset_optimizer=True on that phase to rebuild it, or pass "
-                "an optimiser name / factory so the learning rate stays injectable."
+                "that cannot be re-hyperparametrised. Pass a new instance built at "
+                "the new rate with reset_optimizer=True, or an optimiser name or "
+                "factory so the learning rate stays injectable."
             )
         _set_lr(opt_state, phase.lr)
     return optimizer, opt_state
@@ -1137,6 +1155,8 @@ class _PhaseRun:
     attempt's score, ``inf`` for one that failed, and is empty when no
     tournament ran. ``continuity`` is the weighted gap term per step, 0 in
     single-shooting steps, and ``None`` when no phase is segmented.
+    ``final_selection`` is the selection score at the returned parameters
+    when they are not a recorded step, and ``None`` otherwise.
     """
 
     predictors: Any
@@ -1150,6 +1170,7 @@ class _PhaseRun:
     failure: str | None = None
     tournament_scores: tuple[float, ...] = ()
     continuity: list[float] | None = None
+    final_selection: float | None = None
 
 
 def _select_ui(ui: TrainingUI | None, verbose: bool) -> TrainingUI:
@@ -1260,6 +1281,9 @@ def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
         ),
         best_step=run.best_step,
         stop_reason=_stop_reason(run),
+        # Measured at the returned parameters, which a restored best step
+        # already is.
+        measured_loss=None if run.best_step is not None else run.final_loss,
     )
 
 
@@ -1402,13 +1426,12 @@ def _run_phases(
     body several times (the ensembles, once per member) fires
     ``on_run_start`` before each call, so every member is its own UI run.
 
-    Returns a :class:`_PhaseRun`. Its ``final_loss`` labels the returned
-    predictors: the
-    best-step loss when ``config.restore_best`` is set (measured exactly
-    at the returned parameters), else the last step's reported loss
-    (measured one update before the returned parameters, as the loop
-    reports it). The ensembles rank members on this labelled loss, so a
-    best-step-restored member is not reported at a loss it never had.
+    Returns a :class:`_PhaseRun`. Its ``final_loss`` is measured at the
+    returned predictors: the best step's loss when ``config.restore_best``
+    is set, else one more forward pass at the parameters after the last
+    update. ``final_selection`` is the selection score there in the second
+    case. The ensembles rank members on these, so no member is reported at
+    a loss it never had.
 
     The fused ``step_update`` kernel comes from ``kernels`` and is reused
     while the optimiser is; a phase reset that rebuilds the optimiser
@@ -1613,6 +1636,7 @@ def _run_phases(
     final_predictors = (
         best.best_predictors if config.restore_best and failure is None else predictors
     )
+    final_selection: float | None = None
     if not losses_history:
         final_loss = float("nan")
     elif config.restore_best and best.best_step is not None:
@@ -1621,6 +1645,12 @@ def _run_phases(
         # that is about to come back. ``history[-1]`` is the last step's
         # loss, which describes a different model.
         final_loss = best.best_loss
+    elif failure is None:
+        # The last recorded loss was measured one update before the returned
+        # parameters, so measure them once more, on the last phase's terms.
+        final_loss, final_selection = _measure_returned(
+            final_predictors, dataset, kernels, config.phases[-1].horizon, select_score
+        )
     else:
         final_loss = losses_history[-1]
     ui.on_run_end(final_loss=final_loss)
@@ -1635,7 +1665,33 @@ def _run_phases(
         stopped_early=stopped_early,
         failure=failure,
         continuity=continuity,
+        final_selection=final_selection,
     )
+
+
+def _measure_returned(
+    predictors: Any,
+    dataset: Dataset,
+    kernels: _Kernels,
+    horizon: float,
+    select_score: Callable[[Any], float] | None,
+) -> tuple[float, float | None]:
+    """The pooled loss, and the selection score, at the parameters a run returns.
+
+    The last phase is single shooting, so its forward-only scorer is the
+    loss the history recorded. A failure here keeps the run, reported as NaN.
+    """
+    horizon_ = jnp.asarray(horizon)
+    shares = kernels.pooling.shares(dataset.bucket_payloads, horizon_)
+    try:
+        loss = sum(
+            float(kernels.score_bucket(predictors, bp, horizon_, share))
+            for bp, share in zip(dataset.bucket_payloads, shares, strict=True)
+        )
+        selection = None if select_score is None else select_score(predictors)
+    except (*FIT_FAILURES, FloatingPointError):
+        return math.nan, None
+    return loss, selection
 
 
 @dataclass(frozen=True)
@@ -1881,7 +1937,9 @@ def _fit_ensemble(
                 optimizer=kernels.optimizer,
                 trainable=mask,
                 tournament_attempts=n_seeds,
-                tournament_steps=config.tournament_steps,
+                # One seed has nothing to choose between, so it is only scored,
+                # not trained for steps the history would not record.
+                tournament_steps=config.tournament_steps if n_seeds > 1 else 0,
                 tournament_lr=lr,
                 key=seed_key,
                 horizon=horizon,
@@ -1889,6 +1947,7 @@ def _fit_ensemble(
                 pooling=kernels.pooling,
                 ui=ui_,
                 segmented=_first_phase_segments(config, kernels),
+                keep_start=False,
             )
 
         # (training data, seed) per member. The key labels are the ones the
@@ -1908,7 +1967,7 @@ def _fit_ensemble(
             ranked, scores = rank(dataset, fold(key, "seed_ensemble_tournament"), n_members)
             jobs = [(dataset, seed, scores) for seed in ranked]
 
-        trained: list[FitResult] = []
+        trained: list[tuple[float, FitResult]] = []
         # The first member's on_run_start is the one opened above.
         run_open = True
         for data_, (seed_score, candidate), scores in jobs:
@@ -1944,7 +2003,8 @@ def _fit_ensemble(
                 continue
             # One attempt chose nothing, so it records no tournament.
             tournament = scores if n_seeds > 1 else ()
-            trained.append(_fit_result(model, replace(run, tournament_scores=tournament)))
+            result = _fit_result(model, replace(run, tournament_scores=tournament))
+            trained.append((_member_score(run), result))
 
         if run_open:
             ui_.on_run_end(final_loss=math.nan)
@@ -1954,22 +2014,23 @@ def _fit_ensemble(
             "fit_ensemble: every seed failed (a solver error or a non-finite loss); "
             "no member was trained"
         )
-    # Stable, so a tie keeps the seed ranking. FitResult.final_loss is the
-    # loss _run_phases reports for the returned parameters. It is NaN when
-    # restore_best found no finite loss, and NaN breaks the ordering of the
-    # whole sort, so such a member ranks last.
-    return sorted(trained, key=_rank_key)
+    # Stable, so a tie keeps the seed ranking. A bootstrap member's training
+    # loss is on its own resample, so without validation its rank is only a
+    # rough guide.
+    return [result for _, result in sorted(trained, key=lambda pair: pair[0])]
 
 
-def _rank_key(result: FitResult) -> float:
-    """Sort key for ensemble members: lower is better, with NaN ranked as ``inf``.
+def _member_score(run: _PhaseRun) -> float:
+    """Sort key for an ensemble member, measured at its returned parameters.
 
-    The validation loss at the returned parameters when there is one, else the
-    final training loss.
+    The validation loss when there is one, else the training loss. NaN would
+    break the ordering of the whole sort, so it ranks as ``inf``.
     """
-    scores = result.history.validation_loss
-    if scores:
-        loss = scores[-1 if result.best_step is None else result.best_step]
+    if run.selection:
+        if run.best_step is not None:
+            loss = run.selection[run.best_step]
+        else:
+            loss = run.selection[-1] if run.final_selection is None else run.final_selection
     else:
-        loss = result.final_loss
+        loss = run.final_loss
     return loss if not math.isnan(loss) else math.inf

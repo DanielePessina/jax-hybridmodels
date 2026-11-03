@@ -114,9 +114,10 @@ force the policy to saturate at $t = 0$ and set the penalty against the fit.
 PPO differentiates the policy's log-probability and the value head. The
 rollout produces rewards and is never differentiated, so
 `SolverConfig.adjoint` plays no part and the solver could be stiff,
-nonsmooth or a black box. That is the reason to use RL on a problem whose
-gradient is well behaved, and it is the argument the [Evosax
-trainer](/guide/training) makes by another route.
+nonsmooth or a black box. That is the reason to use RL where the gradient
+through the solve is badly behaved or unavailable, and it is the argument the
+[Evosax trainer](/guide/training) makes by another route. This problem's
+gradient is well behaved, so here PPO is a check, not a necessity.
 
 ## Results
 

@@ -68,6 +68,8 @@ diffeqsolve(
     ts: 'Array',
     y0: 'Array',
     args: 'Any' = None,
+    *,
+    jump_ts: 'ArrayLike | None' = None,
 ) -> diffrax.Solution
 ```
 
@@ -93,6 +95,7 @@ crystallisation example does this.
 | `ts` |  | The observation times ``[T]``. The solver integrates from ``ts[0]`` to ``ts[-1]`` and saves at exactly ``ts``. |
 | `y0` |  | Full initial state ``[S]``. |
 | `args` |  | Optional static-or-traced value passed to the vector field's ``args`` (e.g. the predictors pytree, for Backsolve). |
+| `jump_ts` |  | Times where the vector field jumps or bends, such as a [`Profile`](/api/profiles#profile)'s ``jump_ts``. The solver ends a step on each instead of stepping across it, which a short pulse would otherwise pass unseen. May be traced, so a breakpoint can come from a covariate. Times outside ``ts`` are ignored. |
 
 **Returns**
 
@@ -100,14 +103,18 @@ crystallisation example does this.
 | --- | --- | --- |
 | `diffrax.Solution` |  | The diffrax solution; ``.ys`` is the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L226)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L236)</small>
 
 <a id="solverconfigstepsize_controller"></a>
 
 #### `SolverConfig.stepsize_controller()`
 
 ```python
-stepsize_controller(self) -> 'diffrax.PIDController'
+stepsize_controller(
+    self,
+    *,
+    jump_ts: 'ArrayLike | None' = None,
+) -> diffrax.AbstractStepSizeController
 ```
 
 Build the adaptive step-size controller this config describes.
@@ -121,6 +128,10 @@ The ``(0, 1, 0)`` coefficient defaults are diffrax's own plain
 I-control, so this reproduces the ``PIDController(rtol, atol)`` the
 examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
 step-size oscillation on stiff problems.
+
+``jump_ts`` are times where the vector field jumps or bends. The
+controller is wrapped in ``diffrax.ClipStepSizeController``, which
+ends a step exactly on each and restarts the solver there.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L204)</small>
 
@@ -138,7 +149,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L283)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L308)</small>
 
 ---
 

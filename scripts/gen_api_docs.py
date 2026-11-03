@@ -171,6 +171,9 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "bal_mle",
             "LOSS_REGISTRY",
             "resolve_loss_fn",
+            "loss_pooling",
+            "Pooling",
+            "POOLING_KINDS",
         ),
     ),
     (
@@ -204,6 +207,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "profiles",
         "Profiles: Time-Varying Inputs",
         (
+            "Profile",
             "constant_profile",
             "step_profile",
             "ramp_profile",
@@ -277,6 +281,10 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "masked_mle": "jaxhybridmodels.losses",
     "masked_mse": "jaxhybridmodels.losses",
     "resolve_loss_fn": "jaxhybridmodels.losses",
+    "loss_pooling": "jaxhybridmodels.losses",
+    "Profile": "jaxhybridmodels.profiles",
+    "Pooling": "jaxhybridmodels.losses",
+    "POOLING_KINDS": "jaxhybridmodels.losses",
     "PenaltyPointSource": "jaxhybridmodels.penalties",
     "attach_penalty_state": "jaxhybridmodels.penalties",
     "bound_penalty": "jaxhybridmodels.penalties",

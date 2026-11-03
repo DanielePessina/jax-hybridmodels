@@ -189,14 +189,20 @@ class FitResult:
     history: FitHistory
     best_step: int | None
     stop_reason: StopReason
+    measured_loss: float | None = field(default=None, kw_only=True)
 
     @property
     def final_loss(self) -> float:
-        """The training loss recorded at the returned parameters.
+        """The training loss at the returned parameters.
 
-        ``history.loss[best_step]``, or the last entry when ``best_step`` is
-        None. ``fit_ensemble`` ranks its members by it.
+        ``measured_loss`` when the trainer measured it there: after the last
+        update with ``restore_best=False``, and for an Evosax candidate chosen
+        by validation, whose own fitness is not the best-so-far in
+        ``history.loss``. Else ``history.loss[best_step]``, or the last entry
+        when ``best_step`` is None.
         """
+        if self.measured_loss is not None:
+            return self.measured_loss
         if not self.history.loss:
             return float("nan")
         step = -1 if self.best_step is None else self.best_step
@@ -252,6 +258,7 @@ class SavedRun:
     config: OptaxTrainingConfig | EvosaxTrainingConfig | dict[str, Any] | None
     objective: Objective | dict[str, Any] | None
     extras: dict[str, Any]
+    measured_loss: float | None = None
 
     def summary(self, data: Any = None) -> str:
         """The report :meth:`FitResult.summary` gives, for a run read back from disk."""

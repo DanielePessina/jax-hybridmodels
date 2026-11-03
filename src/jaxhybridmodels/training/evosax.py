@@ -101,6 +101,7 @@ from jaxhybridmodels.training.kernels import (
     failure_details,
     failure_summary,
     simulate_bucket,
+    split_share,
 )
 from jaxhybridmodels.ui.base import EvosaxUI, SilentUI, close_run_on_error
 from jaxhybridmodels.ui.evosax import RichEvosaxUI
@@ -254,12 +255,11 @@ def _build_single_eval(
             # failure, as it is for inference.
             solved = solved & jnp.all(jnp.isfinite(full_state))
             pred_obs = jax.vmap(state_to_output)(full_state)
-            bucket_loss = loss_fn(pred_obs, bp)
+            data_share, penalty_share = split_share(share)
+            total = total + data_share * loss_fn(pred_obs, bp)
             if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-                bucket_loss = bucket_loss + trajectory_penalty_weight * trajectory_penalty_fn(
-                    full_state, bp
-                )
-            total = total + share * bucket_loss
+                penalty = trajectory_penalty_fn(full_state, bp)
+                total = total + penalty_share * trajectory_penalty_weight * penalty
         if penalty_weight > 0.0:
             # The search roams the latent space with nothing holding it in
             # range, and the squash keeps the physical output legal however
@@ -400,6 +400,8 @@ class _EvosaxRun:
     individual and is empty without a validation set. ``best_step`` indexes
     both at the returned predictors. ``failure`` says why the run ended early
     on a solver error or a non-finite fitness, and is ``None`` otherwise.
+    ``selected_loss`` is the training fitness of the candidate validation
+    chose, ``None`` without validation.
     """
 
     predictors: Any
@@ -408,6 +410,7 @@ class _EvosaxRun:
     validation: list[float]
     best_step: int
     failure: str | None = None
+    selected_loss: float | None = None
 
 
 def train_with_evosax(
@@ -491,6 +494,7 @@ def train_with_evosax(
         ),
         best_step=run.best_step,
         stop_reason="budget_exhausted" if run.failure is None else "diverged",
+        measured_loss=run.selected_loss,
     )
 
 
@@ -613,6 +617,7 @@ def _train_with_evosax(
         # generation's best individual instead of the training fitness.
         best_selection = math.inf
         selected_flat = best_flat
+        selected_loss = math.nan
 
         history: list[float] = []
         failed: list[int] = []
@@ -683,6 +688,9 @@ def _train_with_evosax(
                 if score < best_selection:
                     best_selection = score
                     selected_flat = gen_flat
+                    # Its own training fitness: history holds the best so far,
+                    # which may belong to another candidate.
+                    selected_loss = gen_best_loss
                     best_step = gen
 
             history.append(best_loss)
@@ -709,4 +717,5 @@ def _train_with_evosax(
             validation=selection,
             best_step=best_step,
             failure=failure,
+            selected_loss=None if select_score is None else selected_loss,
         )

@@ -484,9 +484,15 @@ def test_patience_stops_early_and_the_best_step_labels_the_model(overshoot):
 
 
 def test_restore_best_off_returns_the_last_step(overshoot):
-    _, keep_last, _ = overshoot
+    _, keep_last, data = overshoot
     assert keep_last.best_step is None
-    assert keep_last.final_loss == keep_last.history.loss[-1]
+    # The last recorded loss predates the last update; final_loss is measured
+    # at the parameters that came back.
+    remeasured = keep_last.model.fit(
+        data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
+    )
+    assert remeasured.history.loss[0] == pytest.approx(keep_last.final_loss, rel=1e-5)
+    assert keep_last.final_loss != keep_last.history.loss[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +837,9 @@ def test_seed_ensemble_returns_trained_members_best_first(ensembles):
 def test_bootstrap_ensemble_trains_one_member_per_resample(ensembles):
     _, bootstrap, _ = ensembles
     assert len(bootstrap) == 2
+    # One seed per resample still trains no tournament, and every member
+    # starts from a fresh draw rather than the model as given.
+    assert bootstrap[0].history.tournament_scores == ()
     assert fitted_rate(bootstrap[0]) == pytest.approx(TRUE_RATE, abs=0.1)
     assert fitted_rate(bootstrap[0]) != fitted_rate(bootstrap[1])
 

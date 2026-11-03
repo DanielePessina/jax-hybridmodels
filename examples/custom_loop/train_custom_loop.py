@@ -4,8 +4,9 @@
 pieces in ``jaxhybridmodels.training.kernels``. When you need a loop it cannot
 express, compose the same pieces instead of forking the trainer. This
 script recovers a harmonic oscillator's frequency with a loop that weights
-each bucket's loss and gradients by its experiment count, which the stock
-trainer has no option for.
+each bucket's loss and gradients by its experiment count. The stock trainer
+weights a mean-type loss like this one by each bucket's measured cells; a
+custom loop can weight however it likes.
 
 Shows:
 
@@ -98,7 +99,11 @@ def weight_decay(predictors, points):
 
 
 def bucket_weight(bp) -> float:
-    """Weight a bucket by its experiment count, so 3 experiments outweigh 1."""
+    """Weight a bucket by its experiment count, so 3 experiments outweigh 1.
+
+    ``float(bp.mask.sum())`` would match the stock trainer, which weights a
+    mean-type loss by the measured cells in each bucket.
+    """
     return float(bp.observed.shape[0])
 
 

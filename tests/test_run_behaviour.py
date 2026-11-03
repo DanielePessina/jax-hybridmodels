@@ -332,13 +332,41 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     )
     assert len(result.history.loss) == 6 and rate_of(result.model) != 0.3
 
-    with pytest.raises(ValueError, match="learning rate cannot be changed"):
-        hm.OptaxTrainingConfig(
-            phases=(
-                TrainingPhase(steps=2, lr=1e-3, optimizer=raw),
-                TrainingPhase(steps=2, lr=1e-2, optimizer=raw),
+    # The same raw instance keeps its own rate, so a new lr is refused with
+    # or without a reset: a reset rebuilds nothing it could write the rate to.
+    for reset in (False, True):
+        with pytest.raises(ValueError, match="keeps the learning rate it was built with"):
+            hm.OptaxTrainingConfig(
+                phases=(
+                    TrainingPhase(steps=2, lr=1e-3, optimizer=raw),
+                    TrainingPhase(steps=2, lr=1e-2, optimizer=raw, reset_optimizer=reset),
+                )
             )
-        )
+
+
+def test_without_restore_best_the_final_loss_is_measured_at_the_returned_model(decay_data):
+    """The last recorded loss predates the last update, so it is measured again."""
+    model = parameter_model()
+    config = hm.OptaxTrainingConfig(steps=5, lr=0.1, restore_best=False)
+    result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
+    assert result.best_step is None
+    returned = result.model.predict(decay_data)
+    expected = float(hm.compute_metrics(returned)["conc"].mse)
+    assert result.final_loss == pytest.approx(expected, rel=1e-4)
+    assert result.final_loss != result.history.loss[-1]
+
+
+def test_bootstrap_members_start_from_fresh_draws(decay_data):
+    """Every member's start is redrawn, so the spread includes the initialisation."""
+    model = network_model(jr.key(1))
+    config = hm.OptaxTrainingConfig(steps=1, lr=0.0)
+    members = model.fit_ensemble(
+        decay_data, config, n_members=2, bootstrap=True, key=jr.key(2), verbose=False
+    )
+    start = jax.tree.leaves(eqx.filter(model.predictors, eqx.is_inexact_array))
+    for member in members:
+        trained = jax.tree.leaves(eqx.filter(member.model.predictors, eqx.is_inexact_array))
+        assert any(not np.array_equal(a, b) for a, b in zip(start, trained, strict=True))
 
 
 def test_tournament_falls_back_when_every_attempt_fails(decay_data):

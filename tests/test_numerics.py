@@ -9,6 +9,7 @@ or a slow run.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import warnings
@@ -49,6 +50,7 @@ from jaxhybridmodels.data import (
 from jaxhybridmodels.losses import (
     bal_mle,
     bal_mse,
+    loss_pooling,
     masked_mle,
     masked_mse,
     resolve_loss_fn,
@@ -587,6 +589,12 @@ def test_a_short_pulse_is_seen_only_through_its_jump_ts():
 
     assert float(jax.jit(after_step)(jnp.asarray(5.3))) == pytest.approx(4.7, rel=1e-4)
 
+    # A smooth profile has no jump times, and passing them is still fine.
+    flat = constant_profile(1.0)
+    field = diffrax.ODETerm(lambda t, y, args: flat(t) * jnp.ones(1))
+    whole = jnp.asarray(solver.diffeqsolve(field, ts, jnp.zeros(1), jump_ts=flat.jump_ts).ys)
+    assert float(whole[-1, 0]) == pytest.approx(10.0, rel=1e-5)
+
 
 def test_rng_fold_is_named_stable_and_pinned():
     root = jr.PRNGKey(0)
@@ -760,6 +768,37 @@ def _lab_table() -> pd.DataFrame:
     )
 
 
+def test_integer_times_and_unsorted_tables_keep_their_meaning():
+    """Integer times still predict on a float grid, a table's rows are read in
+    time order, and a run whose covariate is missing raises."""
+    experiment = hm.make_experiment(
+        channels={"conc": hm.ChannelObs(ts=jnp.asarray([0, 2, 4]), values=jnp.ones(3))},
+        y0=[1.0],
+        exp_id="int",
+    )
+    model = make_model(parameter_predictors())
+    grid = jnp.asarray([0.5, 1.5, 2.5])
+    np.testing.assert_allclose(model.predict([experiment], ts=grid)["int"].ts, grid)
+    assert len(model.simulate(experiment, n_points=7).ts) == 7
+
+    table = pd.DataFrame({"run": [1, 1, 1], "t": [2.0, 0.0, 1.0], "y": [0.3, 1.0, 0.6]})
+    first = lambda cov, ch: jnp.array([ch["y"].values[0]])  # noqa: E731
+    [run] = experiments_from_dataframe(
+        table, time="t", experiment="run", channels=["y"], y0_fn=first
+    )
+    np.testing.assert_allclose(run.channels["y"].ts, [0.0, 1.0, 2.0])
+    np.testing.assert_allclose(run.y0, [1.0])
+    with pytest.raises(ValueError, match="missing"):
+        experiments_from_dataframe(
+            table.assign(T=np.nan),
+            time="t",
+            experiment="run",
+            channels=["y"],
+            covariates=["T"],
+            y0=[1.0],
+        )
+
+
 def test_experiments_from_dataframe_builds_one_experiment_per_run():
     experiments = experiments_from_dataframe(
         _lab_table(),
@@ -813,6 +852,8 @@ def _numbered(n: int) -> Dataset:
         # An explicit zero stays zero, even when flooring leaves a remainder.
         (10, {"train": 1.0, "validation": 0.0, "test": 0.0}, (10, 0, 0)),
         (4, {"train": 0.7, "validation": 0.3, "test": 0.0}, (3, 1, 0)),
+        # 0.29 * 100 is 28.999999999999996 in binary, and still means 29.
+        (100, {"train": 0.29, "validation": 0.61, "test": 0.1}, (29, 61, 10)),
     ],
 )
 def test_split_partitions_experiments(n, fractions, counts):
@@ -1505,6 +1546,8 @@ def test_evaluate_predictor_broadcasts_named_inputs():
     rate = BoundedPredictor(inner=Scalar(), input_keys=("T",), output_bounds=(0.0, None))
     assert hm.evaluate_predictor(rate, {"T": jnp.arange(4)}).shape == (4,)
     assert hm.evaluate_predictor(rate, {"T": 1}).shape == ()
+    # A key the predictor does not read is ignored, whatever its shape.
+    assert hm.evaluate_predictor(rate, {"T": jnp.arange(4), "junk": jnp.ones(3)}).shape == (4,)
 
 
 def test_pytree_restart_keeps_scalers_and_constants():
@@ -1683,6 +1726,27 @@ def test_the_dataset_loss_pools_every_measurement_however_it_is_bucketed(decay_d
         pooling = objective.pooling(CHANNELS)
         score = build_dataset_score(score_bucket, decay_data, pooling=pooling)
         assert score(model.predictors) == pytest.approx(value, rel=1e-5), name
+
+    # A partial of a built-in pools as the built-in does.
+    assert loss_pooling(functools.partial(masked_mle, channel_idx=None)) == "sum"
+
+    # The trajectory penalty is a mean over a bucket's experiments, so each
+    # bucket's penalty share is its share of the experiments, whatever the
+    # loss: a bucket of unmeasured probes still counts.
+    probe = hm.make_experiment(
+        channels={"conc": hm.ChannelObs(ts=jnp.linspace(0.1, 3.0, 9), values=jnp.array([]))},
+        y0=[1.0],
+        t0=0.0,
+        covariates={"temp": 1.0},
+        exp_id="probe",
+    )
+    probed = hm.make_dataset([*decay_data.experiments, probe], output_channel_names=CHANNELS)
+    shares = hm.Objective(loss="mse").pooling(CHANNELS).shares(probed.bucket_payloads)
+    data_shares, penalty_shares = np.asarray(shares).T
+    assert data_shares.sum() == pytest.approx(1.0) and penalty_shares.sum() == pytest.approx(1.0)
+    sizes = np.array([bp.ts.shape[0] for bp in probed.bucket_payloads])
+    np.testing.assert_allclose(penalty_shares, sizes / sizes.sum())
+    assert data_shares.min() == 0.0 and penalty_shares.min() > 0.0
 
 
 def test_a_horizon_cuts_each_experiment_at_its_own_span(decay_data):

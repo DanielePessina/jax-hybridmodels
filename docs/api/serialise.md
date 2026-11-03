@@ -55,7 +55,7 @@ Read it back with [`load`](/api/serialise#load).
 The directory is created, parents included. Existing files are
 overwritten.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L338)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L339)</small>
 
 ---
 
@@ -86,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L483)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L486)</small>
 
 ---
 
@@ -105,6 +105,7 @@ SavedRun(
     config: 'OptaxTrainingConfig | EvosaxTrainingConfig | dict[str, Any] | None',
     objective: 'Objective | dict[str, Any] | None',
     extras: 'dict[str, Any]',
+    measured_loss: 'float | None' = None,
 ) -> None
 ```
 
@@ -122,7 +123,7 @@ an lr schedule) cannot be rebuilt, so it comes back as the raw dict
 with each callable as ``{"__callable__": "module.qualname"}``; rebind
 those fields yourself. ``extras`` is the dict passed to ``save``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L231)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L237)</small>
 
 <a id="savedrunsummary"></a>
 
@@ -134,7 +135,7 @@ summary(self, data: 'Any' = None) -> 'str'
 
 The report [`FitResult.summary`](/api/model#fitresultsummary) gives, for a run read back from disk.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L256)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L263)</small>
 
 ---
 
@@ -154,7 +155,7 @@ Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 the container shape, writing a flat binary stream of ``np.save``-encoded
 leaves. The caller picks the file extension; ``save`` uses ``.eqx``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L77)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L78)</small>
 
 ---
 
@@ -182,4 +183,4 @@ bounds reads the saved latent under its own bounds and gets a different
 value. [`load`](/api/serialise#load) records the static configuration and refuses such a
 template.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L88)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L89)</small>

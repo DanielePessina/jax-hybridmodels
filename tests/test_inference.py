@@ -362,6 +362,18 @@ def test_mixed_models_state_what_they_condition_on(x64):
     moved = last_layer.to_model(last_layer.position)
     assert isinstance(moved, hm.HybridModel) and moved.solver.throw
 
+    # A fixed Parameter is named as physical() names it, without ".latent".
+    with pytest.warns(UserWarning, match="conditional on"):
+        layer_only = make_problem(
+            linear_model(net=network),
+            experiments,
+            log_prior=normal_prior,
+            noise="data",
+            estimate="net.inner.mlp.layers.1",
+        )
+    assert "k" in layer_only.conditional_on
+    assert not any(name.endswith(".latent") for name in layer_only.conditional_on)
+
 
 def test_to_model_predicts_at_a_draw(linear):
     problem, experiments, *_ = linear

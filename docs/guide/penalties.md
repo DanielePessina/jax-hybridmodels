@@ -27,7 +27,7 @@ The bound penalty is the mean output saturation of each `BoundedPredictor`
 leaf over a set of input points. Only outputs with two finite bounds are
 charged: one with a single bound is log-like near its edge, so a small
 value there is not stuck. It needs no simulation. It is added once
-per training step to the bucket-averaged data gradient, so a given
+per training step to the pooled data gradient, so a given
 `penalty_weight` means the same thing at any dataset size or point count.
 
 ```python

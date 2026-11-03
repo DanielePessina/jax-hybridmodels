@@ -43,7 +43,8 @@ LOG_KREF_BOUNDS: tuple[float, float] = (-3.0, 2.0)
 EA_BOUNDS: tuple[float, float] = (0.0, 80.0)
 
 # Residual box, symmetric so a fresh MLP contributes no correction. Two
-# decades is generous against the truth's one-decade pH modulation.
+# decades either side is generous against the truth's pH modulation, a factor
+# of about 2.6 (0.4 decades) over the data's pH range.
 RES_LOG10_BOUNDS: tuple[float, float] = (-2.0, 2.0)
 
 INPUT_KEYS: tuple[str, ...] = ("temperature_C", "pH")

@@ -35,7 +35,7 @@ is genuinely baked in.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `kind` | `str` | One of ``"cosine"`` (default), ``"linear"``, ``"warmup_cosine"``, ``"exponential"``. The exponential kind decays geometrically with the per-epoch rate *derived* from ``(init_value, end_value, total_epochs)``, so its end point and run length are honoured like every other kind. |
+| `kind` | `str` | One of ``"cosine"`` (default), ``"linear"``, ``"warmup_cosine"``, ``"exponential"``. The exponential kind decays geometrically with the per-epoch rate *derived* from ``(init_value, end_value, total_epochs)``, so its end point and run length are honoured like every other kind. It needs ``end_value > 0``. |
 | `total_epochs` | `int` | Run length in steps (one step == one epoch). Must be at least 1. |
 | `init_value` | `float` | Value at ``step=0``, except ``"warmup_cosine"`` where it is the **peak** the schedule rises to after ``warmup_epochs``. Must be positive. |
 | `end_value` | `float` | Value at ``step=total_epochs``, where every kind arrives. Must lie in ``[0, init_value]``. |

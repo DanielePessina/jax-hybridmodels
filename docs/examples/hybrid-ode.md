@@ -35,7 +35,7 @@ The library is never told which network is where. Both are ordinary calls inside
 
 ### Bounds, warps and squashes
 
-`rate` has an output box of $(10^{-3}, 1)$. Under a linear axis the box midpoint is 0.5, so every rate in the data sits in the bottom 3% of the range, reachable only through large negative latents. A **warp** reparameterises the axis before normalising: under `log10` the midpoint is 0.032 and the data covers the middle of the box. Which values are reachable does not change.
+`rate` has an output box of $(10^{-3}, 1)$. Under a linear axis the box midpoint is 0.5, and the true rates, 0.0063 to 0.276, sit between 0.5% and 27.5% of the range, the two coldest levels in the bottom 3%, reached only through large negative latents. A **warp** reparameterises the axis before normalising: under `log10` the midpoint is 0.032 and the same rates spread over 27% to 81% of the box. Which values are reachable does not change.
 
 The residual's box straddles zero, so `log10` is unusable, and a linear axis spends resolution on large corrections that should never happen. The script registers a signed-logarithmic warp, `symlog`, that is linear near zero and logarithmic in the tails. `forward(0) = 0`, so a fresh residual starts near no correction.
 

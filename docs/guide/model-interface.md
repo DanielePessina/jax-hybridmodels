@@ -36,7 +36,7 @@ units by path, such as `{"omega": 0.9997, "damping": 0.0}`.
 
 `print(result.summary())` reports how the run ended, the loss by phase, each
 `Parameter`, and how much of each network's input box has a saturated output.
-The line `loss change over the last 10% of steps` shows whether a fit that ran out
+The line `loss change over the last 10% of steps` (of the final phase, when there are several) shows whether a fit that ran out
 of budget had settled: on one reactor fit, it read -5% to -10% with a fitted
 constant still well off and under 0.1% once it had arrived. A saturated output is
 near its bound, where gradients vanish.
@@ -49,7 +49,7 @@ if the data never reaches those inputs.
 ## Predicting
 
 `predict` returns a `PredictionResult` keyed by experiment ID, in dataset
-order. Each entry has `times`, `outputs`, `observed` and `mask`,
+order. Each entry has `ts`, `outputs`, `observed` and `mask`,
 all aligned on the experiment's own time axis; `observed` is NaN where a
 channel was not measured. Experiments without an ID are named
 `experiment_<index>`, and duplicate IDs raise. `predictions.to_dataframe()`

@@ -50,19 +50,24 @@ The predictor:
 
 ## Results
 
-Seed 0, 400 steps. The `mu0` series fit to the noise floor
-(`R^2 = 0.998`).
+Seed 0, 400 steps. The `mu0` series fit with `R^2 = 0.998`, but the MSE of
+about 3e-3 is some 30 times the noise variance of 1e-4, and the loss was still
+falling when the step budget ran out.
 
 ![Predicted against observed nucleation moment](assets/supersaturation-poly/parity.png)
 
 ![Learned nucleation rate against the truth](assets/supersaturation-poly/recovered_rate.png)
 
 The learned rate matches the truth at high supersaturation (within 0.5% at
-`S - 1` of 1.2 and 1.5) and drifts at low supersaturation: 0.0100 against
-0.0212 at 0.3, and 13 to 19% off at 0.6 and 0.9. There the rate is small,
-so it moves the fitted moment little and the loss barely constrains it.
-More conditions at low supersaturation, or fewer free coefficients, would
-tighten the curve.
+`S - 1` of 1.2 and 1.5) and misses at low supersaturation: 0.0100 against
+0.0212 at 0.3, and 13 to 19% off at 0.6 and 0.9. The data do constrain the
+low rate: with `dmu0/dt = J`, an error of 0.011 in `J` puts the moment 0.09
+off by `t = 8`, about 9 noise standard deviations. The value 0.0100 is the
+lower edge of the output box, `J_BOUNDS = (0.01, 2.0)`. The rate there is
+pinned in the squash's tail, where its gradient vanishes, so training cannot
+pull it back up to the truth. A lower edge well below the smallest expected
+rate, a bound penalty (see [Penalties](/guide/penalties)), or more steps would
+free it.
 
 ## Things to try
 

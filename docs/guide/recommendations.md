@@ -9,7 +9,9 @@ Defaults that worked in the shipped examples. None are enforced.
 A fresh network outputs a latent near zero, which maps to the middle of the
 output box. If the middle is physically absurd, the first solve can be so
 stiff that it hits `max_steps` before training starts. A log10 nucleation
-box of `(0, 15)` starts at `J ≈ 3e7`, about 17,000 times too large. Pick the
+box of `(0, 15)` starts at `J ≈ 3e7` whatever the data say, about 5,000 times
+below the `1.6e11` the [crystallisation example](/examples/crystallisation)
+learns at 17 °C. Pick the
 order of magnitude you would guess by hand and allow a few decades either
 side, with `warp="log10"` if the box spans decades.
 

@@ -246,7 +246,9 @@ def row_horizons(ts: Array, observed_rows: Array) -> Array:
     Rows up to the first measurement get 0, so every horizon scores it:
     otherwise an experiment that starts at ``t0`` well before its first
     measurement would score nothing at a small horizon, and train nothing.
-    The last measurement gets exactly 1, with no rounding at the edge.
+    The last measurement gets exactly 1, with no rounding at the edge, and so
+    does any row after it. "Measured" here means in any channel, whatever
+    the loss selects.
     """
     start = ts[:, :1]
     last = jnp.max(jnp.where(observed_rows, ts, -jnp.inf), axis=1, keepdims=True)
@@ -254,7 +256,10 @@ def row_horizons(ts: Array, observed_rows: Array) -> Array:
     has_span = span > 0
     position = jnp.where(has_span, (ts - start) / jnp.where(has_span, span, 1.0), 0.0)
     first = jnp.min(jnp.where(observed_rows, position, jnp.inf), axis=1, keepdims=True)
-    return jnp.where(position <= first, 0.0, position)
+    # A row after the last measurement, such as a probe channel's time, holds
+    # nothing to score, but a multiple-shooting join there must still count
+    # at the full horizon.
+    return jnp.where(position <= first, 0.0, jnp.minimum(position, 1.0))
 
 
 def horizon_rows(ts: Array, observed_rows: Array, horizon: ArrayLike) -> Array:
@@ -338,8 +343,9 @@ def make_experiment(
     Where the observed channels are the whole state, a typical hook is
     ``lambda c, ch: jnp.array([ch["x"].values[0], ch["v"].values[0]])``.
     The state belongs to the experiment's start: ``t0`` when set, else the
-    earliest time of any channel. ``values[0]`` is that state only when the
-    channel's ``ts`` is sorted and the channel was measured at that start.
+    earliest time of any channel the model outputs. ``values[0]`` is that
+    state only when the channel's ``ts`` is sorted and the channel was
+    measured at that start.
     Unobserved state components are constructed there too, a population
     moment initialised to zero being the common case.
 
@@ -561,8 +567,11 @@ def experiments_from_dataframe(
         return np.full(len(group), float(spec))
 
     out = []
-    for key, group in df.groupby(experiment, sort=False):
+    for key, unsorted in df.groupby(experiment, sort=False):
         exp_id = str(key)
+        # In time order, as the long loader gives them, so a y0_fn reading
+        # ``values[0]`` gets each channel's earliest measurement.
+        group = unsorted.sort_values(time, kind="stable")
         variances = [channel_variance(group, name) for name in channel_cols]
         out.append(
             experiment_from_array(
@@ -701,7 +710,10 @@ def _run_options(
                 f"Column {column!r} must be constant within experiment {exp_id!r}; "
                 f"found {list(values)}"
             )
-        return values[0]
+        value = values[0]
+        if isinstance(value, float) and value != value:
+            raise ValueError(f"Column {column!r} is missing (NaN) for experiment {exp_id!r}")
+        return value
 
     return {
         "covariates": {name: float(constant(column)) for name, column in covariate_cols.items()},
@@ -786,13 +798,7 @@ def _per_experiment_arrays(
     if float_ts_dtypes:
         key_dtype = np.dtype(f"float{min(dtype.itemsize for dtype in float_ts_dtypes) * 8}")
     else:
-        key_dtype = (
-            np.result_type(*ts_dtypes, np.float32)
-            if experiment.t0 is not None
-            else np.result_type(*ts_dtypes)
-            if ts_dtypes
-            else np.dtype(np.float32)
-        )
+        key_dtype = np.result_type(*ts_dtypes, np.float32)
     for ch_name, (ts_np, _values_np, _variance_np) in zip(
         output_channel_names, channel_arrays, strict=True
     ):
@@ -819,13 +825,11 @@ def _per_experiment_arrays(
     D = len(output_channel_names)
     val_dtype = np.result_type(*val_dtypes) if val_dtypes else np.dtype(np.float32)
     var_dtype = np.result_type(*var_dtypes) if var_dtypes else np.dtype(np.float32)
-    ts_dtype = (
-        np.result_type(*ts_dtypes, np.float32)
-        if experiment.t0 is not None
-        else np.result_type(*ts_dtypes)
-        if ts_dtypes
-        else np.dtype(np.float32)
-    )
+    # Always floating: integer measurement times would otherwise floor every
+    # float grid a caller predicts on.
+    ts_dtype = np.result_type(*ts_dtypes) if ts_dtypes else np.dtype(np.float32)
+    if ts_dtype.kind != "f":
+        ts_dtype = np.result_type(ts_dtype, np.float32)
 
     observed = np.zeros((T, D), dtype=val_dtype)
     variance = np.ones((T, D), dtype=var_dtype)
@@ -1199,8 +1203,10 @@ def _split_counts(n: int, train: float, validation: float, test: float) -> tuple
     downstream as "no validation needed" rather than "lost to rounding", so a
     caller who means it has to ask for ``0.0`` explicitly.
     """
-    n_train = int(np.floor(train * n))
-    n_val = int(np.floor(validation * n))
+    # A product such as 0.29 * 100 lands just under 29 in binary, so floor a
+    # hair above it.
+    n_train = int(np.floor(train * n + 1e-9))
+    n_val = int(np.floor(validation * n + 1e-9))
     if test == 0.0:
         remainder = n - n_train - n_val
         if remainder:

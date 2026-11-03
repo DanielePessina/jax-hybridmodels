@@ -228,11 +228,10 @@ class SolverConfig(eqx.Module):
             icoeff=self.icoeff,
             dcoeff=self.dcoeff,
         )
-        if jump_ts is None:
+        times = None if jump_ts is None else jnp.ravel(jnp.asarray(jump_ts))
+        if times is None or times.size == 0:
             return controller
-        return diffrax.ClipStepSizeController(
-            controller, jump_ts=jnp.atleast_1d(jnp.asarray(jump_ts, dtype=float))
-        )
+        return diffrax.ClipStepSizeController(controller, jump_ts=times)
 
     def diffeqsolve(
         self,
@@ -285,6 +284,12 @@ class SolverConfig(eqx.Module):
             The diffrax solution; ``.ys`` is the state trajectory
             ``[T, S]`` ``simulate_fn`` must return.
         """
+        if jump_ts is not None:
+            # In the time axis's dtype, which diffrax requires, and dropped when
+            # empty, as for a smooth profile, which diffrax cannot take.
+            jump_ts = jnp.ravel(jnp.asarray(jump_ts, dtype=jnp.asarray(ts).dtype))
+            if jump_ts.size == 0:
+                jump_ts = None
         return diffrax.diffeqsolve(
             term,
             self.solver,

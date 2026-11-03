@@ -27,7 +27,7 @@
 - `jaxhybridmodels.inference.make_problem` builds a log-density for a model and
   its data, for any sampler such as BlackJAX. It sums over buckets, adds the
   change-of-variables term for free `Parameter`s, and turns a failed solve into
-  a rejected proposal. `free=` picks what is sampled, and what stays fixed is
+  a rejected proposal. `estimate=` picks what is sampled, and what stays fixed is
   listed in `InferenceProblem.conditional_on`.
 - `InferenceProblem.preconditioned` whitens the position with the Gauss-Newton
   curvature at the fit, and `make_problem(gradient=)` picks forward or reverse
@@ -169,6 +169,9 @@
   estimate and standard error of any function of the values, as a
   `DerivedQuantity` with one- or two-sided Wald intervals.
 - `OptimizeResult.gradient` and `gradient_norm` show how flat the optimum is.
+- Profiles list the times where they jump or bend in `jump_ts`, and
+  `SolverConfig.diffeqsolve(jump_ts=)` ends a step on each. Without them an
+  adaptive solver can step over a pulse shorter than a step.
 - Fisher and Laplace report `nan` for the standard error and Wald interval of
   a value against its bound, mark it "at bound" in the summary, and warn.
 - `examples/shelf_life/shelf_life.py` and its page: a label claim from an
@@ -184,6 +187,41 @@
 
 ### Changed (breaking against 0.2.0b1)
 
+- The training loss pools buckets by what each one averages over, so `mse`
+  is the mean over every measurement and `bal_mse` the mean over every
+  experiment, however the experiments fall into buckets. Each bucket used to
+  count the same, which reweighted experiments by their grid length, and a
+  bootstrap duplicate added no weight. `mle` is the summed likelihood. A
+  custom loss declares how it pools with a `pooling` attribute. Losses in a
+  multi-length fit change value. `build_bucket_step` and `build_score_bucket`
+  take a `share`, and `build_dataset_score` a `pooling`. The trajectory
+  penalty and the multiple-shooting gap term are means over every
+  experiment, probes included.
+- `TrainingPhase.horizon` cuts each experiment at that fraction of its own
+  span, from `t0` (or its first measurement) to its last measurement, and
+  always scores its first measurement. It used to count rows of the bucket's
+  shared time grid, so a short horizon after `t0` could score nothing.
+- The Fisher condition number and the not-identified test read the
+  information scaled to a unit diagonal, so a change of bound or warp no
+  longer moves them.
+- A multiple-shooting phase uses the number of segments asked for, up to
+  `T - 1`, with lengths that differ by at most one step.
+- `annealing_schedule("exponential", ...)` needs `end_value > 0`. With 0 it
+  used to be a straight line.
+- `fit_ensemble` starts every member from a fresh draw. It used to keep the
+  model as given for one member, and for every bootstrap member when
+  `n_seeds=1`, which left the initialisation out of the spread. With one seed
+  it no longer trains an unrecorded tournament.
+- `FitResult.final_loss` is measured at the returned parameters: after the
+  last update with `restore_best=False`, and at the chosen candidate for an
+  Evosax fit with validation. It is kept in `FitResult.measured_loss`, and
+  `fit_ensemble` ranks members on it.
+- A phase that changes `lr` on the same raw `optax.GradientTransformation`
+  raises even with `reset_optimizer=True`, since the instance keeps the rate
+  it was built with. A reset now writes the phase's `lr` into an instance
+  built with `optax.inject_hyperparams`.
+- Measurement times are always stored as floats, so a float prediction grid
+  on integer times is no longer floored.
 - A log warp is allowed on one-sided bounds and acts on the distance from the
   bound: `Parameter(5000.0, bounds=(0.0, None), warp="log")` is
   `exp(z)`, so each Adam step is a relative change. With a softplus a value of
@@ -370,6 +408,37 @@ Migration for code written against the earlier API:
 
 ### Fixed
 
+- A segmented phase that changed only `continuity_weight` kept the previous
+  phase's best loss, so patience could end it while it still improved.
+- `simulate(experiment)` with x64 off rejected some `t0` values that float32
+  rounds, and put `y0` at a channel the model does not output.
+- `split_dataset(train=0.29)` on 100 experiments gave 28 for training.
+- `experiments_from_dataframe` reads each run's rows in time order, so a
+  `y0_fn` reading `values[0]` gets the first measurement, and raises on a
+  covariate that is missing for a run.
+- `load` names a precision mismatch: a run saved with x64 off refuses to load
+  with it on, and the reverse warns that values are rounded.
+- `evaluate_predictor` ignores inputs the predictor does not read.
+- `InferenceProblem.conditional_on` names a fixed `Parameter` as `physical`
+  does, without `.latent`.
+- `KANPredictor` weights follow the x64 flag, and `grid_range` sets the
+  interval its spline grid covers.
+- Fisher and Laplace flagged a value with one finite bound as "at bound" when
+  it sat far from that bound, and a profile of a value with only an upper
+  bound returned its ends in reverse.
+- The likelihood floored every variance at 1e-12, so data with a standard
+  deviation below 1e-6 in their own units got intervals too wide. The floor
+  is now the smallest positive float.
+- A channel whose float64 times collide in float32, next to a float32
+  channel, lost a measurement silently. It now raises.
+- `predict_ensemble` leaves a member whose prediction is non-finite out of
+  the mean, spread and quantiles, with a warning.
+- `predict(observation_noise=True)` on a problem with a custom likelihood
+  refuses, since it would draw Gaussian noise the likelihood does not define.
+- The bound penalty's mean ran over uncharged one-sided outputs too, which
+  diluted its weight.
+- A log-warped input scaler with mixed boxed and one-sided inputs returned
+  NaN for a non-positive input instead of raising.
 - A training run that raised after its progress display opened, for
   example on an unknown channel name or a compile error, left the Rich
   dashboard running. The objective is now checked before the display

@@ -372,9 +372,13 @@ def evaluate_predictor(predictor: Any, inputs: Mapping[str, ArrayLike]) -> Array
             f"object of type {type(inputs).__name__}.{hint} For rows of an array, use "
             "jax.vmap(predictor)(x)."
         )
+    # Only the inputs the predictor reads are broadcast: an extra key, which a
+    # BoundedPredictor allows, must not fail on a shape it never uses.
+    used = getattr(predictor, "input_keys", None)
     arrays = {
         key: jnp.asarray(value, dtype=jnp.result_type(jnp.asarray(value).dtype, float))
         for key, value in inputs.items()
+        if used is None or key in used
     }
     shape = jnp.broadcast_shapes(*(a.shape for a in arrays.values())) if arrays else ()
     if not shape:

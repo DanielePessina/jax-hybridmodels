@@ -43,6 +43,12 @@ selected channels, already sliced, so `{"conc": 1.0}` works with it; weights
 other than 1 raise, since they have to be applied inside the loss. See
 `jaxhybridmodels.losses.resolve_loss_fn`.
 
+A loss reduces one bucket, and the trainers add the buckets back up by what
+the loss averages over. A custom loss is taken as a mean over measured cells.
+Set `my_loss.pooling = "experiments"` for a mean over experiments, or `"sum"`
+for a summed likelihood; `jaxhybridmodels.losses.loss_pooling` reads it and
+`POOLING_KINDS` lists the choices.
+
 ## Optimisers
 
 `optimizer` on a config or `TrainingPhase` accepts:
@@ -124,8 +130,8 @@ regulariser and the update:
 
 <<< @/../examples/custom_loop/train_custom_loop.py#loss
 
-`horizon` is the leading fraction of each time series the loss scores, and
-defaults to 1.0. A new value does not recompile. At the end, put the
+`horizon` is the fraction of each experiment's span the loss scores, from `t0`
+(or its first measurement) to its last measurement, and defaults to 1.0. A new value does not recompile. At the end, put the
 predictors back to get a model you can predict with and save:
 
 <<< @/../examples/custom_loop/train_custom_loop.py#put-back

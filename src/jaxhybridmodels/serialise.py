@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.tree_util as jtu
 import numpy as np
 import optax
@@ -382,12 +383,14 @@ def save(
         "version": _resolve_version(),
         "predictors": _describe_predictors(model.predictors),
         "output_channel_names": list(model.output_channel_names),
+        "x64": bool(jax.config.read("jax_enable_x64")),
         "solver": _solver_metadata(model.solver),
         "config": _serialise_config(config) if config is not None else None,
         "objective": _serialise_objective(objective) if objective is not None else None,
         "history": _serialise_history(result.history) if result is not None else None,
         "best_step": result.best_step if result is not None else None,
         "stop_reason": result.stop_reason if result is not None else None,
+        "measured_loss": _json_safe(result.measured_loss) if result is not None else None,
         "extras": dict(extras) if extras is not None else {},
     }
     encoded = json.dumps(metadata, indent=2, sort_keys=True)
@@ -530,6 +533,22 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
             f"like.output_channel_names {like.output_channel_names}"
         )
 
+    # The predictors file holds arrays in the precision they were saved at, so
+    # name a mismatch here instead of letting a dtype error surface below.
+    saved_x64, x64 = metadata.get("x64"), bool(jax.config.read("jax_enable_x64"))
+    if saved_x64 is False and x64:
+        raise ValueError(
+            "load: the run was saved in float32 (jax_enable_x64 off), but x64 is on now. "
+            "Load it with x64 off, or save it again with x64 on."
+        )
+    if saved_x64 and not x64:
+        warnings.warn(
+            "load: the run was saved in float64 (jax_enable_x64 on) and is read back in "
+            "float32, which rounds every value",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     saved_solver = metadata.get("solver")
     if saved_solver is not None and saved_solver != _solver_metadata(like.solver):
         warnings.warn(
@@ -547,6 +566,11 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
         history=_build_history(metadata.get("history")),
         best_step=metadata.get("best_step"),
         stop_reason=metadata.get("stop_reason"),
+        measured_loss=(
+            None
+            if metadata.get("measured_loss") is None
+            else _decode_float(metadata["measured_loss"])
+        ),
         config=_build_training_config(metadata.get("config")),
         objective=_build_objective(metadata.get("objective")),
         extras=metadata.get("extras", {}),

@@ -386,8 +386,9 @@ class BoundScaler(eqx.Module):
 
         The bound kind is static, so only the branch for this component is
         traced and no infinite endpoint ever enters the arithmetic. A finite
-        interval uses the warp and squash. One finite endpoint uses softplus
-        distance from it. No endpoints is the identity. ``guard=False``
+        interval uses the warp and squash. One finite endpoint puts the
+        distance from it through softplus, or through ``exp`` under a log
+        warp. No endpoints is the identity. ``guard=False``
         gives the exact inverse, used to initialise a ``Parameter`` close to
         an endpoint.
         """
@@ -628,8 +629,9 @@ class BoundScaler(eqx.Module):
 
         Only a component with two finite bounds is charged. One with a single
         bound is ``edge + softplus(z / T)``, which near its edge behaves like
-        ``edge + exp(z / T)``: a log parametrisation whose relative slope stays
-        1, so a small value there is not stuck and costs nothing.
+        ``edge + exp(z / T)``, or exactly that under a log warp: a log
+        parametrisation whose relative slope stays 1, so a small value there
+        is not stuck and costs nothing.
         """
         # The mean runs over the charged components only, so uncharged
         # one-sided outputs do not dilute the weight.
@@ -696,7 +698,8 @@ class Parameter(eqx.Module):
         One ``(low, high)`` pair shared by every element, or one pair per
         element in flattened order. None for a missing endpoint. Omit for
         an unbounded value. Two finite endpoints use the ``transform``
-        squash. One endpoint uses softplus distance from it.
+        squash. One endpoint puts the distance from it through softplus,
+        or ``exp`` under ``warp="log"``.
     transform, warp
         Passed to :class:`BoundScaler`. ``warp="log10"`` suits rate
         constants that span decades and needs finite positive bounds.
@@ -761,7 +764,7 @@ class Parameter(eqx.Module):
         A standard-normal latent lands across the middle of a finite box,
         which is a fair random restart. An element without two finite
         bounds keeps its value: its latent is the value itself, or a
-        softplus distance from one endpoint, so a standard-normal draw
+        softplus (or log) distance from one endpoint, so a standard-normal draw
         would replace a rate of 5000 with something near 1 and lose the
         starting value the user chose. The scaler is left untouched.
         """

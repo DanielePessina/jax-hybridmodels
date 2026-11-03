@@ -176,6 +176,21 @@ def failure_details(
     return " ".join(part for part in parts if part)
 
 
+def share_pair(share: ArrayLike) -> Array:
+    """A bucket's ``(data, penalty)`` multipliers as one ``[2]`` array.
+
+    A scalar applies to both. Always the same shape, so a kernel called with
+    a scalar and with a pair compiles once.
+    """
+    return jnp.broadcast_to(jnp.asarray(share, dtype=float), (2,))
+
+
+def split_share(share: Array) -> tuple[Array, Array]:
+    """A bucket's ``(data, penalty)`` multipliers, from a pair or one scalar for both."""
+    pair = share_pair(share)
+    return pair[0], pair[1]
+
+
 def apply_length_mask(bp: BucketPayload, horizon: Array) -> BucketPayload:
     """Narrow the bucket's mask to the first ``horizon`` of each experiment's timeline.
 
@@ -187,7 +202,8 @@ def apply_length_mask(bp: BucketPayload, horizon: Array) -> BucketPayload:
 
     ``horizon`` stays traced rather than becoming a Python branch, so a
     phase that changes it costs no recompile. Each experiment's first
-    measurement is always scored, so no horizon trains on nothing.
+    measurement, in any channel, is always kept. A loss that reads only
+    channels first measured later can still score nothing at a small horizon.
     """
     keep = horizon_rows(bp.ts, bp.mask.any(axis=-1), horizon)
     mask = bp.mask & keep[:, :, None]
@@ -249,9 +265,11 @@ def build_bucket_step(
     """Return ``bucket_step(predictors, bp, horizon=1.0, share=1.0) -> (loss, grads)``.
 
     ``horizon`` is the leading fraction of each experiment's timeline that
-    the loss scores. ``share`` multiplies the bucket's loss and gradient:
-    pass the bucket's entry of :meth:`~jaxhybridmodels.losses.Pooling.shares`
-    and the plain sum over buckets is the loss over the whole dataset. One
+    the loss scores. ``share`` weights the bucket in the dataset loss: a
+    ``(data, penalty)`` pair from :meth:`~jaxhybridmodels.losses.Pooling.shares`
+    multiplies the data loss and the trajectory penalty, and a scalar
+    multiplies both. With the pooling shares, the plain sum over buckets is
+    the loss over the whole dataset. One
     trace per bucket shape (R-T5): a new horizon or share does not retrace.
 
     Takes no ``opt_state``: the optimiser update lives in a separate jitted
@@ -273,6 +291,7 @@ def build_bucket_step(
         diff_predictors: Any,
         static_predictors: Any,
         bp_masked: BucketPayload,
+        share: Array,
     ) -> Array:
         # ``eqx.combine`` walks any pytree shape, so the container is never
         # inspected before the recombined tree goes to simulate_fn.
@@ -284,17 +303,19 @@ def build_bucket_step(
             solver=solver,
         )
         pred_obs = jax.vmap(state_to_output)(full_state)
-        loss = loss_fn(pred_obs, bp_masked)
+        return _shared_terms(loss_fn(pred_obs, bp_masked), full_state, bp_masked, share)
+
+    def _shared_terms(
+        data: Array, full_state: Array, bp_masked: BucketPayload, share: Array
+    ) -> Array:
+        data_share, penalty_share = split_share(share)
+        loss = data_share * data
         if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-            loss = loss + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp_masked)
+            penalty = trajectory_penalty_fn(full_state, bp_masked)
+            loss = loss + penalty_share * trajectory_penalty_weight * penalty
         return loss
 
-    def shared_loss(
-        diff_predictors: Any, static_predictors: Any, bp_masked: BucketPayload, share: Array
-    ) -> Array:
-        return share * loss_eval(diff_predictors, static_predictors, bp_masked)
-
-    grad_fn = eqx.filter_value_and_grad(shared_loss)
+    grad_fn = eqx.filter_value_and_grad(loss_eval)
 
     @eqx.filter_jit
     def jitted_step(
@@ -309,9 +330,7 @@ def build_bucket_step(
     ) -> tuple[Array, Any]:
         # Arrays, because filter_jit treats a Python float as static and
         # would recompile for each new value.
-        return jitted_step(
-            predictors, bp, jnp.asarray(horizon, dtype=float), jnp.asarray(share, dtype=float)
-        )
+        return jitted_step(predictors, bp, jnp.asarray(horizon, dtype=float), share_pair(share))
 
     return bucket_step
 
@@ -340,18 +359,18 @@ def build_score_bucket(
         bp_masked = apply_length_mask(bp, horizon)
         full_state = simulate_bucket(predictors, bp_masked, simulate_fn=simulate_fn, solver=solver)
         pred_obs = jax.vmap(state_to_output)(full_state)
-        loss = loss_fn(pred_obs, bp_masked)
+        data_share, penalty_share = split_share(share)
+        loss = data_share * loss_fn(pred_obs, bp_masked)
         if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-            loss = loss + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp_masked)
-        return share * loss
+            penalty = trajectory_penalty_fn(full_state, bp_masked)
+            loss = loss + penalty_share * trajectory_penalty_weight * penalty
+        return loss
 
     def score_bucket(
         predictors: Any, bp: BucketPayload, horizon: ArrayLike = 1.0, share: ArrayLike = 1.0
     ) -> Array:
         # Arrays for the same reason as in ``build_bucket_step``.
-        return jitted_score(
-            predictors, bp, jnp.asarray(horizon, dtype=float), jnp.asarray(share, dtype=float)
-        )
+        return jitted_score(predictors, bp, jnp.asarray(horizon, dtype=float), share_pair(share))
 
     return score_bucket
 

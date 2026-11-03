@@ -487,12 +487,17 @@ class HybridModel(eqx.Module):
                 raise ValueError(
                     "simulate: experiment= supplies y0, covariates and t0; do not pass them too"
                 )
-            measured = _per_experiment_arrays(experiment, tuple(experiment.channels)).ts
+            # The model's own channels, as predict and make_dataset use, so y0
+            # sits at the same time on every path.
+            measured = _per_experiment_arrays(experiment, self.output_channel_names).ts
             if ts is None:
                 ts = measured
             # y0 belongs to the experiment's own start: t0 when set, else its
-            # first observation time. Pin it so a caller's ts cannot move it.
-            start_time = experiment.t0 if experiment.t0 is not None else float(measured[0])
+            # first observation time. The measured axis already holds t0, in
+            # the axis's own precision, so a float32 rounding of t0 cannot put
+            # the start after the first time. Pin it so a caller's ts cannot
+            # move it.
+            start_time = float(measured[0])
             if n_points is not None:
                 ts = jnp.linspace(start_time, measured[-1], n_points, dtype=measured.dtype)
             y0, covariates, t0 = experiment.y0, experiment.covariates, start_time

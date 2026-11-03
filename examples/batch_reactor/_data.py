@@ -27,7 +27,7 @@ from scipy.stats import qmc
 
 import jaxhybridmodels as hm
 
-EA_TRUE: float = 30.0  # kJ/mol; the rate doubles about every 10 °C near T_REF
+EA_TRUE: float = 30.0  # kJ/mol; the rate rises about 1.5 times per 10 °C near T_REF
 
 # The hidden pH dependence, a Hill-type saturation curve: fast below pH 5,
 # a plateau above pH 7, and a knee at K_SAT_PH50.

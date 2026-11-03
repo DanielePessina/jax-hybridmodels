@@ -57,7 +57,7 @@ from jaxtyping import Array, ArrayLike
 
 from jaxhybridmodels.data import BucketPayload, Dataset, horizon_rows
 from jaxhybridmodels.solver import SolverConfig, simulation_state
-from jaxhybridmodels.training.kernels import apply_length_mask
+from jaxhybridmodels.training.kernels import apply_length_mask, share_pair, split_share
 
 __all__ = [
     "Nodes",
@@ -160,7 +160,8 @@ class ShootingKernels(NamedTuple):
     takes the same arguments and returns ``(data, continuity)`` with no
     backward pass. ``data`` is the loss plus any trajectory penalty on the
     assembled trajectory, and ``continuity`` the weighted gap term, both
-    scaled by the bucket's pooling ``share``.
+    scaled by the bucket's pooling ``share``, a ``(data, penalty)`` pair (see
+    :func:`~jaxhybridmodels.training.kernels.build_bucket_step`).
     """
 
     segments: int
@@ -202,11 +203,13 @@ def build_shooting_kernels(
             predictors, bp, z * scale, layout, simulate_fn=simulate_fn, solver=solver
         )
         scored = apply_length_mask(bp, horizon)
-        data = loss_fn(jax.vmap(state_to_output)(full), scored)
+        data_share, penalty_share = split_share(share)
+        data = data_share * loss_fn(jax.vmap(state_to_output)(full), scored)
         if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-            data = data + trajectory_penalty_weight * trajectory_penalty_fn(full, scored)
+            penalty = trajectory_penalty_fn(full, scored)
+            data = data + penalty_share * trajectory_penalty_weight * penalty
         if layout.segments == 1:
-            return share * data, jnp.zeros_like(data)
+            return data, jnp.zeros_like(data)
         # A join past the horizon is as unscored as the data there: it would
         # otherwise pull the predictors toward a stretch the phase leaves out.
         # Each experiment is cut at its own horizon, as its data are.
@@ -214,7 +217,7 @@ def build_shooting_kernels(
         joined = in_horizon[:, jnp.asarray(layout.boundaries)]  # [N, K-1]
         squared = jnp.where(joined[:, :, None], (gaps / scale) ** 2, 0.0)
         count = jnp.maximum(joined.sum() * gaps.shape[2], 1)
-        return share * data, share * weight * squared.sum() / count
+        return data, penalty_share * weight * squared.sum() / count
 
     def objective(
         diff: tuple[Any, Array],
@@ -266,7 +269,7 @@ def build_shooting_kernels(
         share: ArrayLike = 1.0,
     ) -> tuple[tuple[Array, tuple[Array, Array]], Any]:
         # Arrays, because filter_jit treats a Python float as static.
-        return jitted_step(predictors, z, scale, bp, *_traced(horizon, weight, share))
+        return jitted_step(predictors, z, scale, bp, *_traced(horizon, weight), share_pair(share))
 
     def value(
         predictors: Any,
@@ -277,7 +280,7 @@ def build_shooting_kernels(
         weight: ArrayLike = 1.0,
         share: ArrayLike = 1.0,
     ) -> tuple[Array, Array]:
-        return jitted_value(predictors, z, scale, bp, *_traced(horizon, weight, share))
+        return jitted_value(predictors, z, scale, bp, *_traced(horizon, weight), share_pair(share))
 
     return ShootingKernels(segments, step, value)
 

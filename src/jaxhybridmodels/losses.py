@@ -46,6 +46,7 @@ resolves them to this pair.
 
 from __future__ import annotations
 
+import functools
 import inspect
 from collections.abc import Callable, Sequence
 from typing import NamedTuple
@@ -125,14 +126,15 @@ def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
     Every input that could be NaN at a masked-out cell is replaced with a
     benign value before any arithmetic, and only then gated by the mask.
     ``var_safe`` swaps masked variance for ``1.0``. ``var_stable`` clips at
-    the smallest positive float only to keep an underflowed variance out of
-    ``log(0)``. A larger floor would change the likelihood of data measured
-    in small units, where a variance of 1e-14 is real.
+    the dtype's machine epsilon squared (about 1e-14 in float32, 5e-32 in
+    float64), only to keep the gradient in the variance, ``r^2 / var^2``,
+    finite. A fixed floor such as 1e-12 would change the likelihood of data
+    measured in small units, where a variance of 1e-14 is real.
 
     Same ``[N, T, D]`` shape as the inputs, exactly zero where masked out.
     """
     var_safe = jnp.where(m, var, 1.0)
-    var_stable = jnp.maximum(var_safe, jnp.finfo(jnp.result_type(var_safe)).tiny)
+    var_stable = jnp.maximum(var_safe, jnp.finfo(jnp.result_type(var_safe)).eps ** 2)
     p_safe, y_safe = _masked_safe(p, y, m)
     log_term = jnp.where(m, 0.5 * jnp.log(2.0 * jnp.pi * var_stable), 0.0)
     sq_term = jnp.where(m, 0.5 * (p_safe - y_safe) ** 2 / var_stable, 0.0)
@@ -295,14 +297,20 @@ def loss_pooling(loss: Callable[..., Array] | str) -> str:
       every experiment counts the same across the dataset.
     - ``"sum"``: already a sum (``mle``). Bucket values are added.
 
-    A custom loss declares its kind with a ``pooling`` attribute, for example
-    ``my_loss.pooling = "sum"``, and defaults to ``"observations"``.
+    A ``functools.partial`` of a built-in pools as the built-in. Any other
+    custom loss declares its kind with a ``pooling`` attribute, for example
+    ``my_loss.pooling = "sum"``, and defaults to ``"observations"``: a
+    wrapper around ``bal_mse`` must set ``"experiments"`` itself.
     """
     if isinstance(loss, str):
         loss = LOSS_REGISTRY[loss.lower().strip()]
-    kind = next((k for fn, k in _BUILTIN_POOLING if fn is loss), None)
+    # A partial of a built-in reduces the same way the built-in does.
+    base: object = loss
+    while isinstance(base, functools.partial):
+        base = base.func
+    kind = next((k for fn, k in _BUILTIN_POOLING if fn is base), None)
     if kind is None:
-        kind = getattr(loss, "pooling", "observations")
+        kind = getattr(loss, "pooling", None) or getattr(base, "pooling", "observations")
     if kind not in POOLING_KINDS:
         raise ValueError(f"loss pooling must be one of {POOLING_KINDS}; got {kind!r}")
     return kind
@@ -331,23 +339,33 @@ class Pooling(NamedTuple):
     def shares(
         self, buckets: Sequence[BucketPayload], horizon: ArrayLike = 1.0
     ) -> tuple[Array, ...]:
-        """Each bucket's multiplier, so that ``sum(share * bucket_loss)`` is the dataset loss.
+        """Each bucket's ``(data, penalty)`` multipliers for the dataset loss.
 
-        The shares of a mean-type loss add up to 1. With ``"sum"`` every
-        share is 1. A dataset with nothing measured inside ``horizon`` gets
-        equal shares, so the loss stays defined. Computed on the host, once
-        per dataset and horizon, not per step.
+        The data multiplier makes ``sum(share * bucket_loss)`` the loss over
+        the whole dataset: the shares of a mean-type loss add up to 1, and
+        with ``"sum"`` each is 1. A dataset with nothing measured inside
+        ``horizon`` gets equal data shares, so the loss stays defined.
+
+        The penalty multiplier weights each bucket's trajectory penalty, and a
+        segmented phase's gap term, by its share of the experiments. Both are
+        means over a bucket's experiments, so this makes them means over the
+        dataset's, whatever the loss, and a bucket of unmeasured probe
+        experiments still counts. Computed on the host, once per dataset and
+        horizon, not per step.
         """
+        sizes = [float(bp.ts.shape[0]) for bp in buckets]
+        penalty = [size / sum(sizes) for size in sizes]
         if self.kind == "sum":
-            return tuple(jnp.asarray(1.0) for _ in buckets)
-        weights = []
-        for bp in buckets:
-            keep = horizon_rows(bp.ts, bp.mask.any(axis=-1), horizon)
-            weights.append(float(self.weight(bp._replace(mask=bp.mask & keep[:, :, None]))))
-        total = sum(weights)
-        if total <= 0.0:
-            return tuple(jnp.asarray(1.0 / len(buckets)) for _ in buckets)
-        return tuple(jnp.asarray(w / total) for w in weights)
+            data = [1.0] * len(buckets)
+        else:
+            weights = []
+            for bp in buckets:
+                keep = horizon_rows(bp.ts, bp.mask.any(axis=-1), horizon)
+                weights.append(float(self.weight(bp._replace(mask=bp.mask & keep[:, :, None]))))
+            total = sum(weights)
+            equal = [1.0 / len(buckets)] * len(buckets)
+            data = [w / total for w in weights] if total > 0.0 else equal
+        return tuple(jnp.asarray([d, q]) for d, q in zip(data, penalty, strict=True))
 
 
 def resolve_loss_fn(

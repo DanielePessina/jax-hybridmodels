@@ -32,8 +32,10 @@ Start from a fitted model, because `problem.position` holds its current values.
 
 `problem.log_density` differs from the training loss in three ways:
 
-- it sums over buckets where the trainers average them, so the grouping of your
-  experiments does not change the posterior, and `max_buckets` is safe here;
+- it is the likelihood itself, where the trainers minimise `Objective.loss`; the
+  two agree only for `loss="mle"` with the data's variances, since `"mse"` weighs
+  every measurement the same whatever its variance. Bucketing changes neither,
+  so `max_buckets` is safe here;
 - it adds the change-of-variables term for free `Parameter`s, so the prior you
   wrote is the prior you get, although the sampler moves in latent space;
 - a failed solve, or a non-positive input to a log-warped scaler, gives `-inf` with a
@@ -53,7 +55,7 @@ trainable leaves left fixed, and `make_problem` warns when there are any.
 | --- | --- | --- |
 | `Parameter`s only, default `estimate=` | Full posterior over the model's fitted values | Solver settings, `y0` |
 | `Parameter`s and a network, default `estimate=` | `p(theta \| weights, data)` | The fitted weights, which can make it too narrow and off centre |
-| `estimate=` naming a last layer | Posterior over that layer | Every other layer, so a lower bound on the network's uncertainty |
+| `estimate=` naming a last layer | Posterior over that layer | Every other layer at its fitted value, so usually narrower than the network's full uncertainty, though not a bound on it |
 | `fit_ensemble` | Spread across independent fits | Nothing is sampled: members are not posterior draws |
 
 A model with only networks has no `Parameter`, so the default raises. Name a layer
@@ -189,7 +191,8 @@ move that posterior beyond Monte Carlo error.
 
 `log_prior=None` gives a problem with only the likelihood, for frequentist work.
 `optimize` finds its maximum with Optimistix's BFGS. A training fit is close to it
-but not at it, because the trainers average the loss over buckets. The result's
+but not at it: Adam stops after a finite budget, and a loss other than `"mle"` has
+a different minimum when the variances differ. The result's
 `converged` says whether BFGS met its tolerances, and `gradient` gives the
 remaining slope per value, with `gradient_norm` its largest entry.
 `fisher()` then gives the information at that point.
@@ -209,7 +212,7 @@ Fisher information
   log_A         17.1      0.09661  [16.91, 17.29]
   Strongest correlations
     E and log_A: +0.999
-  Condition number 2.04e+03
+  Condition number 1.83e+03
 ```
 
 A profile likelihood needs no Gaussian assumption. `profile(name)` holds one
@@ -255,8 +258,9 @@ temperature removes it. The Fisher covariance gives the temperature at which
 
 <<< @/../examples/identifiability/arrhenius.py#centred
 
-The centred fit reports no correlation above 0.5, and the condition number falls
-from 2040 to 35. When the data cannot separate parameters at all,
+The centred fit's correlation is essentially zero, and the condition number, read
+in correlation form, falls from about 1.8e3 to 1. When the data cannot separate
+parameters at all,
 `fisher().unidentified()` names the directions it cannot see, such as two rates
 whose product is all a model uses. Those parameters' standard errors are infinite,
 and the summary lists them under "Not identified".
