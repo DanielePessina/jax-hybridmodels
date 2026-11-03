@@ -92,29 +92,29 @@ Default settings, one CPU, seeds fixed.
 
 | run | $R^2$ (y1) | $R^2$ (y2) | worst $k$ error | residual RMS |
 |---|---|---|---|---|
-| hybrid, irregular (3 buckets) | 0.975 | 0.973 | 1.90x | 48% |
+| hybrid, irregular (3 buckets) | 0.965 | 0.961 | 4.25x | 45% |
 | hybrid, rectangular (1 bucket) | 0.978 | 0.974 | 2.00x | 40% |
-| `--mechanistic-only`, irregular | 0.662 | 0.701 | **33.5x** | n/a |
-| `--inner kan`, irregular | 0.990 | 0.992 | 6.61x | 38% |
+| `--mechanistic-only`, irregular | 0.663 | 0.701 | **34.8x** | n/a |
+| `--inner kan`, irregular | 0.987 | 0.987 | 8.06x | 23% |
 
 The default run's rate law against the Arrhenius truth it never saw:
 
 | temperature (K) | true $k$ | fitted $k$ | ratio |
 |---|---|---|---|
-| 280 | 0.00629 | 0.01195 | 1.90 |
-| 292 | 0.01516 | 0.02576 | 1.70 |
-| 304 | 0.03412 | 0.04719 | 1.38 |
-| 316 | 0.07221 | 0.08344 | 1.16 |
-| 328 | 0.14463 | 0.15206 | 1.05 |
-| 340 | 0.27583 | 0.31368 | 1.14 |
+| 280 | 0.00629 | 0.02672 | 4.25 |
+| 292 | 0.01516 | 0.04549 | 3.00 |
+| 304 | 0.03412 | 0.06987 | 2.05 |
+| 316 | 0.07221 | 0.10687 | 1.48 |
+| 328 | 0.14463 | 0.17282 | 1.19 |
+| 340 | 0.27583 | 0.32731 | 1.19 |
 
-From trajectories alone, 1.6 decades of temperature dependence come back within a factor of two. The coldest point is worst: that trajectory barely decays inside the observation window, so $k$ is least identifiable there.
+From trajectories alone, the fitted rate is within 20% of the truth at the two hottest levels and about twice it at 304 K, but 3.0 and 4.25 times too high at the two coldest. The coldest points are worst: those trajectories barely decay inside the observation window, so $k$ is least identifiable there. The rate network also ends this run pressed against its output bound (the penalty below), which the cold end feels most.
 
-The `--mechanistic-only` row is the argument for hybrid models, and the $R^2$ column is not what makes it. Without the residual, the rate network is the only flexible part left, so it absorbs the missing cubic term into $k$, and the recovered rate at 280 K goes from 1.90 times the truth to 33.5 times. An unmodelled term does not stay in its own residual. It contaminates whichever parameter can absorb it, usually the one the experiment was built to measure.
+The `--mechanistic-only` row is the argument for hybrid models, and the $R^2$ column is not what makes it. Without the residual, the rate network is the only flexible part left, so it absorbs the missing cubic term into $k$, and the recovered rate at 280 K goes from 4.25 times the truth to 34.8 times. An unmodelled term does not stay in its own residual. It contaminates whichever parameter can absorb it, usually the one the experiment was built to measure.
 
 The KAN row is the same effect the other way. A more expressive residual fits the trajectories better and recovers $k$ worse, because it absorbs part of the damping too. If a fitted parameter is what you want, use the least expressive residual that closes the gap.
 
-Both data layouts reach the same trajectory accuracy, so a half-empty mask is not a handicap. Their rate laws differ at the cold end because the irregular end times reach 9 and the rectangular grid stops at 8.
+Both data layouts reach nearly the same trajectory accuracy, so a half-empty mask is not a handicap there. Their rate laws differ at the cold end, 4.25 against 2.00 times the truth at 280 K. The irregular runs carry about half as many measurements, which the loss now weights one by one, and their end times reach 9 where the rectangular grid stops at 8.
 
 The residual RMS is measured on a grid over the data range against a true RMS of 0.249. The grid includes corners no trajectory visited, where the residual is not identifiable, so the number overstates the error the trajectory fit sees.
 
@@ -122,8 +122,8 @@ The end-of-run saturation penalty per network:
 
 ```
   end-of-run saturation penalty, by network:
-    rate      1.3467e+00
-    residual  1.8072e-02
+    rate      1.6042e+00
+    residual  5.2604e-02
 ```
 
 The grid covers each network's whole declared box, including inputs no experiment reached (`rate` is declared over 270 to 350 K and the data spans 280 to 340 K). A non-zero value says a network is pressed against an output bound somewhere in that box, which the training loss cannot see. The loss history can rise at the phase boundary, because the second phase sees the whole trajectory; the penalty is not part of that history, so runs with different penalty weights stay comparable.

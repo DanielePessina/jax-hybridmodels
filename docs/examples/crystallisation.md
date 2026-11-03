@@ -125,13 +125,13 @@ Seed 0, 600 Adam steps per family:
 
 | family | best loss | conc $R^2$ | d43 $R^2$ |
 |--------|----------:|-----------:|----------:|
-| MLP    | 0.274     | 0.970      | 0.983     |
-| KAN    | 0.336     | 0.967      | 0.850     |
+| MLP    | 0.250     | 0.974      | 0.986     |
+| KAN    | 0.535     | 0.953      | 0.679     |
 
-Both families fit concentration about equally well. The KAN family is
+The MLP fits concentration better, 0.974 against 0.953. The KAN family is much
 worse on the terminal `d43`, which has one point per experiment and so
 little say in the loss. At 17 °C and $S = 1.5$ the MLP learns
-$G = 1.0 \times 10^{-11}$ m/s and $J = 1.6 \times 10^{11}$ per m³ per s.
+$G = 9.2 \times 10^{-12}$ m/s and $J = 1.85 \times 10^{10}$ per m³ per s.
 
 ![Predicted against observed concentration and d43, MLP](assets/crystallisation/mlp/parity.png)
 

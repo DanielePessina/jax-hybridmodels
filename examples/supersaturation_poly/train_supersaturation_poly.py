@@ -19,8 +19,8 @@ Run::
     uv run python examples/supersaturation_poly/train_supersaturation_poly.py --steps 5 --no-plot
 
 Prints the buckets, metrics and the learned rate at each supersaturation;
-writes ``parity.png`` and ``recovered_rate.png`` to ``figures/``. About a
-minute on CPU.
+writes ``parity.png`` and ``recovered_rate.png`` to ``figures/``. About 10
+seconds on CPU.
 """
 
 from __future__ import annotations

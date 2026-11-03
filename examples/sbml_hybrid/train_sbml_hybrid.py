@@ -20,7 +20,7 @@ Run (needs the ``examples`` extra for python-libsbml and sympy)::
 
 Prints the buckets, per-channel metrics and the learned ``Vmax`` at each
 dose; writes ``parity.png`` and ``recovered_vmax.png`` to ``figures/``.
-About a minute on CPU.
+About 20 seconds on CPU.
 """
 
 from __future__ import annotations

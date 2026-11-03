@@ -51,8 +51,8 @@ The predictor:
 ## Results
 
 Seed 0, 400 steps. The `mu0` series fit with `R^2 = 0.998`, but the MSE of
-about 3e-3 is some 30 times the noise variance of 1e-4, and the loss was still
-falling when the step budget ran out.
+about 3e-3 is some 30 times the noise variance of 1e-4, and the loss was nearly
+flat over the last 100 steps.
 
 ![Predicted against observed nucleation moment](assets/supersaturation-poly/parity.png)
 

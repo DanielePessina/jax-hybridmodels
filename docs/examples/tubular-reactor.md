@@ -117,7 +117,7 @@ where a wrong rate has acted for longer.
 ![Sensor traces for the coldest and hottest runs](assets/tubular-reactor/sensors.png)
 
 The first-order model also gets its constants wrong. It fits
-$E_a/R = 5139$ K against a true 4000 K. The true effective coefficient is
+$E_a/R = 5142$ K against a true 4000 K. The true effective coefficient is
 $k(T)/(1 + Kc)$. Cold runs convert little, so $c$ stays high and the
 coefficient is suppressed by the denominator; hot runs consume the
 reactant, so $c$ is low and the coefficient is close to $k(T)$. Seen
@@ -128,10 +128,10 @@ The learned rate law matches the truth across the measured box:
 
 | $c$ | $T$ (K) | true $r$ | learned $r$ |
 |---|---|---|---|
-| 0.2 | 310 | 0.196 | 0.196 |
-| 1.5 | 310 | 0.515 | 0.524 |
+| 0.2 | 310 | 0.196 | 0.193 |
+| 1.5 | 310 | 0.515 | 0.525 |
 | 0.2 | 350 | 0.857 | 0.840 |
-| 1.5 | 350 | 2.249 | 2.264 |
+| 1.5 | 350 | 2.249 | 2.273 |
 
 ![Learned rate against the truth at three temperatures](assets/tubular-reactor/rate_law.png)
 

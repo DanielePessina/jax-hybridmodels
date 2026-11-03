@@ -165,8 +165,8 @@ the number to reduce is the count. In order of effect on the tubular reactor:
 
 - **Precondition.** `problem.preconditioned()` whitens the position with the
   Gauss-Newton curvature at the fit. It is a constant linear map, so the posterior
-  does not change. On the last-layer problem, whose curvature has a condition number
-  of 1e6, it took the step size from 0.0097 to 0.67 and warmup from the 63-leapfrog
+  does not change. On the last-layer problem, whose raw Gauss-Newton curvature (not
+  the correlation form `fisher()` reports) has a condition number of about 1e6, it took the step size from 0.0097 to 0.67 and warmup from the 63-leapfrog
   depth cap on nearly every iteration to about 7. It needs a fitted model to help,
   and the Gaussian likelihood unless you pass `precision=`.
   Skipping it is not wrong, only slower: in one run on the Arrhenius posterior, with
@@ -181,8 +181,8 @@ the number to reduce is the count. In order of effect on the tubular reactor:
   accuracy, so loosening `rtol` by 100 times saved 5 steps. Damped PID gains
   (`pcoeff=0.3, icoeff=0.4`) saved about 12% of each gradient by rejecting fewer steps.
 
-Together these took the two-parameter posterior from 527 s to 18 s on 8 CPU cores,
-with a larger effective sample size. The 17-parameter last layer took 593 s for 4
+Together these took the two-parameter posterior from 527 s to about 20 s on 8 CPU cores,
+with a larger effective sample size. The 17-parameter last layer took 683 s for 4
 chains of 450 iterations each, with R-hat below 1.01.
 
 ## Precision and solver tolerance

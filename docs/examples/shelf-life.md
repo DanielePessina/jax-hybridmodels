@@ -23,6 +23,10 @@ About 20 seconds on CPU. Prints the fit, the rate's uncertainty at each
 temperature and the shelf life, and writes `shelf_life.png` to
 `examples/shelf_life/figures/`.
 
+XLA may print `Algebraic simplifier is likely stuck` to stderr while this compiles.
+It is harmless; see
+[Troubleshooting](/guide/troubleshooting#algebraic-simplifier-is-likely-stuck-in-stderr).
+
 ## The model
 
 Potency $y$, as a fraction of the label claim, falls by first-order kinetics
@@ -65,7 +69,7 @@ Fisher information
   log_k25         -5.726      0.06914  [-5.862, -5.591]
   Strongest correlations
     Ea_over_R and log_k25: -0.989
-  Condition number 178
+  Condition number 174
 ```
 
 ## Extrapolating

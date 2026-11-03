@@ -21,7 +21,7 @@ Run::
 
 Prints the learned rate against the truth before and after training, the
 save/load drift and metrics; writes ``figures/parity.png`` and
-``figures/trajectories.png``. About a minute on CPU.
+``figures/trajectories.png``. About 15 seconds on CPU.
 """
 
 # ruff: noqa: F722
