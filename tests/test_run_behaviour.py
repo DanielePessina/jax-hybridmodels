@@ -353,9 +353,10 @@ def test_tournament_falls_back_when_every_attempt_fails(decay_data):
             )
 
 
-def test_a_run_whose_every_attempt_fails_still_summarises(decay_data):
-    """Only the starting rate solves, so every redrawn attempt fails and the run
-    falls back to the start, trains at zero rate and must still summarise."""
+def test_the_tournament_keeps_the_start_and_summarises_failures(decay_data):
+    """Only the starting rate solves. Attempt 0 trains from it at zero rate and
+    wins; every redrawn attempt fails. A history whose every attempt failed must
+    still summarise."""
 
     def only_the_start(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any):
         ys = simulate_parameter(predictors, ts, covariates, y0, solver)
@@ -365,9 +366,18 @@ def test_a_run_whose_every_attempt_fails_still_summarises(decay_data):
         {"rate": hm.Parameter(0.3, bounds=(0.0, 1.0)), "offset": hm.Constant(0.0)}, only_the_start
     )
     config = hm.OptaxTrainingConfig(steps=3, lr=0.0, tournament_attempts=3, tournament_steps=1)
-    with pytest.warns(RuntimeWarning, match="all attempts failed"):
-        result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
-    assert "all 3 attempts failed" in result.summary()
+    result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
+    first, *redrawn = result.history.tournament_scores
+    assert math.isfinite(first) and all(math.isinf(score) for score in redrawn)
+    assert "2 failed" in result.summary()
+
+    failed = hm.FitResult(
+        model=model,
+        history=hm.FitHistory(loss=(1.0,), tournament_scores=(math.inf,) * 3),
+        best_step=0,
+        stop_reason="budget_exhausted",
+    )
+    assert "all 3 attempts failed" in failed.summary()
 
 
 def test_tournament_survives_equinox_runtime_failures(decay_data):

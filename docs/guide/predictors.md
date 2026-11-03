@@ -41,7 +41,8 @@ bounds. Every bounds argument in the library (`Parameter(bounds=)`,
 reads the same way: one `(low, high)` pair applies to every element, and a
 sequence of pairs applies per element in flattened order. The optimiser updates an unbounded latent
 and `.value` maps it back, so the value never leaves its bounds. Tournament
-restarts draw a fresh latent.
+restarts draw a fresh latent for each entry with two finite bounds, and
+keep one-sided and unbounded entries as they are.
 
 ## Bounds
 
@@ -49,11 +50,20 @@ restarts draw a fresh latent.
 | --- | --- | --- |
 | `(low, high)` | `transform` squash onto the interval | `warp`, then inverse squash |
 | `(low, None)` | `low + softplus(z / temperature)` | identity |
+| `(low, None)`, `warp="log"` | `low + exp(z / temperature)` | identity |
 | `(None, high)` | `high - softplus(z / temperature)` | identity |
 | `(None, None)` or omitted | identity | identity |
 
 `-inf` and `inf` mean the same as `None`. Finite bounds must be ordered.
-Log warps need finite positive bounds; open bounds need the linear warp.
+On a box, log warps need a positive lower bound. With one bound, a log warp
+acts on the distance from it, so any bound works. Unbounded values need the
+linear warp.
+
+A softplus is linear far from its bound, so a large one-sided value moves by
+about the learning rate per Adam step: a rate of 5000 hardly trains. With
+`warp="log"` each step is a relative change instead, at any size. Use it for
+positive constants of unknown scale, such as Arrhenius prefactors:
+`hm.Parameter(5000.0, bounds=(0.0, None), warp="log")`.
 
 Cover the values the solver may meet, with a small margin. Use
 `warp="log10"` when a positive quantity spans decades: across

@@ -919,7 +919,7 @@ def test_positive_warp_rejects_nonpositive_runtime_inputs():
         (dict(bounds=((10.0, 0.0),)), "low < high"),
         (dict(bounds=((5.0, 5.0),)), "low < high"),
         (dict(bounds=((0.0, 10.0),), warp="log10"), "undefined at or below zero"),
-        (dict(bounds=((1.0, None),), warp="log10"), "Open bounds"),
+        (dict(bounds=((None, None),), warp="log10"), "Unbounded values require"),
         (dict(bounds=((0.0, 1.0),), temperature=0.0), "temperature"),
         (dict(bounds=((0.0, 1.0),), temperature=math.nan), "temperature"),
         (dict(bounds=((0.0, 1.0),), temperature=jnp.array([1.0, 2.0])), "temperature"),

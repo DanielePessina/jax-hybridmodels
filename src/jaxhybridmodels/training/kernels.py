@@ -175,6 +175,11 @@ def failure_details(
     return " ".join(part for part in parts if part)
 
 
+def horizon_cutoff(n_times: int, horizon: Array) -> Array:
+    """How many leading samples of ``n_times`` a ``horizon`` fraction scores, at least 1."""
+    return jnp.maximum(jnp.ceil(jnp.float32(n_times) * horizon).astype(jnp.int32), jnp.int32(1))
+
+
 def apply_length_mask(bp: BucketPayload, horizon: Array) -> BucketPayload:
     """Narrow the bucket's mask to the first ``horizon`` fraction of its timestamps.
 
@@ -191,11 +196,7 @@ def apply_length_mask(bp: BucketPayload, horizon: Array) -> BucketPayload:
     count clamped at 1, so the step would silently score nothing.
     """
     T = bp.ts.shape[1]
-    cutoff = jnp.maximum(
-        jnp.ceil(jnp.float32(T) * horizon).astype(jnp.int32),
-        jnp.int32(1),
-    )
-    sched_mask = (jnp.arange(T) < cutoff)[None, :, None]
+    sched_mask = (jnp.arange(T) < horizon_cutoff(T, horizon))[None, :, None]
     mask = bp.mask & sched_mask
     return bp._replace(mask=mask, n_obs=mask.sum().astype(bp.n_obs.dtype))
 

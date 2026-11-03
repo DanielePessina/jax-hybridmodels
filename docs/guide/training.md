@@ -183,9 +183,11 @@ penalty weights comparable.
 ### The tournament
 
 A bad initialisation can put the solver in a stiff regime it never leaves.
-The tournament re-initialises the predictors from `tournament_attempts`
-keys, trains each for `tournament_steps`, scores each with a forward pass,
-and keeps the best:
+The tournament runs `tournament_attempts` attempts. The first starts from the
+predictors as given, so your starting guess is always a candidate. The rest
+re-initialise them, redrawing networks and the entries of a `Parameter` with
+two finite bounds. Each trains for `tournament_steps` and is scored with a
+forward pass, and the best is kept:
 
 ```python
 config = hm.OptaxTrainingConfig(

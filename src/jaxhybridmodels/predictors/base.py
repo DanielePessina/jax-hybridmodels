@@ -411,6 +411,8 @@ class BoundScaler(eqx.Module):
         if not (math.isfinite(low) or math.isfinite(high)):
             return v
         edge, sign = (low, 1.0) if math.isfinite(low) else (high, -1.0)
+        if self.warp != "linear":
+            return self._warped_one_sided(v, edge, sign, temperature, inverse=inverse, guard=guard)
         if not inverse:
             return edge + sign * jax.nn.softplus(v / temperature)
         distance = sign * (v - edge)
@@ -428,6 +430,29 @@ class BoundScaler(eqx.Module):
     def _uniform(self) -> bool:
         """Do all components share one bound pair and one temperature?"""
         return len(set(self.bounds)) == 1 and self.temperature.ndim == 0
+
+    def _warped_one_sided(
+        self, v: Array, edge: float, sign: float, temperature: Array, *, inverse: bool, guard: bool
+    ) -> Array:
+        """One finite bound under a warp: the warp acts on the distance from the edge.
+
+        Under ``"log"`` the value is ``edge + exp(z / T)``, so an Adam step on
+        the latent is a relative change in the distance however large it is.
+        A softplus would move a value of 5000 by about the learning rate per
+        step. The guarded inverse continues linearly below ``logit_eps``, as
+        the softplus branch does, so an input at or past the edge keeps a
+        finite latent and a finite sensitivity.
+        """
+        warp = WARPS[self.warp]
+        if not inverse:
+            return edge + sign * warp.inverse(v / temperature)
+        distance = sign * (v - edge)
+        if not guard:
+            return warp.forward(distance) * temperature
+        eps = jnp.asarray(self.logit_eps, dtype=jnp.result_type(distance, float))
+        safe = jnp.maximum(distance, eps)
+        _, slope = jax.jvp(warp.forward, (eps,), (jnp.ones_like(eps),))
+        return (warp.forward(safe) + jnp.minimum(distance - eps, 0.0) * slope) * temperature
 
     def _map(self, x: Array, *, inverse: bool, guard: bool = True) -> Array:
         """Apply :meth:`_component` along the last axis; a scalar broadcasts.
@@ -521,8 +546,12 @@ class BoundScaler(eqx.Module):
         :meth:`input_violation` when an input can leave its box.
         """
         warp = WARPS[self.warp]
-        if warp.requires_positive:
-            nonpositive = jnp.any(x <= 0.0)
+        # Only a box warps the value itself. One finite bound warps the
+        # distance from it, which the guarded inverse continues past the edge.
+        boxed = [math.isfinite(low) and math.isfinite(high) for low, high in self.bounds]
+        if warp.requires_positive and any(boxed):
+            checked = x if all(boxed) else self._components_last(x)[..., np.flatnonzero(boxed)]
+            nonpositive = jnp.any(checked <= 0.0)
             try:
                 if bool(nonpositive):
                     raise ValueError(

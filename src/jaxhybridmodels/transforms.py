@@ -239,18 +239,26 @@ def check_bounds(bounds: tuple[tuple[float, float], ...], warp_name: str) -> Non
     """Validate ordered endpoints and the warp's domain.
 
     Signed infinities represent open endpoints; NaN and reversed endpoints
-    raise. Open intervals require a linear warp. Finite intervals with a
+    raise. With one finite endpoint, a warp acts on the distance from it,
+    which is always positive, so it must be a positive-only warp such as
+    ``"log"``. With none, the warp must be linear. Finite intervals with a
     positive-only warp require a strictly positive lower endpoint.
     """
     warp = WARPS[warp_name]
     for low, high in bounds:
         if math.isnan(low) or math.isnan(high) or low == math.inf or high == -math.inf:
             raise ValueError(f"BoundScaler bounds must be ordered and not NaN; got ({low}, {high})")
-        if (not math.isfinite(low) or not math.isfinite(high)) and warp_name != "linear":
-            raise ValueError("Open bounds require warp='linear'")
+        if not (math.isfinite(low) or math.isfinite(high)) and warp_name != "linear":
+            raise ValueError("Unbounded values require warp='linear'")
+        one_sided = math.isfinite(low) != math.isfinite(high)
+        if one_sided and warp_name != "linear" and not warp.requires_positive:
+            raise ValueError(
+                f"warp={warp_name!r} on one-sided bounds ({low}, {high}) would act on the "
+                "distance from the bound, which needs a positive-only warp such as 'log'"
+            )
         if low >= high:
             raise ValueError(f"BoundScaler bounds require low < high; got ({low}, {high}).")
-        if warp.requires_positive and low <= 0.0:
+        if warp.requires_positive and not one_sided and low <= 0.0:
             raise ValueError(
                 f"warp={warp_name!r} is undefined at or below zero, but bounds "
                 f"({low}, {high}) start at {low}. Raise the lower bound to a "

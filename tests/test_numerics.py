@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 import numpy as np
+import optax
 import pandas as pd
 import pytest
 from _models import (
@@ -345,6 +346,38 @@ def test_input_violation_is_a_width_normalised_hinge():
     np.testing.assert_allclose(narrow, wide)
     # A one-sided box has no width, so the overshoot is not normalised.
     assert float(hm.BoundScaler(((0.0, None),)).input_violation(jnp.array([-2.0]))) == 4.0
+
+
+def test_a_log_warp_on_one_bound_makes_steps_relative():
+    """With one bound, a log warp acts on the distance from it: ``low + exp(z)``.
+
+    A softplus is linear far from its bound, so Adam moves a value of 5000 by
+    about the learning rate per step. The log warp moves it by a fraction.
+    """
+
+    def train(warp: str) -> float:
+        parameter = hm.Parameter(5000.0, bounds=(0.0, None), warp=warp)
+        optimizer = optax.adam(1e-2)
+        latent = parameter.latent
+        state = optimizer.init(latent)
+
+        def loss(z: Array) -> Array:
+            return jnp.sum((eqx.tree_at(lambda p: p.latent, parameter, z).value - 6000.0) ** 2)
+
+        for _ in range(500):
+            update, state = optimizer.update(jax.grad(loss)(latent), state)
+            latent = optax.apply_updates(latent, update)
+        return float(eqx.tree_at(lambda p: p.latent, parameter, latent).value)
+
+    assert train("linear") < 5010.0
+    assert train("log") == pytest.approx(6000.0, rel=1e-4)
+    for bounds, value in (((1.0, None), 5.0), ((None, 2.0), 1.5)):
+        parameter = hm.Parameter(value, bounds=bounds, warp="log10")
+        assert float(parameter.value) == pytest.approx(value, rel=1e-6)
+        # At and past the bound the guarded inverse stays finite and keeps a slope.
+        edge = jnp.asarray(bounds[0] if bounds[0] is not None else bounds[1])
+        past = jax.grad(parameter.scaler.to_latent)(edge)
+        assert jnp.isfinite(parameter.scaler.to_latent(edge)) and float(past) != 0.0
 
 
 def test_array_parameter_takes_one_bound_per_element():
@@ -1662,5 +1695,7 @@ def test_default_mask_trains_networks_and_parameters_only():
 
     scalers_too = trainable_mask(predictors, train_scalers=True)
     assert scalers_too["rate"].in_scaler.temperature is True
+    # A Parameter's temperature only rescales its latent: training both is redundant.
+    assert scalers_too["k"].latent is True and scalers_too["k"].scaler.temperature is False
     assert not any(flags(scalers_too["offset"])), "a Constant is never trainable"
     assert not any(flags(trainable_mask(predictors, predicate=lambda _: False)))

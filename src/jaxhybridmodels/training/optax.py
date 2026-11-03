@@ -659,6 +659,8 @@ def _shared_tournament(
     sort), so the result stays a deterministic function of ``key``.
     ``top_k=1`` reproduces the single-best behaviour the main loop uses.
 
+    Attempt 0 starts from ``predictors`` as given; the others redraw.
+
     An attempt that raises a diffrax error or a non-finite score is dropped,
     scored ``inf``, and the next key tried. If every attempt fails, the
     original ``predictors`` come back with score ``inf`` and a
@@ -674,9 +676,15 @@ def _shared_tournament(
     for attempt in range(tournament_attempts):
         attempt_key = fold(key, f"tournament_attempt_{attempt}")
         try:
-            # One subkey per Module leaf, so identical-shape sibling
+            # Attempt 0 trains from the values given, so a good starting
+            # guess is always a candidate and is never thrown away. The others
+            # redraw, one subkey per Module leaf, so identical-shape sibling
             # predictors get genuinely different fresh weights.
-            fresh = reinitialize_pytree_with_key(predictors, attempt_key)
+            fresh = (
+                predictors
+                if attempt == 0
+                else reinitialize_pytree_with_key(predictors, attempt_key)
+            )
             # Re-init draws every Module leaf, frozen ones included. Put the
             # frozen leaves back, so a frozen pre-trained subtree (or a
             # default-frozen BoundScaler) keeps its values instead of being

@@ -184,6 +184,16 @@
 
 ### Changed (breaking against 0.2.0b1)
 
+- A log warp is allowed on one-sided bounds and acts on the distance from the
+  bound: `Parameter(5000.0, bounds=(0.0, None), warp="log")` is
+  `exp(z)`, so each Adam step is a relative change. With a softplus a value of
+  5000 moved by about the learning rate per step.
+- The tournament's first attempt trains from the predictors as given, so the
+  starting guess is always a candidate; the others redraw as before.
+- In a multiple-shooting phase with `horizon < 1`, continuity gaps past the
+  horizon are left out of the gap term, as the data there are.
+- `train_scalers=True` no longer trains a `Parameter`'s own temperature, which
+  only duplicated its latent.
 - `verbose` moved from `OptaxTrainingConfig` and `EvosaxTrainingConfig` to `fit`,
   `fit_ensemble`, `train_with_optax` and `train_with_evosax`. A run saved with the old
   field still loads.

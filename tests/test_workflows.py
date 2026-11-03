@@ -986,6 +986,24 @@ def test_segments_assemble_into_the_single_solve(oscillator_data):
     np.testing.assert_allclose(assembled, states, atol=1e-4)
     assert float(jnp.max(jnp.abs(gaps))) < 1e-4
 
+    # A node knocked off the trajectory past the horizon opens a gap there, and
+    # the phase leaves it unscored, as it does the data.
+    from jaxhybridmodels.losses import masked_mse
+    from jaxhybridmodels.training.shooting import build_shooting_kernels
+
+    kernels = build_shooting_kernels(
+        segments=8,
+        simulate_fn=oscillator_fn,
+        state_to_output=lambda state: state,
+        solver=model.solver,
+        loss_fn=masked_mse,
+        trainable=jax.tree.map(eqx.is_inexact_array, model.predictors),
+    )
+    late = nodes.z[0].at[:, -1].add(0.5)
+    _, full_gap = kernels.value(model.predictors, late, nodes.scale[0], bp, 1.0, 1.0)
+    _, early_gap = kernels.value(model.predictors, late, nodes.scale[0], bp, 0.5, 1.0)
+    assert float(full_gap) > 1e-3 and float(early_gap) < 1e-8
+
 
 # ---------------------------------------------------------------------------
 # Capped buckets: irregular data padded into fewer compiled shapes

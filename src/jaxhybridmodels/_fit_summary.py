@@ -183,7 +183,10 @@ def _parameter_rows(path: str, parameter: Parameter) -> list[tuple[str, str, str
     # The middle of the latent range decides the side, whatever the warp or squash.
     midpoints = jnp.ravel(scaler.from_latent(jnp.zeros_like(parameter.latent)))
     temperature = jnp.broadcast_to(scaler.temperature, latent.shape)
+    # A warped one-sided element is exp-like all the way to its edge, never stuck.
     one_sided = jnp.array([math.isfinite(lo) != math.isfinite(hi) for lo, hi in scaler.bounds])
+    if scaler.warp != "linear":
+        one_sided = jnp.zeros_like(one_sided)
     pinned = jnp.where(
         one_sided,
         -latent / temperature > scaler.z_knee,

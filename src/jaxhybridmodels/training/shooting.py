@@ -58,7 +58,7 @@ from jaxtyping import Array, ArrayLike
 
 from jaxhybridmodels.data import BucketPayload, Dataset
 from jaxhybridmodels.solver import SolverConfig, simulation_state
-from jaxhybridmodels.training.kernels import apply_length_mask
+from jaxhybridmodels.training.kernels import apply_length_mask, horizon_cutoff
 
 __all__ = [
     "Nodes",
@@ -182,24 +182,36 @@ def build_shooting_kernels(
     """
 
     def terms(
-        predictors: Any, z: Array, scale: Array, bp: BucketPayload, weight: Array
+        predictors: Any, z: Array, scale: Array, bp: BucketPayload, horizon: Array, weight: Array
     ) -> tuple[Array, Array]:
-        layout = segment_layout(int(bp.ts.shape[1]), segments)
+        n_times = int(bp.ts.shape[1])
+        layout = segment_layout(n_times, segments)
         full, gaps = shoot_bucket(
             predictors, bp, z * scale, layout, simulate_fn=simulate_fn, solver=solver
         )
-        data = loss_fn(jax.vmap(state_to_output)(full), bp)
+        scored = apply_length_mask(bp, horizon)
+        data = loss_fn(jax.vmap(state_to_output)(full), scored)
         if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-            data = data + trajectory_penalty_weight * trajectory_penalty_fn(full, bp)
+            data = data + trajectory_penalty_weight * trajectory_penalty_fn(full, scored)
         if layout.segments == 1:
             return data, jnp.zeros_like(data)
-        return data, weight * jnp.mean((gaps / scale) ** 2)
+        # A join past the horizon is as unscored as the data there: it would
+        # otherwise pull the predictors toward a stretch the phase leaves out.
+        joined = jnp.asarray(layout.boundaries) < horizon_cutoff(n_times, horizon)
+        squared = jnp.where(joined[None, :, None], (gaps / scale) ** 2, 0.0)
+        count = jnp.maximum(joined.sum() * gaps.shape[0] * gaps.shape[2], 1)
+        return data, weight * squared.sum() / count
 
     def objective(
-        diff: tuple[Any, Array], static: Any, scale: Array, bp: BucketPayload, weight: Array
+        diff: tuple[Any, Array],
+        static: Any,
+        scale: Array,
+        bp: BucketPayload,
+        horizon: Array,
+        weight: Array,
     ) -> tuple[Array, tuple[Array, Array]]:
         predictors = eqx.combine(diff[0], static)
-        data, continuity = terms(predictors, diff[1], scale, bp, weight)
+        data, continuity = terms(predictors, diff[1], scale, bp, horizon, weight)
         return data + continuity, (data, continuity)
 
     grad_fn = eqx.filter_value_and_grad(objective, has_aux=True)
@@ -208,15 +220,14 @@ def build_shooting_kernels(
     def jitted_step(
         predictors: Any, z: Array, scale: Array, bp: BucketPayload, horizon: Array, weight: Array
     ) -> tuple[tuple[Array, tuple[Array, Array]], Any]:
-        masked = apply_length_mask(bp, horizon)
         diff, static = eqx.partition(predictors, trainable)
-        return grad_fn((diff, z), static, scale, masked, weight)
+        return grad_fn((diff, z), static, scale, bp, horizon, weight)
 
     @eqx.filter_jit
     def jitted_value(
         predictors: Any, z: Array, scale: Array, bp: BucketPayload, horizon: Array, weight: Array
     ) -> tuple[Array, Array]:
-        return terms(predictors, z, scale, apply_length_mask(bp, horizon), weight)
+        return terms(predictors, z, scale, bp, horizon, weight)
 
     def step(
         predictors: Any,
