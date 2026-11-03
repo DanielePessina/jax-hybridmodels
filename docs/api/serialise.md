@@ -55,7 +55,7 @@ Read it back with [`load`](/api/serialise#load).
 The directory is created, parents included. Existing files are
 overwritten.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L332)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L338)</small>
 
 ---
 
@@ -86,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L472)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L478)</small>
 
 ---
 
@@ -175,5 +175,11 @@ static configuration, such as the same ``in_size`` and ``depth`` on
 every ``MLPPredictor`` leaf. The file's values overwrite its array
 leaves; its static fields supply the structure ``equinox`` needs.
 ``like`` is not mutated.
+
+Nothing checks the static fields against the saved ones, since the file
+holds only array leaves. A ``Parameter`` in ``like`` with different
+bounds reads the saved latent under its own bounds and gets a different
+value. [`load`](/api/serialise#load) records the static configuration and refuses such a
+template.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L88)</small>

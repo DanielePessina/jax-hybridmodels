@@ -803,7 +803,8 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     with pytest.warns(UserWarning, match="not at the likelihood's maximum"):
         frequentist.fisher()
     optimum = frequentist.optimize()
-    assert optimum.converged
+    assert optimum.converged and set(optimum.gradient) == {"k"}
+    assert optimum.gradient_norm < 1e-6
     fisher = optimum.problem.fisher()
     assert float(fisher.estimate[0]) == pytest.approx(mle, rel=1e-6)
     assert fisher.standard_errors()["k"] == pytest.approx(error, rel=1e-6)
@@ -815,6 +816,13 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     assert estimates.mean() == pytest.approx(mle, abs=4 * error / np.sqrt(4000))
     assert estimates.std() == pytest.approx(error, rel=0.05)
     assert "Condition number" in fisher.summary()
+    # The delta method is exact for a linear function, and a one-sided bound uses
+    # the one-sided quantile.
+    doubled = fisher.derived(lambda values: 2.0 * values["k"])
+    assert float(doubled.estimate) == pytest.approx(2 * mle, rel=1e-6)
+    assert float(doubled.standard_error) == pytest.approx(2 * error, rel=1e-6)
+    low, high = fisher.derived(lambda values: values["k"]).interval(0.95, side="lower")
+    assert float(low) == pytest.approx(mle - 1.644854 * error, rel=1e-6) and high == np.inf
 
     bayesian = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
     laplace = bayesian.optimize(target="posterior").problem.laplace()
@@ -861,6 +869,35 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     centre = float(result.estimate[0])
     # Built in the latent and mapped back, so it leans up as log k does and stays in bounds.
     assert 0.01 < low < centre < high < 10.0 and high - centre > centre - low
+    # An interior optimum a millionth of the way along a huge box is in the squash's
+    # tail but not held there by the bound, so it is reported in full.
+    for wide in (
+        hm.Parameter(0.7, bounds=(0.0, 1e7)),
+        hm.Parameter(0.7, bounds=(1e-12, 1e4), warp="log10"),
+    ):
+        problem = make_problem(linear_model(wide), experiments, log_prior=None, noise="data")
+        result = problem.optimize().problem.fisher()
+        assert not result.at_bound.any()
+        assert result.standard_errors()["k"] == pytest.approx(least_squares(ts, ys)[1], rel=1e-5)
+
+    # With inferred noise the Gauss-Newton information must count the noise once:
+    # the MLE's standard error is sigma / sqrt(2 n), as the observed information says.
+    noisy = (
+        make_problem(
+            linear_model(),
+            experiments,
+            log_prior=None,
+            noise={"y": hm.Parameter(0.3, bounds=(1e-3, 10.0), warp="log")},
+        )
+        .optimize()
+        .problem
+    )
+    sigma = float(noisy.physical(noisy.position)["noise.y"])
+    expected = sigma / np.sqrt(2 * ys.size)
+    assert noisy.fisher().standard_errors()["noise.y"] == pytest.approx(expected, rel=1e-6)
+    assert noisy.fisher(information="observed").standard_errors()["noise.y"] == pytest.approx(
+        expected, rel=1e-6
+    )
 
     product = product_model(hm.Parameter(1.0))
     problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
@@ -868,6 +905,10 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     (direction,) = together.unidentified()
     assert set(direction) == {"a", "b"}
     assert together.standard_errors() == {"a": np.inf, "b": np.inf}
+    # The product is what the data see, so its error is finite: that of the slope.
+    product_error = together.derived(lambda values: values["a"] * values["b"]).standard_error
+    assert float(product_error) == pytest.approx(least_squares(ts, ys)[1], rel=1e-5)
+    assert np.isinf(together.derived(lambda values: values["a"]).standard_error)
     assert together.intervals()["a"] == (-np.inf, np.inf)
     with pytest.raises(ValueError, match="do not constrain"):
         together.sample(jr.key(0), 10)
@@ -918,11 +959,17 @@ def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
     profiles = problem.profiles()
     assert set(profiles) == {"a", "b"}
     assert profiles["a"].interval == (None, None) and not profiles["a"].identifiable
-    assert profiles["a"].stopped == ("bound", "bound")
+    assert profiles["a"].stopped == ("bound", "bound") and not profiles["a"].at_bound
     # b compensates for a along the whole profile, keeping the product fixed.
     product_along = profiles["a"].values * profiles["a"].others["b"]
     assert np.ptp(product_along) == pytest.approx(0.0, abs=1e-5)
     assert "reaches its bound" in profiles["a"].summary()
+    # Profiling b, a compensates until it is pinned, and only then does the profile
+    # drop: the interval holds for a's bounds, and the result says which bound.
+    with pytest.warns(RuntimeWarning, match="reached its bound along the profile"):
+        b = problem.profile("b")
+    assert b.identifiable and set(b.at_bound) == {"a"}
+    assert "a pinned at its" in b.summary()
 
 
 def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
@@ -945,6 +992,13 @@ def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
     # Bisecting the bracket close to the threshold keeps that error small.
     assert high is None and low == pytest.approx(expected, rel=1e-3)
     assert list(profile.values) == sorted(profile.values)
+    # The curvature in the squash's tail says nothing about k, so Fisher reports
+    # no number for it rather than a misleading one.
+    with pytest.warns(RuntimeWarning, match="sit against their bounds"):
+        fisher = problem.fisher()
+    assert np.isnan(fisher.standard_errors()["k"]) and np.isnan(fisher.intervals()["k"]).all()
+    assert np.isnan(fisher.derived(lambda values: values["k"]).standard_error)
+    assert "at bound" in fisher.summary()
 
 
 def test_profile_rejects_what_it_cannot_profile(x64):

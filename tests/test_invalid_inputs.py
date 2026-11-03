@@ -942,6 +942,8 @@ def test_scaler_validation(kwargs, match):
         ([], None, "nonempty"),
         (0.0, (0.0, 1.0), "strictly inside"),
         (2.0, (None, 1.0), "strictly inside"),
+        # 0.1 in float32 rounds onto the bound 0.1, where the latent is infinite.
+        (0.1, (0.1, 0.2), "strictly inside"),
         ([0.1, 0.2], [(0.0, 1.0)] * 3, "Expected 2 bound pairs"),
     ],
 )

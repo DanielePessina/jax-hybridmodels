@@ -558,15 +558,23 @@ is ``[..., S + n]``; the result is ``[..., S]``.
 trajectory_saturation_penalty(state: 'Array', out_scaler: 'Any') -> 'Array'
 ```
 
-Sum over time of output saturation for a predictor whose output *is* the state.
+Mean output saturation over time, for a predictor whose output *is* the state.
 
 For a **parallel** hybrid model, where the predictor is outside the
 solver and its output is a predicted channel, the full state holds the
 physical outputs. Invert them back to latents with the predictor's
-``out_scaler`` and charge [`BoundScaler.saturation`](/api/predictors#boundscalersaturation) at every time
-step, summed over time. This is the trajectory-aware counterpart of
-``bound_penalty`` for the hoisted case: it fires only where the model
-actually predicted, not across a synthetic grid.
+``out_scaler`` and charge [`BoundScaler.saturation`](/api/predictors#boundscalersaturation), averaged over
+every time step and output like ``saturation`` itself, so one weight
+means the same at any number of samples. This is the trajectory-aware
+counterpart of ``bound_penalty`` for the hoisted case: it fires only
+where the model actually predicted, not across a synthetic grid.
+
+It works near the knee, which is where it should catch a predictor
+drifting into saturation. Deep in saturation it cannot: the outputs it
+reads have rounded onto the bound, so the latents rebuilt from them stop
+growing, and the charge caps (about 25 for the sigmoid in float32) with
+a vanishing gradient. Where the latents themselves are at hand, charge
+``out_scaler.saturation`` on them instead, which has neither limit.
 
 ``state`` is ``[..., T, D]`` (or ``[..., T, S]`` projected to the
 predictor's channel); ``out_scaler`` is the ``BoundScaler`` whose

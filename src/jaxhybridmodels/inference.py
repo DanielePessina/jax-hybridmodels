@@ -84,6 +84,7 @@ from jaxhybridmodels.trainable import (
 from jaxhybridmodels.training.kernels import predict_bucket_obs
 
 __all__ = (
+    "DerivedQuantity",
     "FisherResult",
     "InferenceProblem",
     "LaplaceResult",
@@ -287,6 +288,15 @@ class InferenceProblem:
         shape does not depend on the data's mask. ``jax.jacfwd`` applies when the
         model's adjoint supports forward mode.
         """
+        return self._whitened_residuals(position, noise_fixed=False)
+
+    def _whitened_residuals(self, position: Any, *, noise_fixed: bool) -> Array:
+        """``residuals``, with the noise held constant under differentiation if asked.
+
+        ``noise_fixed`` stops the gradient through the variance, so ``J^T J``
+        carries only the mean's information. The noise's own comes from the
+        log-variance term in ``_curvature_residuals``.
+        """
         tree = self._tree(position)
         noise = self._noise_values(tree)
         parts = []
@@ -295,6 +305,8 @@ class InferenceProblem:
                 self._predictions(tree[_PREDICTORS], bp), bp.y_observed, bp.mask
             )
             variance = jnp.where(bp.mask, self._variance(bp, noise), 1.0)
+            if noise_fixed:
+                variance = jax.lax.stop_gradient(variance)
             parts.append(((predicted - observed) / jnp.sqrt(variance)).ravel())
         return jnp.concatenate(parts)
 
@@ -346,8 +358,12 @@ class InferenceProblem:
         A Gaussian's Fisher information has ``0.5 (d log var)^2`` per cell on top of
         the mean's ``J^T J``, which is the Jacobian of ``log var / sqrt(2)``. It is
         what gives inferred noise a curvature, however far its start is from its mode.
+        The mean's residuals hold the noise fixed: through their division by
+        ``sigma`` they would add ``r^2 (d log sigma)^2`` per cell, about one more
+        unit on top of the two the log-variance term gives, and overstate the
+        noise's information by half.
         """
-        parts = [self.residuals(position)]
+        parts = [self._whitened_residuals(position, noise_fixed=True)]
         noise = self._noise_values(self._tree(position))
         if noise:
             parts += [
@@ -584,12 +600,16 @@ class InferenceProblem:
         found = _maximise(
             lambda x, args: objective(x), flat, rtol=rtol, atol=atol, max_steps=max_steps
         )
+        at_optimum = dataclasses.replace(problem, position=unravel(found.position))
+        gradient = np.asarray(found.gradient)
         return OptimizeResult(
-            problem=dataclasses.replace(problem, position=unravel(found.position)),
+            problem=at_optimum,
             target=target,
             value=found.value,
             converged=found.converged,
             steps=found.steps,
+            gradient=dict(zip(at_optimum._coordinates().names, gradient.tolist(), strict=True)),
+            gradient_norm=float(np.max(np.abs(gradient), initial=0.0)),
         )
 
     def fisher(
@@ -615,6 +635,7 @@ class InferenceProblem:
         coordinates = problem._coordinates()
         result = problem._fisher(coordinates, gauss_newton=information == "gauss_newton")
         problem._warn_if_not_at_optimum("fisher", "likelihood", coordinates, result.covariance)
+        _warn_about_pinned("fisher", result.names, result.at_bound)
         return result
 
     def _fisher(self, coordinates: _Coordinates, *, gauss_newton: bool) -> FisherResult:
@@ -647,7 +668,7 @@ class InferenceProblem:
             raise ValueError(f"laplace: hessian must be 'exact' or 'gauss_newton'; got {hessian!r}")
         problem = self._unwhitened()
         problem._require_prior("laplace")
-        coordinates = problem._coordinates()
+        coordinates = problem._coordinates("posterior")
         precision = problem._information(
             caller="laplace",
             gauss_newton=hessian == "gauss_newton",
@@ -663,9 +684,11 @@ class InferenceProblem:
                 "first; if this persists, that direction is not identified and needs a prior."
             )
         problem._warn_if_not_at_optimum("laplace", "posterior", coordinates, covariance)
-        return LaplaceResult(
+        result = LaplaceResult(
             **coordinates.summary_fields(covariance), _to_position=self._position_from(coordinates)
         )
+        _warn_about_pinned("laplace", result.names, result.at_bound)
+        return result
 
     def _position_from(self, coordinates: _Coordinates) -> Callable[[Array], Any]:
         """Map a flat latent vector to a position of this problem, whitened or not.
@@ -782,7 +805,6 @@ class InferenceProblem:
             )
         fisher = problem._fisher(coordinates, gauss_newton=problem._log_likelihood is None)
         problem._warn_if_not_at_optimum(caller, "likelihood", coordinates, fisher.covariance)
-        _warn_if_against_a_bound(caller, coordinates)
         return _Profiler(
             coordinates=coordinates,
             parameters=parameters,
@@ -823,9 +845,13 @@ class InferenceProblem:
         """Warn when a Newton step from here would still raise the objective by much.
 
         ``0.5 g^T C g`` is that rise in log units, so the test does not depend on the
-        values' scale.
+        values' scale. An entry against its bound is left out: the maximum within
+        the bounds is there, and its huge latent variance would turn a tiny residual
+        slope into a large predicted rise that no step inside the box can deliver.
         """
         _, gradient = self._value_and_grad(target, coordinates.unravel)(coordinates.flat)
+        pinned = coordinates.at_bound != ""
+        gradient = jnp.where(pinned, 0.0, gradient)
         rise = 0.5 * float(gradient @ covariance @ gradient)
         if rise > _OPTIMUM_TOLERANCE:
             method = "optimize()" if target == "likelihood" else "optimize(target='posterior')"
@@ -837,8 +863,11 @@ class InferenceProblem:
                 stacklevel=3,
             )
 
-    def _coordinates(self) -> _Coordinates:
+    def _coordinates(self, target: str = "likelihood") -> _Coordinates:
         """The flat latent position with a name, a physical value and a slope per entry.
+
+        ``target`` is the objective whose maximum the position is, which decides
+        whether a value against its bound is held there by it.
 
         Entries follow the flat position, which is the tree order ``physical`` also
         walks. Each physical value depends on its own latent only, so the Jacobian is
@@ -860,12 +889,6 @@ class InferenceProblem:
             )
         to_physical = _PhysicalMap(static=self._static, mask=self._mask, unravel=unravel)
         estimate, slopes = jax.jvp(to_physical, (flat,), (jnp.ones_like(flat),))
-        # Each transform acts on its own entry, so mapping all latents to -inf and
-        # +inf gives every entry's limits: a squash's bounds, or infinity.
-        limits = (
-            to_physical(jnp.full_like(flat, -jnp.inf)),
-            to_physical(jnp.full_like(flat, jnp.inf)),
-        )
         return _Coordinates(
             names=tuple(names),
             is_parameter=tuple(is_parameter),
@@ -873,8 +896,9 @@ class InferenceProblem:
             unravel=unravel,
             estimate=estimate,
             slopes=slopes,
-            limits=limits,
+            limits=to_physical.limits(flat),
             to_physical=to_physical,
+            objective=functools.partial(self._scalar, target, unravel),
         )
 
     def to_model(self, position: Any) -> HybridModel:
@@ -1048,13 +1072,63 @@ class _PhysicalMap:
     unravel: Callable[[Array], Any]
 
     def __call__(self, flat: Array) -> Array:
+        return jnp.concatenate([jnp.ravel(value) for value in self.values(flat).values()])
+
+    def values(self, flat: Array) -> dict[str, Array]:
+        """The free values keyed by dotted path, as ``InferenceProblem.physical`` gives them."""
+        tree = eqx.combine(self.unravel(flat), self.static)
+        return {
+            _dotted(path): leaf.value if _is_parameter(leaf) else leaf
+            for path, leaf in _free_leaves(tree, self.mask)
+        }
+
+    def squash_positions(self, flat: Array) -> Array:
+        """Each entry's place between its bounds, from 0 to 1, as ``BoundScaler.squash_position``.
+
+        A free entry that is not a ``Parameter``, such as a network weight, has no
+        bounds and reads 0.5.
+        """
         tree = eqx.combine(self.unravel(flat), self.static)
         return jnp.concatenate(
             [
-                jnp.ravel(leaf.value if _is_parameter(leaf) else leaf)
+                jnp.ravel(leaf.scaler.squash_position(leaf.latent))
+                if _is_parameter(leaf)
+                else jnp.full(np.size(leaf), 0.5)
                 for _, leaf in _free_leaves(tree, self.mask)
             ]
         )
+
+    def with_position(self, flat: Array, index: int, position: Array) -> Array:
+        """``flat`` with entry ``index`` moved to squash position ``position``."""
+        tree = eqx.combine(self.unravel(flat), self.static)
+        start = 0
+        for _, leaf in _free_leaves(tree, self.mask):
+            size = int(np.size(leaf.value if _is_parameter(leaf) else leaf))
+            if start <= index < start + size:
+                if not _is_parameter(leaf):
+                    raise ValueError("with_position: only a Parameter entry has bounds")
+                element = index - start
+                component = 0 if len(leaf.scaler.bounds) == 1 else element
+                return flat.at[index].set(leaf.scaler.latent_at_position(position, component))
+            start += size
+        raise IndexError(f"with_position: no entry {index}")
+
+    def limits(self, flat: Array) -> tuple[np.ndarray, np.ndarray]:
+        """Every entry's lower and upper bound in physical units, infinite when it has none.
+
+        Read from each ``Parameter``'s scaler rather than by mapping infinite
+        latents through the transform, which gives ``nan`` for squashes such as
+        ``"algebraic"`` that reach their ends only in the limit.
+        """
+        tree = eqx.combine(self.unravel(flat), self.static)
+        lows, highs = [], []
+        for _, leaf in _free_leaves(tree, self.mask):
+            size = int(np.size(leaf.value if _is_parameter(leaf) else leaf))
+            pairs = np.array(leaf.scaler.bounds if _is_parameter(leaf) else [(-np.inf, np.inf)])
+            pairs = np.broadcast_to(pairs, (size, 2))
+            lows.append(pairs[:, 0])
+            highs.append(pairs[:, 1])
+        return np.concatenate(lows), np.concatenate(highs)
 
 
 @dataclass(frozen=True)
@@ -1067,8 +1141,70 @@ class _Coordinates:
     unravel: Callable[[Array], Any]
     estimate: Array
     slopes: Array
-    limits: tuple[Array, Array]
+    limits: tuple[np.ndarray, np.ndarray]
     to_physical: _PhysicalMap
+    objective: Callable[..., Callable[[Array], Array]] | None = None
+
+    def sides(self, flat: Array) -> np.ndarray:
+        """Which bound each entry of a latent is pinned at: ``"lower"``, ``"upper"`` or ``""``.
+
+        Pinned means the bound holds the value back: the data would move it
+        past the bound. Closeness alone does not say that. A value of 0.9 in a
+        box from 0 to 1e6 sits a millionth of the way along it, and is still a
+        free interior optimum. So each entry in its squash's tail is tested on
+        the squash's own ``[0, 1]`` scale, which is linear in the warped value:
+        with the others held, a Newton step on the objective, free of the
+        bound, would carry it past the edge. That needs no physical scale and
+        no tolerance on the gradient, which vanishes in the tail either way.
+        """
+        positions = np.asarray(self.to_physical.squash_positions(flat))
+        sides = np.full(positions.shape, "", dtype="<U5")
+        tail = np.flatnonzero((positions < _TAIL) | (positions > 1.0 - _TAIL))
+        if tail.size == 0 or self.objective is None:
+            return sides
+        for index in tail.tolist():
+            lower = bool(positions[index] < 0.5)
+            if _edge_side(float(positions[index])):
+                # On the edge to rounding: nothing interior is that close, and
+                # the derivatives there are not finite.
+                sides[index] = "lower" if lower else "upper"
+                continue
+            slope, curvature = self._position_derivatives(flat, index, positions[index])
+            outward = slope < 0.0 if lower else slope > 0.0
+            gap = positions[index] if lower else 1.0 - positions[index]
+            step = math.inf if curvature >= 0.0 else abs(slope / curvature)
+            if outward and step > gap:
+                sides[index] = "lower" if lower else "upper"
+        return sides
+
+    def _position_derivatives(
+        self, flat: Array, index: int, position: float
+    ) -> tuple[float, float]:
+        """First and second derivative of the objective in one entry's squash position.
+
+        A function of one variable, so forward over forward is cheapest, and it
+        falls back to reverse mode for a model without forward mode.
+        """
+        assert self.objective is not None
+
+        def along(at: Array, objective: Callable[[Array], Array]) -> Array:
+            return objective(self.to_physical.with_position(flat, index, at))
+
+        at = jnp.asarray(position, dtype=flat.dtype)
+        try:
+            objective = self.objective(forward=True)
+            first = jax.jacfwd(lambda x: along(x, objective))
+            values = (first(at), jax.jacfwd(first)(at))
+        except (TypeError, ValueError, NotImplementedError):
+            objective = self.objective(forward=False)
+            first = jax.grad(lambda x: along(x, objective))
+            values = (first(at), jax.grad(first)(at))
+        return float(values[0]), float(values[1])
+
+    @functools.cached_property
+    def at_bound(self) -> np.ndarray:
+        """``sides`` at the estimate."""
+        return self.sides(self.flat)
 
     def summary_fields(self, covariance: Array) -> dict[str, Any]:
         """The fields every Gaussian result shares, around a latent ``covariance``."""
@@ -1078,6 +1214,8 @@ class _Coordinates:
             "latent": self.flat,
             "covariance": covariance,
             "slopes": self.slopes,
+            "at_bound": self.at_bound != "",
+            "limits": self.limits,
             "_to_physical": self.to_physical,
         }
 
@@ -1087,6 +1225,7 @@ class _Maximum(NamedTuple):
     value: float
     converged: bool
     steps: int
+    gradient: Array
 
 
 def _maximise(
@@ -1100,8 +1239,9 @@ def _maximise(
 ) -> _Maximum:
     """Minimise ``objective`` (minus a log density) with BFGS, and report the maximum.
 
-    The value comes from the solver's state at the returned point, so it costs no
-    extra solve.
+    The value and the gradient come from the solver's state at the returned point,
+    so they cost no extra solve. Both are of the maximised log density, so the
+    signs are flipped from the minimised objective's.
     """
     solution = optx.minimise(
         objective,
@@ -1116,6 +1256,7 @@ def _maximise(
         value=-float(solution.state.f_info.f),
         converged=bool(solution.result == optx.RESULTS.successful),
         steps=int(solution.stats["num_steps"]),
+        gradient=-solution.state.f_info.grad,
     )
 
 
@@ -1163,6 +1304,16 @@ class OptimizeResult:
         Whether BFGS met its tolerances within ``max_steps``.
     steps : int
         BFGS steps taken.
+    gradient : dict[str, float]
+        The gradient of the log-likelihood or log-posterior at the optimum, per
+        entry as ``physical`` names it, taken in the latent coordinates the search
+        runs in. Near zero at a maximum. An entry that stays large points at the
+        value BFGS could not settle, for instance one against its bound.
+    gradient_norm : float
+        The largest entry of ``gradient`` in size, a one-number convergence check.
+        How small is small depends on the curvature: ``fisher`` and ``laplace``
+        apply the scale-free test, and warn when a Newton step from here would
+        still raise the log density by more than 0.1.
     """
 
     problem: InferenceProblem
@@ -1170,6 +1321,8 @@ class OptimizeResult:
     value: float
     converged: bool
     steps: int
+    gradient: dict[str, float]
+    gradient_norm: float
 
 
 @dataclass(frozen=True)
@@ -1179,7 +1332,9 @@ class _GaussianSummary:
     ``names`` labels every scalar entry, as ``physical`` names it, with ``[i]`` for
     an element of an array. ``estimate`` holds the physical values at the centre,
     ``latent`` the latent ones, and ``covariance`` the latent covariance, all in
-    ``names`` order. ``slopes`` is ``d value / d latent`` per entry.
+    ``names`` order. ``slopes`` is ``d value / d latent`` per entry. ``at_bound``
+    flags the entries whose estimate sits against a bound of their ``Parameter``,
+    and ``limits`` holds every entry's lower and upper bounds, infinite without.
     """
 
     names: tuple[str, ...]
@@ -1187,6 +1342,8 @@ class _GaussianSummary:
     latent: Array
     covariance: Array
     slopes: Array
+    at_bound: np.ndarray = dataclasses.field(kw_only=True)
+    limits: tuple[np.ndarray, np.ndarray] = dataclasses.field(kw_only=True, repr=False)
     _to_physical: _PhysicalMap = dataclasses.field(repr=False)
     _to_position: Callable[[Array], Any] = dataclasses.field(repr=False, kw_only=True)
 
@@ -1223,6 +1380,10 @@ class _GaussianSummary:
         """Entries with unbounded variance. None here; ``FisherResult`` finds some."""
         return jnp.zeros(len(self.names), dtype=bool)
 
+    def _loose_directions(self) -> Array:
+        """``[P, K]`` latent directions with unbounded variance. None here."""
+        return jnp.zeros((len(self.names), 0))
+
     def _spread(self, covariance: Array) -> Array:
         spread = jnp.sqrt(jnp.clip(jnp.diagonal(covariance), 0.0))
         return jnp.where(self._unbounded(), jnp.inf, spread)
@@ -1231,10 +1392,15 @@ class _GaussianSummary:
         """The standard error of each entry: physical by the delta method, or latent.
 
         An entry that loads on a direction the data does not constrain has an
-        infinite standard error.
+        infinite standard error. An entry against its bound has ``nan`` as its
+        physical one: the curvature there describes the squash's flat tail, not
+        how far the data let the value move, so no number would be honest.
         """
-        spread = self._spread(self.covariance if latent else self.physical_covariance())
-        return dict(zip(self.names, np.asarray(spread).tolist(), strict=True))
+        if latent:
+            spread = np.asarray(self._spread(self.covariance))
+        else:
+            spread = np.where(self.at_bound, np.nan, self._spread(self.physical_covariance()))
+        return dict(zip(self.names, spread.tolist(), strict=True))
 
     def physical_covariance(self) -> Array:
         """The ``[P, P]`` covariance in physical units, by the delta method, in ``names`` order.
@@ -1261,21 +1427,76 @@ class _GaussianSummary:
         Built in latent space and mapped through each value's transform, so it is
         asymmetric on a log warp and stays inside a ``Parameter``'s bounds. An
         unconstrained entry's interval reaches its bounds, or infinity without one.
+        An entry against its bound gets ``(nan, nan)``, as in ``standard_errors``;
+        a profile tells whether the data bound it away from there.
         """
         if not 0.0 < confidence < 1.0:
             raise ValueError(f"intervals: confidence must be in (0, 1); got {confidence}")
         z = float(stats.norm.ppf(0.5 + confidence / 2))
-        # An unbounded entry's reach is infinite, so its interval runs to the limits
-        # of its transform: the bounds of a squash, or plus and minus infinity.
-        reach = z * self._spread(self.covariance)
+        unbounded = np.asarray(self._unbounded())
+        # An unbounded entry's interval runs to its bounds, or plus and minus
+        # infinity. Its reach is set to 0 here and replaced below, since an
+        # infinite latent gives nan through some squashes.
+        reach = jnp.where(unbounded, 0.0, z * self._spread(self.covariance))
         # Each value depends on its own latent only, so both ends map in one call each.
         ends = np.asarray(
             jnp.stack(
                 [self._to_physical(self.latent - reach), self._to_physical(self.latent + reach)]
             )
         )
-        low, high = ends.min(axis=0), ends.max(axis=0)
+        low = np.where(unbounded, self.limits[0], ends.min(axis=0))
+        high = np.where(unbounded, self.limits[1], ends.max(axis=0))
+        low = np.where(self.at_bound, np.nan, low)
+        high = np.where(self.at_bound, np.nan, high)
         return {name: (float(low[i]), float(high[i])) for i, name in enumerate(self.names)}
+
+    def derived(self, fn: Callable[[dict[str, Array]], Any]) -> DerivedQuantity:
+        """The estimate and standard error of a function of the values, by the delta method.
+
+        ``fn`` takes the free values as ``physical`` gives them, a dict keyed by
+        dotted path, and returns a scalar or an array, such as a shelf life from a
+        rate constant or a prediction at a new condition. Its gradient comes from
+        ``jax.jacobian``, so ``fn`` must be written in ``jax.numpy``. The standard
+        error is ``sqrt(g^T C g)`` with ``C`` the physical covariance, and so is
+        exact for a function linear in the values over their spread. For a
+        strongly curved ``fn``, push draws from ``sample`` through it instead.
+
+        A result that moves along a direction the data do not constrain has an
+        infinite standard error. One the data fix is finite even when the values
+        it combines are not, such as the product of two rates when the data see
+        only the product. One that depends on an entry against its bound is
+        ``nan``.
+        """
+        flat = jnp.asarray(self.estimate)
+        template = self._to_physical.values(self.latent)
+        sizes = [int(np.size(value)) for value in template.values()]
+
+        def from_flat(values: Array) -> Array:
+            parts = jnp.split(values, np.cumsum(sizes)[:-1])
+            tree = {
+                key: part.reshape(np.shape(old))
+                for (key, old), part in zip(template.items(), parts, strict=True)
+            }
+            return jnp.asarray(fn(tree))
+
+        estimate = from_flat(flat)
+        gradient = jax.jacobian(from_flat)(flat).reshape(-1, flat.size)
+        variance = jnp.einsum("op,pq,oq->o", gradient, self.physical_covariance(), gradient)
+        uses = np.asarray(gradient != 0.0)
+        spread = np.sqrt(np.clip(np.asarray(variance), 0.0, None))
+        # A function of values the data cannot separate can still be fixed by
+        # them, such as the product of two rates when only the product is seen.
+        # Its spread is unbounded only if its latent gradient has a component
+        # along a direction the data leave free; the pseudo-inverse gives the rest.
+        latent_gradient = np.asarray(gradient * self.slopes[None, :])
+        loose = np.asarray(self._loose_directions())
+        along = np.abs(latent_gradient @ loose).max(axis=1, initial=0.0)
+        size = np.linalg.norm(latent_gradient, axis=1)
+        spread = np.where(along > 1e-6 * np.maximum(size, np.finfo(float).tiny), np.inf, spread)
+        spread = np.where((uses & self.at_bound).any(axis=1), np.nan, spread)
+        return DerivedQuantity(
+            estimate=np.asarray(estimate), standard_error=spread.reshape(np.shape(estimate))
+        )
 
     def _table(self, title: str, confidence: float = 0.95) -> list[str]:
         errors = self.standard_errors()
@@ -1288,10 +1509,12 @@ class _GaussianSummary:
         ]
         for i, name in enumerate(self.names):
             low, high = bounds[name]
-            lines.append(
-                f"  {name:{width}}  {float(self.estimate[i]):11.4g}  {errors[name]:11.4g}  "
-                f"[{low:.4g}, {high:.4g}]"
+            spread, reach = (
+                (f"{'at bound':>11}", "not reported")
+                if self.at_bound[i]
+                else (f"{errors[name]:11.4g}", f"[{low:.4g}, {high:.4g}]")
             )
+            lines.append(f"  {name:{width}}  {float(self.estimate[i]):11.4g}  {spread}  {reach}")
         correlation = np.asarray(self.correlation())
         pairs = sorted(
             (
@@ -1341,6 +1564,10 @@ class FisherResult(_GaussianSummary):
         loose = np.asarray(self.eigenvalues < threshold * self.eigenvalues[-1])
         return [_loadings(self.eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)]
 
+    def _loose_directions(self) -> Array:
+        loose = np.asarray(self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1])
+        return self.eigenvectors[:, loose]
+
     def _unbounded(self) -> Array:
         # Any loading on an unconstrained direction makes that entry's variance
         # unbounded, not only the loadings large enough to list. 1e-3 is well above
@@ -1369,33 +1596,34 @@ class LaplaceResult(_GaussianSummary):
         return "\n".join(self._table("Laplace approximation", confidence))
 
 
-def _warn_if_against_a_bound(caller: str, coordinates: _Coordinates) -> None:
-    """Warn when a free value sits against its bound, where a profile can mislead.
+# Squash positions within this of 0 or 1 are in the tail, where a value may be
+# pinned and ``_Coordinates.sides`` tests whether it is.
+_TAIL = 1e-3
+# Within this of 0 or 1 a profiled value has reached its bound for every
+# purpose: a millionth of a millionth of the way along its warped box.
+_AT_EDGE = 1e-12
 
-    Its latent is then far out in the squash's tail, where its gradient
-    vanishes, so re-optimising at each profile point cannot move it off the
-    bound. A profile of any other value that the data trade off against it
-    then closes where the data do not close it.
-    """
-    low, high = (np.asarray(limit) for limit in coordinates.limits)
-    value = np.asarray(coordinates.estimate)
-    span = high - low
-    boxed = np.isfinite(span)
-    near = boxed & (np.minimum(value - low, high - value) <= 1e-6 * np.where(boxed, span, 1.0))
-    pressed = [
-        f"{name} ({float(v):.4g})"
-        for name, v, flag in zip(coordinates.names, value, near, strict=True)
-        if flag
-    ]
-    # With one free value there is nothing else for a pressed one to distort.
-    if pressed and len(coordinates.names) > 1:
+
+def _edge_side(position: float) -> str:
+    """``"lower"`` or ``"upper"`` when a squash position is at that edge, else ``""``."""
+    if position <= _AT_EDGE:
+        return "lower"
+    if position >= 1.0 - _AT_EDGE:
+        return "upper"
+    return ""
+
+
+def _warn_about_pinned(caller: str, names: Sequence[str], at_bound: np.ndarray) -> None:
+    """Warn that the Gaussian results leave out entries against their bound."""
+    pinned = [name for name, flag in zip(names, at_bound.tolist(), strict=True) if flag]
+    if pinned:
         warnings.warn(
-            f"{caller}: {', '.join(pressed)} sits against its bound, where re-optimising "
-            "cannot move it. A profile of any other value can then close where the data "
-            "do not close it. Widen the bound, or reparametrise so the data fix what you "
-            "profile, before trusting these intervals.",
+            f"{caller}: {pinned} sit against their bounds, so their standard errors and "
+            "Wald intervals are nan: the curvature there says nothing about how far the "
+            "data let them move. Profile them to see whether the data bound them, and "
+            "widen a bound that is not physical.",
             RuntimeWarning,
-            stacklevel=4,
+            stacklevel=3,
         )
 
 
@@ -1423,30 +1651,28 @@ class _Profiler:
         spread = self.spreads[name]
         first_step = 0.2 * spread if math.isfinite(spread) and spread > 0 else 0.1
         low, high = (float(limit[index]) for limit in coordinates.limits)
+        positions = coordinates.to_physical.squash_positions
         if math.isfinite(low) and math.isfinite(high):
             # A latent unit already crosses much of a box. A value pressed against
             # its bound sits far out in the squash's tail, where its latent spread
             # is huge and meaningless, and a step sized from it would jump clean
             # across the box.
             first_step = min(first_step, 1.0)
-        # A warp need only be monotone, so find which way the physical value moves
-        # when the latent rises. Each entry's transform is its own, so moving one
-        # latent entry moves only its own physical value.
-        rising = float(coordinates.to_physical(coordinates.flat.at[index].set(1.0))[index]) > float(
-            coordinates.to_physical(coordinates.flat.at[index].set(-1.0))[index]
+        # Find which way the squash position moves when the latent rises: up for
+        # two bounds or a lower one, down for an upper one alone.
+        rising = float(positions(coordinates.flat.at[index].set(1.0))[index]) > float(
+            positions(coordinates.flat.at[index].set(-1.0))[index]
         )
 
-        def at_bound(value: float, direction: float) -> bool:
+        def reached_bound(x: Array, direction: float) -> bool:
             """Has the walk in ``direction`` reached the bound it is heading for?
 
-            Only that bound counts. An estimate at its upper bound must still walk
-            down, since the data may bound it from below.
+            Only that bound counts. An estimate pinned at its upper bound must
+            still walk down, since the data may bound it from below. Read on the
+            squash's scale, so a one-sided bound counts too.
             """
-            if not (math.isfinite(low) and math.isfinite(high)):
-                return False
-            if (direction > 0) == rising:
-                return high - value <= 1e-6 * (high - low)
-            return value - low <= 1e-6 * (high - low)
+            side = _edge_side(float(positions(x)[index]))
+            return side == ("upper" if (direction > 0) == rising else "lower")
 
         def solve_at(x: Array, fixed: Array) -> _Maximum:
             found = _maximise(
@@ -1505,7 +1731,19 @@ class _Profiler:
             """The points on one side, and why the walk stopped there."""
             points: list[tuple[Array, float, bool]] = []
             x, step, ratio = coordinates.flat, first_step, 0.0
-            for _ in range(self.max_points // 2):
+            pinned = str(coordinates.at_bound[index])
+            heading = "upper" if (direction > 0) == rising else "lower"
+            # A value pinned at its bound can sit so deep in the squash's tail,
+            # under a squash with a polynomial tail, that steps of a latent unit
+            # would never get it out. Leaving the bound, the first step jumps to
+            # the tail's edge; if that passes the threshold, ``narrow`` bisects
+            # back to the crossing.
+            leaving = bool(pinned) and pinned != heading
+            if leaving:
+                edge = _TAIL if pinned == "lower" else 1.0 - _TAIL
+                inside = coordinates.to_physical.with_position(x, index, jnp.asarray(edge))
+                step = max(abs(float(inside[index] - x[index])), first_step)
+            for point in range(self.max_points // 2):
                 # A long step can land where the model cannot be solved from the
                 # previous point's other values; shorter ones may not.
                 for _attempt in range(6):
@@ -1528,10 +1766,12 @@ class _Profiler:
                     points += narrow(x, ratio, new, new_ratio)
                     return points, "threshold"
                 points.append((new, new_ratio, found.converged))
-                if at_bound(float(coordinates.to_physical(new)[index]), direction):
+                if reached_bound(new, direction):
                     return points, "bound"
                 # Aim each step at a tenth of the threshold, never more than doubling.
                 rise = max(new_ratio - ratio, 1e-12)
+                if leaving and point == 0:
+                    step = first_step
                 step *= float(np.clip(0.1 * self.threshold / rise, 0.5, 2.0))
                 x, ratio = new, new_ratio
             return points, "max_points"
@@ -1555,6 +1795,24 @@ class _Profiler:
         (below, stopped_below), (above, stopped_above) = walk(-1.0), walk(1.0)
         points = [*reversed(below), (coordinates.flat, 0.0, True), *above]
         physical = np.asarray(jax.vmap(coordinates.to_physical)(jnp.stack([p[0] for p in points])))
+        converged = np.array([p[2] for p in points])
+        # Another value pinned at any converged point could not move further to
+        # compensate, so the drop there may be steeper than with the bound widened.
+        sides = np.stack([coordinates.sides(p[0]) for p in points if p[2]])
+        at_bound = {
+            other: str(next(side for side in sides[:, i] if side))
+            for i, other in enumerate(coordinates.names)
+            if i != index and sides[:, i].any()
+        }
+        if at_bound:
+            pinned = ", ".join(f"{other} ({side})" for other, side in at_bound.items())
+            warnings.warn(
+                f"profile {name!r}: {pinned} reached its bound along the profile, where "
+                "re-optimising cannot move it further. The interval holds for these bounds; "
+                "if one is not physical, widen it, since the profile may then close later.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
         return ProfileResult(
             name=name,
             confidence=self.confidence,
@@ -1564,9 +1822,10 @@ class _Profiler:
             others={
                 other: physical[:, i] for i, other in enumerate(coordinates.names) if i != index
             },
-            converged=np.array([p[2] for p in points]),
+            converged=converged,
             interval=(end(below, stopped_below), end(above, stopped_above)),
             stopped=(stopped_below, stopped_above),
+            at_bound=at_bound,
         )
 
 
@@ -1603,6 +1862,11 @@ class ProfileResult:
         do not bound it), ``"max_points"`` (still inside; raise ``max_points``),
         ``"solve_failed"`` (the model stopped solving) and ``"not_converged"``
         (BFGS did not converge where the ratio crossed).
+    at_bound : dict[str, str]
+        Other values that sat against a bound, ``"lower"`` or ``"upper"``, at some
+        converged point. Re-optimising could not move them further, so the profile
+        may drop faster than it would with that bound widened, and the interval
+        holds for the bounds as set. Empty when nothing was pinned.
     """
 
     name: str
@@ -1614,6 +1878,7 @@ class ProfileResult:
     converged: np.ndarray
     interval: tuple[float | None, float | None]
     stopped: tuple[str, str]
+    at_bound: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @property
     def identifiable(self) -> bool:
@@ -1635,8 +1900,46 @@ class ProfileResult:
         unconverged = int((~self.converged).sum())
         if unconverged:
             notes.append(f"{unconverged} points did not converge")
+        notes += [f"{other} pinned at its {side} bound" for other, side in self.at_bound.items()]
         note = "".join(f"; {text}" for text in notes)
         return f"{self.name}: {int(self.confidence * 100)}% profile interval {shown}{note}"
+
+
+@dataclass(frozen=True)
+class DerivedQuantity:
+    """A function of the values with its delta-method standard error, from ``derived``.
+
+    Attributes
+    ----------
+    estimate : ndarray
+        The function at the estimate, in the shape ``fn`` returns.
+    standard_error : ndarray
+        Its standard error, same shape. ``inf`` where it depends on a value the
+        data do not constrain, ``nan`` where it depends on one against its bound.
+    """
+
+    estimate: np.ndarray
+    standard_error: np.ndarray
+
+    def interval(
+        self, confidence: float = 0.95, *, side: Literal["both", "lower", "upper"] = "both"
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """A Wald interval, ``estimate`` plus or minus ``z`` standard errors.
+
+        ``side="lower"`` gives a one-sided bound, ``(estimate - z se, inf)`` with
+        ``z`` the ``confidence`` quantile, as a shelf-life claim needs;
+        ``"upper"`` the mirror image.
+        """
+        if not 0.0 < confidence < 1.0:
+            raise ValueError(f"interval: confidence must be in (0, 1); got {confidence}")
+        if side not in ("both", "lower", "upper"):
+            raise ValueError(f"interval: side must be 'both', 'lower' or 'upper'; got {side!r}")
+        tail = (1 - confidence) / 2 if side == "both" else 1 - confidence
+        reach = float(stats.norm.ppf(1 - tail)) * self.standard_error
+        infinite = np.full(np.shape(self.estimate), np.inf)
+        low = -infinite if side == "upper" else self.estimate - reach
+        high = infinite if side == "lower" else self.estimate + reach
+        return np.asarray(low), np.asarray(high)
 
 
 _STOP_REASONS = {

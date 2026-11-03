@@ -337,6 +337,23 @@ def _validate_optimizer_transitions(config: OptaxTrainingConfig) -> None:
                 "Optimiser state is specific to the optimiser that built it, so switching "
                 "without a reset would keep running the previous one."
             )
+        # A raw transformation's learning rate is baked in, and the state it
+        # carries into this phase has nowhere to write a new one. Refused here,
+        # before any training, rather than when the phase starts.
+        keeps_state = not phase.reset_optimizer and phase.segments == before.segments
+        if (
+            keeps_state
+            and not callable(phase.lr)
+            and phase.lr != before.lr
+            and isinstance(phase.optimizer, optax.GradientTransformation)
+            and not _optimiser_state_supports_lr(phase.optimizer.init(jnp.zeros(())))
+        ):
+            raise ValueError(
+                f"OptaxTrainingConfig: phase {idx} changes lr with a raw "
+                "optax.GradientTransformation, whose learning rate cannot be changed. "
+                "Set reset_optimizer=True on that phase to rebuild it, or pass an "
+                "optimiser name or factory so the learning rate stays injectable."
+            )
 
 
 def _validate_tournament(config: OptaxTrainingConfig) -> None:
@@ -432,10 +449,11 @@ def _scheduled_lrs(phase: TrainingPhase) -> Array | None:
     schedule = cast(optax.Schedule, phase.lr)
     try:
         return jax.vmap(schedule)(jnp.arange(phase.steps))
-    except (jax.errors.ConcretizationTypeError, jax.errors.TracerIntegerConversionError):
-        # A plain Python schedule (``lambda s: 0.1 if s < 2 else 0.01``)
-        # branches on the step, which a traced index cannot do. Evaluate it
-        # on the host instead, once per step.
+    except TypeError:
+        # A plain Python schedule cannot take a traced step: one that branches
+        # on it (``lambda s: 0.1 if s < 2 else 0.01``), calls NumPy on it or
+        # indexes a dict with it. JAX's tracer errors are all TypeErrors.
+        # Evaluate it on the host instead, once per step.
         return jnp.stack([jnp.asarray(schedule(i)) for i in range(phase.steps)])
 
 
@@ -716,18 +734,14 @@ def _shared_tournament(
     return _Tournament(scored[:top_k], tuple(scores))
 
 
-def _warn_if_lr_fixed(opt_state: Any, lr: float) -> None:
-    """Set the tournament's rate, or warn that a raw optimiser keeps its own."""
+def _set_tournament_lr(opt_state: Any, lr: float) -> None:
+    """Set the tournament's rate where the optimiser can take it.
+
+    A raw optimiser keeps its own baked-in rate. ``_tournament_settings`` warns
+    about that once, and only when ``tournament_lr`` was set.
+    """
     if _optimiser_state_supports_lr(opt_state):
         _set_lr(opt_state, lr)
-    else:
-        warnings.warn(
-            "tournament_lr has no effect: the optimiser state carries no "
-            "injectable hyperparams. Wrap the optimiser in "
-            "optax.inject_hyperparams to make tournament_lr apply.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
 
 
 def _single_attempt(
@@ -745,7 +759,7 @@ def _single_attempt(
 ) -> tuple[Any, Array]:
     """Train one tournament attempt by single shooting, and score it."""
     opt_state = optimizer.init(eqx.filter(candidate, trainable))
-    _warn_if_lr_fixed(opt_state, lr)
+    _set_tournament_lr(opt_state, lr)
     for _ in range(steps):
         _loss, acc_grads, n_buckets = _training_step(
             candidate, dataset, bucket_step, horizon, trainable
@@ -791,7 +805,7 @@ def _segmented_attempt(
     """Train one tournament attempt with segments, and score it on data plus gaps."""
     nodes = initial_nodes(candidate, dataset, segmented.kernels.segments, segmented.simulate)
     opt_state = optimizer.init((eqx.filter(candidate, trainable), nodes.z))
-    _warn_if_lr_fixed(opt_state, lr)
+    _set_tournament_lr(opt_state, lr)
     for _ in range(steps):
         _, _, acc_grads, node_grads, n_buckets = _shooting_training_step(
             candidate, nodes, dataset, segmented.kernels, horizon, segmented.weight
@@ -830,6 +844,19 @@ def _tournament_settings(config: OptaxTrainingConfig) -> tuple[float, Array]:
     is exactly the state every attempt is in.
     """
     first = config.phases[0]
+    if (
+        config.tournament_lr is not None
+        and config.tournament_attempts > 1
+        and isinstance(first.optimizer, optax.GradientTransformation)
+        and not _optimiser_state_supports_lr(first.optimizer.init(jnp.zeros(())))
+    ):
+        warnings.warn(
+            "tournament_lr has no effect: a raw optax.GradientTransformation keeps "
+            "its own learning rate. Wrap it in optax.inject_hyperparams, or pass an "
+            "optimiser name or factory, to make tournament_lr apply.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
     lr = _start_lr(first.lr) if config.tournament_lr is None else config.tournament_lr
     return lr, jnp.asarray(first.horizon)
 

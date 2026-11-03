@@ -99,6 +99,9 @@ def _tournament_line(scores: Sequence[float], *, kept: int | None = None) -> str
         which = "attempt" if kept == 1 else "attempts"
         named = ", ".join(str(i + 1) for i in order[:kept])
         line = f"tournament: kept {which} {named} of {len(scores)}"
+    if not finite:
+        # The trainer falls back to the starting predictors then.
+        return f"tournament: all {len(scores)} attempts failed, kept the starting values"
     line += f", best score {scores[order[0]]:.4g}, worst {max(finite):.4g}"
     failed = len(scores) - len(finite)
     return line + (f", {failed} failed" if failed else "")
@@ -167,13 +170,25 @@ def _parameter_lines(predictors: Any) -> list[str]:
 
 
 def _parameter_rows(path: str, parameter: Parameter) -> list[tuple[str, str, str, str]]:
-    """One row per element, flagging an element in the range the bound penalty charges."""
+    """One row per element, flagging an element past its squash's knee.
+
+    A boxed element is flagged past the knee on either side. A one-sided one
+    is flagged when its latent is below ``-knee`` times its temperature,
+    within about 5% of the temperature of its edge: a note to look, not a
+    charge, since a one-sided element is log-like there and still trains.
+    """
     scaler = parameter.scaler
     latent = jnp.ravel(parameter.latent)
     values = jnp.ravel(scaler.from_latent(parameter.latent))
     # The middle of the latent range decides the side, whatever the warp or squash.
     midpoints = jnp.ravel(scaler.from_latent(jnp.zeros_like(parameter.latent)))
-    pinned = scaler._saturation_terms(latent) > 0.0
+    temperature = jnp.broadcast_to(scaler.temperature, latent.shape)
+    one_sided = jnp.array([math.isfinite(lo) != math.isfinite(hi) for lo, hi in scaler.bounds])
+    pinned = jnp.where(
+        one_sided,
+        -latent / temperature > scaler.z_knee,
+        scaler._saturation_terms(latent) > 0.0,
+    )
     rows = []
     for i, (low, high) in enumerate(scaler.bounds):
         note = ""

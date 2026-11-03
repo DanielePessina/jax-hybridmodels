@@ -48,7 +48,7 @@ standard-normal sample, which skews any considered init scheme.
 Do not subclass to add bound handling or named inputs.
 ``BoundedPredictor`` supplies both by composition.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L71)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L72)</small>
 
 ---
 
@@ -156,7 +156,7 @@ slow convergence.
 | `logit_eps` | `float` | Static. Half-width of the band at each end of ``[0, 1]`` outside which ``to_latent`` continues linearly instead of running into the squash inverse's pole. Also sets the continuation slope (roughly ``1 / logit_eps``). |
 | `z_knee` | `float` | Static. The knee. Defaults to the transform's own value, which for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the box. Do not share one number across transforms: 2.944 is 12.5% from the bound on softsign, which would charge 2.7x too hard. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L189)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L190)</small>
 
 <a id="boundscalerfrom_latent"></a>
 
@@ -172,7 +172,7 @@ Squash ``z / temperature`` into ``(0, 1)``, affine rescale onto the
 warped box, then unwarp. The result is finite and inside the box for
 any finite ``z``, so this direction needs no guard.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L551)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L610)</small>
 
 <a id="boundscalerinput_violation"></a>
 
@@ -193,7 +193,21 @@ pass finite and differentiable near the box, this term supplies a
 restoring force that keeps working far outside it. Pure, so the
 caller decides whether and where to pay for it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L486)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L542)</small>
+
+<a id="boundscalerlatent_at_position"></a>
+
+#### `BoundScaler.latent_at_position()`
+
+```python
+latent_at_position(self, position: 'Array', i: 'int') -> 'Array'
+```
+
+The latent of component ``i`` whose `squash_position` is ``position``.
+
+Its exact inverse. An unbounded component has no such map.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L483)</small>
 
 <a id="boundscalersaturation"></a>
 
@@ -218,7 +232,12 @@ Reading ``|z| / T`` gives a gradient linear in the overshoot.
 Reduced with ``mean``, not ``sum``, so one weight means the same for
 a one-output and a six-output predictor.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L517)</small>
+Only a component with two finite bounds is charged. One with a single
+bound is ``edge + softplus(z / T)``, which near its edge behaves like
+``edge + exp(z / T)``: a log parametrisation whose relative slope stays
+1, so a small value there is not stuck and costs nothing.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L573)</small>
 
 <a id="boundscalerscale_inputs"></a>
 
@@ -233,7 +252,26 @@ Normalise network inputs: finite intervals map to latent, open ones pass through
 A one-sided input bound says where the input may go, not what scale
 it has, so the network sees such an input unchanged.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L560)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L619)</small>
+
+<a id="boundscalersquash_position"></a>
+
+#### `BoundScaler.squash_position()`
+
+```python
+squash_position(self, latent: 'Array') -> 'Array'
+```
+
+Where each latent sits between its bounds, on the squash's ``[0, 1]`` scale.
+
+0 is the lower bound and 1 the upper. A value with two finite bounds
+reads off its squash. One with one finite bound uses the softplus slope,
+which is 0 at that bound and 1 far from it, so the bound end is 0 for a
+lower bound and 1 for an upper one. An unbounded value is 0.5. Near 0 or
+1 the value's gradient vanishes, whatever its physical scale or warp:
+that is what "pinned" means for inference.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L455)</small>
 
 <a id="boundscalerto_latent"></a>
 
@@ -267,7 +305,7 @@ sees no kink.
 The continuation reports direction, not magnitude. Pair it with
 `input_violation` when an input can leave its box.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L442)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L498)</small>
 
 ---
 
@@ -358,7 +396,7 @@ predictor always describes its own input contract.
 | `inner` | `Predictor` | Trainable Array -> Array module operating in latent space. |
 | `out_scaler` | `BoundScaler` | Maps the inner network's latent output back to physical units. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L662)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L736)</small>
 
 <a id="boundedpredictorinitialized_with_key"></a>
 
@@ -381,7 +419,7 @@ own init scheme rather than leaf-level normal sampling. The scalers
 hold bound geometry, not learned state, so a restart has no reason
 to touch them.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L860)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L934)</small>
 
 ---
 
@@ -422,7 +460,7 @@ without clipping.
     rate = Parameter(0.1, bounds=(0.0, None))
     rate.value  # Array(0.1)
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L580)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L639)</small>
 
 <a id="parameterinitialized_with_key"></a>
 
@@ -441,7 +479,15 @@ softplus distance from one endpoint, so a standard-normal draw
 would replace a rate of 5000 with something near 1 and lose the
 starting value the user chose. The scaler is left untouched.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L640)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L714)</small>
+
+<a id="parametervalue"></a>
+
+#### `Parameter.value`
+
+Current value in physical units, with the shape given at construction.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L709)</small>
 
 ---
 
@@ -468,7 +514,7 @@ leave constants unchanged.
     damping = Constant(0.0)
     damping.value  # Array(0.)
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L142)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L143)</small>
 
 <a id="constantinitialized_with_key"></a>
 
@@ -480,7 +526,7 @@ initialized_with_key(self, key: 'Array') -> 'Constant'
 
 Keep fixed values unchanged when restarting a model.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L167)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L168)</small>
 
 ---
 
@@ -725,7 +771,7 @@ replaced with a standard-normal sample of matching shape and dtype.
 For a *pytree* of predictors, the convention at the ``simulate_fn``
 boundary, use [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L881)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L955)</small>
 
 ---
 
@@ -752,6 +798,10 @@ subkeys would be path-stable at the cost of a hash per leaf.
 
 Accepts any pytree shape ``jax.tree_util`` can walk, including a bare
 ``eqx.Module``. Returns a structurally identical pytree with fresh
-weights on every ``eqx.Module`` leaf.
+weights on every unit it finds. A unit is a ``Predictor``, a module with
+its own ``initialized_with_key``, or a module holding neither, such as an
+``eqx.nn.MLP``. A plain container module of predictors is walked into,
+as a dict is, so a ``Parameter`` inside it keeps its own rule: only
+boxed entries are redrawn.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L908)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L982)</small>

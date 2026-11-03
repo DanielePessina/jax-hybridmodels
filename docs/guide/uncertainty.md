@@ -189,7 +189,9 @@ move that posterior beyond Monte Carlo error.
 
 `log_prior=None` gives a problem with only the likelihood, for frequentist work.
 `optimize` finds its maximum with Optimistix's BFGS. A training fit is close to it
-but not at it, because the trainers average the loss over buckets.
+but not at it, because the trainers average the loss over buckets. The result's
+`converged` says whether BFGS met its tolerances, and `gradient` gives the
+remaining slope per value, with `gradient_norm` its largest entry.
 `fisher()` then gives the information at that point.
 
 The example fits first-order decay at seven temperatures, with the rate written two
@@ -273,6 +275,46 @@ for a frequentist band on any function of the parameters, such as a prediction a
 new conditions. The [shelf life](/examples/shelf-life) example uses it for a potency
 band at a temperature the study never ran. It refuses when a direction is not
 identified, since that spread is unbounded.
+
+### Derived quantities and one-sided bounds
+
+`derived(fn)` gives the estimate and delta-method standard error of any function
+of the values. `fn` takes the dict that `physical` returns and must use
+`jax.numpy`, since its gradient comes from `jax.jacobian`. A shelf life from a rate:
+
+```python
+life = fisher.derived(lambda values: jnp.log(1 / 0.9) / jnp.exp(values["log_k25"]))
+low, _ = life.interval(0.95, side="lower")  # one-sided 95% lower bound
+```
+
+It assumes the quantity is close to Gaussian. For a bound that does not, profile
+a parameter that is the quantity itself, or that the quantity depends on
+monotonically. A two-sided interval at `confidence=0.90` has a one-sided 95% bound
+at each end. To make a quantity at new conditions a parameter, rewrite the model
+around those conditions, as the [shelf life](/examples/shelf-life#at-another-storage-temperature)
+example does for a storage temperature.
+
+### Values at a bound
+
+A value is pinned when the data would push it past a bound of its `Parameter`, so
+the bound, not the data, holds it there. Its latent is then far out in the
+squash's flat tail, and the curvature there says nothing about how far the data
+would let the value move. Being close to a bound is not enough: a value near the
+end of a wide or log-warped box that the data put there is reported as usual. `fisher` and `laplace` therefore report `nan` for
+its standard error and Wald interval, mark the row "at bound", and warn. A
+`derived` quantity that depends on it is `nan` too. Profile the value to see
+whether the data bound it from the other side.
+
+A profile of another value re-optimises the pinned one at each point, but cannot
+move it past its bound. If the data trade the two off, the profile then drops
+faster than it would with the bound widened, and closes sooner. The interval is
+right for the bounds as set. `profile.at_bound` names every value that was pinned
+along the walk, the summary lists them, and a warning says so. If such a bound is
+a numerical guard rather than physics, widen it and profile again.
+
+BFGS and the solves inside it can print `Algebraic simplifier is likely stuck` to
+stderr while they compile. This is harmless; see
+[troubleshooting](/guide/troubleshooting#algebraic-simplifier-is-likely-stuck-in-stderr).
 
 ## Worked example
 

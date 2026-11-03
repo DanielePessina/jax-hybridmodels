@@ -52,6 +52,14 @@ penalty.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L42)</small>
 
+<a id="objectivebound_penalty_fn"></a>
+
+#### `Objective.bound_penalty_fn`
+
+``penalty_fn`` when set, else [`bound_penalty`](/api/penalties#bound_penalty).
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L141)</small>
+
 <a id="objectiveextra_penalty_points"></a>
 
 #### `Objective.extra_penalty_points()`
@@ -140,6 +148,14 @@ stores ``phases``::
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L209)</small>
 
+<a id="optaxtrainingconfigtotal_steps"></a>
+
+#### `OptaxTrainingConfig.total_steps`
+
+Step budget summed over every phase.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L313)</small>
+
 ---
 
 <a id="trainingphase"></a>
@@ -227,7 +243,7 @@ A solver error or a non-finite loss after the first step ends the run: it
 warns and returns the best parameters so far, with ``stop_reason``
 ``"diverged"``. On the first step there is nothing to return, so it raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1138)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1165)</small>
 
 ---
 

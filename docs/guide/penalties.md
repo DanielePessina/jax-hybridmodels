@@ -24,7 +24,9 @@ without warning. Check its `.value` after training if that matters.
 ## The bound penalty
 
 The bound penalty is the mean output saturation of each `BoundedPredictor`
-leaf over a set of input points. It needs no simulation. It is added once
+leaf over a set of input points. Only outputs with two finite bounds are
+charged: one with a single bound is log-like near its edge, so a small
+value there is not stuck. It needs no simulation. It is added once
 per training step to the bucket-averaged data gradient, so a given
 `penalty_weight` means the same thing at any dataset size or point count.
 
@@ -122,7 +124,10 @@ you wire it depends on where the predictor sits.
   wired together.
 - **Parallel** predictors produce an output channel directly, so no state
   change is needed: `trajectory_saturation_penalty(state, out_scaler)`
-  charges saturation of that channel over time.
+  charges the mean saturation of that channel over time. It rebuilds the
+  latents from the outputs, so it acts near the knee and caps once the
+  outputs have rounded onto a bound. Charge `out_scaler.saturation` on the
+  latents themselves if your model returns them.
 
 `trajectory_penalty_fn` receives the full state `[N, T, S]` and the
 `BucketPayload`, and is added to the data loss in the same forward pass.

@@ -372,9 +372,6 @@ Dataset(
     bucket_payloads: 'tuple[BucketPayload, ...]',
     output_channel_names: 'tuple[str, ...]',
     covariate_names: 'tuple[str, ...]',
-    _experiments: 'tuple[Experiment, ...]' = (),
-    _locations: 'tuple[tuple[int, int], ...]' = (),
-    _max_buckets: 'int | None' = None,
 ) -> None
 ```
 
@@ -397,6 +394,17 @@ prediction and training take it as a separate argument.
 | `_max_buckets` | `int | None` | The limit given to ``make_dataset``, kept so that a split or a resample applies it again to its own experiments. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L234)</small>
+
+<a id="datasetexperiments"></a>
+
+#### `Dataset.experiments`
+
+The source experiments in the order given to ``make_dataset``.
+
+Every ``exp_id`` is nonempty and unique. Empty for a dataset built
+by hand from raw payloads.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L271)</small>
 
 ---
 
