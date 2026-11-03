@@ -203,7 +203,9 @@
   shared time grid, so a short horizon after `t0` could score nothing.
 - The Fisher condition number and the not-identified test read the
   information scaled to a unit diagonal, so a change of bound or warp no
-  longer moves them.
+  longer moves them. A value the data barely see on its own, whose latent
+  standard error passes 1e3 times its latent's size, is also listed as not
+  identified, with an infinite standard error.
 - A multiple-shooting phase uses the number of segments asked for, up to
   `T - 1`, with lengths that differ by at most one step.
 - `annealing_schedule("exponential", ...)` needs `end_value > 0`. With 0 it
@@ -436,7 +438,8 @@ Migration for code written against the earlier API:
 - `InferenceProblem.conditional_on` names a fixed `Parameter` as `physical`
   does, without `.latent`.
 - `KANPredictor` weights follow the x64 flag, and `grid_range` sets the
-  interval its spline grid covers.
+  interval its spline grid covers. It defaults to (-3, 3), which covers the
+  inner 90% of a bounded input; jaxkan's (-1, 1) covered the middle 46%.
 - Fisher and Laplace flagged a value with one finite bound as "at bound" when
   it sat far from that bound, and a profile of a value with only an upper
   bound returned its ends in reverse.

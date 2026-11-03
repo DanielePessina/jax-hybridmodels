@@ -69,7 +69,7 @@ def _build_kan(
     grid_size: int,
     basis: str,
     seed: int,
-    grid_range: tuple[float, float] = (-1.0, 1.0),
+    grid_range: tuple[float, float] = (-3.0, 3.0),
 ) -> Any:
     """Construct a ``jaxkan.models.KAN`` from the static architecture fields.
 
@@ -93,7 +93,7 @@ def _scaffold_parts(
     grid_size: int,
     basis: str,
     seed: int,
-    grid_range: tuple[float, float] = (-1.0, 1.0),
+    grid_range: tuple[float, float] = (-3.0, 3.0),
 ) -> tuple[Any, tuple[Any, ...]]:
     """Cached ``(graphdef, rest_states)`` for one KAN architecture.
 
@@ -145,9 +145,9 @@ class KANPredictor(Predictor):
         The basis sums to 1 inside it and fades to 0 a few grid cells
         outside, leaving only the silu residual. Inside a
         ``BoundedPredictor`` a boxed input arrives as a logit, which reaches
-        about +-2.9 for the inner 90% of the box, so the default ``(-1, 1)``
-        covers only the middle 46% of it: widen it to ``(-3, 3)`` to give
-        the edges of the box a spline too. Static.
+        about +-2.9 for the inner 90% of the box. The default ``(-3, 3)``
+        covers that, where jaxkan's own ``(-1, 1)`` would cover only the
+        middle 46%. Static.
     seed : int
         Integer seed used to build the underlying jaxkan model and to
         recreate its rng-state on demand inside ``__call__``. Derived from
@@ -179,7 +179,7 @@ class KANPredictor(Predictor):
         hidden_widths: tuple[int, ...] = (8,),
         grid_size: int = 5,
         basis: str = "spline",
-        grid_range: tuple[float, float] = (-1.0, 1.0),
+        grid_range: tuple[float, float] = (-3.0, 3.0),
         key: Array,
     ) -> None:
         """Build the KAN, split off its Param state, and pin the rest as static config.

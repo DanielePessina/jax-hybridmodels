@@ -111,6 +111,12 @@ _OPTIMUM_TOLERANCE = 0.1
 # the data does not constrain. Double precision resolves about 1e-16 of the largest, so
 # this leaves room for solver noise.
 _UNIDENTIFIED = 1e-8
+# The scale-free test above sees only directions the data cannot separate. A value
+# the data barely see, with tiny information and no correlation to anything, passes
+# it, so a latent standard error beyond this many times the latent's own size, or
+# beyond this many latent units, marks it unidentified too. The squash and the warps
+# keep latents of order 1 to 10, so such an interval spans the whole range.
+_WEAK = 1e3
 
 
 def flat_prior(predictors: Any, noise: Mapping[str, Array]) -> Array:
@@ -1602,26 +1608,45 @@ class FisherResult(_GaussianSummary):
     def unidentified(self, *, threshold: float = _UNIDENTIFIED) -> list[dict[str, float]]:
         """The directions the data does not constrain, as ``{name: loading}`` per direction.
 
-        A direction counts when its eigenvalue is below ``threshold`` times the
-        largest. Loadings below 0.1 in size are left out, so each dict names the
-        values that trade off along it, such as two rates whose product is all the
-        data sees.
+        A direction counts when its eigenvalue, in the correlation form of the
+        information, is below ``threshold`` times the largest. Loadings below 0.1
+        in size are left out, so each dict names the values that trade off along
+        it, such as two rates whose product is all the data sees. A value the data
+        barely see on its own, whose latent standard error passes 1e3 times its
+        latent's size (and 1e3 latent units), is listed alone as ``{name: 1.0}``.
         """
         loose = np.asarray(self.eigenvalues < threshold * self.eigenvalues[-1])
-        return [_loadings(self.eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)]
+        directions = [_loadings(self.eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)]
+        listed = {name for direction in directions for name in direction}
+        weak = np.asarray(self._weak())
+        directions += [
+            {name: 1.0}
+            for name, flag in zip(self.names, weak, strict=True)
+            if flag and name not in listed
+        ]
+        return directions
+
+    def _weak(self) -> Array:
+        """Entries whose latent standard error spans far more than any latent range."""
+        spread = jnp.sqrt(jnp.clip(jnp.diagonal(self.covariance), 0.0))
+        return spread > _WEAK * jnp.maximum(1.0, jnp.abs(self.latent))
 
     def _loose_directions(self) -> Array:
-        # Back from the scaled coordinates to latent directions, unit length.
+        # Back from the scaled coordinates to latent directions, unit length, and
+        # one axis per weakly seen entry.
         loose = np.asarray(self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1])
         directions = _unit_scale(self.information)[:, None] * self.eigenvectors[:, loose]
-        return directions / jnp.linalg.norm(directions, axis=0, keepdims=True)
+        directions = directions / jnp.linalg.norm(directions, axis=0, keepdims=True)
+        axes = jnp.eye(len(self.names), dtype=directions.dtype)[:, np.asarray(self._weak())]
+        return jnp.concatenate([directions, axes], axis=1)
 
     def _unbounded(self) -> Array:
         # Any loading on an unconstrained direction makes that entry's variance
         # unbounded, not only the loadings large enough to list. 1e-3 is well above
         # the rounding in the eigenvectors of a near-null direction.
         loose = self.eigenvalues < _UNIDENTIFIED * self.eigenvalues[-1]
-        return jnp.any(loose[None, :] & (jnp.abs(self.eigenvectors) >= 1e-3), axis=1)
+        collinear = jnp.any(loose[None, :] & (jnp.abs(self.eigenvectors) >= 1e-3), axis=1)
+        return collinear | self._weak()
 
     def summary(self, *, confidence: float = 0.95) -> str:
         """Estimates, standard errors, Wald intervals, correlations and identifiability."""

@@ -912,6 +912,32 @@ def test_the_condition_number_ignores_how_a_value_is_bounded(x64):
     assert numbers[0] == pytest.approx(numbers[1], rel=1e-4)
 
 
+def test_a_value_the_data_barely_see_is_not_identified(x64):
+    """No correlation, so the scale-free test passes it; its huge spread does not."""
+
+    def faint_field(t: Any, y: Any, predictors: Any, covariates: Any) -> Any:
+        # b's effect grows with t, so it is not a multiple of k's: its own
+        # information is tiny but nothing is collinear.
+        return (predictors["k"].value + 1e-9 * predictors["b"].value * t) * jnp.ones_like(y)
+
+    experiments, *_ = measurements()
+    model = hm.HybridModel.from_vector_field(
+        vector_field=faint_field,
+        predictors={"k": hm.Parameter(0.7), "b": hm.Parameter(0.5)},
+        state_to_output=identity,
+        output_channel_names=("y",),
+        solver=SOLVER,
+    )
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    fisher = problem.fisher()
+    errors = fisher.standard_errors()
+    assert np.isfinite(errors["k"]) and errors["b"] == np.inf
+    assert {"b": 1.0} in fisher.unidentified()
+    assert "Not identified: b" in fisher.summary()
+    assert np.isinf(float(fisher.derived(lambda v: v["b"]).standard_error))
+    assert np.isfinite(float(fisher.derived(lambda v: v["k"]).standard_error))
+
+
 def test_a_tiny_measurement_variance_is_not_floored(x64):
     """Data in small units keep their likelihood: every curvature agrees."""
     rate, sigma = 1e-4, 1e-7
