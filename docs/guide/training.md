@@ -248,7 +248,9 @@ the segments back into one trajectory:
   the two depends on the data's scale.
 - **The schedule must end with `segments=1`.** The nodes are dropped when
   the run ends, and the returned model has been fitted as the single solve
-  that `predict` runs. `restore_best` picks from that last phase.
+  that `predict` runs. `restore_best` picks from that last phase. With
+  `validation=`, it picks by the validation score instead, which is always
+  single shooting at the full horizon, so it can pick from any phase.
 - **A change in `segments` resets the optimiser**, because the nodes change
   shape. Expect a short spike in the loss there.
 - **`history.continuity`** records the gap term per step, and the summary's

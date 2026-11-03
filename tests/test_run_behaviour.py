@@ -315,8 +315,8 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     """A raw ``GradientTransformation`` cannot take a new learning rate.
 
     After ``reset_optimizer`` it starts fresh and is fine. Reusing the same
-    raw object across a learning-rate change passes the config check (the
-    specs are equal) and must be refused when the phase begins.
+    raw object across a learning-rate change is refused when the config is
+    built, before any phase has trained.
     """
     raw = optax.adam(1e-2)
     result = parameter_model().fit(
@@ -332,11 +332,13 @@ def test_raw_optimizer_after_a_reset_and_refused_lr_change(decay_data):
     )
     assert len(result.history.loss) == 6 and rate_of(result.model) != 0.3
 
-    refused = hm.OptaxTrainingConfig(
-        phases=(TrainingPhase(2, lr=1e-3, optimizer=raw), TrainingPhase(2, lr=1e-2, optimizer=raw))
-    )
-    with pytest.raises(ValueError, match="cannot be re-hyperparametrised"):
-        parameter_model().fit(decay_data, refused, key=jr.key(0), verbose=False)
+    with pytest.raises(ValueError, match="learning rate cannot be changed"):
+        hm.OptaxTrainingConfig(
+            phases=(
+                TrainingPhase(2, lr=1e-3, optimizer=raw),
+                TrainingPhase(2, lr=1e-2, optimizer=raw),
+            )
+        )
 
 
 def test_tournament_falls_back_when_every_attempt_fails(decay_data):
@@ -349,6 +351,23 @@ def test_tournament_falls_back_when_every_attempt_fails(decay_data):
                 key=jr.key(0),
                 verbose=False,
             )
+
+
+def test_a_run_whose_every_attempt_fails_still_summarises(decay_data):
+    """Only the starting rate solves, so every redrawn attempt fails and the run
+    falls back to the start, trains at zero rate and must still summarise."""
+
+    def only_the_start(predictors: Any, ts: Array, covariates: Any, y0: Array, solver: Any):
+        ys = simulate_parameter(predictors, ts, covariates, y0, solver)
+        return jnp.where(jnp.abs(predictors["rate"].value - 0.3) < 1e-4, ys, jnp.nan)
+
+    model = make_model(
+        {"rate": hm.Parameter(0.3, bounds=(0.0, 1.0)), "offset": hm.Constant(0.0)}, only_the_start
+    )
+    config = hm.OptaxTrainingConfig(steps=3, lr=0.0, tournament_attempts=3, tournament_steps=1)
+    with pytest.warns(RuntimeWarning, match="all attempts failed"):
+        result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
+    assert "all 3 attempts failed" in result.summary()
 
 
 def test_tournament_survives_equinox_runtime_failures(decay_data):
@@ -882,6 +901,20 @@ def test_lr_schedule_counts_from_the_phase_start(decay_data):
     assert len(set(history[:9])) == 1
     assert history[9] != history[8]
     assert rate_of(result.model) != 0.3
+
+    # The same schedule in NumPy cannot take a traced step, so it runs on the host.
+    def host(step: Any) -> float:
+        return float(np.where(step < 3, 0.0, 0.1))
+
+    again = parameter_model().fit(
+        decay_data,
+        hm.OptaxTrainingConfig(
+            phases=(TrainingPhase(5, lr=0.0), TrainingPhase(6, lr=host)), restore_best=False
+        ),
+        key=jr.key(0),
+        verbose=False,
+    )
+    assert again.history.loss == pytest.approx(history)
 
 
 def test_channel_selection_composes_with_a_plain_custom_loss(quadratic_data):

@@ -50,6 +50,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import numpy as np
 from jax.typing import ArrayLike
 from jaxtyping import Array
 
@@ -397,7 +398,9 @@ class BoundScaler(eqx.Module):
             warp = WARPS[self.warp]
             squash = BOUND_TRANSFORMS[self.transform]
             if not inverse:
-                return warp.inverse(wl + (wh - wl) * squash.forward(v / temperature))
+                # A nonlinear warp's inverse can round one ulp past a bound.
+                inside = warp.inverse(wl + (wh - wl) * squash.forward(v / temperature))
+                return inside if self.warp == "linear" else jnp.clip(inside, low, high)
             normalized = (warp.forward(v) - wl) / (wh - wl)
             if not guard:
                 return squash.inverse(normalized) * temperature
@@ -421,6 +424,11 @@ class BoundScaler(eqx.Module):
         slope = 1.0 / (-jnp.expm1(-self.logit_eps))
         return (latent + jnp.minimum(distance - self.logit_eps, 0.0) * slope) * temperature
 
+    @property
+    def _uniform(self) -> bool:
+        """Do all components share one bound pair and one temperature?"""
+        return len(set(self.bounds)) == 1 and self.temperature.ndim == 0
+
     def _map(self, x: Array, *, inverse: bool, guard: bool = True) -> Array:
         """Apply :meth:`_component` along the last axis; a scalar broadcasts.
 
@@ -430,6 +438,11 @@ class BoundScaler(eqx.Module):
         """
         x = jnp.asarray(x)
         if len(self.bounds) == 1:
+            return self._component(x, 0, inverse=inverse, guard=guard)
+        if self._uniform:
+            # One trace for the whole array, not one per element, which made an
+            # array Parameter's compile time grow with its size.
+            x = jnp.broadcast_to(jnp.atleast_1d(x), (*jnp.shape(x)[:-1], len(self.bounds)))
             return self._component(x, 0, inverse=inverse, guard=guard)
         x = jnp.atleast_1d(x)
         x = jnp.broadcast_to(x, (*x.shape[:-1], len(self.bounds)))
@@ -461,7 +474,7 @@ class BoundScaler(eqx.Module):
             return slope if math.isfinite(low) else 1.0 - slope
 
         latent = jnp.asarray(latent)
-        if len(self.bounds) == 1:
+        if len(self.bounds) == 1 or self._uniform:
             return component(latent, 0)
         latent = jnp.atleast_1d(latent)
         latent = jnp.broadcast_to(latent, (*latent.shape[:-1], len(self.bounds)))
@@ -572,6 +585,11 @@ class BoundScaler(eqx.Module):
 
         Reduced with ``mean``, not ``sum``, so one weight means the same for
         a one-output and a six-output predictor.
+
+        Only a component with two finite bounds is charged. One with a single
+        bound is ``edge + softplus(z / T)``, which near its edge behaves like
+        ``edge + exp(z / T)``: a log parametrisation whose relative slope stays
+        1, so a small value there is not stuck and costs nothing.
         """
         terms = self._saturation_terms(z)
         return jnp.mean(terms) if terms.size else jnp.asarray(0.0)
@@ -585,8 +603,6 @@ class BoundScaler(eqx.Module):
             u = z[..., i] / temperature
             if math.isfinite(low) and math.isfinite(high):
                 terms.append(jnp.maximum(jnp.abs(u) - self.z_knee, 0.0) ** 2)
-            elif math.isfinite(low) or math.isfinite(high):
-                terms.append(jnp.maximum(-u - self.z_knee, 0.0) ** 2)
             else:
                 terms.append(jnp.zeros_like(u))
         return jnp.stack(terms, axis=-1) if terms else jnp.zeros((*z.shape[:-1], 0))
@@ -666,12 +682,27 @@ class Parameter(eqx.Module):
             raise ValueError("Parameter value must be nonempty and finite")
         flat = physical.reshape(-1)
         scaler = BoundScaler(_bound_pairs(bounds, flat.size), transform=transform, warp=warp)
-        for (low, high), v in zip(scaler.bounds, flat.tolist(), strict=True):
-            if not low < v < high:
-                raise ValueError(f"Parameter value {v} must lie strictly inside ({low}, {high})")
+        # Compared in the value's own dtype, where the arithmetic runs: a float64
+        # bound of 0.1 rounds onto the float32 value 0.1, which is on the bound.
+        dtype = np.dtype(flat.dtype)
+        for (low, high), v in zip(scaler.bounds, np.asarray(flat).tolist(), strict=True):
+            if not dtype.type(low) < dtype.type(v) < dtype.type(high):
+                raise ValueError(
+                    f"Parameter value {dtype.type(v)} must lie strictly inside "
+                    f"({low}, {high}) in {dtype}"
+                )
         # The exact inverse, not to_latent's guarded one, so a value close to
         # an endpoint still round-trips through .value.
-        self.latent = scaler._map(flat, inverse=True, guard=False)
+        latent = scaler._map(flat, inverse=True, guard=False)
+        if not bool(
+            jnp.all(jnp.isfinite(latent) & jnp.isfinite(scaler._map(latent, inverse=False)))
+        ):
+            raise ValueError(
+                f"Parameter value {np.asarray(flat).tolist()} is too close to its bounds "
+                f"{list(scaler.bounds)} for {dtype}: its latent is not finite. Move it "
+                "inside, or enable x64."
+            )
+        self.latent = latent
         self.scaler = scaler
         self.shape = tuple(physical.shape)
 
@@ -962,11 +993,23 @@ def reinitialize_pytree_with_key(predictors: Any, key: Array) -> Any:
 
     Accepts any pytree shape ``jax.tree_util`` can walk, including a bare
     ``eqx.Module``. Returns a structurally identical pytree with fresh
-    weights on every ``eqx.Module`` leaf.
+    weights on every unit it finds. A unit is a ``Predictor``, a module with
+    its own ``initialized_with_key``, or a module holding neither, such as an
+    ``eqx.nn.MLP``. A plain container module of predictors is walked into,
+    as a dict is, so a ``Parameter`` inside it keeps its own rule: only
+    boxed entries are redrawn.
     """
 
+    def _has_own_rule(node: Any) -> bool:
+        return isinstance(node, Predictor) or hasattr(node, "initialized_with_key")
+
     def _is_module(node: Any) -> bool:
-        return isinstance(node, eqx.Module)
+        if not isinstance(node, eqx.Module):
+            return False
+        if _has_own_rule(node):
+            return True
+        inside = jtu.tree_leaves(node, is_leaf=lambda n: n is not node and _has_own_rule(n))
+        return not any(_has_own_rule(leaf) for leaf in inside)
 
     module_leaves = [
         leaf for leaf in jtu.tree_leaves(predictors, is_leaf=_is_module) if _is_module(leaf)

@@ -93,6 +93,12 @@ def load_predictors(path: str | Path, *, like: Any) -> Any:
     every ``MLPPredictor`` leaf. The file's values overwrite its array
     leaves; its static fields supply the structure ``equinox`` needs.
     ``like`` is not mutated.
+
+    Nothing checks the static fields against the saved ones, since the file
+    holds only array leaves. A ``Parameter`` in ``like`` with different
+    bounds reads the saved latent under its own bounds and gets a different
+    value. :func:`load` records the static configuration and refuses such a
+    template.
     """
     path = Path(path)
     return eqx.tree_deserialise_leaves(path, like)

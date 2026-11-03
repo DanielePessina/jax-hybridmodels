@@ -327,6 +327,10 @@ def test_saturation_gradient_survives_where_the_physical_gradient_underflows():
     assert float(jax.grad(lambda v: scaler.saturation(v))(z)[0]) > 0.0
     assert float(jax.grad(lambda v: scaler.from_latent(v)[0])(z)[0]) == 0.0
     assert float(scaler.saturation(jnp.array([0.0, 1.0, -2.0]))) == 0.0
+    # A one-sided output near its edge is log-like, not stuck, so a small rate
+    # costs nothing however close to zero the data put it.
+    one_sided = hm.BoundScaler(((0.0, None),))
+    assert float(one_sided.saturation(one_sided.to_latent(jnp.array([1e-5])))) == 0.0
 
 
 def test_input_violation_is_a_width_normalised_hinge():
@@ -1468,6 +1472,18 @@ def test_pytree_restart_keeps_scalers_and_constants():
     boxed, one_sided, unbounded = fresh["rates"].value.tolist()
     assert boxed != pytest.approx(5000.0) and 1.0 < boxed < 1e5
     assert (one_sided, unbounded) == pytest.approx((5000.0, 5000.0))
+
+    # A plain module holding predictors is walked into like the dict, so the
+    # Parameter keeps its own rule rather than getting N(0, 1) on every leaf.
+    class Holder(eqx.Module):
+        rates: hm.Parameter
+        net: BoundedPredictor
+
+    held = reinitialize_pytree_with_key(
+        Holder(rates=predictors["rates"], net=bounded(jr.key(3))), jr.key(2)
+    )
+    assert held.rates.value[1:].tolist() == pytest.approx([5000.0, 5000.0])
+    assert float(held.net.out_scaler.temperature) == 1.0
     a, b = fresh["twins"]
     # Identical siblings get independent subkeys.
     assert not jnp.allclose(a.inner.mlp.layers[0].weight, b.inner.mlp.layers[0].weight)

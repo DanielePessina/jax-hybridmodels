@@ -370,6 +370,26 @@ Migration for code written against the earlier API:
   scrambling the order of the whole list.
 - `evaluate_predictor` given an array, not a mapping, raised an unrelated
   `AttributeError`. It now raises a `TypeError` naming the predictor's inputs.
+- Tournament restarts and `fit_ensemble` overwrote every leaf with N(0, 1)
+  when the predictors sat in a user's `eqx.Module` container instead of a
+  dict, so a `Parameter` lost its value and a scaler its temperature. A
+  plain container is now walked into like a dict.
+- The bound penalty charged an output with one finite bound whenever it came
+  within about 0.05 of that bound, pushing small rates up whatever the data
+  said. Only outputs with two finite bounds are charged now: near its edge, a
+  one-sided output is log-like and does not saturate.
+- `Parameter` accepted a value that rounds onto its bound in its own dtype,
+  such as float32 0.1 against a bound of 0.1, leaving an infinite latent. It
+  now compares in the value's dtype and refuses a non-finite latent.
+- An array `Parameter` with one shared bound compiled in time linear in its
+  size (17 s at 1000 entries); it is now one elementwise transform.
+- A log-warped value could round one ulp past its bound; it is clipped.
+- A learning-rate schedule written with NumPy, or as a dict lookup, failed at
+  the phase start; it is evaluated on the host like other plain Python ones.
+- An lr change on a raw `optax.GradientTransformation` without a reset is
+  refused when the config is built, not after the earlier phases trained.
+- `summary()` raised when every tournament attempt failed. A raw optimiser
+  no longer warns about `tournament_lr` when it was not set.
 - The API reference lists the methods and properties a class inherits from a
   private base, such as `FisherResult.standard_errors`, and leaves private
   fields out of signatures.
