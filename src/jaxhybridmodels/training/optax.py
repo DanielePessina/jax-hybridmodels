@@ -2,7 +2,8 @@
 
 One training **step** is one full pass over every bucket: per-bucket
 gradients from ``bucket_step`` (jitted, one trace per bucket shape),
-accumulated and averaged, then a single ``optimizer.update``. A bucket is
+each weighted by its pooling share and summed, then a single
+``optimizer.update``. A bucket is
 not a step, and there is no minibatching.
 
 What is minimised (loss, channel weights, penalties) is an
@@ -38,6 +39,7 @@ from dataclasses import KW_ONLY, InitVar, dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -135,9 +137,11 @@ class TrainingPhase:
     horizon : float
         Fraction of each experiment's timeline the loss looks at, in
         ``(0, 1]``. It masks the **loss**, never the integration: the
-        solver still runs the full trajectory, and only the first
-        ``horizon`` of the observation times is scored, which stops a
-        long-horizon divergence from drowning the gradient. Being a
+        solver still runs the full trajectory, and only measurements in
+        the first ``horizon`` of each experiment's own span (from ``t0`` or
+        its first measurement to its last measurement) are scored, which
+        stops a long-horizon divergence from drowning the gradient. Each
+        experiment's first measurement is always scored. Being a
         runtime mask rather than a shape change, a phase boundary costs no
         recompile.
     reset_optimizer : bool
@@ -153,8 +157,8 @@ class TrainingPhase:
         counted in samples, each started from a trainable state (a node).
         ``1``, the default, is single shooting. The last phase of a schedule
         must be single shooting, and a change in ``segments`` resets the
-        optimiser, because the nodes change shape. A bucket with too few
-        samples uses fewer segments. See
+        optimiser, because the nodes change shape. A bucket with fewer than
+        ``segments + 1`` samples uses fewer segments. See
         :mod:`jaxhybridmodels.training.shooting`.
     continuity_weight : float
         Weight of the gap term, ``mean((gap / scale)^2)`` over every join and
@@ -260,10 +264,13 @@ class OptaxTrainingConfig:
         acts. ``0`` disables early stopping.
     restore_best : bool
         Return the predictors from the lowest tracked-loss step instead of
-        the last one. The running minimum resets whenever the horizon
-        changes, since tracked losses over different horizons are not
-        comparable and the shortest horizon would otherwise always own the
-        minimum.
+        the last one. Without validation, the running minimum resets
+        whenever the horizon, the segment count or (in a segmented phase)
+        ``continuity_weight`` changes, since the tracked losses either side
+        are not comparable. With ``validation=``, the minimum runs across
+        all phases on the validation score, which is always single shooting
+        at the full horizon, so the returned step can be in an earlier
+        horizon or a segmented phase.
     """
 
     # Single-phase shorthand. Init-only: after construction the schedule
@@ -733,9 +740,13 @@ def _shared_tournament(
             continue
 
     if not scored:
+        fallback = (
+            "falling back to initial predictors"
+            if keep_start
+            else "this ensemble member is left out"
+        )
         warnings.warn(
-            "tournament: all attempts failed; falling back to initial predictors. "
-            f"Last failure: {last_error!r}",
+            f"tournament: all attempts failed; {fallback}. Last failure: {last_error!r}",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -1054,8 +1065,11 @@ def _begin_phase(
         optimizer = _build_optimizer(phase.optimizer, _start_lr(phase.lr))
         opt_state = optimizer.init(eqx.filter(predictors, trainable))
         # A ready-made instance built with inject_hyperparams starts at its own
-        # rate; write this phase's into it, as the segmented reset does.
-        if _optimiser_state_supports_lr(opt_state):
+        # rate. Write this phase's in only when the phase changed lr, as the
+        # path without a reset does, so an lr left at its default never
+        # overrides the rate the instance was built with.
+        changed = phase.lr != config.phases[phase_idx - 1].lr
+        if changed and _optimiser_state_supports_lr(opt_state):
             _set_lr(opt_state, _start_lr(phase.lr))
         return optimizer, opt_state
     if callable(phase.lr):
@@ -1213,9 +1227,12 @@ def train_with_optax(
     different things.
 
     The returned model comes from the lowest-loss step when
-    ``config.restore_best=True``, else the final step. That minimum resets
-    whenever the phase horizon changes, so the returned model always comes
-    from the last horizon trained on.
+    ``config.restore_best=True``, else the final step. Without validation
+    that minimum resets whenever the phase horizon or segment count changes,
+    so the returned model comes from the last horizon trained on. With
+    ``validation=`` it runs across all phases on the validation score,
+    single shooting at the full horizon, so the returned step can be in an
+    earlier horizon or a segmented phase.
 
     A solver error or a non-finite loss after the first step ends the run: it
     warns and returns the best parameters so far, with ``stop_reason``
@@ -1284,6 +1301,7 @@ def _fit_result(model: HybridModel, run: _PhaseRun) -> FitResult:
         # Measured at the returned parameters, which a restored best step
         # already is.
         measured_loss=None if run.best_step is not None else run.final_loss,
+        measured_validation=run.final_selection,
     )
 
 
@@ -1688,9 +1706,21 @@ def _measure_returned(
             float(kernels.score_bucket(predictors, bp, horizon_, share))
             for bp, share in zip(dataset.bucket_payloads, shares, strict=True)
         )
-        selection = None if select_score is None else select_score(predictors)
-    except (*FIT_FAILURES, FloatingPointError):
-        return math.nan, None
+    except FIT_FAILURES:
+        loss = math.nan
+    selection = None
+    if select_score is not None:
+        try:
+            selection = select_score(predictors)
+        except (*FIT_FAILURES, FloatingPointError):
+            selection = math.nan
+    if not math.isfinite(loss):
+        warnings.warn(
+            "the parameters after the last update do not give a finite training loss; "
+            "final_loss is NaN. restore_best=True returns the best measured step instead",
+            RuntimeWarning,
+            stacklevel=3,
+        )
     return loss, selection
 
 
@@ -1747,6 +1777,15 @@ def _build_training_kernels(
     ensembles fire ``on_run_start`` before every member, of which this is
     the first.
     """
+    if isinstance(solver.adjoint, diffrax.ForwardMode):
+        # Optax steps take reverse-mode gradients, which diffrax's forward
+        # mode refuses with an error about while loops that never names it.
+        raise ValueError(
+            "train_with_optax: SolverConfig(adjoint=ForwardMode()) supports forward-mode "
+            "derivatives only, and training takes reverse-mode gradients. Use Direct, "
+            "RecursiveCheckpoint or Backsolve for fitting; ForwardMode suits "
+            'make_problem(gradient="forward").'
+        )
     bucket_payloads = dataset.bucket_payloads
     objective, loss_fn = resolved.objective, resolved.loss_fn
     sources, extras = resolved.sources, resolved.extras

@@ -79,7 +79,8 @@ class HybridModel(eqx.Module):
     other fields are static. Equinox tools work on it directly, for example
     ``eqx.tree_at(lambda m: m.predictors["rate"], model, new_rate)`` to swap
     one predictor, or ``eqx.filter_vmap`` over a function that builds models
-    from different keys.
+    from different keys. Fitting returns a new model; the original is
+    unchanged.
 
     Parameters
     ----------
@@ -97,8 +98,6 @@ class HybridModel(eqx.Module):
         ``output_channel_names`` of every dataset passed in.
     solver
         Integration settings, default ``SolverConfig()``.
-
-    Fitting returns a new model; the original is unchanged.
     """
 
     predictors: Any
@@ -313,10 +312,13 @@ class HybridModel(eqx.Module):
         ``verbose`` shows a live display of the run, and ``False`` runs
         quietly. ``ui`` is a display of your own and overrides ``verbose``.
 
-        With ``validation``, the validation data loss replaces the training
-        loss for choosing the returned step (Optax) or generation (Evosax),
-        and for ``patience``. It costs one extra forward pass over the
-        validation set per step or generation.
+        With ``validation``, the validation loss replaces the training loss
+        for choosing the returned step (Optax) or generation (Evosax), and
+        for ``patience``. It costs one extra forward pass over the
+        validation set per step or generation. The validation score is
+        always single shooting at the full horizon, so Optax picks the best
+        step across all phases: the returned model can come from an earlier
+        horizon or from a segmented phase.
 
         ``data`` and ``validation`` may be a ``Dataset`` or a sequence of
         experiments. ``simulate_fn`` and ``state_to_output`` shapes are
@@ -489,6 +491,12 @@ class HybridModel(eqx.Module):
                 )
             # The model's own channels, as predict and make_dataset use, so y0
             # sits at the same time on every path.
+            absent = [name for name in self.output_channel_names if name not in experiment.channels]
+            if absent:
+                raise ValueError(
+                    f"simulate: experiment {experiment.exp_id!r} has no channel {absent}; it "
+                    f"needs every channel the model outputs, {list(self.output_channel_names)}"
+                )
             measured = _per_experiment_arrays(experiment, self.output_channel_names).ts
             if ts is None:
                 ts = measured

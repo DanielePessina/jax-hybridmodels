@@ -55,7 +55,7 @@ tolerance change must change the compiled solve.
 | `pcoeff, icoeff, dcoeff` | `float` | Gains of the PID step-size controller. The defaults ``(0, 1, 0)`` are diffrax's own and give plain I-control. See `stepsize_controller`. |
 | `throw` | `bool` | Whether a failed solve raises, default ``True``. With ``False``, diffrax returns non-finite states after the failure instead, which is what a sampler needs: `jaxhybridmodels.inference` turns them into a rejected proposal. A hand-written ``diffrax.diffeqsolve`` call must forward it. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L106)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L110)</small>
 
 <a id="solverconfigdiffeqsolve"></a>
 
@@ -103,7 +103,7 @@ crystallisation example does this.
 | --- | --- | --- |
 | `diffrax.Solution` |  | The diffrax solution; ``.ys`` is the state trajectory ``[T, S]`` ``simulate_fn`` must return. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L236)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L240)</small>
 
 <a id="solverconfigstepsize_controller"></a>
 
@@ -133,7 +133,7 @@ step-size oscillation on stiff problems.
 controller is wrapped in ``diffrax.ClipStepSizeController``, which
 ends a step exactly on each and restarts the solver there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L204)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L208)</small>
 
 <a id="solverconfigto_dict"></a>
 
@@ -149,7 +149,7 @@ Solver and adjoint instances become their registered names, and a
 tuple ``atol`` becomes a list. An unregistered class raises rather
 than being guessed at.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L308)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L312)</small>
 
 ---
 
@@ -198,7 +198,7 @@ After registration, ``SolverConfig(solver=cls(), ...).to_dict()`` emits
 Re-registering an existing name overwrites without warning. Calling code
 owns the naming.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L67)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L71)</small>
 
 ---
 
@@ -245,4 +245,4 @@ Register a diffrax adjoint class under ``name`` for round-trip serialisation.
 Same contract as [`register_solver`](/api/solver#register_solver). Re-registering an existing
 name overwrites without warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L58)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/solver.py#L62)</small>

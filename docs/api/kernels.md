@@ -182,10 +182,10 @@ loop. It must take ``(predictors, points)`` and return a scalar; a
 custom term that does not need points just ignores them.
 
 Returns the gradient of ``weight * penalty``, to add straight onto the
-averaged data gradient. ``penalty`` comes back unweighted, since that
+pooled data gradient. ``penalty`` comes back unweighted, since that
 is what gets reported.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L426)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L424)</small>
 
 ---
 
@@ -209,4 +209,4 @@ The single optimiser update per training step. Build once per
 optimiser; reuse its returned state across steps, rebuilding only at a
 reset/phase boundary.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L475)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L473)</small>

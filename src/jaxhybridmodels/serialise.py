@@ -391,6 +391,9 @@ def save(
         "best_step": result.best_step if result is not None else None,
         "stop_reason": result.stop_reason if result is not None else None,
         "measured_loss": _json_safe(result.measured_loss) if result is not None else None,
+        "measured_validation": (
+            _json_safe(result.measured_validation) if result is not None else None
+        ),
         "extras": dict(extras) if extras is not None else {},
     }
     encoded = json.dumps(metadata, indent=2, sort_keys=True)
@@ -570,6 +573,11 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
             None
             if metadata.get("measured_loss") is None
             else _decode_float(metadata["measured_loss"])
+        ),
+        measured_validation=(
+            None
+            if metadata.get("measured_validation") is None
+            else _decode_float(metadata["measured_validation"])
         ),
         config=_build_training_config(metadata.get("config")),
         objective=_build_objective(metadata.get("objective")),

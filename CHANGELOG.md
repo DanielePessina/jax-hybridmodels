@@ -408,6 +408,20 @@ Migration for code written against the earlier API:
 
 ### Fixed
 
+- The inverse squash on a boxed input was exact only to first order, so a
+  Hessian through a `BoundedPredictor` input that depends on the fitted
+  values, as `fisher(curvature="exact")` and `laplace()` take, came out
+  wrong by up to about 10%. It is now exact to every order inside the box.
+- A profile of a value pinned at a one-sided bound jumped to a huge latent on
+  its first step and reported a wrong or open far side.
+- Evosax with `validation=` could return a search candidate that validated
+  worse than the starting model. The start is now a candidate.
+- With `restore_best=False` and validation, the summary's validation line is
+  measured at the returned parameters (`FitResult.measured_validation`).
+- A reset no longer overrides the rate of an `optax.inject_hyperparams`
+  instance when the phase leaves `lr` at its default.
+- `SolverConfig(adjoint=ForwardMode())` in training raises a clear error
+  instead of a while-loop error from JAX.
 - A segmented phase that changed only `continuity_weight` kept the previous
   phase's best loss, so patience could end it while it still improved.
 - `simulate(experiment)` with x64 off rejected some `t0` values that float32

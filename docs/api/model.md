@@ -33,7 +33,8 @@ An ``eqx.Module``: ``predictors`` is its only array subtree, and the
 other fields are static. Equinox tools work on it directly, for example
 ``eqx.tree_at(lambda m: m.predictors["rate"], model, new_rate)`` to swap
 one predictor, or ``eqx.filter_vmap`` over a function that builds models
-from different keys.
+from different keys. Fitting returns a new model; the original is
+unchanged.
 
 **Parameters**
 
@@ -44,7 +45,6 @@ from different keys.
 | `state_to_output` |  | Pure ``[T, S] -> [T, D]``. |
 | `output_channel_names` |  | Names of the ``D`` output columns, in order. Must match the ``output_channel_names`` of every dataset passed in. |
 | `solver` |  | Integration settings, default ``SolverConfig()``. |
-| `Fitting returns a new model; the original is unchanged.` |  |  |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L75)</small>
 
@@ -84,10 +84,13 @@ control; pass one or the other.
 ``verbose`` shows a live display of the run, and ``False`` runs
 quietly. ``ui`` is a display of your own and overrides ``verbose``.
 
-With ``validation``, the validation data loss replaces the training
-loss for choosing the returned step (Optax) or generation (Evosax),
-and for ``patience``. It costs one extra forward pass over the
-validation set per step or generation.
+With ``validation``, the validation loss replaces the training loss
+for choosing the returned step (Optax) or generation (Evosax), and
+for ``patience``. It costs one extra forward pass over the
+validation set per step or generation. The validation score is
+always single shooting at the full horizon, so Optax picks the best
+step across all phases: the returned model can come from an earlier
+horizon or from a segmented phase.
 
 ``data`` and ``validation`` may be a ``Dataset`` or a sequence of
 experiments. ``simulate_fn`` and ``state_to_output`` shapes are
@@ -102,7 +105,7 @@ Same as ``train_with_optax(model, ...)`` or
 ``train_with_evosax(model, ...)`` in `jaxhybridmodels.training`,
 picked by the type of ``config``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L287)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L286)</small>
 
 <a id="hybridmodelfit_ensemble"></a>
 
@@ -165,7 +168,7 @@ A seed whose warm-up or first step fails is dropped, so fewer than
 ``stop_reason`` ``"diverged"``. Optax only. The list goes straight
 into [`predict_ensemble`](/api/prediction#predict_ensemble).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L352)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L354)</small>
 
 <a id="hybridmodelnamed_values"></a>
 
@@ -188,7 +191,7 @@ values sit near them.
     result.model.named_values()
     # {"omega": 0.9997, "damping": 0.1}
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L261)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L260)</small>
 
 <a id="hybridmodelpredict"></a>
 
@@ -219,7 +222,7 @@ still integrates from its own start, so ``y0`` stays in place.
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
 experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L427)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L429)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -255,7 +258,7 @@ must be finite, strictly increasing, and not before ``t0``. When
 ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
 returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L453)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L455)</small>
 
 <a id="hybridmodelwith_predictors"></a>
 
@@ -270,7 +273,7 @@ This model with its predictors replaced, for the end of a custom loop.
 ``predictors`` must have the same structure as ``self.predictors``.
 Everything else about the model stays the same.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L159)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L158)</small>
 
 ---
 
@@ -288,6 +291,7 @@ FitResult(
     stop_reason: 'StopReason',
     *,
     measured_loss: 'float | None' = None,
+    measured_validation: 'float | None' = None,
 ) -> None
 ```
 
@@ -300,7 +304,7 @@ phase short, ``"diverged"`` when a solver error or a non-finite loss ended
 the run (it warned, and the model holds the best parameters so far), else
 ``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L176)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L177)</small>
 
 <a id="fitresultfinal_loss"></a>
 
@@ -312,9 +316,10 @@ The training loss at the returned parameters.
 update with ``restore_best=False``, and for an Evosax candidate chosen
 by validation, whose own fitness is not the best-so-far in
 ``history.loss``. Else ``history.loss[best_step]``, or the last entry
-when ``best_step`` is None.
+when ``best_step`` is None. ``measured_validation`` is the validation
+loss at the same parameters when they are not a recorded step.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L194)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L196)</small>
 
 <a id="fitresultsummary"></a>
 
@@ -332,12 +337,16 @@ pinned against an output bound. With ``data``, a list of experiments or
 a ``Dataset``, it also predicts on them and adds the metrics and the
 worst experiment per channel.
 
-A flagged parameter is in the range where the bound penalty would
-charge it: the outer 5% of its box for the default sigmoid. The network
+A parameter is flagged when its latent is past the squash's knee: the
+outer 5% of its box for the default sigmoid, measured in warped units
+(log units under a log warp), or for a one-sided bound under a linear
+warp, close to its edge. The bound penalty never charges a
+``Parameter``; it charges only ``BoundedPredictor`` outputs, so the
+flag is a warning that its gradient is fading, nothing more. The network
 figure covers the whole declared box, including inputs no experiment
 reached, so a large share can be harmless if the data never goes there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L211)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L214)</small>
 
 ---
 
@@ -373,6 +382,7 @@ monotone non-increasing; with a bound penalty on, that fitness includes
 it. ``penalty`` and ``phase`` stay empty.
 
 ``validation_loss`` is the full-horizon data loss on the validation set,
+plus any configured trajectory penalty,
 present when one was given: per step for Optax, and for each
 generation's best individual for Evosax.
 

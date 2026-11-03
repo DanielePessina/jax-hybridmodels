@@ -379,15 +379,16 @@ def build_dataset_score(
     score_bucket: Callable[..., Array],
     dataset: Dataset,
     *,
-    pooling: Pooling | None = None,
+    pooling: Pooling,
     output_channel_names: tuple[str, ...] | None = None,
 ) -> Callable[[Any], float]:
     """Return ``score(predictors) -> float``, the full-horizon loss over ``dataset``.
 
     Wraps a :func:`build_score_bucket` kernel over every bucket of
     ``dataset``, combined with ``pooling``'s shares as the trainers combine
-    their own loss (``Objective.pooling`` gives it). Without ``pooling``
-    the buckets are averaged with equal weight. The stock trainers use it to score a
+    their own loss, so the score is the pooled loss the trainers report.
+    ``Objective.pooling(dataset.output_channel_names)`` gives it. The stock
+    trainers use it to score a
     ``validation=`` set with the training objective; reusing the trainer's
     own ``score_bucket`` means a bucket shape the two datasets share
     compiles once.
@@ -406,10 +407,7 @@ def build_dataset_score(
     if not buckets:
         raise ValueError("validation dataset has no bucket payloads")
     full_horizon = jnp.asarray(1.0)
-    if pooling is None:
-        shares = tuple(jnp.asarray(1.0 / len(buckets)) for _ in buckets)
-    else:
-        shares = pooling.shares(buckets, full_horizon)
+    shares = pooling.shares(buckets, full_horizon)
 
     def score(predictors: Any) -> float:
         value = sum(
@@ -449,7 +447,7 @@ def build_penalty_step(
     custom term that does not need points just ignores them.
 
     Returns the gradient of ``weight * penalty``, to add straight onto the
-    averaged data gradient. ``penalty`` comes back unweighted, since that
+    pooled data gradient. ``penalty`` comes back unweighted, since that
     is what gets reported.
     """
 

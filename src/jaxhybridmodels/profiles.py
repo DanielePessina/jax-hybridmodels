@@ -14,10 +14,13 @@ vector field:
 
 Everything here is a pure JAX function, safe under ``jit``, ``vmap``
 and ``grad``, so a profile composes with the framework exactly like
-any other term in the vector field. The functions are factories: they
-close over their parameters and return a :class:`Profile`, a ``t -> Array``
-callable. ``step_profile`` and ``ramp_profile`` take their parameters by
-keyword, since several same-typed numbers in a row are easy to swap.
+any other term in the vector field. A step's switch time is the one
+parameter whose gradient needs ``jump_ts`` (see :func:`step_profile`).
+
+The functions are factories: they close over their parameters and return
+a :class:`Profile`, a ``t -> Array`` callable. ``step_profile`` and
+``ramp_profile`` take their parameters by keyword, since several
+same-typed numbers in a row are easy to swap.
 
 A profile that jumps or bends makes the vector field non-smooth there. An
 adaptive solver's error estimate assumes smoothness, so it either rejects
@@ -74,7 +77,11 @@ def step_profile(*, at: ArrayLike, before: ArrayLike, after: ArrayLike) -> Profi
     """Return ``t -> before if t < at else after``: a step change.
 
     For a reactor, the moment a feed valve opens or a heater switches.
-    Discontinuous at ``at``, which is its ``jump_ts``.
+    Discontinuous at ``at``, which is its ``jump_ts``. To fit or infer
+    ``at`` itself, pass ``jump_ts`` to the solve: the switch has no
+    derivative in ``at``, so without them the gradient with respect to it is
+    exactly 0. With them the solver ends a step on ``at`` and the gradient
+    comes through the step's end.
     """
 
     def profile(t: ArrayLike) -> Array:

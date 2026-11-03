@@ -146,6 +146,7 @@ class FitHistory:
     it. ``penalty`` and ``phase`` stay empty.
 
     ``validation_loss`` is the full-horizon data loss on the validation set,
+    plus any configured trajectory penalty,
     present when one was given: per step for Optax, and for each
     generation's best individual for Evosax.
 
@@ -190,6 +191,7 @@ class FitResult:
     best_step: int | None
     stop_reason: StopReason
     measured_loss: float | None = field(default=None, kw_only=True)
+    measured_validation: float | None = field(default=None, kw_only=True)
 
     @property
     def final_loss(self) -> float:
@@ -199,7 +201,8 @@ class FitResult:
         update with ``restore_best=False``, and for an Evosax candidate chosen
         by validation, whose own fitness is not the best-so-far in
         ``history.loss``. Else ``history.loss[best_step]``, or the last entry
-        when ``best_step`` is None.
+        when ``best_step`` is None. ``measured_validation`` is the validation
+        loss at the same parameters when they are not a recorded step.
         """
         if self.measured_loss is not None:
             return self.measured_loss
@@ -217,8 +220,12 @@ class FitResult:
         a ``Dataset``, it also predicts on them and adds the metrics and the
         worst experiment per channel.
 
-        A flagged parameter is in the range where the bound penalty would
-        charge it: the outer 5% of its box for the default sigmoid. The network
+        A parameter is flagged when its latent is past the squash's knee: the
+        outer 5% of its box for the default sigmoid, measured in warped units
+        (log units under a log warp), or for a one-sided bound under a linear
+        warp, close to its edge. The bound penalty never charges a
+        ``Parameter``; it charges only ``BoundedPredictor`` outputs, so the
+        flag is a warning that its gradient is fading, nothing more. The network
         figure covers the whole declared box, including inputs no experiment
         reached, so a large share can be harmless if the data never goes there.
         """
@@ -259,6 +266,7 @@ class SavedRun:
     objective: Objective | dict[str, Any] | None
     extras: dict[str, Any]
     measured_loss: float | None = None
+    measured_validation: float | None = None
 
     def summary(self, data: Any = None) -> str:
         """The report :meth:`FitResult.summary` gives, for a run read back from disk."""

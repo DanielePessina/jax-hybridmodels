@@ -886,6 +886,20 @@ def test_a_value_far_from_its_only_bound_is_free(x64, rate, bounds, warp, profil
     assert np.all(np.diff(profile.grid) > 0)
 
 
+@pytest.mark.parametrize("warp", ["linear", "log"])
+def test_a_value_pinned_at_its_only_bound_profiles_away_from_it(x64, warp):
+    """The far side closes where the closed form says, however huge the latent spread."""
+    experiments, ts, ys = measurements()
+    mle, error = least_squares(ts, ys)
+    edge = mle + 2.0 * error
+    model = linear_model(hm.Parameter(edge + 0.5, bounds=(edge, None), warp=warp))
+    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    profile = problem.profile("k")
+    assert profile.stop_reasons == ("bound", "threshold")
+    high = mle + np.sqrt(3.841459 * error**2 + (edge - mle) ** 2)
+    assert profile.bounds[1] == pytest.approx(high, abs=0.01 * error)
+
+
 def test_the_condition_number_ignores_how_a_value_is_bounded(x64):
     """Rescaling a latent through its bounds leaves the identifiability readout alone."""
     experiments, *_ = measurements()

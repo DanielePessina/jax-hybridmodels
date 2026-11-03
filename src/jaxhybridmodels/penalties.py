@@ -8,7 +8,7 @@ two places it goes missing.
 
 Output side, saturation. ``from_latent`` has derivative
 ``(high - low) / T * sigma'(z / T)``, which underflows to exactly 0.0 past
-``|z / T| = 15`` in float32. A predictor that far out is pinned against its
+``|z / T| ~ 16.8`` in float32. A predictor that far out is pinned against its
 bound with nothing left to pull it back. :meth:`BoundScaler.saturation`
 hinges on the latent magnitude to stop it getting there. Hinge on the
 latent, never the physical value: a penalty written against the output
@@ -24,8 +24,9 @@ instead, and :func:`box_violation` supplies push-back beyond its reach.
 The bound penalty (:func:`bound_penalty`) is charged at *points*, not on a
 box sweep. The default points are the measured ones: the input vectors the
 loss actually sees at observed cells, gathered from the dataset by
-:func:`data_penalty_points` and following the same length-mask prefix as
-the loss (:func:`length_mask_keep`). User-supplied penalty-only points
+:func:`data_penalty_points` and following the same horizon mask as the
+loss (:func:`length_mask_keep`): each experiment's measurements in the
+first ``horizon`` of its own span. User-supplied penalty-only points
 (no measurements needed) extend coverage where it matters, such as a
 deployment region or a future operating point. :func:`box_grid` is the
 collocation-as-extension recipe: a deterministic sweep of the input box,
@@ -142,14 +143,24 @@ def soft_inverse(
     interval, where a hard clip would zero the derivative and silently drop
     state-derived sensitivities from the ODE adjoint (R-P2).
 
-    Exact in value and derivative inside the band, and C^1 across the
-    junction, since the continuation uses the inverse's own slope there.
-    The ``stop_gradient`` on the clamp is load-bearing: without it the
-    correction term picks up a contribution through the clip and the
-    interior derivative comes out wrong.
+    Exact inside the band, in value and every derivative, so a Hessian
+    through it (``fisher(curvature="exact")``, ``laplace``) is right too.
+    Outside it is the tangent line at the band's edge, C^1 across the
+    junction. Two branches with ``jnp.where``, each fed an input that is
+    safe for it: the inside branch sees ``s`` itself, so its derivatives
+    are the inverse's own, and the outside branch sees a clamped edge
+    behind ``stop_gradient``, so it is exactly linear in ``s``. A single
+    expression ``inverse(edge) + slope(edge) * (s - edge)`` matches the
+    first derivative but drops the second.
     """
-    s_clamped = jax.lax.stop_gradient(jnp.clip(s, eps, 1.0 - eps))
-    return inverse(s_clamped) + inverse_slope(s_clamped) * (s - s_clamped)
+    low, high = eps, 1.0 - eps
+    inside = (s >= low) & (s <= high)
+    edge = jax.lax.stop_gradient(jnp.clip(s, low, high))
+    # The dead branch must stay finite: ``inverse`` at a pole would put a NaN
+    # into the gradient through ``where``.
+    safe = jnp.where(inside, s, edge)
+    tangent = inverse(edge) + inverse_slope(edge) * (s - edge)
+    return jnp.where(inside, inverse(safe), tangent)
 
 
 def soft_logit(s: Array, eps: float = 1e-3) -> Array:
@@ -166,8 +177,9 @@ def soft_logit(s: Array, eps: float = 1e-3) -> Array:
     enough to keep gradient far outside the box also distorts the middle.
 
     ``eps`` sets the continuation slope, roughly ``1 / eps``, and is the one
-    tuning knob. The default 1e-3 maps a 1% overshoot to ``|z| ~ 10``, a
-    number a network can still consume; 1e-6 would map it to ``|z| ~ 1e4``.
+    tuning knob. The default 1e-3 maps a 1% overshoot to ``|z| ~ 18``
+    (``logit(0.999) ~ 6.9`` plus about 1000 per unit past it), a number a
+    network can still consume; 1e-6 would map it to ``|z| ~ 1e4``.
     """
     from jaxhybridmodels.transforms import BOUND_TRANSFORMS
 
@@ -180,10 +192,13 @@ def softclip(x: Array, lo: float | Array, hi: float | Array, beta: float = 20.0)
 
     Built from two softplus shoulders, so the derivative is
     ``sigmoid(beta * (x - lo)) - sigmoid(beta * (x - hi))``, analytically in
-    ``(0, 1)``. The interior is reproduced to ``O(1 / beta)``. Larger
-    ``beta`` tracks a hard clip more closely but underflows sooner outside
-    the box; the default 20 holds interior error below about 0.05 box widths
-    and keeps usable gradient roughly one width out.
+    ``(0, 1)``. The interior is reproduced to about ``log(2) / beta`` in the
+    units of ``x``, whatever the box width. Larger ``beta`` tracks a hard
+    clip more closely but underflows sooner outside the box; the default 20
+    gives an interior error of about 0.035 and usable gradient up to about
+    ``1 / beta`` times a few units past each edge. Choose ``beta`` against
+    the scale of ``x``: on a box 0.01 wide the default error is half the
+    box.
 
     Repairs the near field only. Several widths out the derivative
     underflows as a hard clip's does, so pair it with :func:`box_violation`
@@ -527,12 +542,13 @@ def _latents_at(leaf: BoundedPredictor, points: Array) -> Array:
 
 
 def bound_penalty(predictors: Any, points: tuple[Array, ...]) -> Array:
-    """Mean output-squash saturation over every ``BoundedPredictor`` in a pytree.
+    """Output-squash saturation summed over every ``BoundedPredictor`` in a pytree.
 
     For each leaf, evaluates ``inner(in_scaler.to_latent(x))`` across the
     leaf's point set and charges
     :meth:`~jaxhybridmodels.predictors.BoundScaler.saturation` on the
-    resulting latents. Leaves are summed.
+    resulting latents, a mean within each leaf. Leaves are summed, so the
+    penalty grows with the number of predictors.
 
     ``points`` is positional, one ``[G, n_inputs]`` array per leaf in
     traversal order: measured points from :func:`data_penalty_points`,

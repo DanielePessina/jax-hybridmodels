@@ -435,7 +435,7 @@ def train_with_evosax(
     <jaxhybridmodels.HybridModel.fit>`, and ``data`` and ``validation`` may
     be a ``Dataset`` or a list of experiments.
 
-    Each individual's fitness is the bucket-averaged data loss plus any
+    Each individual's fitness is the pooled data loss plus any
     trajectory penalty plus ``objective.penalty_weight`` times the bound
     penalty, since evosax ranks by one scalar.
 
@@ -614,10 +614,14 @@ def _train_with_evosax(
         best_flat = jnp.asarray(warm_pop[best_idx])
         best_step = 0
         # With a validation set, selection follows the validation score of each
-        # generation's best individual instead of the training fitness.
+        # generation's best individual instead of the training fitness. The
+        # warm-up best is scored too, so here also a short or wide search
+        # cannot replace a good seed with a worse one.
         best_selection = math.inf
         selected_flat = best_flat
-        selected_loss = math.nan
+        selected_loss = best_loss
+        if select_score is not None:
+            best_selection = select_score(rebuild(best_flat))
 
         history: list[float] = []
         failed: list[int] = []

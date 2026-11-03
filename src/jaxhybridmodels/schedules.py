@@ -48,8 +48,8 @@ def annealing_schedule(
 
     Built on optax's own schedule helpers, so the returned callable is a
     plain pure function of the integer step count: ``jit``-safe, usable
-    inside a traced loop. Every kind lands exactly on ``end_value`` at
-    ``step == total_epochs`` and stays there afterwards, so the run length
+    inside a traced loop. Every kind lands on ``end_value``, up to float
+    rounding, at ``step == total_epochs`` and stays there afterwards, so the run length
     is genuinely baked in.
 
     Parameters

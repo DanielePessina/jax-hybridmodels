@@ -239,9 +239,9 @@ def row_horizons(ts: Array, observed_rows: Array) -> Array:
     (``t0`` when set, else the first measurement) to its last measurement,
     and a row's horizon is how far along that span it lies, from 0 to 1.
     Each experiment is measured against its own span, so one long
-    experiment in a bucket does not shift the cutoff of the others, and the
-    rows a bucket adds for ``t0`` or for ``max_buckets`` padding do not
-    count.
+    experiment in a bucket does not shift the cutoff of the others. A ``t0``
+    row starts the span; rows added by ``max_buckets`` padding hold no
+    measurement and do not move it.
 
     Rows up to the first measurement get 0, so every horizon scores it:
     otherwise an experiment that starts at ``t0`` well before its first
@@ -711,7 +711,12 @@ def _run_options(
                 f"found {list(values)}"
             )
         value = values[0]
-        if isinstance(value, float) and value != value:
+        # NaN of any float width, pandas' NA and None all count as missing.
+        try:
+            missing = value is None or bool(value != value)
+        except TypeError:
+            missing = True
+        if missing:
             raise ValueError(f"Column {column!r} is missing (NaN) for experiment {exp_id!r}")
         return value
 
@@ -1096,10 +1101,10 @@ def make_dataset(
     that add the fewest rows. Predictions still report each experiment's own
     times. Only ``PredictionResult.buckets`` shows the padded grids.
 
-    Capping changes what a fit minimises. The loss averages buckets with equal
-    weight, so regrouping experiments reweights them. ``TrainingPhase.horizon``
-    counts rows, so its cutoff shifts slightly, and a trajectory penalty also
-    sees the state at the added rows.
+    Capping does not change what ``mse`` or ``bal_mse`` minimise: the trainers
+    pool buckets by what each one averages over, and ``TrainingPhase.horizon``
+    cuts each experiment at a fraction of its own span, which the added rows
+    do not move. Only a trajectory penalty sees the state at the added rows.
 
     The ``Dataset`` is pure data: ``state_to_output``, being a property of
     the model, is passed to prediction and training separately.
@@ -1350,7 +1355,8 @@ def split_dataset(
     the original bucket boundaries.
 
     Counts use ``floor(train*n)`` and ``floor(validation*n)``, with test taking the
-    remainder so the sizes sum to ``n``. An empty split comes back with no
+    remainder so the sizes sum to ``n``. With ``test=0`` the remainder goes to
+    train or validation instead, whichever lost more to the floor. An empty split comes back with no
     payloads and no experiments, so it cannot be split again.
 
     Parameters

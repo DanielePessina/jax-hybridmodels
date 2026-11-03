@@ -356,6 +356,27 @@ def test_without_restore_best_the_final_loss_is_measured_at_the_returned_model(d
     assert result.final_loss != result.history.loss[-1]
 
 
+def test_evosax_with_validation_keeps_a_good_start(decay_data):
+    """A short, wide search must not replace a start that validates better."""
+    model = parameter_model(rate=TRUE_RATE)
+    config = hm.EvosaxTrainingConfig(population_size=4, steps=2, init_sigma=3.0)
+    result = model.fit(decay_data, config, key=jr.key(0), validation=decay_data, verbose=False)
+    assert rate_of(result.model) == pytest.approx(TRUE_RATE, rel=1e-6)
+
+
+def test_an_inject_hyperparams_rate_survives_a_reset_at_the_default_lr(decay_data):
+    """A phase that leaves lr at its default keeps the instance's own rate."""
+    injected = optax.inject_hyperparams(optax.sgd)(learning_rate=0.0)
+    config = hm.OptaxTrainingConfig(
+        phases=(
+            TrainingPhase(steps=2, optimizer=injected),
+            TrainingPhase(steps=2, optimizer=injected, reset_optimizer=True),
+        )
+    )
+    result = parameter_model().fit(decay_data, config, key=jr.key(0), verbose=False)
+    assert rate_of(result.model) == pytest.approx(0.3, rel=1e-6)
+
+
 def test_bootstrap_members_start_from_fresh_draws(decay_data):
     """Every member's start is redrawn, so the spread includes the initialisation."""
     model = network_model(jr.key(1))

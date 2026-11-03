@@ -101,7 +101,9 @@ def state_to_output(state):
     return strip_penalty_state(state, n=2)          # the loss never sees the accumulators
 
 def trajectory_penalty(full_state, bp):
-    return jnp.sum(penalty_integral(full_state, n=2))
+    # Summed over the two penalties, averaged over the bucket's experiments,
+    # so the trainers' bucket weights give the mean over every experiment.
+    return jnp.mean(jnp.sum(penalty_integral(full_state, n=2), axis=-1))
 
 objective = hm.Objective(
     trajectory_penalty_fn=trajectory_penalty, trajectory_penalty_weight=0.1

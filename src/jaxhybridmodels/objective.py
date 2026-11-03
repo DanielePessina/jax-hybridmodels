@@ -55,15 +55,18 @@ class Objective:
         Per-channel multipliers on the loss. A mapping keyed by channel
         name scores only the channels it names (``{"conc": 1.0}`` fits one
         channel of several); a sequence gives one weight per output channel,
-        in ``output_channel_names`` order, and keeps every channel's cells
-        in the loss's denominator. ``None`` weights every channel 1. Names
-        are checked against the dataset's channels when training starts.
-        A named channel with weight ``0.0`` contributes nothing but its
-        cells still count in the denominator, so ``{"a": 1.0, "b": 0.0}``
-        gives half the loss of ``{"a": 1.0}``; leave a name out to drop it.
+        in ``output_channel_names`` order. ``None`` weights every channel 1.
+        Names are checked against the dataset's channels when training
+        starts. A named channel with weight ``0.0`` contributes no error.
+        Under ``"mse"`` its cells still count in the denominator, so
+        ``{"a": 1.0, "b": 0.0}`` scales the loss of ``{"a": 1.0}`` by
+        ``cells(a) / cells(a and b)``. ``"bal_*"`` and ``"mle"`` reduce per
+        channel, so there a zero weight is the same as leaving the name out.
     penalty_weight : float
-        Weight on the bound-saturation penalty, relative to the
-        per-bucket-averaged data term. ``0.0`` disables it.
+        Weight on the bound-saturation penalty, relative to the pooled data
+        loss. Under ``"mle"`` that loss is a sum over every measurement, so
+        the same weight counts for less as the data grow. ``0.0`` disables
+        it.
         ``TrainingPhase.penalty_weight`` overrides it for one Optax phase.
     penalty_points : Mapping[str, ArrayLike] | None
         Extra points where the bound penalty is charged, keyed by the path of
@@ -81,8 +84,12 @@ class Objective:
     trajectory_penalty_fn : Callable | None
         Trajectory-aware penalty for embedded hybrid models, called as
         ``(full_state, bp) -> scalar`` on the full simulator state
-        ``[N, T, S]``, penalty accumulators included. See the
-        ``penalty_*`` helpers in ``jaxhybridmodels.penalties``.
+        ``[N, T, S]``, penalty accumulators included. Return a mean over
+        the bucket's ``N`` experiments: the trainers weight each bucket by
+        its share of the experiments, so a mean gives the mean over the
+        dataset, and a sum would count an experiment more in a larger
+        bucket. See the ``penalty_*`` helpers in
+        ``jaxhybridmodels.penalties``.
     trajectory_penalty_weight : float
         Weight on ``trajectory_penalty_fn``. ``0.0`` disables it even when a
         function is set; a non-zero weight without a function raises.

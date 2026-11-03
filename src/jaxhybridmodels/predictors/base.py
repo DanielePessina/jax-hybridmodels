@@ -292,7 +292,7 @@ class BoundScaler(eqx.Module):
     z_knee : float
         Static. The knee. Defaults to the transform's own value, which
         for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the
-        box. Do not share one number across transforms: 2.944 is 12.5%
+        box. Do not share one number across transforms: 2.944 is 12.7%
         from the bound on softsign, which would charge 2.7x too hard.
     """
 
@@ -699,10 +699,12 @@ class Parameter(eqx.Module):
         element in flattened order. None for a missing endpoint. Omit for
         an unbounded value. Two finite endpoints use the ``transform``
         squash. One endpoint puts the distance from it through softplus,
-        or ``exp`` under ``warp="log"``.
+        or ``exp`` under ``warp="log"`` or ``"log10"``.
     transform, warp
         Passed to :class:`BoundScaler`. ``warp="log10"`` suits rate
-        constants that span decades and needs finite positive bounds.
+        constants that span decades. With two finite bounds it warps the
+        value and needs them positive; with one it warps the distance from
+        the edge, as ``"log"`` does.
 
     Examples
     --------

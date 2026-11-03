@@ -86,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L486)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L489)</small>
 
 ---
 
@@ -106,6 +106,7 @@ SavedRun(
     objective: 'Objective | dict[str, Any] | None',
     extras: 'dict[str, Any]',
     measured_loss: 'float | None' = None,
+    measured_validation: 'float | None' = None,
 ) -> None
 ```
 
@@ -123,7 +124,7 @@ an lr schedule) cannot be rebuilt, so it comes back as the raw dict
 with each callable as ``{"__callable__": "module.qualname"}``; rebind
 those fields yourself. ``extras`` is the dict passed to ``save``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L237)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L244)</small>
 
 <a id="savedrunsummary"></a>
 
@@ -135,7 +136,7 @@ summary(self, data: 'Any' = None) -> 'str'
 
 The report [`FitResult.summary`](/api/model#fitresultsummary) gives, for a run read back from disk.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L263)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L271)</small>
 
 ---
 

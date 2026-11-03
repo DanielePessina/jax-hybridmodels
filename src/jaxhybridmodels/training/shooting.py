@@ -10,17 +10,22 @@ alongside the predictors. A penalty on the **gap** where one segment ends
 and the next begins pulls the segments back into one trajectory.
 
 A ``TrainingPhase(segments=K)`` turns it on for one phase, and the schedule
-must end in single shooting, so the returned model has been fitted as one
-solve. The nodes belong to the run and are dropped when it ends.
+must end in single shooting. Without validation the returned model comes from
+that final phase, so it has been fitted as one solve. With ``validation=``
+the step with the best validation score wins, which can be in a segmented
+phase; its parameters still predict by single shooting, which is what the
+validation score measured. The nodes belong to the run and are dropped when
+it ends.
 
 Layout
 ------
 Segments are counted in samples. A bucket's ``T`` union timestamps are split
-into segments of ``L`` samples that overlap by one: segment ``k`` covers
-indices ``k(L-1)`` to ``(k+1)(L-1)``. Every experiment in a bucket has the
-same ``T``, so the layout is fixed when the step compiles. The last segment
-is padded by repeating its final time, which diffrax accepts, so every
-segment has the same length and all of them solve as one ``vmap``.
+into ``K = min(segments, T-1)`` segments that overlap by one sample: segment
+``k`` starts at index ``floor(k(T-1)/K)`` and ends where the next starts, so
+their lengths differ by at most one step. Every experiment in a bucket has
+the same ``T``, so the layout is fixed when the step compiles. Each segment
+is padded to the longest, ``L``, by repeating its end time, which diffrax
+accepts, so all of them solve as one ``vmap``.
 
 The **assembled** trajectory takes each index from the segment that starts
 at or before it: a node's own sample is scored at the node value. The result

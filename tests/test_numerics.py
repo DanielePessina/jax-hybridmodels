@@ -588,12 +588,26 @@ def test_a_short_pulse_is_seen_only_through_its_jump_ts():
         return jnp.asarray(solution.ys)[-1, 0]
 
     assert float(jax.jit(after_step)(jnp.asarray(5.3))) == pytest.approx(4.7, rel=1e-4)
+    # With jump_ts the switch time has its gradient: d/d(at) of (10 - at) is -1.
+    assert float(jax.grad(after_step)(jnp.asarray(5.3))) == pytest.approx(-1.0, rel=1e-3)
 
     # A smooth profile has no jump times, and passing them is still fine.
     flat = constant_profile(1.0)
     field = diffrax.ODETerm(lambda t, y, args: flat(t) * jnp.ones(1))
     whole = jnp.asarray(solver.diffeqsolve(field, ts, jnp.zeros(1), jump_ts=flat.jump_ts).ys)
     assert float(whole[-1, 0]) == pytest.approx(10.0, rel=1e-5)
+
+
+def test_to_latent_is_exact_to_second_order_inside_the_box():
+    """A Hessian through a boxed input, as fisher(curvature="exact") takes, is right."""
+    for warp in ("linear", "log"):
+        scaler = hm.BoundScaler((0.5, 20.0), warp=warp)
+        x, h = jnp.asarray(0.6), jnp.asarray(1e-2)
+        f = scaler.to_latent
+        fd = (f(x + h) - 2 * f(x) + f(x - h)) / h**2
+        # Float32 differences are rough, but the old single-expression inverse
+        # gave 0 here, and -27 under log against about -100.
+        assert float(jax.grad(jax.grad(f))(x)) == pytest.approx(float(fd), rel=2e-2), warp
 
 
 def test_rng_fold_is_named_stable_and_pinned():
@@ -780,6 +794,13 @@ def test_integer_times_and_unsorted_tables_keep_their_meaning():
     grid = jnp.asarray([0.5, 1.5, 2.5])
     np.testing.assert_allclose(model.predict([experiment], ts=grid)["int"].ts, grid)
     assert len(model.simulate(experiment, n_points=7).ts) == 7
+    other = hm.make_experiment(
+        channels={"other": hm.ChannelObs(ts=jnp.asarray([1.0]), values=jnp.ones(1))},
+        y0=[1.0],
+        exp_id="other",
+    )
+    with pytest.raises(ValueError, match="needs every channel the model outputs"):
+        model.simulate(other)
 
     table = pd.DataFrame({"run": [1, 1, 1], "t": [2.0, 0.0, 1.0], "y": [0.3, 1.0, 0.6]})
     first = lambda cov, ch: jnp.array([ch["y"].values[0]])  # noqa: E731
@@ -788,6 +809,16 @@ def test_integer_times_and_unsorted_tables_keep_their_meaning():
     )
     np.testing.assert_allclose(run.channels["y"].ts, [0.0, 1.0, 2.0])
     np.testing.assert_allclose(run.y0, [1.0])
+    for column in (np.full(3, np.nan, dtype=np.float32), pd.array([None] * 3, dtype="Float64")):
+        with pytest.raises(ValueError, match="missing"):
+            experiments_from_dataframe(
+                table.assign(T=column),
+                time="t",
+                experiment="run",
+                channels=["y"],
+                covariates=["T"],
+                y0=[1.0],
+            )
     with pytest.raises(ValueError, match="missing"):
         experiments_from_dataframe(
             table.assign(T=np.nan),

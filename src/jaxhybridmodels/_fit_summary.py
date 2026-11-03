@@ -42,7 +42,13 @@ _MIN_TREND_WINDOW = 2
 def format_fit_summary(run: Any, *, data: Any = None) -> str:
     """Build the report for a ``FitResult`` or ``SavedRun``; see ``FitResult.summary``."""
     measured = getattr(run, "measured_loss", None)
-    lines = _run_lines(run.history, run.best_step, run.stop_reason, measured)
+    lines = _run_lines(
+        run.history,
+        run.best_step,
+        run.stop_reason,
+        measured,
+        getattr(run, "measured_validation", None),
+    )
     lines += _phase_lines(run.history)
     lines += _parameter_lines(run.model.predictors)
     lines += _network_lines(run.model.predictors)
@@ -56,6 +62,7 @@ def _run_lines(
     best_step: int | None,
     stop_reason: str | None,
     measured: float | None = None,
+    measured_validation: float | None = None,
 ) -> list[str]:
     if not history.loss:
         return ["Run: no fit recorded"]
@@ -77,7 +84,10 @@ def _run_lines(
         span = "the final phase" if len(set(history.phase)) > 1 else unit
         lines.append(f"  loss change over the last 10% of {span}: {trend:+.2%}")
     if history.validation_loss:
-        lines.append(f"  validation loss {history.validation_loss[at]:.4e} at the returned point")
+        validation = (
+            history.validation_loss[at] if measured_validation is None else measured_validation
+        )
+        lines.append(f"  validation loss {validation:.4e} at the returned point")
     if any(history.penalty):
         lines.append(f"  bound penalty {history.penalty[at]:.4e} at the returned point")
     failed = sum(history.failed_candidates)

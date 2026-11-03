@@ -1700,11 +1700,13 @@ class _Profiler:
         first_step = 0.2 * spread if math.isfinite(spread) and spread > 0 else 0.1
         low, high = (float(limit[index]) for limit in coordinates.limits)
         positions = coordinates.to_physical.squash_positions
-        if math.isfinite(low) and math.isfinite(high):
+        if (math.isfinite(low) and math.isfinite(high)) or coordinates.at_bound[index]:
             # A latent unit already crosses much of a box. A value pressed against
             # its bound sits far out in the squash's tail, where its latent spread
             # is huge and meaningless, and a step sized from it would jump clean
-            # across the box.
+            # across the box, or, for a one-sided bound, to a latent so large the
+            # value overflows. Far from a one-sided bound the latent is near the
+            # value itself, so its spread is kept there.
             first_step = min(first_step, 1.0)
         # Find which way the value moves when the latent rises: up for two bounds,
         # a lower one or none, down for an upper one alone. The squash position

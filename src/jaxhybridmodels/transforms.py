@@ -78,10 +78,11 @@ class BoundTransform(NamedTuple):
         ``d(inverse)/ds``. Builds the linear continuation that keeps
         ``to_latent`` differentiable for inputs that fall outside the box.
     knee : float
-        The latent at which ``forward`` reaches 0.95, where the physical
-        value enters the outer 5% of its box. Default for
+        The latent at which ``forward`` reaches 0.95, where the value enters
+        the outer 5% of its warped box (under a log warp, 5% of the box in
+        log units, not of the physical range). Default for
         ``BoundScaler.z_knee``. It must come from the transform: reusing
-        sigmoid's 2.944 for softsign would start charging at 12.5% from the
+        sigmoid's 2.944 for softsign would start charging at 12.7% from the
         bound instead of 5%.
     """
 

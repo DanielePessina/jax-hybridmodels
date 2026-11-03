@@ -449,10 +449,10 @@ unobserved rows, at midpoints of their largest gaps, choosing the buckets
 that add the fewest rows. Predictions still report each experiment's own
 times. Only ``PredictionResult.buckets`` shows the padded grids.
 
-Capping changes what a fit minimises. The loss averages buckets with equal
-weight, so regrouping experiments reweights them. ``TrainingPhase.horizon``
-counts rows, so its cutoff shifts slightly, and a trajectory penalty also
-sees the state at the added rows.
+Capping does not change what ``mse`` or ``bal_mse`` minimise: the trainers
+pool buckets by what each one averages over, and ``TrainingPhase.horizon``
+cuts each experiment at a fraction of its own span, which the added rows
+do not move. Only a trajectory penalty sees the state at the added rows.
 
 The ``Dataset`` is pure data: ``state_to_output``, being a property of
 the model, is passed to prediction and training separately.
@@ -471,7 +471,7 @@ the model, is passed to prediction and training separately.
 | --- | --- | --- |
 | `Dataset` |  | ``bucket_payloads`` ordered ascending by ``T``, with the (named) experiments kept on ``Dataset.experiments``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1071)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1076)</small>
 
 ---
 
@@ -518,7 +518,7 @@ ensemble whose members saw different resamples.
 | --- | --- | --- |
 | `Dataset` |  | A new dataset of ``n_experiments`` experiments (some duplicated), re-bucketed from scratch. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1263)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1268)</small>
 
 ---
 
@@ -546,7 +546,8 @@ from scratch, so its bucket structure suits its own contents rather than
 the original bucket boundaries.
 
 Counts use ``floor(train*n)`` and ``floor(validation*n)``, with test taking the
-remainder so the sizes sum to ``n``. An empty split comes back with no
+remainder so the sizes sum to ``n``. With ``test=0`` the remainder goes to
+train or validation instead, whichever lost more to the floor. An empty split comes back with no
 payloads and no experiments, so it cannot be split again.
 
 **Parameters**
@@ -563,7 +564,7 @@ payloads and no experiments, so it cannot be split again.
 | --- | --- | --- |
 | `tuple[Dataset, Dataset, Dataset]` |  | ``(train_dataset, validation_dataset, test_dataset)``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1338)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1343)</small>
 
 ---
 
@@ -584,4 +585,4 @@ debugging and example output. Each line reports the bucket's ``N``
 (experiments), ``T`` (union timestamp axis), ``D`` (channels), and the
 fraction of ``[N, T, D]`` cells the mask marks as real observations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1053)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/data.py#L1058)</small>

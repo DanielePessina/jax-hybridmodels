@@ -29,7 +29,7 @@ A time profile: call it with ``t``, and read where it jumps or bends.
 for a smooth one. Concatenate several profiles' ``jump_ts`` to pass them
 to one solve.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L41)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L44)</small>
 
 ---
 
@@ -49,7 +49,7 @@ The degenerate case, included so a code path can treat every
 quantity uniformly (a quantity is either a covariate or
 ``constant_profile(v)`` evaluated at ``t``).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L59)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L62)</small>
 
 ---
 
@@ -66,9 +66,13 @@ step_profile(*, at: 'ArrayLike', before: 'ArrayLike', after: 'ArrayLike') -> 'Pr
 Return ``t -> before if t < at else after``: a step change.
 
 For a reactor, the moment a feed valve opens or a heater switches.
-Discontinuous at ``at``, which is its ``jump_ts``.
+Discontinuous at ``at``, which is its ``jump_ts``. To fit or infer
+``at`` itself, pass ``jump_ts`` to the solve: the switch has no
+derivative in ``at``, so without them the gradient with respect to it is
+exactly 0. With them the solver ends a step on ``at`` and the gradient
+comes through the step's end.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L73)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L76)</small>
 
 ---
 
@@ -100,7 +104,7 @@ check runs when the times are host-side values; inside ``jit``/``vmap``
 (per-experiment parameters from traced covariates) it is skipped, so
 the factory stays trace-safe.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L86)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L93)</small>
 
 ---
 
@@ -122,4 +126,4 @@ outward). Knots must be strictly increasing in ``t`` and contain at
 least two entries. Its slope changes at every knot, so the knot times are
 its ``jump_ts``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L125)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L132)</small>

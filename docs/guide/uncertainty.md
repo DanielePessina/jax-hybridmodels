@@ -102,6 +102,12 @@ problem = hm.inference.make_problem(
 )
 ```
 
+With few measurements per inferred noise, Wald and Laplace intervals run a little
+narrow: they use the normal quantile where a t quantile would apply, and the
+maximum-likelihood noise is biased low by a factor of about `sqrt((n - p) / n)`. In
+a 12-point decay fit, a 95% interval covered about 92% of the time. The profile
+likelihood held its 95% there.
+
 Independent Gaussian residuals are often wrong for a densely sampled trajectory,
 and treating correlated residuals as independent makes a posterior overconfident.
 `log_likelihood=` replaces the Gaussian. It is called once per bucket and summed,
