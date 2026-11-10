@@ -223,7 +223,7 @@ def main() -> None:
         input_keys=("temperature",),
         input_bounds=TEMPERATURE_BOUNDS,
         inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
-        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
+        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, squash="sigmoid", warp="log10"),
     )
     predictors = {"rate": rate_net}
     if not args.mechanistic_only:
@@ -238,7 +238,7 @@ def main() -> None:
             # A scaler on its own cannot infer its size, so the shared pair
             # is repeated once per output.
             out_scaler=hm.BoundScaler(
-                bounds=(RESIDUAL_BOUNDS,) * 2, transform="softsign", warp="symlog"
+                bounds=(RESIDUAL_BOUNDS,) * 2, squash="softsign", warp="symlog"
             ),
         )
     # endregion predictors
@@ -256,8 +256,8 @@ def main() -> None:
     # grid over their input box in warped space instead (``box_grid``),
     # keyed by their name in the predictors dict.
     objective = hm.Objective(
-        penalty_weight=args.penalty_weight,
-        penalty_points={
+        bound_penalty_weight=args.bound_penalty_weight,
+        bound_penalty_points={
             name: box_grid(leaf.in_scaler, n_per_dim=7) for name, leaf in predictors.items()
         },
     )
@@ -265,7 +265,7 @@ def main() -> None:
     # penalty applies in both phases.
     config = hm.OptaxTrainingConfig(
         phases=(
-            hm.TrainingPhase(steps=args.steps // 2, lr=5e-3, horizon=0.4),
+            hm.TrainingPhase(steps=args.steps // 2, lr=5e-3, loss_horizon=0.4),
             hm.TrainingPhase(steps=args.steps, lr=1e-3),
         ),
     )

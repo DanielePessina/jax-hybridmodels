@@ -55,7 +55,7 @@ Read it back with [`load`](/api/serialise#load).
 The directory is created, parents included. Existing files are
 overwritten.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L339)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L344)</small>
 
 ---
 
@@ -86,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L489)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L551)</small>
 
 ---
 
@@ -119,7 +119,7 @@ A run read back by [`load`](/api/serialise#load).
 ``FitHistory`` and None.
 
 ``config`` and ``objective`` come back as typed objects. A section that
-names a callable (a custom loss, a ``penalty_fn``, an optimizer factory,
+names a callable (a custom loss, a ``bound_penalty_fn``, an optimizer factory,
 an lr schedule) cannot be rebuilt, so it comes back as the raw dict
 with each callable as ``{"__callable__": "module.qualname"}``; rebind
 those fields yourself. ``extras`` is the dict passed to ``save``.

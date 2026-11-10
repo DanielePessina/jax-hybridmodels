@@ -65,9 +65,9 @@ ready-made instance cannot: a phase that changes `lr` on one needs
 
 ## Regularisers
 
-`Objective(penalty_fn=...)`, a `(predictors, points) -> scalar`, replaces
+`Objective(bound_penalty_fn=...)`, a `(predictors, points) -> scalar`, replaces
 the bound penalty for both trainers. It is charged once per step with
-weight `penalty_weight`. See [Penalties](/guide/penalties#replacing-it).
+weight `bound_penalty_weight`. See [Penalties](/guide/penalties#replacing-it).
 
 ## Trajectory-aware penalties
 
@@ -145,7 +145,7 @@ over a fixed run length:
 ```python
 from jaxhybridmodels.schedules import annealing_schedule
 
-lr_scale = annealing_schedule("cosine", total_epochs=n_steps)
+lr_scale = annealing_schedule("cosine", total_steps=n_steps)
 lr = base_lr * lr_scale(step)
 ```
 
@@ -168,7 +168,7 @@ def vector_field(t, y, args):
     ...
 ```
 
-Masks, the tournament and saving all walk the pytree, so the embedding
+Masks, restarts and saving all walk the pytree, so the embedding
 needs no special handling.
 
 ## Registries
@@ -179,7 +179,7 @@ name, which is what lets configs round-trip through JSON:
 | Register | Module |
 | --- | --- |
 | `register_solver`, `register_adjoint` | `jaxhybridmodels.solver` |
-| `register_bound_transform`, `register_warp` | `jaxhybridmodels.transforms` |
+| `register_squash`, `register_warp` | `jaxhybridmodels.transforms` |
 | `register_algorithm` | `jaxhybridmodels.training.evosax` |
 
 Register before loading a saved run that uses a custom entry.

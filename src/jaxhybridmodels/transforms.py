@@ -9,7 +9,7 @@ constant bounded by ``(1e-6, 1e2)``, a linear warp puts 99.99% of the
 physical range above ``1e-2`` and collapses the low end into an
 unresolvable sliver. ``"log10"`` puts the midpoint at ``1e-2`` instead of ``50``.
 
-The *transform* is the squash that folds the latent line into the unit
+The *squash* folds the latent line into the unit
 interval. It decides how fast the gradient dies once a predictor pushes
 against a bound.
 
@@ -22,10 +22,10 @@ JSON-friendly and round-trips through ``eqx.tree_serialise_leaves``
 without changing its leaf structure. That is also why these are plain
 ``NamedTuple`` records: holding no arrays, composing one into
 ``BoundScaler`` would add a pytree node that serialises to nothing.
-Register your own with :func:`register_bound_transform` and
+Register your own with :func:`register_squash` and
 :func:`register_warp`.
 
-Gradient decay is the reason to care about the transform choice.
+Gradient decay is the reason to care about the squash choice.
 Measured float32 ``|du/dz|``, and the ``z`` at which it underflows to
 exactly ``0.0``:
 
@@ -36,7 +36,7 @@ exactly ``0.0``:
 Sigmoid's last usable gradient (3.6e-7, at z=15) is matched by algebraic
 at z~110 and by softsign at z~1178. Polynomial decay does not remove the
 need for the saturation penalty: escape time under a gradient of c/z^2
-scales as z^3, so a slower-decaying transform turns an impossible
+scales as z^3, so a slower-decaying squash turns an impossible
 recovery into a slow one.
 
 ``tanh`` is absent on purpose. ``(1 + tanh z) / 2`` is exactly
@@ -55,16 +55,16 @@ from jax.typing import ArrayLike
 from jaxtyping import Array
 
 __all__ = (
-    "BoundTransform",
+    "Squash",
     "Warp",
-    "BOUND_TRANSFORMS",
+    "SQUASHES",
     "WARPS",
-    "register_bound_transform",
+    "register_squash",
     "register_warp",
 )
 
 
-class BoundTransform(NamedTuple):
+class Squash(NamedTuple):
     """A squash from the whole real line into ``(0, 1)``, with its inverse and metadata.
 
     Attributes
@@ -81,7 +81,7 @@ class BoundTransform(NamedTuple):
         The latent at which ``forward`` reaches 0.95, where the value enters
         the outer 5% of its warped box (under a log warp, 5% of the box in
         log units, not of the physical range). Default for
-        ``BoundScaler.z_knee``. It must come from the transform: reusing
+        ``BoundScaler.saturation_knee``. It must come from the transform: reusing
         sigmoid's 2.944 for softsign would start charging at 12.7% from the
         bound instead of 5%.
     """
@@ -146,27 +146,27 @@ def _algebraic_inverse_slope(s: Array) -> Array:
     return 2.0 * (1.0 - y * y) ** -1.5
 
 
-BOUND_TRANSFORMS: dict[str, BoundTransform] = {
-    "sigmoid": BoundTransform(
+SQUASHES: dict[str, Squash] = {
+    "sigmoid": Squash(
         forward=jax.nn.sigmoid,
         inverse=jax.scipy.special.logit,
         inverse_slope=lambda s: 1.0 / (s * (1.0 - s)),
         knee=2.9444389,  # logit(0.95)
     ),
-    "algebraic": BoundTransform(
+    "algebraic": Squash(
         forward=_algebraic,
         inverse=_algebraic_inverse,
         inverse_slope=_algebraic_inverse_slope,
         knee=2.0647416,  # 0.9 / sqrt(1 - 0.81)
     ),
-    "softsign": BoundTransform(
+    "softsign": Squash(
         forward=_softsign,
         inverse=_softsign_inverse,
         inverse_slope=_softsign_inverse_slope,
         knee=9.0,  # 0.9 / (1 - 0.9)
     ),
 }
-"""Name to :class:`BoundTransform`. Extend via :func:`register_bound_transform`.
+"""Name to :class:`Squash`. Extend via :func:`register_squash`.
 
 ``algebraic`` is the recommended alternative to ``sigmoid``: 180 times the
 latent range before the gradient dies, and smooth to all orders.
@@ -198,21 +198,21 @@ leaves the reachable physical values unchanged.
 """
 
 
-def register_bound_transform(name: str, transform: BoundTransform) -> None:
+def register_squash(name: str, squash: Squash) -> None:
     """Register a squash under ``name`` for use by ``BoundScaler``.
 
     Mirrors :func:`~jaxhybridmodels.solver.register_solver`. A scaler stores
-    only the name, so a custom transform must be registered before a saved
+    only the name, so a custom squash must be registered before a saved
     scaler that references it can be rebuilt. Re-registering an existing
     name overwrites without warning.
     """
-    BOUND_TRANSFORMS[name] = transform
+    SQUASHES[name] = squash
 
 
 def register_warp(name: str, warp: Warp) -> None:
     """Register an axis warp under ``name`` for use by ``BoundScaler``.
 
-    Same contract as :func:`register_bound_transform`. A warp must be
+    Same contract as :func:`register_squash`. A warp must be
     monotone on the declared box and ``inverse`` must undo ``forward``
     there, or the scaler's round trip stops being the identity.
     """

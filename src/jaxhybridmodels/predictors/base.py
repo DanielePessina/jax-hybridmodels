@@ -55,7 +55,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaxhybridmodels.penalties import soft_inverse
-from jaxhybridmodels.transforms import BOUND_TRANSFORMS, WARPS, check_bounds, warp_bounds
+from jaxhybridmodels.transforms import SQUASHES, WARPS, check_bounds, warp_bounds
 
 # What this module exports.
 __all__ = (
@@ -221,15 +221,14 @@ class BoundScaler(eqx.Module):
     squash
         The map from latent onto ``(0, 1)``, applied before the affine
         rescale onto the box. ``"sigmoid"`` (default), ``"algebraic"``,
-        ``"softsign"``. Same module, ``BOUND_TRANSFORMS``. Stored as the
-        ``transform`` field.
+        ``"softsign"``. Same module, ``SQUASHES``.
     temperature
         Divides the latent before the squash. A larger ``T`` spreads the
         same box over a wider latent range, so the squash saturates more
         slowly. ``T = 1.0`` is the plain squash.
     knee
-        The ``z_knee`` field. Latent magnitude past which
-        :meth:`saturation` starts charging. Derived per transform from
+        The ``saturation_knee`` field. Latent magnitude past which
+        :meth:`saturation` starts charging. Derived per squash from
         one physical criterion, the outer 5% of the box.
 
     The two maps
@@ -273,10 +272,12 @@ class BoundScaler(eqx.Module):
         ``BoundScaler((270.0, 350.0))``, as a one-component scaler, which
         acts elementwise on an array of any shape. Use None or signed
         infinity for a missing endpoint. Finite pairs must satisfy
-        ``low < high``. Open pairs require a linear warp.
-    transform : str
-        Static. Squash name, a key of ``BOUND_TRANSFORMS``. Register your
-        own with ``register_bound_transform``.
+        ``low < high``. A fully open pair requires a linear warp; a
+        one-sided pair also takes ``"log"`` or ``"log10"``, which then
+        warps the distance from the bound.
+    squash : str
+        Static. Squash name, a key of ``SQUASHES``. Register your
+        own with ``register_squash``.
     temperature : Array
         Scalar (or per-component) latent sharpness. ``T = 1.0`` recovers
         the plain squash and its inverse.
@@ -286,44 +287,44 @@ class BoundScaler(eqx.Module):
     warped_bounds : tuple[tuple[float, float], ...]
         Static. ``bounds`` pushed through the warp once at construction.
         Resolved eagerly so no call has to warp the edges under a trace.
-    logit_eps : float
+    edge_eps : float
         Static. Half-width of the band at each end of ``[0, 1]`` outside
         which ``to_latent`` continues linearly instead of running into
         the squash inverse's pole. Also sets the continuation slope
-        (roughly ``1 / logit_eps``). For a one-sided bound there is no unit
+        (roughly ``1 / edge_eps``). For a one-sided bound there is no unit
         interval, so it is a distance from the bound in the value's own
-        units: ``to_latent`` is exact only beyond ``logit_eps`` of the edge.
+        units: ``to_latent`` is exact only beyond ``edge_eps`` of the edge.
         ``Parameter`` uses the exact inverse and is not affected.
-    z_knee : float
-        Static. The knee. Defaults to the transform's own value, which
+    saturation_knee : float
+        Static. The knee. Defaults to the squash's own value, which
         for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the
         box. Do not share one number across transforms: 2.944 is 12.7%
         from the bound on softsign, which would charge 2.7x too hard.
     """
 
     bounds: tuple[tuple[float, float], ...] = eqx.field(static=True)
-    transform: str = eqx.field(static=True)
+    squash: str = eqx.field(static=True)
     temperature: Array
     warp: str = eqx.field(static=True)
     warped_bounds: tuple[tuple[float, float], ...] = eqx.field(static=True)
-    logit_eps: float = eqx.field(static=True)
-    z_knee: float = eqx.field(static=True)
+    edge_eps: float = eqx.field(static=True)
+    saturation_knee: float = eqx.field(static=True)
 
     def __init__(
         self,
         bounds: Any,
         *,
-        transform: str = "sigmoid",
+        squash: str = "sigmoid",
         temperature: Any = 1.0,
         warp: str = "linear",
-        logit_eps: float = 1e-3,
-        z_knee: float | None = None,
+        edge_eps: float = 1e-3,
+        saturation_knee: float | None = None,
     ) -> None:
-        if transform not in BOUND_TRANSFORMS:
+        if squash not in SQUASHES:
             raise ValueError(
-                f"Unknown transform {transform!r}; available: "
-                f"{sorted(BOUND_TRANSFORMS)}. Register custom squashes via "
-                "register_bound_transform(name, transform)."
+                f"Unknown squash {squash!r}; available: "
+                f"{sorted(SQUASHES)}. Register custom squashes via "
+                "register_squash(name, squash)."
             )
         if warp not in WARPS:
             raise ValueError(
@@ -364,12 +365,12 @@ class BoundScaler(eqx.Module):
             ) from exc
         if not valid_temperature:
             raise ValueError("BoundScaler temperature must be finite and strictly positive")
-        if not math.isfinite(float(logit_eps)) or not 0.0 < float(logit_eps) < 0.5:
+        if not math.isfinite(float(edge_eps)) or not 0.0 < float(edge_eps) < 0.5:
             raise ValueError(
-                "BoundScaler logit_eps must be finite and lie strictly between 0 and 0.5"
+                "BoundScaler edge_eps must be finite and lie strictly between 0 and 0.5"
             )
         self.bounds = bounds
-        self.transform = transform
+        self.squash = squash
         self.warp = warp
         # Resolved once here, not per call: jnp ops inside a jit trace are
         # staged out, so warping the edges lazily would hand back tracers.
@@ -378,13 +379,15 @@ class BoundScaler(eqx.Module):
             for pair in bounds
         )
         self.temperature = temperature_arr
-        self.logit_eps = float(logit_eps)
+        self.edge_eps = float(edge_eps)
         # Resolved to a float now, not looked up per call. The static field
         # stays JSON-friendly, and a saved scaler keeps the knee it trained
         # with even if the registry default later changes.
-        self.z_knee = float(BOUND_TRANSFORMS[transform].knee) if z_knee is None else float(z_knee)
-        if not math.isfinite(self.z_knee) or self.z_knee < 0.0:
-            raise ValueError("BoundScaler z_knee must be finite and non-negative")
+        self.saturation_knee = (
+            float(SQUASHES[squash].knee) if saturation_knee is None else float(saturation_knee)
+        )
+        if not math.isfinite(self.saturation_knee) or self.saturation_knee < 0.0:
+            raise ValueError("BoundScaler saturation_knee must be finite and non-negative")
 
     def _component(self, v: Array, i: int, *, inverse: bool, guard: bool = True) -> Array:
         """Map component ``i`` between physical and latent units.
@@ -402,7 +405,7 @@ class BoundScaler(eqx.Module):
         if math.isfinite(low) and math.isfinite(high):
             wl, wh = self.warped_bounds[i]
             warp = WARPS[self.warp]
-            squash = BOUND_TRANSFORMS[self.transform]
+            squash = SQUASHES[self.squash]
             if not inverse:
                 # The affine rescale, and a nonlinear warp's inverse, can round
                 # one ulp past a bound, so every warp is clipped to the box.
@@ -412,7 +415,7 @@ class BoundScaler(eqx.Module):
             if not guard:
                 return squash.inverse(normalized) * temperature
             return (
-                soft_inverse(normalized, squash.inverse, squash.inverse_slope, self.logit_eps)
+                soft_inverse(normalized, squash.inverse, squash.inverse_slope, self.edge_eps)
                 * temperature
             )
         if not (math.isfinite(low) or math.isfinite(high)):
@@ -426,12 +429,12 @@ class BoundScaler(eqx.Module):
         if not guard:
             # Stable softplus inverse: log(expm1(d)) = d + log(1 - exp(-d)).
             return (distance + jnp.log(-jnp.expm1(-distance))) * temperature
-        # Below logit_eps the inverse continues linearly, as in soft_inverse,
+        # Below edge_eps the inverse continues linearly, as in soft_inverse,
         # so an input at or past the endpoint keeps a finite sensitivity.
-        safe = jnp.maximum(distance, self.logit_eps)
+        safe = jnp.maximum(distance, self.edge_eps)
         latent = safe + jnp.log(-jnp.expm1(-safe))
-        slope = 1.0 / (-jnp.expm1(-self.logit_eps))
-        return (latent + jnp.minimum(distance - self.logit_eps, 0.0) * slope) * temperature
+        slope = 1.0 / (-jnp.expm1(-self.edge_eps))
+        return (latent + jnp.minimum(distance - self.edge_eps, 0.0) * slope) * temperature
 
     @property
     def _uniform(self) -> bool:
@@ -446,7 +449,7 @@ class BoundScaler(eqx.Module):
         Under ``"log"`` the value is ``edge + exp(z / T)``, so an Adam step on
         the latent is a relative change in the distance however large it is.
         A softplus would move a value of 5000 by about the learning rate per
-        step. The guarded inverse continues linearly below ``logit_eps``, as
+        step. The guarded inverse continues linearly below ``edge_eps``, as
         the softplus branch does, so an input at or past the edge keeps a
         finite latent and a finite sensitivity.
         """
@@ -456,7 +459,7 @@ class BoundScaler(eqx.Module):
         distance = sign * (v - edge)
         if not guard:
             return warp.forward(distance) * temperature
-        eps = jnp.asarray(self.logit_eps, dtype=jnp.result_type(distance, float))
+        eps = jnp.asarray(self.edge_eps, dtype=jnp.result_type(distance, float))
         safe = jnp.maximum(distance, eps)
         _, slope = jax.jvp(warp.forward, (eps,), (jnp.ones_like(eps),))
         return (warp.forward(safe) + jnp.minimum(distance - eps, 0.0) * slope) * temperature
@@ -501,7 +504,7 @@ class BoundScaler(eqx.Module):
             low, high = self.bounds[i]
             temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
             if math.isfinite(low) and math.isfinite(high):
-                return BOUND_TRANSFORMS[self.transform].forward(v / temperature)
+                return SQUASHES[self.squash].forward(v / temperature)
             if not (math.isfinite(low) or math.isfinite(high)):
                 return jnp.full_like(v, 0.5)
             half = 0.5 * jax.nn.sigmoid(v / temperature)
@@ -522,7 +525,7 @@ class BoundScaler(eqx.Module):
         low, high = self.bounds[i]
         temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
         if math.isfinite(low) and math.isfinite(high):
-            return BOUND_TRANSFORMS[self.transform].inverse(position) * temperature
+            return SQUASHES[self.squash].inverse(position) * temperature
         if not (math.isfinite(low) or math.isfinite(high)):
             raise ValueError("latent_at_position: an unbounded component has no squash position")
         # Half the sigmoid, so the inverse is the logit of twice the distance
@@ -546,7 +549,7 @@ class BoundScaler(eqx.Module):
         example), so a clipped input silently drops a real sensitivity from
         the adjoint.
 
-        Inside ``[logit_eps, 1 - logit_eps]`` the map is exactly the plain
+        Inside ``[edge_eps, 1 - edge_eps]`` the map is exactly the plain
         inverse in value and derivative. Outside it continues linearly at
         the inverse's slope at the crossing: finite values, non-zero
         constant gradient, and a C^1 join so an adaptive step controller
@@ -618,7 +621,7 @@ class BoundScaler(eqx.Module):
         return x[..., None] if len(self.bounds) == 1 else jnp.atleast_1d(x)
 
     def saturation(self, z: Array) -> Array:
-        """Scalar squared overshoot of ``|z / temperature|`` past ``z_knee``.
+        """Scalar squared overshoot of ``|z / temperature|`` past ``saturation_knee``.
 
         Measures how hard the output squash is pinned against its bound.
         For sigmoid the knee is ``2.944``, where ``sigmoid(2.944) = 0.95``,
@@ -654,7 +657,7 @@ class BoundScaler(eqx.Module):
             temperature = self.temperature if self.temperature.ndim == 0 else self.temperature[i]
             u = z[..., i] / temperature
             if math.isfinite(low) and math.isfinite(high):
-                terms.append(jnp.maximum(jnp.abs(u) - self.z_knee, 0.0) ** 2)
+                terms.append(jnp.maximum(jnp.abs(u) - self.saturation_knee, 0.0) ** 2)
             else:
                 terms.append(jnp.zeros_like(u))
         return jnp.stack(terms, axis=-1) if terms else jnp.zeros((*z.shape[:-1], 0))
@@ -703,10 +706,10 @@ class Parameter(eqx.Module):
     bounds
         One ``(low, high)`` pair shared by every element, or one pair per
         element in flattened order. None for a missing endpoint. Omit for
-        an unbounded value. Two finite endpoints use the ``transform``
-        squash. One endpoint puts the distance from it through softplus,
-        or ``exp`` under ``warp="log"`` (``10 **`` under ``"log10"``).
-    transform, warp
+        an unbounded value. Two finite endpoints use the ``squash``. One
+        endpoint puts the distance from it through softplus, or ``exp``
+        under ``warp="log"`` (``10 **`` under ``"log10"``).
+    squash, warp
         Passed to :class:`BoundScaler`. ``warp="log10"`` suits rate
         constants that span decades. With two finite bounds it warps the
         value and needs them positive; with one it warps the distance from
@@ -729,14 +732,14 @@ class Parameter(eqx.Module):
         value: Any,
         bounds: Any = None,
         *,
-        transform: str = "sigmoid",
+        squash: str = "sigmoid",
         warp: str = "linear",
     ) -> None:
         physical = _float_array(value)
         if physical.size == 0 or not bool(jnp.all(jnp.isfinite(physical))):
             raise ValueError("Parameter value must be nonempty and finite")
         flat = physical.reshape(-1)
-        scaler = BoundScaler(_bound_pairs(bounds, flat.size), transform=transform, warp=warp)
+        scaler = BoundScaler(_bound_pairs(bounds, flat.size), squash=squash, warp=warp)
         # Compared in the value's own dtype: a float64 bound of 0.1 rounds onto
         # the float32 value 0.1, which is on the bound. Under x64 the scaler
         # promotes a float32 value to float64, so this check is stricter than

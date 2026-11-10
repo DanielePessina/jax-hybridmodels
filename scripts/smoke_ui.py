@@ -24,7 +24,7 @@ def fire_representative_events(ui: Any) -> None:
     ui.on_step_end(step_idx=4, phase_idx=0, loss=0.42)
     ui.on_phase_end(phase_idx=0)
     ui.on_generation_end(gen_idx=0, best_loss=0.2, mean_loss=0.5)
-    ui.on_run_end(final_loss=0.05)
+    ui.on_run_end(returned_loss=0.05)
     ui.on_message(level="info", text="finished")
 
 

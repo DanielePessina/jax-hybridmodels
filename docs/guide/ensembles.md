@@ -7,7 +7,9 @@ best first. `hm.predict_ensemble` averages their predictions.
 
 `fit_ensemble` takes `fit`'s arguments (`data`, `config`, `key`,
 `objective`, `freeze`, `trainable`, `ui`, `validation`) plus `n_members`,
-`n_seeds` and `bootstrap`. It trains with Optax only. Every member starts from a
+`bootstrap`, and the seed count of each mode: `n_seeds` for a seed ensemble,
+`seeds_per_member` for a bootstrap one. Setting the other mode's keyword
+raises. It trains with Optax only. Every member starts from a
 fresh initialisation of the predictors drawn from `key`.
 
 With `validation=`, each member picks its returned step on the validation loss,
@@ -17,17 +19,17 @@ training data.
 ## Seed ensembles
 
 Score `n_seeds` initialisations with the
-[tournament](/guide/training#the-tournament) on all of `data`, then fully
+[restarts](/guide/training#restarts) on all of `data`, then fully
 train the best `n_members`:
 
 ```python
 results = model.fit_ensemble(data, config, key=key, n_members=4, n_seeds=16)
 ```
 
-`config.tournament_steps` sets how many warm-up steps each seed gets before
+`config.restart_steps` sets how many warm-up steps each seed gets before
 it is scored. The default `0` scores the initialisation as it stands.
 `n_seeds` defaults to `n_members`, which trains every seed.
-`config.tournament_attempts` is not used here; `n_seeds` replaces it.
+`config.restarts` is not used here; `n_seeds` replaces it.
 
 ## Bootstrap ensembles
 
@@ -38,16 +40,16 @@ experiments, drawn with replacement:
 results = model.fit_ensemble(data, config, key=key, n_members=10, bootstrap=True)
 ```
 
-`n_seeds` defaults to 1 here: one fresh seed per resample. With
-`n_seeds > 1`, each resample's member is the best of that many seeds,
-scored on the resample. `make_bootstrap_dataset(dataset, key=key)` gives a
+`seeds_per_member` defaults to 1: one fresh seed per resample. With
+`seeds_per_member > 1`, each resample's member is the best of that many
+seeds, scored on the resample. `make_bootstrap_dataset(dataset, key=key)` gives a
 single resample if you want to train on it yourself. A resample keeps IDs
 unique by naming an experiment's second and later draws `<exp_id>#2`,
 `<exp_id>#3` and so on.
 
 ## Ranking and failures
 
-The list is sorted by `FitResult.final_loss`, the training loss at each
+The list is sorted by `FitResult.returned_loss`, the training loss at each
 member's returned parameters. A seed whose warm-up fails is dropped, so
 fewer than `n_members` may come back. If every seed fails, `fit_ensemble`
 raises `RuntimeError`.

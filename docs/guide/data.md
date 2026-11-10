@@ -158,8 +158,8 @@ single time has no gap to pad, so it stays in a bucket of its own.
 
 Capping leaves the data loss alone: the trainers pool buckets by what each
 loss averages over, so `mse` stays the mean over every measurement and
-`bal_mse` over every experiment, however the experiments are grouped. A
-phase `horizon` is measured on each experiment's own span, which the added
+`per_experiment_mse` over every experiment, however the experiments are grouped. A
+phase's `loss_horizon` is measured on each experiment's own span, which the added
 rows do not change. Only a trajectory penalty differs, since it also sees the
 state at the added rows.
 
@@ -206,5 +206,5 @@ experiment = hm.make_experiment(
 The dataset inserts `t0` as an unobserved timestamp, so the simulator
 receives it as `ts[0]` and losses ignore it. A `t0` after the first
 observation raises. Without `t0`, `y0` belongs to the first union timestamp.
-A phase `horizon` measures each experiment's span from `t0`, and always scores
+A phase's `loss_horizon` measures each experiment's span from `t0`, and always scores
 its first measurement.

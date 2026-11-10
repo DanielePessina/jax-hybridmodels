@@ -57,7 +57,7 @@ uncertainty in it. A real ICH Q1E analysis fits the intercept too.
 ## The fit and its information
 
 The trainer gets close, and `optimize` finishes at the maximum likelihood.
-`noise="data"` uses the assay variance given with each measurement, and
+`noise_sd="data"` uses the assay variance given with each measurement, and
 `log_prior=None` keeps this a likelihood-only problem:
 
 <<< @/../examples/shelf_life/shelf_life.py#fisher

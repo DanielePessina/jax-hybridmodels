@@ -99,7 +99,7 @@ class TrainingUI(Protocol):
         """
         ...
 
-    def on_run_end(self, *, final_loss: float) -> None:
+    def on_run_end(self, *, returned_loss: float) -> None:
         """Fires once after every phase has completed (or training was aborted gracefully)."""
         ...
 
@@ -115,7 +115,7 @@ class EvosaxUI(Protocol):
     Differs from ``TrainingUI`` because the evosax loop has no phases and
     no per-step gradient loss. Each generation reports the best and mean
     fitness across its population instead. The run-level events use the
-    same argument names as ``TrainingUI`` (``total_steps``, ``final_loss``).
+    same argument names as ``TrainingUI`` (``total_steps``, ``returned_loss``).
 
     Event order during a typical run::
 
@@ -145,7 +145,7 @@ class EvosaxUI(Protocol):
         """Fires once per generation with population statistics."""
         ...
 
-    def on_run_end(self, *, final_loss: float) -> None:
+    def on_run_end(self, *, returned_loss: float) -> None:
         """Fires once after the last generation with the loss of the returned predictors."""
         ...
 
@@ -156,7 +156,7 @@ class EvosaxUI(Protocol):
 
 @contextmanager
 def close_run_on_error(ui: TrainingUI | EvosaxUI) -> Iterator[None]:
-    """Fire ``on_run_end(final_loss=nan)`` if the body raises, then re-raise.
+    """Fire ``on_run_end(returned_loss=nan)`` if the body raises, then re-raise.
 
     The trainers wrap everything after ``on_run_start`` in it, so a compile
     failure, a non-finite loss or Ctrl-C does not leave a Rich Live
@@ -165,7 +165,7 @@ def close_run_on_error(ui: TrainingUI | EvosaxUI) -> Iterator[None]:
     try:
         yield
     except BaseException:
-        ui.on_run_end(final_loss=math.nan)
+        ui.on_run_end(returned_loss=math.nan)
         raise
 
 

@@ -169,7 +169,7 @@ TRAJECTORY = Objective(trajectory_penalty_fn=accumulated_penalty, trajectory_pen
 
 
 def test_evosax_ranks_by_the_trajectory_penalty():
-    config = EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.5)
+    config = EvosaxTrainingConfig(population_size=8, generations=10, init_sigma=0.5)
     result = train_with_evosax(
         embedded_model(latent_predictors(5.0)),
         embedded_dataset(),
@@ -195,7 +195,7 @@ def test_a_probe_alone_drives_every_bootstrap_member():
     )
     assert len(members) == 2
     for member in members:
-        assert np.isfinite(member.final_loss)
+        assert np.isfinite(member.returned_loss)
         assert float(member.model.predictors[0].inner.c) < 4.5
 
 
@@ -268,7 +268,7 @@ def test_patience_stops_early_and_weak_scalars_train(decay_data, capsys):
     weak type, so the first update would retrace every kernel. The warm-up
     settle in ``training/optax.py`` absorbs that; the run must finish with
     finite losses. With ``lr=0`` nothing improves after step 0, so
-    ``patience=3`` stops the run four steps in. No UI and ``verbose=False``
+    ``patience_steps=3`` stops the run four steps in. No UI and ``verbose=False``
     must print nothing.
     """
 
@@ -280,7 +280,7 @@ def test_patience_stops_early_and_weak_scalars_train(decay_data, capsys):
     result = train_with_optax(
         make_model(predictors),
         decay_data,
-        hm.OptaxTrainingConfig(steps=20, lr=0.0, patience=3),
+        hm.OptaxTrainingConfig(steps=20, lr=0.0, patience_steps=3),
         key=jr.key(0),
         verbose=False,
     )
@@ -298,7 +298,7 @@ def curriculum(temp_data):
     ``Parameter`` has a loss floor over the full window. Over the first
     observation every curve looks alike and the loss is far lower.
     """
-    short = TrainingPhase(steps=10, lr=0.1, horizon=0.2)
+    short = TrainingPhase(steps=10, lr=0.1, loss_horizon=0.2)
     both = parameter_model().fit(
         temp_data,
         hm.OptaxTrainingConfig(phases=(short, TrainingPhase(steps=15, lr=0.05))),
@@ -352,14 +352,14 @@ def test_without_restore_best_the_final_loss_is_measured_at_the_returned_model(d
     assert result.best_step is None
     returned = result.model.predict(decay_data)
     expected = float(hm.compute_metrics(returned)["conc"].mse)
-    assert result.final_loss == pytest.approx(expected, rel=1e-4)
-    assert result.final_loss != result.history.loss[-1]
+    assert result.returned_loss == pytest.approx(expected, rel=1e-4)
+    assert result.returned_loss != result.history.loss[-1]
 
 
 def test_evosax_with_validation_keeps_a_good_start(decay_data):
     """A short, wide search must not replace a start that validates better."""
     model = parameter_model(rate=TRUE_RATE)
-    config = hm.EvosaxTrainingConfig(population_size=4, steps=2, init_sigma=3.0)
+    config = hm.EvosaxTrainingConfig(population_size=4, generations=2, init_sigma=3.0)
     result = model.fit(decay_data, config, key=jr.key(0), validation=decay_data, verbose=False)
     assert rate_of(result.model) == pytest.approx(TRUE_RATE, rel=1e-6)
     # The validation loss reported is the start's own, not generation 0's.
@@ -381,7 +381,7 @@ def test_an_inject_hyperparams_rate_survives_a_reset_at_the_default_lr(decay_dat
     # The same holds when a phase rebuilds its state for multiple shooting.
     segmented = hm.OptaxTrainingConfig(
         phases=(
-            TrainingPhase(steps=2, optimizer=injected, segments=2),
+            TrainingPhase(steps=2, optimizer=injected, shooting_segments=2),
             TrainingPhase(steps=2, optimizer=injected, reset_optimizer=True),
         )
     )
@@ -404,11 +404,11 @@ def test_bootstrap_members_start_from_fresh_draws(decay_data):
 
 def test_tournament_falls_back_when_every_attempt_fails(decay_data):
     # The fallback keeps the input model, whose own first step then fails too.
-    with pytest.warns(RuntimeWarning, match="all attempts failed"):
+    with pytest.warns(RuntimeWarning, match="all candidates failed"):
         with pytest.raises(FloatingPointError, match="non-finite"):
             make_model(parameter_predictors(), nan_simulate).fit(
                 decay_data,
-                hm.OptaxTrainingConfig(steps=1, tournament_attempts=2, tournament_steps=1),
+                hm.OptaxTrainingConfig(steps=1, restarts=1, restart_steps=1),
                 key=jr.key(0),
                 verbose=False,
             )
@@ -426,19 +426,19 @@ def test_the_tournament_keeps_the_start_and_summarises_failures(decay_data):
     model = make_model(
         {"rate": hm.Parameter(0.3, bounds=(0.0, 1.0)), "offset": hm.Constant(0.0)}, only_the_start
     )
-    config = hm.OptaxTrainingConfig(steps=3, lr=0.0, tournament_attempts=3, tournament_steps=1)
+    config = hm.OptaxTrainingConfig(steps=3, lr=0.0, restarts=2, restart_steps=1)
     result = model.fit(decay_data, config, key=jr.key(0), verbose=False)
-    first, *redrawn = result.history.tournament_scores
+    first, *redrawn = result.history.restart_scores
     assert math.isfinite(first) and all(math.isinf(score) for score in redrawn)
     assert "2 failed" in result.summary()
 
     failed = hm.FitResult(
         model=model,
-        history=hm.FitHistory(loss=(1.0,), tournament_scores=(math.inf,) * 3),
+        history=hm.FitHistory(loss=(1.0,), restart_scores=(math.inf,) * 3),
         best_step=0,
         stop_reason="budget_exhausted",
     )
-    assert "all 3 attempts failed" in failed.summary()
+    assert "all 3 candidates failed" in failed.summary()
 
 
 def test_tournament_survives_equinox_runtime_failures(decay_data):
@@ -449,7 +449,7 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
     def score_bucket(*_args):
         raise eqx.EquinoxRuntimeError("solver failed")
 
-    with pytest.warns(RuntimeWarning, match="all attempts failed"):
+    with pytest.warns(RuntimeWarning, match="all candidates failed"):
         ranked, scores = _shared_tournament(
             predictors,
             decay_data,
@@ -458,9 +458,9 @@ def test_tournament_survives_equinox_runtime_failures(decay_data):
             apply_update=lambda *args: args[:2],
             optimizer=optax.sgd(1e-3),
             trainable=trainable_mask(predictors),
-            tournament_attempts=2,
-            tournament_steps=0,
-            tournament_lr=1e-3,
+            attempts=2,
+            restart_steps=0,
+            restart_lr=1e-3,
             key=jr.key(0),
             horizon=jnp.asarray(1.0),
             top_k=1,
@@ -518,7 +518,7 @@ def test_failed_seed_ensemble_raises_and_closes_the_bracket(decay_data):
     with pytest.raises(RuntimeError, match="every seed failed"):
         make_model(parameter_predictors(), nan_simulate).fit_ensemble(
             decay_data,
-            hm.OptaxTrainingConfig(steps=2, tournament_steps=1),
+            hm.OptaxTrainingConfig(steps=2, restart_steps=1),
             key=jr.key(0),
             n_members=1,
             n_seeds=2,
@@ -560,7 +560,7 @@ def train_with(trainer: str, model: hm.HybridModel, data: Dataset, **kwargs: Any
             **kwargs,
             verbose=False,
         )
-    config = EvosaxTrainingConfig(population_size=4, steps=2)
+    config = EvosaxTrainingConfig(population_size=4, generations=2)
     return train_with_evosax(model, data, config, **kwargs, verbose=False)
 
 
@@ -583,7 +583,7 @@ def test_error_after_run_start_closes_the_ui(decay_data, trainer):
         train_with(trainer, model, decay_data, key=jr.key(0), ui=ui)
     assert ui.count("on_run_start") == ui.count("on_run_end") == 1
     assert not ui.open
-    assert math.isnan(ui.events[-1][1]["final_loss"])
+    assert math.isnan(ui.events[-1][1]["returned_loss"])
 
 
 def test_predict_on_explicit_and_even_grids(decay_data):
@@ -661,8 +661,8 @@ def test_multi_bucket_fitness_pools_like_optax(quadratic_data):
         bucket_payloads=(small, large),
         shares=(jnp.asarray(0.25), jnp.asarray(0.75)),
         loss_fn=lambda _pred, bucket: bucket.n_obs.astype(jnp.float32),
-        penalty_fn=lambda _p, _points: jnp.asarray(0.0),
-        penalty_weight=0.0,
+        bound_penalty_fn=lambda _p, _points: jnp.asarray(0.0),
+        bound_penalty_weight=0.0,
         simulate_fn=simulate_quadratic,
         state_to_output=identity,
         solver=SOLVER,
@@ -711,7 +711,7 @@ def _rate(model: hm.HybridModel) -> float:
 def validation_fit(decay_data):
     """Validation data generated at the starting rate, so training only hurts it."""
     validation = decay_dataset(lambda temp: 0.3)
-    config = hm.OptaxTrainingConfig(steps=20, lr=0.03, patience=2)
+    config = hm.OptaxTrainingConfig(steps=20, lr=0.03, patience_steps=2)
     return parameter_model().fit(
         decay_data, config, validation=validation, key=jr.key(2), verbose=False
     )
@@ -729,7 +729,8 @@ def test_stop_reason_follows_the_final_phase(decay_data, monkeypatch):
     # Phase 0 cannot improve (lr=0), so patience cuts it short. Phase 1
     # improves every step and runs to its budget.
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(steps=10, lr=0.0), hm.TrainingPhase(steps=3, lr=0.05)), patience=2
+        phases=(hm.TrainingPhase(steps=10, lr=0.0), hm.TrainingPhase(steps=3, lr=0.05)),
+        patience_steps=2,
     )
     result = parameter_model().fit(decay_data, config, key=jr.key(5))
     assert result.history.phase.count(0) < 10
@@ -748,7 +749,7 @@ def evosax_fit(decay_data):
     console = _console()
     predictors = {**parameter_predictors(), "meta": hm.Constant((1.0, [2.0, 3.0]))}
     model = eqx.tree_at(lambda m: m.predictors, parameter_model(), predictors)
-    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.5)
+    config = hm.EvosaxTrainingConfig(population_size=8, generations=10, init_sigma=0.5)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(evosax_module, "live_display_available", lambda: True)
         patch.setattr(
@@ -761,13 +762,18 @@ def evosax_fit(decay_data):
 
 
 def test_population_fit_moves_values_and_keeps_constants(evosax_fit):
-    """Evosax fills a monotone ``loss``, improves the rate, and leaves Constants alone."""
+    """Evosax records each generation's best, improves the rate, and leaves Constants alone."""
     result, _ = evosax_fit
     loss = result.history.loss
     assert len(loss) == 10
-    assert all(b <= a for a, b in zip(loss, loss[1:], strict=False))
     assert result.history.penalty == result.history.phase == result.history.validation_loss == ()
-    assert result.best_step == int(np.argmin(loss))
+    # The returned candidate is the best seen, the warm-up's included, so its
+    # loss is at or below every generation's best.
+    assert result.returned_loss <= min(loss)
+    if result.returned_loss < min(loss):
+        assert result.best_step == 0
+    else:
+        assert result.best_step == int(np.argmin(loss))
     assert abs(_rate(result.model) - TRUE_RATE) < abs(0.3 - TRUE_RATE)
     meta = result.model.predictors["meta"].value
     assert float(meta[0]) == 1.0
@@ -787,7 +793,7 @@ def test_piped_output_gets_plain_lines(decay_data, capsys, monkeypatch):
     assert any(line.startswith("step 20/20") for line in lines)
     assert lines[-1].startswith("done: final loss")
 
-    config = hm.EvosaxTrainingConfig(population_size=4, steps=3, init_sigma=0.1)
+    config = hm.EvosaxTrainingConfig(population_size=4, generations=3, init_sigma=0.1)
     parameter_model().fit(decay_data, config, key=jr.key(0))
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "searching: 3 generations of 4 candidates"
@@ -894,7 +900,7 @@ def test_evosax_log_every_throttles_the_generation_table():
     bests = [0.7771, 0.6661, 0.5551, 0.4441, 0.3331]
     for i, best in enumerate(bests):
         ui.on_generation_end(gen_idx=i, best_loss=best, mean_loss=best + 0.1)
-    ui.on_run_end(final_loss=0.2221)
+    ui.on_run_end(returned_loss=0.2221)
     text = console.export_text()
     assert [f"{b:.4f}" in text for b in bests] == [True, False, True, False, True]
 
@@ -905,10 +911,10 @@ def test_dashboards_tolerate_out_of_order_events():
     training.on_run_start(total_steps=1, num_phases=1)
     training.on_phase_end(phase_idx=0)
     training.on_step_end(step_idx=0, phase_idx=0, loss=0.0)
-    training.on_run_end(final_loss=0.0)
+    training.on_run_end(returned_loss=0.0)
     evosax = RichEvosaxUI(console=_console())
     evosax.on_run_start(total_steps=3, population_size=4)
-    evosax.on_run_end(final_loss=0.0)
+    evosax.on_run_end(returned_loss=0.0)
 
 
 def test_filter_vmap_builds_a_batch_of_models():
@@ -1028,7 +1034,7 @@ def _metadata(run_dir: Path) -> dict[str, Any]:
 
 def test_an_evosax_config_reloads_as_its_own_type(tmp_path):
     """The config's kind is recorded, so an Evosax config comes back as one."""
-    evosax = hm.EvosaxTrainingConfig(population_size=8, steps=2)
+    evosax = hm.EvosaxTrainingConfig(population_size=8, generations=2)
     hm.save(tmp_path, parameter_model(), config=evosax)
     assert _metadata(tmp_path)["config"]["kind"] == "evosax"
     assert hm.load(tmp_path, like=parameter_model()).config == evosax

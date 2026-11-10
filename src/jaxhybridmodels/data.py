@@ -80,7 +80,7 @@ class ChannelObs(eqx.Module):
     values : Float[Array, "Tc"]
         Observed channel values aligned with ``ts``.
     variance : Float[Array, "Tc"]
-        Per-observation variance used by ``masked_mle`` / ``bal_mle``. A
+        Per-observation variance used by ``masked_mle`` / ``per_experiment_mle``. A
         scalar passed to the constructor is broadcast to ``values.shape`` so
         downstream code can assume rank-1.
     """
@@ -1102,8 +1102,8 @@ def make_dataset(
     that add the fewest rows. Predictions still report each experiment's own
     times. Only ``PredictionResult.buckets`` shows the padded grids.
 
-    Capping does not change what ``mse`` or ``bal_mse`` minimise: the trainers
-    pool buckets by what each one averages over, and ``TrainingPhase.horizon``
+    Capping does not change what ``mse`` or ``per_experiment_mse`` minimise: the trainers
+    pool buckets by what each one averages over, and ``TrainingPhase.loss_horizon``
     cuts each experiment at a fraction of its own span, which the added rows
     do not move. Only a trajectory penalty sees the state at the added rows.
 

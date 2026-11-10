@@ -48,7 +48,7 @@ keep one-sided and unbounded entries as they are.
 
 | Bounds | Output | Input |
 | --- | --- | --- |
-| `(low, high)` | `transform` squash onto the interval | `warp`, then inverse squash |
+| `(low, high)` | `squash` onto the interval | `warp`, then inverse squash |
 | `(low, None)` | `low + softplus(z / temperature)` | identity |
 | `(low, None)`, `warp="log"` | `low + exp(z / temperature)` | identity |
 | `(None, high)` | `high - softplus(z / temperature)` | identity |
@@ -97,7 +97,7 @@ rate = hm.BoundedPredictor(
 ```
 
 Pass `in_scaler=hm.BoundScaler(...)` and `out_scaler=...` instead when you
-need a non-default `transform` or `warp`.
+need a non-default `squash` or `warp`.
 
 A boxed input reaches the network through the inverse squash, a logit of its
 position in the box. That map is not affine: it compresses the middle of the
@@ -139,7 +139,7 @@ use `Parameter`.
 ## Saturation
 
 Near the edge of a finite box the output squash flattens and its gradient
-vanishes. `Objective(penalty_weight=...)` charges `BoundedPredictor` leaves
+vanishes. `Objective(bound_penalty_weight=...)` charges `BoundedPredictor` leaves
 for sitting there. `Parameter` leaves are not charged. See
 [Penalties](/guide/penalties).
 

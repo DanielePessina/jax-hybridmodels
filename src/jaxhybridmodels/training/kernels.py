@@ -429,7 +429,7 @@ def build_dataset_score(
 
 def build_penalty_step(
     *,
-    penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
+    bound_penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
     trainable: Any,
 ) -> Callable[[Any, Array, tuple[Array, ...]], tuple[Array, Any]]:
     """Return ``penalty_step(predictors, weight, points=()) -> (penalty, weighted_grads)``.
@@ -443,9 +443,9 @@ def build_penalty_step(
     (the output of :func:`jaxhybridmodels.penalties.select_penalty_points`),
     passed as traced arrays, so a shape change (a phase boundary) retraces
     this small kernel and nothing else. The default ``()`` suits a custom
-    ``penalty_fn`` that ignores points.
+    ``bound_penalty_fn`` that ignores points.
 
-    ``penalty_fn`` is the regulariser, required here and defaulted to
+    ``bound_penalty_fn`` is the regulariser, required here and defaulted to
     :func:`jaxhybridmodels.penalties.bound_penalty` by the stock trainers.
     Passing a different callable (weight decay on inner weights, a
     monotonicity term, ...) is how a custom regulariser composes with the
@@ -465,7 +465,7 @@ def build_penalty_step(
 
         def weighted(diff: Any, static: Any, w: Array) -> Array:
             preds = eqx.combine(diff, static)
-            return w * penalty_fn(preds, points)
+            return w * bound_penalty_fn(preds, points)
 
         weighted_value, grads = eqx.filter_value_and_grad(weighted)(diff_part, static_part, weight)
         # Report the raw penalty; the weight is a scheduling choice and

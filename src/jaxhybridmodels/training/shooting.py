@@ -9,7 +9,7 @@ starts from its own state at its first sample, a **node**, which is trained
 alongside the predictors. A penalty on the **gap** where one segment ends
 and the next begins pulls the segments back into one trajectory.
 
-A ``TrainingPhase(segments=K)`` turns it on for one phase, and the schedule
+A ``TrainingPhase(shooting_segments=K)`` turns it on for one phase, and the schedule
 must end in single shooting. Without validation the returned model comes from
 that final phase, so it has been fitted as one solve. With ``validation=``
 the step with the best validation score wins, which can be in a segmented

@@ -16,7 +16,7 @@ Check that:
 
 A failed fit names the experiments that failed, and says whether more steps are
 likely to help. If only some seeds fail, turn on the
-[tournament](/guide/training#the-tournament) or zero the readout with
+[restarts](/guide/training#restarts) or zero the readout with
 `with_zero_final_head()`. If every seed fails, the problem may be stiff:
 try `diffrax.Kvaerno3()`, per-state `atol`, or x64. See
 [Recommendations](/guide/recommendations#solver).
@@ -68,7 +68,7 @@ two experiments. A guarded division is the usual culprit; see
 Each bucket shape compiles once. Further compiles mean something static
 changed: a static predictor field, the solver config, or the identity of
 `simulate_fn` or `state_to_output`. Define those functions once at module
-level; a closure rebuilt per call is a new function to JAX. A new `horizon` or
+level; a closure rebuilt per call is a new function to JAX. A new `loss_horizon` or
 learning rate does not recompile.
 
 ## `Algebraic simplifier is likely stuck` in stderr

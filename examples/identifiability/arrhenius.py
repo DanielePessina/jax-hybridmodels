@@ -113,7 +113,7 @@ def main() -> None:
 
     # region fisher
     fit = textbook_model().fit(data, CONFIG, key=jr.key(1), verbose=False)
-    problem = hm.inference.make_problem(fit.model, data, log_prior=None, noise="data")
+    problem = hm.inference.make_problem(fit.model, data, log_prior=None, noise_sd="data")
     mle = problem.optimize()  # Adam's finite budget leaves the fit close to the MLE, not at it
     fisher = mle.problem.fisher()
     print(fisher.summary())
@@ -128,7 +128,7 @@ def main() -> None:
     # endregion profile
     wald = fisher.intervals()
     for name, profile in profiles.items():
-        low, high = profile.bounds
+        low, high = profile.interval
         if low is None or high is None or abs(low - wald[name][0]) > 0.1 * (high - low):
             raise SystemExit(f"{name}: the profile should close near the Wald interval here")
 
@@ -141,7 +141,7 @@ def main() -> None:
     print(f"reference temperature {reference:.1f} K")
 
     fit = centred_model(reference).fit(data, CONFIG, key=jr.key(1), verbose=False)
-    problem = hm.inference.make_problem(fit.model, data, log_prior=None, noise="data")
+    problem = hm.inference.make_problem(fit.model, data, log_prior=None, noise_sd="data")
     centred = problem.optimize().problem.fisher()
     print(centred.summary())
     # endregion centred
@@ -155,7 +155,7 @@ def main() -> None:
         log_k_ref, energy = predictors["log_k_ref"].value, predictors["E"].value
         return -0.5 * ((log_k_ref + 2.0) / 3.0) ** 2 - 0.5 * ((energy - 6000.0) / 3000.0) ** 2
 
-    bayesian = hm.inference.make_problem(fit.model, data, log_prior=log_prior, noise="data")
+    bayesian = hm.inference.make_problem(fit.model, data, log_prior=log_prior, noise_sd="data")
     laplace = bayesian.optimize(target="posterior").problem.laplace()
     print(laplace.summary())
     draws = bayesian.physical(laplace.sample(key=jr.key(2), n_draws=2000))

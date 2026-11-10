@@ -28,7 +28,7 @@ def _trainable_leaf_count(mask) -> int:
 def main() -> None:
     bp = BoundedPredictor(
         input_keys=("temperature_C", "loading"),
-        in_scaler=BoundScaler(bounds=((20.0, 40.0), (0.05, 0.30)), transform="sigmoid"),
+        in_scaler=BoundScaler(bounds=((20.0, 40.0), (0.05, 0.30)), squash="sigmoid"),
         inner=MLPPredictor(
             in_size=2,
             out_size=2,
@@ -37,7 +37,7 @@ def main() -> None:
             activation="tanh",
             key=jr.PRNGKey(0),
         ),
-        out_scaler=BoundScaler(bounds=((1e8, 1e14), (1e-8, 1e-4)), transform="sigmoid"),
+        out_scaler=BoundScaler(bounds=((1e8, 1e14), (1e-8, 1e-4)), squash="sigmoid"),
     )
 
     # Every helper takes the predictors first and chains through ``mask=``.

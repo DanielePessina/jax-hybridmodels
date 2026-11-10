@@ -65,7 +65,7 @@ bounded_predictor_paths(predictors: 'Any') -> 'tuple[str, ...]'
 Dotted path of every ``BoundedPredictor`` in ``predictors``, in traversal order.
 
 These are the keys [`Objective`](/api/training#objective) accepts in
-``penalty_points``: for ``{"rate": BoundedPredictor(...)}`` the path is
+``bound_penalty_points``: for ``{"rate": BoundedPredictor(...)}`` the path is
 ``"rate"``.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/penalties.py#L123)</small>

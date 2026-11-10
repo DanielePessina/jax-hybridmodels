@@ -10,7 +10,7 @@ Shows:
 
 - a custom ``Predictor`` with static fields and ``reinitialized``
 - ``HybridModel.fit(freeze=...)`` with dotted paths to hold the bank
-- the restart tournament (``tournament_attempts``)
+- restarts (``restarts``)
 - ``hm.save`` / ``hm.load(like=...)`` round-trip through a template model
 
 Run::
@@ -160,7 +160,7 @@ class RandomFourierPredictor(hm.Predictor):
         return features @ self.weights + self.bias
 
     def reinitialized(self, *, key: Array) -> RandomFourierPredictor:
-        """Re-init for the restart tournament: a fresh bank and readout.
+        """Re-init for restarts: a fresh bank and readout.
 
         The tournament then puts frozen leaves back, so with the bank frozen
         only the readout is actually redrawn.
@@ -203,7 +203,7 @@ def build_predictors(key: Array, *, n_features: int, bandwidth: float) -> dict[s
         inner=RandomFourierPredictor(
             in_size=1, out_size=1, n_features=n_features, bandwidth=bandwidth, key=key
         ),
-        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
+        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, squash="sigmoid", warp="log10"),
     )
     return {"rate": rate}
     # endregion bounds
@@ -322,14 +322,14 @@ def main() -> None:
     print_rate_table(model.predictors, "rates before training:")
 
     # region fit
-    # The tournament restarts the predictor three times through
-    # ``reinitialized`` and keeps the best start.
+    # Two restarts redraw the predictor through ``reinitialized``; the best of
+    # those and the starting values is kept.
     config = hm.OptaxTrainingConfig(
         steps=args.steps,
         lr=args.lr,
-        tournament_attempts=3,
-        tournament_steps=40,
-        tournament_lr=args.lr,
+        restarts=2,
+        restart_steps=40,
+        restart_lr=args.lr,
     )
     result = model.fit(dataset, config, key=k_train, freeze=freeze, verbose=False)
     # endregion fit

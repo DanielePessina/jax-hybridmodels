@@ -22,17 +22,17 @@ Variants in this module
 -----------------------
 - ``mse`` is the mean over every measured cell, and ``mle`` the summed
   Gaussian negative log-likelihood.
-- ``bal_*`` normalises per experiment. Each experiment contributes its own
+- ``per_experiment_*`` normalises per experiment. Each experiment contributes its own
   per-channel average across time, then the experiments are averaged. Use
   it when experiments differ widely in observation count and you do not
-  want long trajectories to dominate the gradient. ``bal_*`` adds the
+  want long trajectories to dominate the gradient. ``per_experiment_*`` adds the
   channels where ``mse`` averages them, so it is about ``D`` times larger
   for ``D`` channels.
 
 Each function here reduces one bucket. The trainers put the buckets back
 together with :class:`Pooling`, weighting each bucket by what its value is
 an average over (see :func:`loss_pooling`). So ``mse`` over a dataset is
-the mean over all its measurements, and ``bal_mse`` the mean over all its
+the mean over all its measurements, and ``per_experiment_mse`` the mean over all its
 experiments, however the experiments were split into buckets.
 
 All four accept ``channel_idx`` (which trailing-``D`` indices to keep) and
@@ -153,7 +153,7 @@ def masked_mse(
     Computes ``sum(mask * weights * (pred - observed)**2) / max(mask.sum(), 1)``
     over the selected channels. A long-trajectory experiment adds terms to
     the numerator and the denominator in proportion, and gets no explicit
-    per-experiment weighting. Use ``bal_mse`` when you want that weighting.
+    per-experiment weighting. Use ``per_experiment_mse`` when you want that weighting.
 
     Parameters
     ----------
@@ -191,7 +191,7 @@ def masked_mle(
     sums those.
 
     Nothing is averaged. The result is a sum of log-likelihoods and grows
-    linearly with the number of observations. Use ``bal_mle`` for the
+    linearly with the number of observations. Use ``per_experiment_mle`` for the
     per-experiment averaged version.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
@@ -202,7 +202,7 @@ def masked_mle(
     return (nll_per_exp_channel * weights[None, :]).sum()
 
 
-def bal_mse(
+def per_experiment_mse(
     pred_obs: Float[Array, "N T D"],
     bp: BucketPayload,
     *,
@@ -235,7 +235,7 @@ def bal_mse(
     return jnp.where(has_observations, per_experiment, 0.0).sum() / n_experiments
 
 
-def bal_mle(
+def per_experiment_mle(
     pred_obs: Float[Array, "N T D"],
     bp: BucketPayload,
     *,
@@ -245,7 +245,7 @@ def bal_mle(
     """Per-experiment-balanced Gaussian NLL.
 
     Averages over time within each observed experiment, then over those
-    experiments. Same reduction as ``bal_mse``, with
+    experiments. Same reduction as ``per_experiment_mse``, with
     ``_gaussian_nll_terms`` (which reads ``bp.variance``) in place of the
     pointwise squared error. Experiments with no observations in any selected
     channel are excluded from the outer mean.
@@ -267,8 +267,8 @@ def bal_mle(
 LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
     "mse": masked_mse,
     "mle": masked_mle,
-    "bal_mse": bal_mse,
-    "bal_mle": bal_mle,
+    "per_experiment_mse": per_experiment_mse,
+    "per_experiment_mle": per_experiment_mle,
 }
 """Short name to loss function, so an ``Objective`` can name its loss as a string."""
 
@@ -278,8 +278,8 @@ POOLING_KINDS = ("observations", "experiments", "sum")
 _BUILTIN_POOLING: tuple[tuple[Callable[..., Array], str], ...] = (
     (masked_mse, "observations"),
     (masked_mle, "sum"),
-    (bal_mse, "experiments"),
-    (bal_mle, "experiments"),
+    (per_experiment_mse, "experiments"),
+    (per_experiment_mle, "experiments"),
 )
 
 
@@ -292,7 +292,7 @@ def loss_pooling(loss: Callable[..., Array] | str) -> str:
     - ``"observations"``: a mean over measured cells (``mse``). Buckets are
       weighted by their measured-cell count, which gives the mean over every
       measurement in the dataset.
-    - ``"experiments"``: a mean over experiments (``bal_mse``, ``bal_mle``).
+    - ``"experiments"``: a mean over experiments (``per_experiment_mse``, ``per_experiment_mle``).
       Buckets are weighted by how many measured experiments they hold, so
       every experiment counts the same across the dataset.
     - ``"sum"``: already a sum (``mle``). Bucket values are added.
@@ -300,7 +300,7 @@ def loss_pooling(loss: Callable[..., Array] | str) -> str:
     A ``functools.partial`` of a built-in pools as the built-in. Any other
     custom loss declares its kind with a ``pooling`` attribute, for example
     ``my_loss.pooling = "sum"``, and defaults to ``"observations"``: a
-    wrapper around ``bal_mse`` must set ``"experiments"`` itself.
+    wrapper around ``per_experiment_mse`` must set ``"experiments"`` itself.
     """
     if isinstance(loss, str):
         loss = LOSS_REGISTRY[loss.lower().strip()]

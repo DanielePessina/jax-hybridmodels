@@ -32,7 +32,7 @@ stability study, where the best estimate would overstate it.
 
 <<< @/../examples/tubular_reactor/sample_tubular_reactor.py#problem
 
-`log_prior` is written on physical values. `noise="data"` trusts the variances in
+`log_prior` is written on physical values. `noise_sd="data"` trusts the variances in
 your data. Neither has a default, because a silent choice in either changes the
 answer. `flat_prior` is available for a parameter with finite bounds, but a flat
 prior is not neutral under a warp.
@@ -104,7 +104,7 @@ that noisy value as exact, which matters most when the early dynamics are fast.
 
 ## Noise
 
-`noise="data"` uses each observation's `variance`, and warns for a channel left at
+`noise_sd="data"` uses each observation's `variance`, and warns for a channel left at
 the default of 1.0, because that sets the posterior's width. To infer a standard
 deviation per channel, name a `Parameter` for each:
 
@@ -112,7 +112,7 @@ deviation per channel, name a `Parameter` for each:
 problem = hm.inference.make_problem(
     model, data,
     log_prior=log_prior,  # receives noise["conc"], the physical value
-    noise={"conc": hm.Parameter(0.05, bounds=(1e-4, 1.0), warp="log10")},
+    noise_sd={"conc": hm.Parameter(0.05, bounds=(1e-4, 1.0), warp="log10")},
 )
 ```
 
@@ -189,7 +189,7 @@ the number to reduce is the count. In order of effect on the tubular reactor:
 - **Run chains on threads.** Compiled code releases the GIL, so threads gave 3.4
   times the speed of running 4 chains in turn. Vmapping chains makes each one wait
   for the deepest NUTS tree in the batch.
-- **Use forward mode for few parameters.** `gradient="auto"` does this up to 8 free
+- **Use forward mode for few parameters.** `ad_mode="auto"` does this up to 8 free
   values: 8 ms against 25 ms at 2 parameters, but 368 ms against 187 ms at 17.
 - **Tune the solver last.** This tube needs about 200 steps for stability, not
   accuracy, so loosening `rtol` by 100 times saved 5 steps. Damped PID gains
@@ -215,7 +215,8 @@ to `Tsit5` or a stiff solver for Fisher, Laplace and profile work.
 
 ## Without sampling
 
-`log_prior=None` gives a problem with only the likelihood, for frequentist work.
+`log_prior=None`, the default, gives a problem with only the likelihood, for
+frequentist work.
 `optimize` finds its maximum with Optimistix's BFGS. A training fit is close to it
 but not at it: Adam stops after a finite budget, and a loss other than `"mle"` has
 a different minimum when the variances differ. The result's
@@ -274,9 +275,11 @@ the interval is conservative there.
 The information is computed in the latent coordinates the problem uses, and
 reported in physical units. Standard errors use the delta method. A Wald interval
 is built in the latent and mapped back, so it leans the way a log warp does and
-stays inside a `Parameter`'s bounds. `curvature="exact"` uses the negative
-Hessian of the log-likelihood instead of the Gauss-Newton `J^T J`, and is the one
-that works with a custom `log_likelihood`. The condition number and the
+stays inside a `Parameter`'s bounds. `fisher` and `laplace` both default to
+`curvature="gauss_newton"`, `J^T J` of the whitened residuals: the expected
+information. `curvature="exact"` uses the negative Hessian instead, the observed
+information, and is the one that works with a custom `log_likelihood`; with one,
+pass it explicitly. The condition number and the
 not-identified test read the information scaled to a unit diagonal, its
 correlation form, so changing a bound or a warp does not move them.
 
@@ -307,7 +310,8 @@ they read a sampler's output:
 <<< @/../examples/identifiability/arrhenius.py#laplace
 
 On the Arrhenius data of the [custom predictor](/examples/custom-predictor) example
-with inferred noise, the Laplace standard deviations were within 4% of NUTS. The
+with inferred noise, the Laplace standard deviations (measured with
+`curvature="exact"`, the default before 0.3.0) were within 4% of NUTS. The
 means of `log A` and `E` agreed within 0.02 standard deviations, and the noise's
 within 0.16, as its posterior is skewed. A Laplace approximation is only as good
 as the posterior is Gaussian in latent space, so check it against a sampler before
@@ -364,7 +368,7 @@ Widen the bound and refit, or profile, before trusting the rest.
 A profile of another value re-optimises the pinned one at each point, but cannot
 move it past its bound. If the data trade the two off, the profile then drops
 faster than it would with the bound widened, and closes sooner. The interval is
-right for the bounds as set. `profile.at_bound` names every value that was pinned
+right for the bounds as set. `profile.others_pinned` names every value that was pinned
 along the walk, the summary lists them, and a warning says so. If such a bound is
 a numerical guard rather than physics, widen it and profile again.
 

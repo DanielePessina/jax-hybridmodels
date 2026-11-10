@@ -303,7 +303,7 @@ def main() -> None:
     config = hm.OptaxTrainingConfig(
         phases=(
             # Fit the start-up front first, then the whole run with the feed drop.
-            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, horizon=0.5),
+            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, loss_horizon=0.5),
             hm.TrainingPhase(steps=args.steps - args.steps // 3, lr=3e-3),
         ),
     )

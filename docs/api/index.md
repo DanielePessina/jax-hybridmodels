@@ -20,7 +20,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Transforms: Squash Shapes and Axis Warps](/api/transforms)
 
-[`BoundTransform`](/api/transforms#boundtransform), [`BOUND_TRANSFORMS`](/api/transforms#bound_transforms), [`register_bound_transform`](/api/transforms#register_bound_transform), [`Warp`](/api/transforms#warp), [`WARPS`](/api/transforms#warps), [`register_warp`](/api/transforms#register_warp)
+[`Squash`](/api/transforms#squash), [`SQUASHES`](/api/transforms#squashes), [`register_squash`](/api/transforms#register_squash), [`Warp`](/api/transforms#warp), [`WARPS`](/api/transforms#warps), [`register_warp`](/api/transforms#register_warp)
 
 ## [Solver: ODE Integration](/api/solver)
 
@@ -36,7 +36,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Losses: Masked & Balanced Objectives](/api/losses)
 
-[`masked_mse`](/api/losses#masked_mse), [`masked_mle`](/api/losses#masked_mle), [`bal_mse`](/api/losses#bal_mse), [`bal_mle`](/api/losses#bal_mle), [`LOSS_REGISTRY`](/api/losses#loss_registry), [`resolve_loss_fn`](/api/losses#resolve_loss_fn), [`loss_pooling`](/api/losses#loss_pooling), [`Pooling`](/api/losses#pooling), [`POOLING_KINDS`](/api/losses#pooling_kinds)
+[`masked_mse`](/api/losses#masked_mse), [`masked_mle`](/api/losses#masked_mle), [`per_experiment_mse`](/api/losses#per_experiment_mse), [`per_experiment_mle`](/api/losses#per_experiment_mle), [`LOSS_REGISTRY`](/api/losses#loss_registry), [`resolve_loss_fn`](/api/losses#resolve_loss_fn), [`loss_pooling`](/api/losses#loss_pooling), [`Pooling`](/api/losses#pooling), [`POOLING_KINDS`](/api/losses#pooling_kinds)
 
 ## [Trainable Masks: Freezing Leaves](/api/trainable)
 

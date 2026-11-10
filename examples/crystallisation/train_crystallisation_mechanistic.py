@@ -169,7 +169,7 @@ def main() -> None:
     config = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
-        steps=args.generations,
+        generations=args.generations,
         init=args.init,
         init_box_extent=args.init_box_extent,
         init_sigma=args.sigma_init,

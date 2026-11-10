@@ -143,7 +143,7 @@ def main() -> None:
     )
     config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2)
     # A small bound penalty keeps the output squash away from saturation.
-    objective = hm.Objective(penalty_weight=1e-2)
+    objective = hm.Objective(bound_penalty_weight=1e-2)
     # endregion model
     print("\n[fit]")
     result = model.fit(dataset, config, objective=objective, key=k_train)

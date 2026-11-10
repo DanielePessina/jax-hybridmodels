@@ -333,7 +333,7 @@ class ExponentialDecay(eqx.Module):
 
     def __init__(self, *, key: Array) -> None:
         self.latent = jr.normal(key, (1,)) * 0.1
-        self.out_scaler = hm.BoundScaler(KD_BOUNDS, transform="sigmoid", warp="log10")
+        self.out_scaler = hm.BoundScaler(KD_BOUNDS, squash="sigmoid", warp="log10")
 
     def rate(self) -> Array:
         """Return ``k_d`` in physical units."""
@@ -526,7 +526,7 @@ def _rollout_episode(
     key: Array,
     *,
     solver: hm.SolverConfig,
-    penalty_weight: float,
+    bound_penalty_weight: float,
     deterministic: bool,
 ) -> Rollout:
     """One free-running episode of ``HORIZON`` zero-order-hold intervals.
@@ -562,7 +562,7 @@ def _rollout_episode(
         )
         err = y_next[0] - episode.ca_obs[i + 1]
         fit = jnp.exp(-(err**2) / episode.variance[i + 1])
-        reward = fit - penalty_weight * agent.policy.out_scaler.saturation(z)
+        reward = fit - bound_penalty_weight * agent.policy.out_scaler.saturation(z)
         value = _value(agent, obs)
         return (y_next, rng), (obs, z, log_prob, reward, value, activity)
 
@@ -590,7 +590,7 @@ def rollout_batch(
     key: Array,
     *,
     solver: hm.SolverConfig,
-    penalty_weight: float,
+    bound_penalty_weight: float,
     n_samples: int,
     deterministic: bool = False,
 ) -> Rollout:
@@ -609,7 +609,7 @@ def rollout_batch(
                 ep,
                 k,
                 solver=solver,
-                penalty_weight=penalty_weight,
+                bound_penalty_weight=bound_penalty_weight,
                 deterministic=deterministic,
             ),
             in_axes=(None, 0),
@@ -711,7 +711,7 @@ def train_ppo(
     n_updates: int,
     n_samples: int,
     lr: float,
-    penalty_weight: float,
+    bound_penalty_weight: float,
     truth_return: float,
     val_episodes: EpisodeData,
     key: Array,
@@ -753,7 +753,7 @@ def train_ppo(
             episodes,
             k_roll,
             solver=solver,
-            penalty_weight=penalty_weight,
+            bound_penalty_weight=bound_penalty_weight,
             n_samples=n_samples,
         )
         # GAE advantages and value targets, one row per episode. ``discount``
@@ -792,7 +792,7 @@ def train_ppo(
                 eps,
                 k,
                 solver=solver,
-                penalty_weight=0.0,
+                bound_penalty_weight=0.0,
                 n_samples=1,
                 deterministic=True,
             )
@@ -939,7 +939,7 @@ def _activity_recovery_plot(
             jax.tree.map(lambda x: x[None], episode),
             jr.PRNGKey(0),
             solver=solver,
-            penalty_weight=0.0,
+            bound_penalty_weight=0.0,
             n_samples=1,
             deterministic=True,
         )
@@ -1199,7 +1199,7 @@ def main() -> None:
         n_updates=args.updates,
         n_samples=args.rollouts,
         lr=args.ppo_lr,
-        penalty_weight=args.penalty_weight,
+        bound_penalty_weight=args.bound_penalty_weight,
         truth_return=truth_return,
         val_episodes=val_episodes,
         key=k_ppo,
@@ -1316,10 +1316,15 @@ def main() -> None:
         # Sampled latents against the squash knee, showing where the policy
         # operates.
         rollout = rollout_batch(
-            val_agent, episodes, jr.PRNGKey(7), solver=solver, penalty_weight=0.0, n_samples=64
+            val_agent,
+            episodes,
+            jr.PRNGKey(7),
+            solver=solver,
+            bound_penalty_weight=0.0,
+            n_samples=64,
         )
         z = np.asarray(rollout.latent).reshape(-1)
-        knee = float(val_agent.policy.out_scaler.z_knee)
+        knee = float(val_agent.policy.out_scaler.saturation_knee)
 
         fig, ax = plt.subplots(figsize=(5.6, 3.6))
         ax.hist(z, bins=60, color="tab:red", alpha=0.75)

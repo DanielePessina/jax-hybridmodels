@@ -25,9 +25,9 @@ Objective(
     *,
     loss: 'Callable[..., Array] | str' = 'mse',
     channel_weights: 'Mapping[str, float] | Sequence[float] | None' = None,
-    penalty_weight: 'float' = 0.0,
-    penalty_points: 'Mapping[str, ArrayLike] | None' = None,
-    penalty_fn: 'Callable[..., Array] | None' = None,
+    bound_penalty_weight: 'float' = 0.0,
+    bound_penalty_points: 'Mapping[str, ArrayLike] | None' = None,
+    bound_penalty_fn: 'Callable[..., Array] | None' = None,
     trajectory_penalty_fn: 'Callable[..., Array] | None' = None,
     trajectory_penalty_weight: 'float' = 0.0,
 ) -> None
@@ -42,23 +42,15 @@ penalty.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `loss` | `Callable | str` | A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"bal_mse"``, ``"bal_mle"``) or a callable ``loss(pred_obs, bp) -> scalar``. |
-| `channel_weights` | `Mapping[str, float] | Sequence[float] | None` | Per-channel multipliers on the loss. A mapping keyed by channel name scores only the channels it names (``{"conc": 1.0}`` fits one channel of several); a sequence gives one weight per output channel, in ``output_channel_names`` order. ``None`` weights every channel 1. Names are checked against the dataset's channels when training starts. A named channel with weight ``0.0`` contributes no error. Under ``"mse"`` its cells still count in the denominator, so ``{"a": 1.0, "b": 0.0}`` scales the loss of ``{"a": 1.0}`` by ``cells(a) / cells(a and b)``. ``"mle"`` sums, so there a zero weight is the same as leaving the name out. ``"bal_*"`` averages over experiments, and one measured only in a zero-weight channel still counts in that average, so the loss is scaled by the share of experiments measured in the weighted channels. |
-| `penalty_weight` | `float` | Weight on the bound-saturation penalty, relative to the pooled data loss. Under ``"mle"`` that loss is a sum over every measurement, so the same weight counts for less as the data grow. ``0.0`` disables it. ``TrainingPhase.penalty_weight`` overrides it for one Optax phase. |
-| `penalty_points` | `Mapping[str, ArrayLike] | None` | Extra points where the bound penalty is charged, keyed by the path of a ``BoundedPredictor`` in the predictors pytree. The path is the dotted string ``fit(freeze=...)`` takes, so for a dict of predictors it is the key: ``{"rate": grid}``. Each value is a ``[G, n_inputs]`` array of physical input vectors in that predictor's ``input_keys`` order. Predictors left out are charged at the measured points only. ``jaxhybridmodels.penalties.box_grid`` builds a sweep of an input box. |
-| `penalty_fn` | `Callable | None` | Replaces [`bound_penalty`](/api/penalties#bound_penalty). Called as ``(predictors, points) -> scalar`` where ``points`` is one ``[G, n_inputs]`` array per ``BoundedPredictor`` in traversal order; a custom term that needs no points ignores them. |
+| `loss` | `Callable | str` | A ``LOSS_REGISTRY`` key (``"mse"``, ``"mle"``, ``"per_experiment_mse"``, ``"per_experiment_mle"``) or a callable ``loss(pred_obs, bp) -> scalar``. |
+| `channel_weights` | `Mapping[str, float] | Sequence[float] | None` | Per-channel multipliers on the loss. A mapping keyed by channel name scores only the channels it names (``{"conc": 1.0}`` fits one channel of several); a sequence gives one weight per output channel, in ``output_channel_names`` order. ``None`` weights every channel 1. Names are checked against the dataset's channels when training starts. A named channel with weight ``0.0`` contributes no error. Under ``"mse"`` its cells still count in the denominator, so ``{"a": 1.0, "b": 0.0}`` scales the loss of ``{"a": 1.0}`` by ``cells(a) / cells(a and b)``. ``"mle"`` sums, so there a zero weight is the same as leaving the name out. ``"per_experiment_*"`` averages over experiments, and one measured only in a zero-weight channel still counts in that average, so the loss is scaled by the share of experiments measured in the weighted channels. |
+| `bound_penalty_weight` | `float` | Weight on the bound-saturation penalty, relative to the pooled data loss. Under ``"mle"`` that loss is a sum over every measurement, so the same weight counts for less as the data grow. ``0.0`` disables it. ``TrainingPhase.bound_penalty_weight`` overrides it for one Optax phase. |
+| `bound_penalty_points` | `Mapping[str, ArrayLike] | None` | Extra points where the bound penalty is charged, keyed by the path of a ``BoundedPredictor`` in the predictors pytree. The path is the dotted string ``fit(freeze=...)`` takes, so for a dict of predictors it is the key: ``{"rate": grid}``. Each value is a ``[G, n_inputs]`` array of physical input vectors in that predictor's ``input_keys`` order. Predictors left out are charged at the measured points only. ``jaxhybridmodels.penalties.box_grid`` builds a sweep of an input box. |
+| `bound_penalty_fn` | `Callable | None` | Replaces [`bound_penalty`](/api/penalties#bound_penalty). Called as ``(predictors, points) -> scalar`` where ``points`` is one ``[G, n_inputs]`` array per ``BoundedPredictor`` in traversal order; a custom term that needs no points ignores them. |
 | `trajectory_penalty_fn` | `Callable | None` | Trajectory-aware penalty for embedded hybrid models, called as ``(full_state, bp) -> scalar`` on the full simulator state ``[N, T, S]``, penalty accumulators included. Return a mean over the bucket's ``N`` experiments: the trainers weight each bucket by its share of the experiments, so a mean gives the mean over the dataset, and a sum would count an experiment more in a larger bucket. See the ``penalty_*`` helpers in ``jaxhybridmodels.penalties``. |
 | `trajectory_penalty_weight` | `float` | Weight on ``trajectory_penalty_fn``. ``0.0`` disables it even when a function is set; a non-zero weight without a function raises. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L42)</small>
-
-<a id="objectivebound_penalty_fn"></a>
-
-#### `Objective.bound_penalty_fn`
-
-``penalty_fn`` when set, else [`bound_penalty`](/api/penalties#bound_penalty).
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L160)</small>
 
 <a id="objectiveextra_penalty_points"></a>
 
@@ -68,7 +60,7 @@ penalty.
 extra_penalty_points(self, predictors: 'Any') -> 'tuple[Array, ...]'
 ```
 
-``penalty_points`` as one array per ``BoundedPredictor``, in traversal order.
+``bound_penalty_points`` as one array per ``BoundedPredictor``, in traversal order.
 
 Predictors with no entry get an empty ``[0, n_inputs]`` array. An
 unknown path raises, naming the valid ones.
@@ -108,6 +100,14 @@ the loss reads are counted.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L151)</small>
 
+<a id="objectiveresolved_bound_penalty_fn"></a>
+
+#### `Objective.resolved_bound_penalty_fn`
+
+``bound_penalty_fn`` when set, else [`bound_penalty`](/api/penalties#bound_penalty).
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/objective.py#L160)</small>
+
 ---
 
 <a id="optaxtrainingconfig"></a>
@@ -123,10 +123,10 @@ OptaxTrainingConfig(
     lr: 'InitVar[float | optax.Schedule | None]' = None,
     optimizer: 'InitVar[OptimizerSpec | None]' = None,
     phases: 'tuple[TrainingPhase, ...]' = (),
-    tournament_attempts: 'int' = 1,
-    tournament_steps: 'int' = 0,
-    tournament_lr: 'float | None' = None,
-    patience: 'int' = 0,
+    restarts: 'int' = 0,
+    restart_steps: 'int' = 0,
+    restart_lr: 'float | None' = None,
+    patience_steps: 'int' = 0,
     restore_best: 'bool' = True,
 ) -> None
 ```
@@ -146,7 +146,7 @@ stores ``phases``::
     OptaxTrainingConfig(steps=500, lr=optax.cosine_decay_schedule(1e-2, 500))
     OptaxTrainingConfig(
         phases=(
-            TrainingPhase(steps=200, lr=3e-2, horizon=0.5),
+            TrainingPhase(steps=200, lr=3e-2, loss_horizon=0.5),
             TrainingPhase(steps=200, lr=5e-3, reset_optimizer=True),
         )
     )
@@ -156,12 +156,13 @@ stores ``phases``::
 | Field | Type | Description |
 | --- | --- | --- |
 | `phases` | `tuple[TrainingPhase, ...]` | The schedule, run in order. See [`TrainingPhase`](/api/training#trainingphase) for the per-phase settings. |
-| `tournament_attempts, tournament_steps` | `int` | The tournament runs only when ``tournament_steps > 0`` and ``tournament_attempts > 1``. Each attempt re-initialises the predictors, trains for ``tournament_steps`` steps with the first phase's optimiser and horizon, and is scored on the data term plus any configured trajectory penalty by a forward-only pass; the bound penalty remains excluded. The lowest score wins, and ``history.tournament_scores`` keeps every attempt's. An attempt that raises a diffrax error or a non-finite loss is dropped and the next key tried. If all fail, the original predictors are used and a ``RuntimeWarning`` is raised. |
-| `tournament_lr` | `float or None` | Learning rate for the tournament's short bursts. None, the default, uses the first phase's starting learning rate. A much smaller rate barely moves the attempts, so the tournament ranks the random initialisations rather than where each one is heading. |
-| `patience` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
-| `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. Without validation, the running minimum resets whenever the horizon, the segment count or (in a segmented phase) ``continuity_weight`` changes, since the tracked losses either side are not comparable. With ``validation=``, the minimum runs across all phases on the validation score, which is always single shooting at the full horizon, so the returned step can be in an earlier horizon or a segmented phase. |
+| `restarts` | `int` | Fresh starts to try before the phases, besides your own values. ``0``, the default, trains from your values alone. With ``restarts=3`` four candidates compete: your starting predictors and three redrawn with ``reinitialize_pytree`` (a ``Parameter`` without two finite bounds keeps its value). Each trains ``restart_steps`` steps with the first phase's optimiser, ``loss_horizon``, ``shooting_segments`` and bound penalty, and is scored on the data term plus any trajectory penalty (plus the gap term if segmented) by a forward-only pass. The lowest score wins, and ``history.restart_scores`` keeps every candidate's, yours first. A candidate that raises a diffrax error or a non-finite loss scores ``inf``. If all fail, your predictors are used and a ``RuntimeWarning`` is raised. ``restarts > 0`` needs ``restart_steps > 0``. |
+| `restart_steps` | `int` | Steps each candidate trains before scoring. |
+| `restart_lr` | `float or None` | Learning rate for those short bursts. None, the default, uses the first phase's starting learning rate. A much smaller rate barely moves the candidates, so the comparison would rank the random draws rather than where each one is heading. |
+| `patience_steps` | `int` | Consecutive steps without a new best tracked loss before the current phase stops early. The tracked loss is the data term plus any trajectory penalty, excluding the fixed-point bound penalty. Counted within a phase and reset at every phase boundary, so a plateau at the end of one phase cannot kill the next before its new learning rate acts. ``0`` disables early stopping. |
+| `restore_best` | `bool` | Return the predictors from the lowest tracked-loss step instead of the last one. Without validation, the running minimum resets whenever ``loss_horizon``, ``shooting_segments`` or (in a segmented phase) ``continuity_weight`` changes, since the tracked losses either side are not comparable. With ``validation=``, the minimum runs across all phases on the validation score, which is always single shooting at the full horizon, so the returned step can be in an earlier horizon or a segmented phase. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L217)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L222)</small>
 
 <a id="optaxtrainingconfigtotal_steps"></a>
 
@@ -169,7 +170,7 @@ stores ``phases``::
 
 Step budget summed over every phase.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L324)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L336)</small>
 
 ---
 
@@ -185,10 +186,10 @@ TrainingPhase(
     steps: 'int',
     lr: 'float | optax.Schedule' = 0.001,
     optimizer: 'OptimizerSpec' = 'adamw',
-    horizon: 'float' = 1.0,
+    loss_horizon: 'float' = 1.0,
     reset_optimizer: 'bool' = False,
-    penalty_weight: 'float | None' = None,
-    segments: 'int' = 1,
+    bound_penalty_weight: 'float | None' = None,
+    shooting_segments: 'int' = 1,
     continuity_weight: 'float' = 1.0,
 ) -> None
 ```
@@ -202,13 +203,13 @@ One contiguous block of Optax steps with its own schedule settings.
 | `steps` | `int` | Step budget for the phase. At least 1. |
 | `lr` | `float | optax.Schedule` | Learning rate: a finite non-negative float, or an optax schedule ``step -> lr`` whose step count starts at 0 at the start of this phase, whatever ran before it. Chain several curves inside one phase with ``optax.join_schedules``. Any callable works: one JAX cannot trace, such as ``lambda s: 0.1 if s < 2 else 0.01``, is evaluated step by step on the host. A float is applied to the live optimiser state unless the phase also sets ``reset_optimizer``. A schedule needs an optimiser name or factory; a ready-made ``optax.GradientTransformation`` owns its learning rate, so pairing one with a schedule raises. |
 | `optimizer` | `OptimizerSpec` | A registered name (``"adamw"``, ``"adabelief"``), a factory taking ``learning_rate`` and returning an ``optax.GradientTransformation`` (e.g. ``optax.adamw``, or ``lambda learning_rate: optax.chain( optax.clip_by_global_norm(1.0), optax.adamw(learning_rate))``), or a ready-made transformation instance. Names and factories are wrapped in ``optax.inject_hyperparams``, so a phase boundary or a schedule can move the learning rate without a rebuild. A ready-made instance owns its learning rate: the first phase and the tournament run at the rate it was built with, whatever ``lr`` says. Built with ``optax.inject_hyperparams``, a later phase that changes ``lr`` writes the new rate into it. On a plain instance such a change raises: pass a new instance, built at the new rate, with ``reset_optimizer``. A phase that changes the optimiser must set ``reset_optimizer``, because optimiser state belongs to the optimiser that built it. |
-| `horizon` | `float` | Fraction of each experiment's timeline the loss looks at, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only measurements in the first ``horizon`` of each experiment's own span (from ``t0`` or its first measurement to its last measurement) are scored, which stops a long-horizon divergence from drowning the gradient. Each experiment's first measurement is always scored. Being a runtime mask rather than a shape change, a phase boundary costs no recompile. |
-| `reset_optimizer` | `bool` | Rebuild the optimiser and discard its state at the start of this phase. Set it when switching optimiser, and when a horizon change has made the accumulated momentum wrong. |
-| `penalty_weight` | `float | None` | Override of ``Objective.penalty_weight`` for this phase. ``None`` (the default) uses the objective's weight; ``0.0`` switches the bound penalty off for the phase. |
-| `segments` | `int` | Multiple shooting: split each trajectory into this many segments, counted in samples, each started from a trainable state (a node). ``1``, the default, is single shooting. The last phase of a schedule must be single shooting, and a change in ``segments`` resets the optimiser, because the nodes change shape. A bucket with fewer than ``segments + 1`` samples uses fewer segments. See `jaxhybridmodels.training.shooting`. |
-| `continuity_weight` | `float` | Weight of the gap term, ``mean((gap / scale)^2)`` over every join and state, in a segmented phase. The gap term has no units; a plain ``"mse"`` loss is in the units of the data, so the balance between the two depends on the data's scale. Ignored when ``segments=1``. |
+| `loss_horizon` | `float` | Fraction of each experiment's timeline the loss scores, in ``(0, 1]``. It masks the **loss**, never the integration: the solver still runs the full trajectory, and only measurements in the first ``loss_horizon`` of each experiment's own span (from ``t0`` or its first measurement to its last measurement) are scored, which stops a long-horizon divergence from drowning the gradient. Each experiment's first measurement is always scored. Being a runtime mask rather than a shape change, a phase boundary costs no recompile. |
+| `reset_optimizer` | `bool` | Rebuild the optimiser and discard its state at the start of this phase. Set it when switching optimiser, and when a ``loss_horizon`` change has made the accumulated momentum wrong. |
+| `bound_penalty_weight` | `float | None` | Override of ``Objective.bound_penalty_weight`` for this phase. ``None`` (the default) uses the objective's weight; ``0.0`` switches the bound penalty off for the phase. |
+| `shooting_segments` | `int` | Multiple shooting: split each trajectory into this many segments, counted in samples, each started from a trainable state (a node). ``1``, the default, is single shooting. The last phase of a schedule must be single shooting, and a change in ``shooting_segments`` resets the optimiser, because the nodes change shape. A bucket with fewer than ``shooting_segments + 1`` samples uses fewer segments. See `jaxhybridmodels.training.shooting`. |
+| `continuity_weight` | `float` | Weight of the gap term, ``mean((gap / scale)^2)`` over every join and state, in a segmented phase. The gap term has no units; a plain ``"mse"`` loss is in the units of the data, so the balance between the two depends on the data's scale. Ignored when ``shooting_segments=1``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L104)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L105)</small>
 
 ---
 
@@ -261,7 +262,7 @@ A solver error or a non-finite loss after the first step ends the run: it
 warns and returns the best parameters so far, with ``stop_reason``
 ``"diverged"``. On the first step there is nothing to return, so it raises.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1303)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/optax.py#L1322)</small>
 
 ---
 
@@ -276,8 +277,8 @@ EvosaxTrainingConfig(
     *,
     algorithm: 'str' = 'CMA_ES',
     population_size: 'int' = 64,
-    steps: 'int' = 100,
-    init: "Literal['warm', 'uniform_box', 'lhs_box']" = 'warm',
+    generations: 'int' = 100,
+    init: "Literal['current', 'uniform_box', 'lhs_box']" = 'current',
     init_box_extent: 'float' = 2.0,
     init_sigma: 'float' = 0.1,
     log_every: 'int' = 1,
@@ -297,10 +298,10 @@ no phases: the run is a flat loop, so every field is a scalar.
 | --- | --- | --- |
 | `algorithm` |  | Evosax strategy name, one of the keys of ``ALGORITHM_REGISTRY``: ``"CMA_ES"`` (default), ``"Sep_CMA_ES"``, ``"SimpleES"``. Add another strategy with [`register_algorithm`](/api/training#register_algorithm). |
 | `population_size` |  | Individuals per generation, evaluated in parallel through ``vmap``. |
-| `steps` |  | Number of generations, run in sequence. Named like the Optax config's ``steps``: one generation is one Evosax step. |
-| `init` |  | Initial-population scheme, one of ``"warm"``, ``"uniform_box"``, ``"lhs_box"``. The module docstring explains the difference. |
-| `init_box_extent` |  | Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``. Ignored by ``"warm"``. |
-| `init_sigma` |  | Initial CMA-ES step size for ``"warm"``. The box-init modes start at the box's own standard deviation, ``init_box_extent / sqrt(3)``, instead. CMA-ES adapts it after the first ``tell``. |
+| `generations` |  | Number of generations, run in sequence. Each one solves the whole population once. |
+| `init` |  | Initial-population scheme: ``"current"`` centres the search on the current values, ``"uniform_box"`` and ``"lhs_box"`` draw the first population in a box around them. The module docstring explains the difference. |
+| `init_box_extent` |  | Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``. Ignored by ``"current"``. |
+| `init_sigma` |  | Initial CMA-ES step size for ``"current"``. The box-init modes start at the box's own standard deviation, ``init_box_extent / sqrt(3)``, instead. CMA-ES adapts it after the first ``tell``. |
 | `log_every` |  | UI heartbeat cadence. Honoured only by the Rich UIs; the silent and recording UIs see every generation. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L142)</small>
@@ -331,29 +332,29 @@ train_with_evosax(
 
 Train ``model``'s predictors with an evolutionary strategy; ``fit`` for an Evosax config.
 
-Runs ``config.steps`` generations over a population of
+Runs ``config.generations`` generations over a population of
 ``config.population_size`` candidates, taking no gradient. See the
 module docstring for the JIT boundary and the initial-population modes.
 Every keyword means what it does for [`HybridModel.fit>`](/api/model#hybridmodelfit), and ``data`` and ``validation`` may
 be a ``Dataset`` or a list of experiments.
 
 Each individual's fitness is the pooled data loss plus any
-trajectory penalty plus ``objective.penalty_weight`` times the bound
+trajectory penalty plus ``objective.bound_penalty_weight`` times the bound
 penalty, since evosax ranks by one scalar.
 
 A candidate whose solve fails ranks last instead of failing the
 generation, and ``history.failed_candidates`` counts them; see the
 module docstring.
 
-``history.loss`` is the best fitness so far after each generation, so
-it is monotone non-increasing; Optax records the raw per-step loss
-instead, so the two series mean different things. Without
-``validation`` the returned model is rebuilt from the lowest-loss
-candidate seen in any generation, the warm-up evaluation of the input
-included. With it, each generation's best is scored on the validation
+``history.loss`` is each generation's best fitness, so like the Optax
+per-step loss it can go up as well as down; ``min`` over it gives the
+best so far. Without ``validation`` the returned model is rebuilt from
+the lowest-loss candidate seen in any generation, the warm-up
+evaluation of the input included, and ``measured_loss`` is its
+fitness. With it, each generation's best is scored on the validation
 set and the returned model is the one that scored lowest there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L429)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/evosax.py#L431)</small>
 
 ---
 

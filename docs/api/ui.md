@@ -133,7 +133,7 @@ optax schedule moves it from there.
 #### `TrainingUI.on_run_end()`
 
 ```python
-on_run_end(self, *, final_loss: float) -> None
+on_run_end(self, *, returned_loss: float) -> None
 ```
 
 Fires once after every phase has completed (or training was aborted gracefully).
@@ -196,7 +196,7 @@ Callback protocol for ``train_with_evosax``.
 Differs from ``TrainingUI`` because the evosax loop has no phases and
 no per-step gradient loss. Each generation reports the best and mean
 fitness across its population instead. The run-level events use the
-same argument names as ``TrainingUI`` (``total_steps``, ``final_loss``).
+same argument names as ``TrainingUI`` (``total_steps``, ``returned_loss``).
 
 Event order during a typical run::
 
@@ -272,7 +272,7 @@ Free-form log line; same level set as ``TrainingUI.on_message``.
 #### `EvosaxUI.on_run_end()`
 
 ```python
-on_run_end(self, *, final_loss: float) -> None
+on_run_end(self, *, returned_loss: float) -> None
 ```
 
 Fires once after the last generation with the loss of the returned predictors.

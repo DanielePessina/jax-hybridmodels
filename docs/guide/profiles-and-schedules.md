@@ -69,17 +69,17 @@ length baked in. Scale it into a learning rate:
 ```python
 schedule = hm.schedules.annealing_schedule(
     "warmup_cosine",
-    total_epochs=n_steps,
+    total_steps=n_steps,
     init_value=1.0,
     end_value=0.1,
-    warmup_epochs=5,
+    warmup_steps=5,
 )
 phase = hm.TrainingPhase(steps=n_steps, lr=lambda step: base_lr * schedule(step))
 ```
 
 `n_steps` is the phase's step budget and `base_lr` its peak learning rate.
-One step is one pass over all buckets, so `total_epochs` is the step budget.
-`"warmup_cosine"` rises from 0 to `init_value` over `warmup_epochs`, then
+One step is one pass over all buckets, so `total_steps` is the step budget.
+`"warmup_cosine"` rises from 0 to `init_value` over `warmup_steps`, then
 decays to `end_value`; the other kinds start at `init_value`. A custom loop
 can call the same multiplier to ramp a penalty weight.
 

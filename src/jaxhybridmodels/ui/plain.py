@@ -56,12 +56,12 @@ class _PlainUI:
     def on_compile_done(self, *, bucket_idx: int) -> None:
         pass
 
-    def on_run_end(self, *, final_loss: float) -> None:
+    def on_run_end(self, *, returned_loss: float) -> None:
         elapsed = time.monotonic() - self._started
-        if math.isnan(final_loss):
+        if math.isnan(returned_loss):
             print(f"stopped after {elapsed:.0f} s with no finite loss", flush=True)
         else:
-            print(f"done: final loss {final_loss:.2e} in {elapsed:.0f} s", flush=True)
+            print(f"done: final loss {returned_loss:.2e} in {elapsed:.0f} s", flush=True)
 
     def on_message(self, *, level: str, text: str) -> None:
         print(f"{level}: {text}", flush=True)

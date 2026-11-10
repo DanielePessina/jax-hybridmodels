@@ -62,11 +62,11 @@ Do not subclass to add bound handling or named inputs.
 BoundScaler(
     bounds: 'Any',
     *,
-    transform: 'str' = 'sigmoid',
+    squash: 'str' = 'sigmoid',
     temperature: 'Any' = 1.0,
     warp: 'str' = 'linear',
-    logit_eps: 'float' = 0.001,
-    z_knee: 'float | None' = None,
+    edge_eps: 'float' = 0.001,
+    saturation_knee: 'float | None' = None,
 ) -> None
 ```
 
@@ -101,15 +101,14 @@ warp
 squash
     The map from latent onto ``(0, 1)``, applied before the affine
     rescale onto the box. ``"sigmoid"`` (default), ``"algebraic"``,
-    ``"softsign"``. Same module, ``BOUND_TRANSFORMS``. Stored as the
-    ``transform`` field.
+    ``"softsign"``. Same module, ``SQUASHES``.
 temperature
     Divides the latent before the squash. A larger ``T`` spreads the
     same box over a wider latent range, so the squash saturates more
     slowly. ``T = 1.0`` is the plain squash.
 knee
-    The ``z_knee`` field. Latent magnitude past which
-    `saturation` starts charging. Derived per transform from
+    The ``saturation_knee`` field. Latent magnitude past which
+    `saturation` starts charging. Derived per squash from
     one physical criterion, the outer 5% of the box.
 
 **The two maps**
@@ -148,13 +147,13 @@ slow convergence.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `bounds` | `tuple[tuple[float, float], ...]` | Per-component ``(low, high)`` pairs in physical units. Length sets the input/output dimension and the pairs apply elementwise to the last axis. The constructor also takes one bare pair, ``BoundScaler((270.0, 350.0))``, as a one-component scaler, which acts elementwise on an array of any shape. Use None or signed infinity for a missing endpoint. Finite pairs must satisfy ``low < high``. Open pairs require a linear warp. |
-| `transform` | `str` | Static. Squash name, a key of ``BOUND_TRANSFORMS``. Register your own with ``register_bound_transform``. |
+| `bounds` | `tuple[tuple[float, float], ...]` | Per-component ``(low, high)`` pairs in physical units. Length sets the input/output dimension and the pairs apply elementwise to the last axis. The constructor also takes one bare pair, ``BoundScaler((270.0, 350.0))``, as a one-component scaler, which acts elementwise on an array of any shape. Use None or signed infinity for a missing endpoint. Finite pairs must satisfy ``low < high``. A fully open pair requires a linear warp; a one-sided pair also takes ``"log"`` or ``"log10"``, which then warps the distance from the bound. |
+| `squash` | `str` | Static. Squash name, a key of ``SQUASHES``. Register your own with ``register_squash``. |
 | `temperature` | `Array` | Scalar (or per-component) latent sharpness. ``T = 1.0`` recovers the plain squash and its inverse. |
 | `warp` | `str` | Static. Warp name, a key of ``WARPS``. Register your own with ``register_warp``. |
 | `warped_bounds` | `tuple[tuple[float, float], ...]` | Static. ``bounds`` pushed through the warp once at construction. Resolved eagerly so no call has to warp the edges under a trace. |
-| `logit_eps` | `float` | Static. Half-width of the band at each end of ``[0, 1]`` outside which ``to_latent`` continues linearly instead of running into the squash inverse's pole. Also sets the continuation slope (roughly ``1 / logit_eps``). For a one-sided bound there is no unit interval, so it is a distance from the bound in the value's own units: ``to_latent`` is exact only beyond ``logit_eps`` of the edge. ``Parameter`` uses the exact inverse and is not affected. |
-| `z_knee` | `float` | Static. The knee. Defaults to the transform's own value, which for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the box. Do not share one number across transforms: 2.944 is 12.7% from the bound on softsign, which would charge 2.7x too hard. |
+| `edge_eps` | `float` | Static. Half-width of the band at each end of ``[0, 1]`` outside which ``to_latent`` continues linearly instead of running into the squash inverse's pole. Also sets the continuation slope (roughly ``1 / edge_eps``). For a one-sided bound there is no unit interval, so it is a distance from the bound in the value's own units: ``to_latent`` is exact only beyond ``edge_eps`` of the edge. ``Parameter`` uses the exact inverse and is not affected. |
+| `saturation_knee` | `float` | Static. The knee. Defaults to the squash's own value, which for sigmoid is ``2.944`` (``logit(0.95)``), the outer 5% of the box. Do not share one number across transforms: 2.944 is 12.7% from the bound on softsign, which would charge 2.7x too hard. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L192)</small>
 
@@ -172,7 +171,7 @@ Squash ``z / temperature`` into ``(0, 1)``, affine rescale onto the
 warped box, then unwarp. The result is finite and inside the box for
 any finite ``z``, so this direction needs no guard.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L662)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L665)</small>
 
 <a id="boundscalerinput_violation"></a>
 
@@ -193,7 +192,7 @@ pass finite and differentiable near the box, this term supplies a
 restoring force that keeps working far outside it. Pure, so the
 caller decides whether and where to pay for it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L589)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L592)</small>
 
 <a id="boundscalerlatent_at_position"></a>
 
@@ -207,7 +206,7 @@ The latent of component ``i`` whose `squash_position` is ``position``.
 
 Its exact inverse. An unbounded component has no such map.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L517)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L520)</small>
 
 <a id="boundscalersaturation"></a>
 
@@ -217,7 +216,7 @@ Its exact inverse. An unbounded component has no such map.
 saturation(self, z: 'Array') -> 'Array'
 ```
 
-Scalar squared overshoot of ``|z / temperature|`` past ``z_knee``.
+Scalar squared overshoot of ``|z / temperature|`` past ``saturation_knee``.
 
 Measures how hard the output squash is pinned against its bound.
 For sigmoid the knee is ``2.944``, where ``sigmoid(2.944) = 0.95``,
@@ -238,7 +237,7 @@ bound is ``edge + softplus(z / T)``, which near its edge behaves like
 parametrisation whose relative slope stays 1, so a small value there
 is not stuck and costs nothing.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L620)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L623)</small>
 
 <a id="boundscalerscale_inputs"></a>
 
@@ -253,7 +252,7 @@ Normalise network inputs: finite intervals map to latent, open ones pass through
 A one-sided input bound says where the input may go, not what scale
 it has, so the network sees such an input unchanged.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L671)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L674)</small>
 
 <a id="boundscalersquash_position"></a>
 
@@ -274,7 +273,7 @@ never reads as one. An unbounded value is 0.5. Near 0 or 1 the
 value's gradient vanishes, whatever its physical scale or warp: that
 is what "pinned" means for inference.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L487)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L490)</small>
 
 <a id="boundscalerto_latent"></a>
 
@@ -299,7 +298,7 @@ are often state-derived (supersaturation in the crystallisation
 example), so a clipped input silently drops a real sensitivity from
 the adjoint.
 
-Inside ``[logit_eps, 1 - logit_eps]`` the map is exactly the plain
+Inside ``[edge_eps, 1 - edge_eps]`` the map is exactly the plain
 inverse in value and derivative. Outside it continues linearly at
 the inverse's slope at the crossing: finite values, non-zero
 constant gradient, and a C^1 join so an adaptive step controller
@@ -308,7 +307,7 @@ sees no kink.
 The continuation reports direction, not magnitude. Pair it with
 `input_violation` when an input can leave its box.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L533)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L536)</small>
 
 ---
 
@@ -406,7 +405,7 @@ predictor always describes its own input contract.
 | `inner` | `Predictor` | Trainable Array -> Array module operating in latent space. |
 | `out_scaler` | `BoundScaler` | Maps the inner network's latent output back to physical units. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L793)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L796)</small>
 
 <a id="boundedpredictorreinitialized"></a>
 
@@ -429,7 +428,7 @@ own init scheme rather than leaf-level normal sampling. The scalers
 hold bound geometry, not learned state, so a restart has no reason
 to touch them.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L998)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L1001)</small>
 
 ---
 
@@ -444,7 +443,7 @@ Parameter(
     value: 'Any',
     bounds: 'Any' = None,
     *,
-    transform: 'str' = 'sigmoid',
+    squash: 'str' = 'sigmoid',
     warp: 'str' = 'linear',
 ) -> None
 ```
@@ -460,8 +459,8 @@ without clipping.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `value` |  | Initial physical value: a scalar or an array of any shape. Must be finite and strictly inside its bounds. |
-| `bounds` |  | One ``(low, high)`` pair shared by every element, or one pair per element in flattened order. None for a missing endpoint. Omit for an unbounded value. Two finite endpoints use the ``transform`` squash. One endpoint puts the distance from it through softplus, or ``exp`` under ``warp="log"`` (``10 **`` under ``"log10"``). |
-| `transform, warp` |  | Passed to [`BoundScaler`](/api/predictors#boundscaler). ``warp="log10"`` suits rate constants that span decades. With two finite bounds it warps the value and needs them positive; with one it warps the distance from the edge, as ``"log"`` does. |
+| `bounds` |  | One ``(low, high)`` pair shared by every element, or one pair per element in flattened order. None for a missing endpoint. Omit for an unbounded value. Two finite endpoints use the ``squash``. One endpoint puts the distance from it through softplus, or ``exp`` under ``warp="log"`` (``10 **`` under ``"log10"``). |
+| `squash, warp` |  | Passed to [`BoundScaler`](/api/predictors#boundscaler). ``warp="log10"`` suits rate constants that span decades. With two finite bounds it warps the value and needs them positive; with one it warps the distance from the edge, as ``"log"`` does. |
 
 **Examples**
 
@@ -470,7 +469,7 @@ without clipping.
     rate = Parameter(0.1, bounds=(0.0, None))
     rate.value  # Array(0.1)
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L691)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L694)</small>
 
 <a id="parameterreinitialized"></a>
 
@@ -489,7 +488,7 @@ softplus (or log) distance from one endpoint, so a standard-normal draw
 would replace a rate of 5000 with something near 1 and lose the
 starting value the user chose. The scaler is left untouched.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L771)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L774)</small>
 
 <a id="parametervalue"></a>
 
@@ -497,7 +496,7 @@ starting value the user chose. The scaler is left untouched.
 
 Current value in physical units, with the shape given at construction.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L766)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L769)</small>
 
 ---
 
@@ -790,7 +789,7 @@ replaced with a standard-normal sample of matching shape and dtype.
 For a *pytree* of predictors, the convention at the ``simulate_fn``
 boundary, use [`reinitialize_pytree`](/api/predictors#reinitialize_pytree).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L1019)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L1022)</small>
 
 ---
 
@@ -823,4 +822,4 @@ its own ``reinitialized``, or a module holding neither, such as an
 as a dict is, so a ``Parameter`` inside it keeps its own rule: only
 boxed entries are redrawn.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L1062)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/predictors/base.py#L1065)</small>

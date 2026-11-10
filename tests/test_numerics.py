@@ -48,11 +48,11 @@ from jaxhybridmodels.data import (
     experiments_from_dataframe,
 )
 from jaxhybridmodels.losses import (
-    bal_mle,
-    bal_mse,
     loss_pooling,
     masked_mle,
     masked_mse,
+    per_experiment_mle,
+    per_experiment_mse,
     resolve_loss_fn,
 )
 from jaxhybridmodels.metrics import _worst_first
@@ -103,11 +103,11 @@ from jaxhybridmodels.training.kernels import (
     build_score_bucket,
 )
 from jaxhybridmodels.transforms import (
-    BOUND_TRANSFORMS,
+    SQUASHES,
     WARPS,
-    BoundTransform,
+    Squash,
     Warp,
-    register_bound_transform,
+    register_squash,
     register_warp,
 )
 
@@ -150,7 +150,9 @@ def test_backsolve_refuses_a_closed_over_value():
         jax.grad(lambda k: solution_sum(k, "Backsolve", through_args=False))(jnp.asarray(1.0))
 
 
-@pytest.mark.parametrize("loss_fn", [masked_mse, masked_mle, bal_mse, bal_mle])
+@pytest.mark.parametrize(
+    "loss_fn", [masked_mse, masked_mle, per_experiment_mse, per_experiment_mle]
+)
 @pytest.mark.parametrize("poison", [jnp.nan, jnp.inf, 1e6], ids=["nan", "inf", "huge"])
 def test_masked_cells_reach_neither_value_nor_gradient(loss_fn, poison):
     # The t0 row of every bucket is masked. A diverged solve leaves garbage
@@ -215,7 +217,10 @@ def test_a_horizon_change_does_not_recompile_training():
     # shape check before training; anything more is a retrace at a phase boundary.
     traces: list[Any] = []
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(steps=5, lr=0.1, horizon=0.5), hm.TrainingPhase(steps=5, lr=0.05))
+        phases=(
+            hm.TrainingPhase(steps=5, lr=0.1, loss_horizon=0.5),
+            hm.TrainingPhase(steps=5, lr=0.05),
+        )
     )
     make_model(parameter_predictors(), _counting(traces)).fit(
         decay_dataset(), config, key=jr.key(0), verbose=False
@@ -228,7 +233,7 @@ def test_a_horizon_change_does_not_recompile_training():
 # ---------------------------------------------------------------------------
 
 
-TRANSFORMS = sorted(BOUND_TRANSFORMS)
+TRANSFORMS = sorted(SQUASHES)
 
 
 INF = math.inf
@@ -247,10 +252,10 @@ BOXES = [
 
 @pytest.fixture
 def restore_registries():
-    transforms, warps = dict(BOUND_TRANSFORMS), dict(WARPS)
+    transforms, warps = dict(SQUASHES), dict(WARPS)
     yield
-    BOUND_TRANSFORMS.clear()
-    BOUND_TRANSFORMS.update(transforms)
+    SQUASHES.clear()
+    SQUASHES.update(transforms)
     WARPS.clear()
     WARPS.update(warps)
 
@@ -259,7 +264,7 @@ def restore_registries():
 @pytest.mark.parametrize("box", BOXES, ids=[b[0] for b in BOXES])
 def test_scaler_properties(transform, box):
     _, (low, high), warp, inside, outside = box
-    scaler = hm.BoundScaler(((low, high),), transform=transform, warp=warp)
+    scaler = hm.BoundScaler(((low, high),), squash=transform, warp=warp)
 
     # Round trip is the identity inside the box.
     x = jnp.asarray(inside)
@@ -316,7 +321,7 @@ class _Identity(hm.Predictor):
 
 def test_polynomial_tails_keep_gradient_where_sigmoid_dies():
     def tail_gradient(name, z):
-        scaler = hm.BoundScaler(((0.0, 10.0),), transform=name)
+        scaler = hm.BoundScaler(((0.0, 10.0),), squash=name)
         return float(jax.grad(lambda v: scaler.from_latent(v)[0])(jnp.array([z]))[0])
 
     assert tail_gradient("sigmoid", 25.0) == 0.0
@@ -396,9 +401,9 @@ def test_array_parameter_takes_one_bound_per_element():
 
 def test_a_registered_transform_and_warp_work_end_to_end(restore_registries):
     # arctan, which the shipped set omits as dominated by softsign.
-    register_bound_transform(
+    register_squash(
         "arctan",
-        BoundTransform(
+        Squash(
             forward=lambda z: 0.5 + jnp.arctan(z) / jnp.pi,
             inverse=lambda s: jnp.tan(jnp.pi * (s - 0.5)),
             inverse_slope=lambda s: jnp.pi / jnp.cos(jnp.pi * (s - 0.5)) ** 2,
@@ -410,11 +415,11 @@ def test_a_registered_transform_and_warp_work_end_to_end(restore_registries):
         "sqrt",
         Warp(forward=jnp.sqrt, inverse=lambda w: jnp.asarray(w) ** 2, requires_positive=False),
     )
-    parameter = hm.Parameter(9.0, bounds=(0.0, 100.0), transform="arctan", warp="sqrt")
+    parameter = hm.Parameter(9.0, bounds=(0.0, 100.0), squash="arctan", warp="sqrt")
     np.testing.assert_allclose(parameter.value, 9.0, rtol=1e-4)
     scaler = parameter.scaler
     assert float(scaler.from_latent(jnp.array([0.0]))[0]) == pytest.approx(25.0, rel=1e-3)
-    knee_value = float(scaler.from_latent(jnp.array([scaler.z_knee]))[0])
+    knee_value = float(scaler.from_latent(jnp.array([scaler.saturation_knee]))[0])
     assert knee_value == pytest.approx(9.5**2, rel=1e-2)
 
 
@@ -502,16 +507,16 @@ def test_registering_a_solver_and_adjoint_makes_them_serialisable(monkeypatch):
         ("cosine", {}, {0: 1.0, 50: 0.5, 100: 0.0}),
         ("cosine", {"end_value": 0.1}, {0: 1.0, 100: 0.1}),
         ("linear", {"end_value": 0.2}, {0: 1.0, 50: 0.6, 100: 0.2, 500: 0.2}),
-        ("warmup_cosine", {"warmup_epochs": 20}, {0: 0.0, 20: 1.0, 100: 0.0}),
+        ("warmup_cosine", {"warmup_steps": 20}, {0: 0.0, 20: 1.0, 100: 0.0}),
         # Decay spans the remaining 50 steps, so the midpoint of the decay is step 75.
-        ("warmup_cosine", {"warmup_epochs": 50}, {50: 1.0, 75: 0.5, 99: 0.0, 100: 0.0}),
+        ("warmup_cosine", {"warmup_steps": 50}, {50: 1.0, 75: 0.5, 99: 0.0, 100: 0.0}),
         ("exponential", {"end_value": 0.01}, {0: 1.0, 100: 0.01, 500: 0.01}),
     ],
 )
 def test_annealing_schedule_values(kind, kwargs, values):
-    # Steps past total_epochs hold the end value, so a loop that overruns
+    # Steps past total_steps hold the end value, so a loop that overruns
     # its budget cannot drive the multiplier negative.
-    schedule = annealing_schedule(kind, total_epochs=100, **kwargs)
+    schedule = annealing_schedule(kind, total_steps=100, **kwargs)
     jitted = jax.jit(schedule)
     for step, expected in values.items():
         assert float(schedule(step)) == pytest.approx(expected, abs=1e-2)
@@ -925,13 +930,13 @@ def test_channel_idx_and_channel_weights_compose_linearly():
     parts = [masked_mse(pred, bp, channel_weights=w) for w in [(1.0, 0.0), (0.0, 1.0)]]
     both = masked_mse(pred, bp, channel_weights=(2.0, 1.0))
     np.testing.assert_allclose(both, 2 * parts[0] + parts[1], rtol=1e-6)
-    # bal_mse weights are linear in the per-channel losses.
-    single = [bal_mse(pred, bp, channel_idx=(i,)) for i in (0, 1)]
-    weighted = bal_mse(pred, bp, channel_weights=(2.0, 1.0))
+    # per_experiment_mse weights are linear in the per-channel losses.
+    single = [per_experiment_mse(pred, bp, channel_idx=(i,)) for i in (0, 1)]
+    weighted = per_experiment_mse(pred, bp, channel_weights=(2.0, 1.0))
     np.testing.assert_allclose(weighted, 2 * single[0] + single[1], rtol=1e-6)
 
 
-@pytest.mark.parametrize("loss_fn", [bal_mse, bal_mle])
+@pytest.mark.parametrize("loss_fn", [per_experiment_mse, per_experiment_mle])
 def test_balanced_losses_weight_experiments_not_observations(loss_fn, decay_data):
     base = decay_data
     copies = [
@@ -978,7 +983,7 @@ def test_likelihood_losses_read_the_observation_variance():
     se = jnp.where(bp.mask, (pred - bp.observed) ** 2, 0.0).sum()
     expected = 0.5 * bp.mask.sum() * jnp.log(2.0) - 0.5 * se
     np.testing.assert_allclose(masked_mle(pred, high) - masked_mle(pred, low), expected, atol=1e-4)
-    assert not jnp.allclose(bal_mle(pred, low), bal_mle(pred, high))
+    assert not jnp.allclose(per_experiment_mle(pred, low), per_experiment_mle(pred, high))
 
 
 def test_resolve_loss_fn_binds_channel_arguments():
@@ -1411,7 +1416,7 @@ def test_stepsize_controller_drives_a_real_solve():
     np.testing.assert_allclose(ys[-1], jnp.array([1.0, 2.0]) * math.exp(-1.0), rtol=1e-4)
 
 
-ALL_LOSSES = [masked_mse, masked_mle, bal_mse, bal_mle]
+ALL_LOSSES = [masked_mse, masked_mle, per_experiment_mse, per_experiment_mle]
 
 
 def test_vector_covariates_stack_and_y0_fn_sees_covariates_and_channels():
@@ -1509,7 +1514,7 @@ def test_losses_score_the_decay_fit(loss_fn, decay_data):
         right = loss_fn(_analytic(bp, TRUE_RATE), bp)
         assert wrong.shape == ()
         assert float(right) < float(wrong)
-        if loss_fn in (masked_mse, bal_mse):
+        if loss_fn in (masked_mse, per_experiment_mse):
             assert float(right) == pytest.approx(0.0, abs=1e-10)
 
 
@@ -1765,7 +1770,7 @@ def test_a_new_horizon_neither_retraces_nor_needs_saying():
 
 
 def test_the_dataset_loss_pools_every_measurement_however_it_is_bucketed(decay_data):
-    """mse is the mean over all measurements, bal_mse over all experiments.
+    """mse is the mean over all measurements, per_experiment_mse over all experiments.
 
     The four decay experiments sit in two buckets of different sizes, so an
     equal weight per bucket would give a different number.
@@ -1778,7 +1783,7 @@ def test_the_dataset_loss_pools_every_measurement_however_it_is_bucketed(decay_d
     ]
     expected = {
         "mse": np.mean(np.concatenate(residuals) ** 2),
-        "bal_mse": np.mean([np.mean(r**2) for r in residuals]),
+        "per_experiment_mse": np.mean([np.mean(r**2) for r in residuals]),
         "mle": sum(np.sum(0.5 * (np.log(2 * np.pi * 1e-2) + r**2 / 1e-2)) for r in residuals),
     }
     for name, value in expected.items():

@@ -1,6 +1,6 @@
 # Losses: Masked & Balanced Objectives
 
-Loss functions consume a model's predicted output `[N, T, D]` and the bucket payload, return a scalar, and respect the bucket mask. Two families: `masked_*` weights every observation equally; `bal_*` normalises per-experiment so duplication of one experiment can't dominate the gradient.
+Loss functions consume a model's predicted output `[N, T, D]` and the bucket payload, return a scalar, and respect the bucket mask. Two families: `masked_*` weights every observation equally; `per_experiment_*` normalises per-experiment so duplication of one experiment can't dominate the gradient.
 
 Pass them by name via training-config `loss="mse"` (resolved through [`LOSS_REGISTRY`](#loss_registry)) or as a callable for custom losses.
 
@@ -8,8 +8,8 @@ Pass them by name via training-config `loss="mse"` (resolved through [`LOSS_REGI
 
 - [`masked_mse`](#masked_mse)
 - [`masked_mle`](#masked_mle)
-- [`bal_mse`](#bal_mse)
-- [`bal_mle`](#bal_mle)
+- [`per_experiment_mse`](#per_experiment_mse)
+- [`per_experiment_mle`](#per_experiment_mle)
 - [`LOSS_REGISTRY`](#loss_registry)
 - [`resolve_loss_fn`](#resolve_loss_fn)
 - [`loss_pooling`](#loss_pooling)
@@ -39,7 +39,7 @@ Mean squared error reduced over a single global denominator.
 Computes ``sum(mask * weights * (pred - observed)**2) / max(mask.sum(), 1)``
 over the selected channels. A long-trajectory experiment adds terms to
 the numerator and the denominator in proportion, and gets no explicit
-per-experiment weighting. Use ``bal_mse`` when you want that weighting.
+per-experiment weighting. Use ``per_experiment_mse`` when you want that weighting.
 
 **Parameters**
 
@@ -78,21 +78,21 @@ channel, shape ``[N, D]``. Multiplies by the per-channel ``weights`` and
 sums those.
 
 Nothing is averaged. The result is a sum of log-likelihoods and grows
-linearly with the number of observations. Use ``bal_mle`` for the
+linearly with the number of observations. Use ``per_experiment_mle`` for the
 per-experiment averaged version.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L179)</small>
 
 ---
 
-<a id="bal_mse"></a>
+<a id="per_experiment_mse"></a>
 
-### `bal_mse()`
+### `per_experiment_mse()`
 
-<small>`from jaxhybridmodels.losses import bal_mse`</small>
+<small>`from jaxhybridmodels.losses import per_experiment_mse`</small>
 
 ```python
-bal_mse(
+per_experiment_mse(
     pred_obs: "Float[Array, 'N T D']",
     bp: 'BucketPayload',
     *,
@@ -118,14 +118,14 @@ from the outer mean rather than diluting measured experiments.
 
 ---
 
-<a id="bal_mle"></a>
+<a id="per_experiment_mle"></a>
 
-### `bal_mle()`
+### `per_experiment_mle()`
 
-<small>`from jaxhybridmodels.losses import bal_mle`</small>
+<small>`from jaxhybridmodels.losses import per_experiment_mle`</small>
 
 ```python
-bal_mle(
+per_experiment_mle(
     pred_obs: "Float[Array, 'N T D']",
     bp: 'BucketPayload',
     *,
@@ -137,7 +137,7 @@ bal_mle(
 Per-experiment-balanced Gaussian NLL.
 
 Averages over time within each observed experiment, then over those
-experiments. Same reduction as ``bal_mse``, with
+experiments. Same reduction as ``per_experiment_mse``, with
 ``_gaussian_nll_terms`` (which reads ``bp.variance``) in place of the
 pointwise squared error. Experiments with no observations in any selected
 channel are excluded from the outer mean.
@@ -154,10 +154,10 @@ channel are excluded from the outer mean.
 
 ```python
 LOSS_REGISTRY = {
-  'bal_mle': function
-  'bal_mse': function
   'mle': function
   'mse': function
+  'per_experiment_mle': function
+  'per_experiment_mse': function
 }
 ```
 
@@ -238,7 +238,7 @@ bucket's value is an average over to put the buckets back together:
 - ``"observations"``: a mean over measured cells (``mse``). Buckets are
   weighted by their measured-cell count, which gives the mean over every
   measurement in the dataset.
-- ``"experiments"``: a mean over experiments (``bal_mse``, ``bal_mle``).
+- ``"experiments"``: a mean over experiments (``per_experiment_mse``, ``per_experiment_mle``).
   Buckets are weighted by how many measured experiments they hold, so
   every experiment counts the same across the dataset.
 - ``"sum"``: already a sum (``mle``). Bucket values are added.
@@ -246,7 +246,7 @@ bucket's value is an average over to put the buckets back together:
 A ``functools.partial`` of a built-in pools as the built-in. Any other
 custom loss declares its kind with a ``pooling`` attribute, for example
 ``my_loss.pooling = "sum"``, and defaults to ``"observations"``: a
-wrapper around ``bal_mse`` must set ``"experiments"`` itself.
+wrapper around ``per_experiment_mse`` must set ``"experiments"`` itself.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/losses.py#L286)</small>
 

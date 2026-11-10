@@ -54,7 +54,7 @@ for a neural ODE memory is usually the binding constraint.
   the vector field closes over raises, so pass the predictors as ``args``.
 - ``ForwardMode`` is for forward-mode differentiation, which wins only
   when parameters are far fewer than outputs. Training takes reverse-mode
-  gradients and refuses it; inference with ``gradient="forward"`` can use
+  gradients and refuses it; inference with ``ad_mode="forward"`` can use
   it.
 """
 

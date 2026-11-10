@@ -156,7 +156,7 @@ outside this per-bucket scorer.
 ```python
 build_penalty_step(
     *,
-    penalty_fn: 'Callable[[Any, tuple[Array, ...]], Array]',
+    bound_penalty_fn: 'Callable[[Any, tuple[Array, ...]], Array]',
     trainable: 'Any',
 ) -> Callable[[Any, Array, tuple[Array, ...]], tuple[Array, Any]]
 ```
@@ -172,9 +172,9 @@ bucket.
 (the output of [`select_penalty_points`](/api/penalties#select_penalty_points)),
 passed as traced arrays, so a shape change (a phase boundary) retraces
 this small kernel and nothing else. The default ``()`` suits a custom
-``penalty_fn`` that ignores points.
+``bound_penalty_fn`` that ignores points.
 
-``penalty_fn`` is the regulariser, required here and defaulted to
+``bound_penalty_fn`` is the regulariser, required here and defaulted to
 [`bound_penalty`](/api/penalties#bound_penalty) by the stock trainers.
 Passing a different callable (weight decay on inner weights, a
 monotonicity term, ...) is how a custom regulariser composes with the

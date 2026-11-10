@@ -30,7 +30,7 @@
   a rejected proposal. `estimate=` picks what is sampled, and what stays fixed is
   listed in `InferenceProblem.conditional_on`.
 - `InferenceProblem.preconditioned` whitens the position with the Gauss-Newton
-  curvature at the fit, and `make_problem(gradient=)` picks forward or reverse
+  curvature at the fit, and `make_problem(ad_mode=)` picks forward or reverse
   mode, which together take most of the cost out of a NUTS run.
 - `InferenceProblem.predict` turns chain draws into a posterior predictive
   `PredictionResult`, with or without observation noise, and
@@ -38,12 +38,13 @@
   installs BlackJAX and `arviz-base`.
 - `predict_ensemble(quantiles=)` adds quantiles across members, also in
   `to_dataframe`.
-- Multiple shooting: `TrainingPhase(segments=K)` splits each trajectory into `K`
+- Multiple shooting: `TrainingPhase(shooting_segments=K)` splits each trajectory into `K`
   segments that start from trainable states, with a gap term weighted by
   `continuity_weight`. The schedule must end in single shooting.
-  `FitHistory.continuity` records the gap term, and the summary's phase table
+  `FitHistory.gap_term` records the gap term, and the summary's phase table
   shows it. See the multiple shooting example.
-- `FitHistory.tournament_scores` keeps every tournament attempt's score, and the
+- `FitHistory.restart_scores` keeps every restart candidate's score, the
+  starting values first, and the
   summary and the training display report the spread.
 - `InferenceProblem.predict` drops a draw whose solve fails on the requested grid,
   with a warning.
@@ -74,7 +75,7 @@
   a `Dataset`. `Dataset.experiments` exposes the source experiments.
 - `hm.Objective` holds what a fit minimises: `loss`, `channel_weights`
   (a mapping by channel name, or one weight per channel), the bound penalty
-  (`penalty_weight`, `penalty_points`, `penalty_fn`) and the trajectory
+  (`bound_penalty_weight`, `bound_penalty_points`, `bound_penalty_fn`) and the trajectory
   penalty. `fit`, `fit_ensemble` and the trainers in
   `jaxhybridmodels.training` take it as `objective=`. Channel names and penalty paths are
   checked before anything compiles.
@@ -103,10 +104,11 @@
 - `evaluate_predictor(predictor, {name: array})` evaluates over a grid,
   broadcasting the inputs.
 - `HybridModel.fit_ensemble(data, config, *, key, n_members, n_seeds=None,
-  bootstrap=False, ...)` trains an ensemble and returns its `FitResult`s,
-  best first. A seed ensemble scores `n_seeds` initialisations (default
-  `n_members`) and fully trains the best `n_members`. A bootstrap ensemble
-  trains one member per resample, the best of `n_seeds` seeds (default 1).
+  bootstrap=False, seeds_per_member=1, ...)` trains an ensemble and returns
+  its `FitResult`s, best first. A seed ensemble scores `n_seeds`
+  initialisations (default `n_members`) and fully trains the best
+  `n_members`. A bootstrap ensemble trains one member per resample, the best
+  of `seeds_per_member` seeds. Each mode refuses the other's keyword.
   Optax only. It raises `RuntimeError` when every seed fails.
 - `HybridModel.predict(data, *, ts=None, n_points=None)`: `n_points` gives
   each experiment an even grid over its own span, `ts` one grid for all.
@@ -117,7 +119,7 @@
   the per-channel spread (`ddof=0`), `PredictionResult.members` each
   model's own result, and `to_dataframe()` gains a `std` column.
   `compute_metrics` scores the mean.
-- `FitResult.final_loss`: the training loss at the returned parameters.
+- `FitResult.returned_loss`: the training loss at the returned parameters.
 - `hm.save(path, run, *, config=None, objective=None, extras=None)` writes
   a `HybridModel` or a `FitResult` (with its `history`, `best_step` and
   `stop_reason`). `hm.load(path, *, like)` returns a `SavedRun` whose
@@ -131,7 +133,7 @@
   `ExperimentPrediction`, `SavedRun`) live in `jaxhybridmodels.results`
   and are re-exported at the top level.
 - `jaxhybridmodels.penalties.bounded_predictor_paths` lists the path of
-  every `BoundedPredictor`, the keys `Objective.penalty_points` takes.
+  every `BoundedPredictor`, the keys `Objective.bound_penalty_points` takes.
 - `TrainingPhase.lr` accepts any callable. One JAX cannot trace, such as a
   Python `if` on the step, is evaluated step by step on the host.
 - `fit` checks the shapes returned by `simulate_fn` and `state_to_output`
@@ -161,7 +163,7 @@
   Steps adapt as in pyPESTO, every other value is re-optimised with BFGS at
   each point, and a side the data leave open is reported as open. A profile
   starting from a value against its bound still walks away from it.
-  `ProfileResult.at_bound` names the other values that were pinned at a bound
+  `ProfileResult.others_pinned` names the other values that were pinned at a bound
   along the walk, since the interval then holds only for those bounds.
 - `FisherResult.sample` draws from the estimate's asymptotic sampling
   distribution, as `LaplaceResult.sample` draws from the posterior's Gaussian.
@@ -187,6 +189,40 @@
 
 ### Changed (breaking against 0.2.0b1)
 
+- **Breaking.** Names that did not say what they do were renamed before the
+  first PyPI release. `load` maps every old field name, so a run saved under
+  one still loads.
+
+  | Before | Now |
+  | --- | --- |
+  | `TrainingPhase(horizon=)` | `loss_horizon=`: it masks the loss, never the integration |
+  | `TrainingPhase(segments=)` | `shooting_segments=` |
+  | `TrainingPhase(penalty_weight=)`, `Objective(penalty_weight=, penalty_points=, penalty_fn=)` | `bound_penalty_weight=`, `bound_penalty_points=`, `bound_penalty_fn=` |
+  | `OptaxTrainingConfig(tournament_attempts=N, tournament_steps=, tournament_lr=)` | `restarts=N - 1`, `restart_steps=`, `restart_lr=`: `restarts` counts the redrawn starts beside your own, so `0` is off |
+  | `OptaxTrainingConfig(patience=)` | `patience_steps=` |
+  | `FitHistory.tournament_scores`, `FitHistory.continuity` | `restart_scores`, `gap_term` |
+  | `FitResult.final_loss`, `on_run_end(final_loss=)` | `returned_loss` |
+  | `EvosaxTrainingConfig(steps=, init="warm")` | `generations=`, `init="current"` |
+  | `Parameter(transform=)`, `BoundScaler(transform=, logit_eps=, z_knee=)` | `squash=`, `edge_eps=`, `saturation_knee=` |
+  | `BOUND_TRANSFORMS`, `BoundTransform`, `register_bound_transform` | `SQUASHES`, `Squash`, `register_squash` |
+  | `Objective(loss="bal_mse")`, `"bal_mle"`, `losses.bal_mse` | `"per_experiment_mse"`, `"per_experiment_mle"`, `losses.per_experiment_mse` |
+  | `annealing_schedule(total_epochs=, warmup_epochs=)` | `total_steps=`, `warmup_steps=` |
+  | `fit_ensemble(n_seeds=, bootstrap=True)` | `fit_ensemble(seeds_per_member=, bootstrap=True)` |
+
+  Names that were new in 0.3.0 changed before release too:
+  `make_problem(noise=, gradient=)` is `noise_sd=` and `ad_mode=`
+  (`InferenceProblem.ad_mode`); `ProfileResult.bounds`,
+  `log_likelihood_ratio` and `at_bound` are `interval`, `statistic` and
+  `others_pinned`; `FisherResult.at_bound` and `LaplaceResult.at_bound` are
+  `pinned`; `FisherResult.eigenvalues` and `eigenvectors` are
+  `scaled_eigenvalues` and `scaled_eigenvectors`.
+- `make_problem(log_prior=)` defaults to `None`, a likelihood-only problem.
+  `laplace` defaults to `curvature="gauss_newton"`, as `fisher` does; a custom
+  `log_likelihood` needs `curvature="exact"`, and the error says so.
+- An Evosax fit records each generation's best loss in `FitHistory.loss`
+  instead of the best so far, so it can rise like an Optax loss.
+  `FitResult.measured_loss` holds the returned candidate's loss.
+
 - The training loss pools buckets by what each one averages over, so `mse`
   is the mean over every measurement and `bal_mse` the mean over every
   experiment, however the experiments fall into buckets. Each bucket used to
@@ -197,7 +233,7 @@
   take a `share`, and `build_dataset_score` a `pooling`. The trajectory
   penalty and the multiple-shooting gap term are means over every
   experiment, probes included.
-- `TrainingPhase.horizon` cuts each experiment at that fraction of its own
+- `TrainingPhase.loss_horizon` cuts each experiment at that fraction of its own
   span, from `t0` (or its first measurement) to its last measurement, and
   always scores its first measurement. It used to count rows of the bucket's
   shared time grid, so a short horizon after `t0` could score nothing.
@@ -229,9 +265,9 @@
   bound: `Parameter(5000.0, bounds=(0.0, None), warp="log")` is
   `exp(z)`, so each Adam step is a relative change. With a softplus a value of
   5000 moved by about the learning rate per step.
-- The tournament's first attempt trains from the predictors as given, so the
+- The first restart candidate trains from the predictors as given, so the
   starting guess is always a candidate; the others redraw as before.
-- In a multiple-shooting phase with `horizon < 1`, continuity gaps past the
+- In a multiple-shooting phase with `loss_horizon < 1`, continuity gaps past the
   horizon are left out of the gap term, as the data there are.
 - `train_scalers=True` no longer trains a `Parameter`'s own temperature, which
   only duplicated its latent.
@@ -248,20 +284,20 @@
 - **Breaking.** `fit` and `fit_ensemble` raise `TypeError` unless `key` is a JAX
   PRNG key. `key=None` and `key=0` used to pass when no random numbers were
   drawn.
-- **Breaking.** `tournament_attempts > 1` with `tournament_steps=0` raises
-  instead of silently running no tournament. `tournament_steps > 0` with
-  `tournament_attempts=1` warns in `fit`.
-- **Breaking.** The tournament trains its attempts with the first phase's
-  learning rate and horizon. `tournament_lr` defaults to None, meaning that
-  rate, instead of 1e-4, at which 30 steps barely moved an attempt and the
-  tournament ranked random initialisations. A tournament re-draws a
+- **Breaking.** `restarts > 0` with `restart_steps=0` raises instead of
+  silently running no restarts. `restart_steps > 0` with `restarts=0` warns
+  in `fit`.
+- **Breaking.** Restarts train their candidates with the first phase's
+  learning rate and horizon. `restart_lr` defaults to None, meaning that
+  rate, instead of 1e-4, at which 30 steps barely moved a candidate and the
+  comparison ranked random initialisations. A restart re-draws a
   `Parameter` only where it has two finite bounds; one without keeps its
   starting value instead of a draw near 1.
 - `repr(FitResult)` is one line instead of the whole model and history.
 - `OptaxTrainingConfig` stores `phases`, a tuple of `TrainingPhase`. The
   parallel `steps`/`lr`/`optimizer`/`reset_optimiser_state`/
   `length_schedule`/`penalty_weight` tuples are gone. `length_schedule` is
-  now `TrainingPhase.horizon` and `reset_optimiser_state` is
+  now `TrainingPhase.loss_horizon` and `reset_optimiser_state` is
   `TrainingPhase.reset_optimizer`. `Objective.penalty_weight` sets the
   bound-penalty weight; `TrainingPhase.penalty_weight` overrides it for one
   phase.
@@ -292,9 +328,9 @@
 - **Breaking.** `penalty_points` is a mapping from predictor path to a
   `[G, n_inputs]` array, not a tuple in traversal order. An unknown path
   raises.
-- **Breaking.** `EvosaxTrainingConfig(steps=...)` replaces
-  `num_generations`. An Evosax fit fills `FitHistory.loss` with the
-  best-so-far loss per generation; `FitHistory.best_fitness` is removed.
+- **Breaking.** `EvosaxTrainingConfig(generations=...)` replaces
+  `num_generations`. An Evosax fit fills `FitHistory.loss` with each
+  generation's best loss; `FitHistory.best_fitness` is removed.
   `EvosaxUI.on_run_start` takes `total_steps` and `on_run_end` takes
   `final_loss`, as in `TrainingUI`.
 - **Breaking.** `HybridModel` takes keyword arguments only and is an
@@ -374,11 +410,11 @@ Migration for code written against the earlier API:
 
 | Old | New |
 | --- | --- |
-| `OptaxTrainingConfig(steps=500, loss="bal_mse", penalty_weight=1e-3)` | `OptaxTrainingConfig(steps=500)` and `fit(..., objective=hm.Objective(loss="bal_mse", penalty_weight=1e-3))` |
+| `OptaxTrainingConfig(steps=500, loss="bal_mse", penalty_weight=1e-3)` | `OptaxTrainingConfig(steps=500)` and `fit(..., objective=hm.Objective(loss="per_experiment_mse", bound_penalty_weight=1e-3))` |
 | `channel_idx=(0,), channel_weights=(1.0,)` | `Objective(channel_weights={"conc": 1.0})` |
-| `penalty_points=(grid_a, grid_b)` | `Objective(penalty_points={"growth": grid_a, "nucleation": grid_b})` |
-| `EvosaxTrainingConfig(num_generations=200)` | `EvosaxTrainingConfig(steps=200)` |
-| `result.history.best_fitness` | `result.history.loss` |
+| `penalty_points=(grid_a, grid_b)` | `Objective(bound_penalty_points={"growth": grid_a, "nucleation": grid_b})` |
+| `EvosaxTrainingConfig(num_generations=200)` | `EvosaxTrainingConfig(generations=200)` |
+| `result.history.best_fitness` | `min(result.history.loss)` |
 | `HybridModel(predictors, simulate_fn, ...)` | `HybridModel(predictors=..., simulate_fn=..., ...)` |
 | `dataclasses.replace(model, predictors=p)` | `eqx.tree_at(lambda m: m.predictors, model, p)` |
 | `ChannelObs(ts, values)` | `ChannelObs(ts=ts, values=values)` |

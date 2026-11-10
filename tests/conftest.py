@@ -38,7 +38,7 @@ def fitted(decay_data):
     ui = RecordingUI()
     config = hm.OptaxTrainingConfig(
         phases=(
-            TrainingPhase(steps=25, lr=0.1, horizon=0.5),
+            TrainingPhase(steps=25, lr=0.1, loss_horizon=0.5),
             TrainingPhase(steps=25, lr=0.05),
         )
     )

@@ -161,7 +161,7 @@ def mechanistic_posterior(args: Any, key: Any) -> None:
         return jstats.norm.logpdf(jnp.log(k_ref), 0.0, 1.5) + jstats.norm.logpdf(ea, 3000.0, 3000.0)
 
     problem = hm.inference.make_problem(
-        damped(result.model), dataset, log_prior=log_prior, noise="data"
+        damped(result.model), dataset, log_prior=log_prior, noise_sd="data"
     ).preconditioned()
     # endregion problem
     start = time.perf_counter()
@@ -196,7 +196,7 @@ def last_layer_posterior(args: Any, key: Any) -> None:
     hybrid, _ = build_models(k_model)
     config = hm.OptaxTrainingConfig(
         phases=(
-            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, horizon=0.5),
+            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, loss_horizon=0.5),
             hm.TrainingPhase(steps=args.steps - args.steps // 3, lr=3e-3),
         ),
     )
@@ -217,7 +217,7 @@ def last_layer_posterior(args: Any, key: Any) -> None:
         damped(result.model),
         dataset,
         log_prior=log_prior,
-        noise="data",
+        noise_sd="data",
         estimate="g.inner.mlp.layers.2",
     ).preconditioned()
     print(f"  conditional on: {', '.join(problem.conditional_on)}")

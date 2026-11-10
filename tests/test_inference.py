@@ -117,7 +117,7 @@ def x64():
 @pytest.fixture(scope="module")
 def linear(x64):
     experiments, ts, ys = measurements()
-    problem = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
+    problem = make_problem(linear_model(), experiments, log_prior=normal_prior, noise_sd="data")
     positions, divergent = run_nuts(problem, jr.key(0))
     draws = np.asarray(problem.physical(positions)["k"]).ravel()
     return problem, experiments, ts, ys, draws, np.asarray(divergent)
@@ -134,7 +134,7 @@ def test_density_is_the_written_out_log_posterior(linear):
 
     for k in (0.3, 0.7, 1.4):
         at_k = make_problem(
-            linear_model(hm.Parameter(k)), problem.dataset, log_prior=normal_prior, noise="data"
+            linear_model(hm.Parameter(k)), problem.dataset, log_prior=normal_prior, noise_sd="data"
         )
         assert float(at_k.log_density(at_k.position)) == pytest.approx(by_hand(k), rel=1e-8)
 
@@ -149,7 +149,7 @@ def test_density_does_not_depend_on_the_bucketing(linear):
     problem, experiments, *_ = linear
     merged = hm.make_dataset(experiments, output_channel_names=("y",), max_buckets=1)
     assert len(merged.bucket_payloads) < len(problem.dataset.bucket_payloads)
-    one = make_problem(linear_model(), merged, log_prior=normal_prior, noise="data")
+    one = make_problem(linear_model(), merged, log_prior=normal_prior, noise_sd="data")
     assert float(one.log_density(one.position)) == pytest.approx(
         float(problem.log_density(problem.position)), rel=1e-7
     )
@@ -193,7 +193,7 @@ def test_the_jacobian_makes_a_physical_prior_integrate_to_one(x64, parameter):
         y0=[0.0],
         t0=0.0,
     )
-    problem = make_problem(linear_model(start), [flat], log_prior=prior, noise="data")
+    problem = make_problem(linear_model(start), [flat], log_prior=prior, noise_sd="data")
     likelihood = float(problem.log_likelihood(problem.position))
     leaf, treedef = jax.tree_util.tree_flatten(problem.position)
     zs = jnp.linspace(-40.0, 40.0, 4001)
@@ -216,7 +216,7 @@ def test_inferred_noise_matches_quadrature(x64):
         linear_model(),
         experiments,
         log_prior=prior,
-        noise={"y": hm.Parameter(0.3, bounds=(1e-3, 10.0), warp="log10")},
+        noise_sd={"y": hm.Parameter(0.3, bounds=(1e-3, 10.0), warp="log10")},
     )
     assert set(problem.physical(problem.position)) == {"k", "noise.y"}
     positions, divergent = run_nuts(problem, jr.key(4))
@@ -261,7 +261,7 @@ def test_a_custom_likelihood_can_restate_the_gaussian(linear):
         linear_model(),
         problem.dataset,
         log_prior=normal_prior,
-        noise="data",
+        noise_sd="data",
         log_likelihood=gaussian,
     )
     assert float(custom.log_density(custom.position)) == pytest.approx(
@@ -290,7 +290,7 @@ def test_the_documented_ar1_likelihood_is_the_multivariate_normal(x64):
         linear_model(hm.Parameter(0.5)),
         [experiment],
         log_prior=lambda p, n: jnp.asarray(0.0),
-        noise={
+        noise_sd={
             "sigma": hm.Parameter(0.3, bounds=(0.01, 2.0)),
             "rho": hm.Parameter(0.6, bounds=(-0.99, 0.99)),
         },
@@ -320,7 +320,7 @@ def test_a_failed_solve_is_a_rejection_and_the_chain_survives(x64):
         solver=SOLVER,
     )
     problem = make_problem(
-        model, experiments, log_prior=lambda p, n: jnp.asarray(0.0), noise="data"
+        model, experiments, log_prior=lambda p, n: jnp.asarray(0.0), noise_sd="data"
     )
     beyond = jax.tree_util.tree_map(lambda leaf: leaf + 5.0, problem.position)
     value, gradient = jax.value_and_grad(problem.log_density)(beyond)
@@ -342,7 +342,7 @@ def test_mixed_models_state_what_they_condition_on(x64):
     experiments, *_ = measurements()
     with pytest.warns(UserWarning, match="conditional on"):
         problem = make_problem(
-            linear_model(net=network), experiments, log_prior=normal_prior, noise="data"
+            linear_model(net=network), experiments, log_prior=normal_prior, noise_sd="data"
         )
     assert problem.conditional_on and all(p.startswith("net.") for p in problem.conditional_on)
     assert set(problem.physical(problem.position)) == {"k"}
@@ -354,7 +354,7 @@ def test_mixed_models_state_what_they_condition_on(x64):
         linear_model(net=network),
         experiments,
         log_prior=normal_prior,
-        noise="data",
+        noise_sd="data",
         estimate=["k", "net.inner.mlp.layers.1"],
     )
     named = set(last_layer.physical(last_layer.position))
@@ -368,7 +368,7 @@ def test_mixed_models_state_what_they_condition_on(x64):
             linear_model(net=network),
             experiments,
             log_prior=normal_prior,
-            noise="data",
+            noise_sd="data",
             estimate="net.inner.mlp.layers.1",
         )
     assert "k" in layer_only.conditional_on
@@ -385,12 +385,12 @@ def test_to_model_predicts_at_a_draw(linear):
 def test_forward_and_reverse_give_one_density_and_gradient(linear):
     problem, *_ = linear
     forward = make_problem(
-        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", gradient="forward"
+        linear_model(), problem.dataset, log_prior=normal_prior, noise_sd="data", ad_mode="forward"
     )
     reverse = make_problem(
-        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", gradient="reverse"
+        linear_model(), problem.dataset, log_prior=normal_prior, noise_sd="data", ad_mode="reverse"
     )
-    assert (forward.gradient, reverse.gradient) == ("forward", "reverse")
+    assert (forward.ad_mode, reverse.ad_mode) == ("forward", "reverse")
     value_f, grad_f = jax.value_and_grad(forward.log_density)(forward.position)
     value_r, grad_r = jax.value_and_grad(reverse.log_density)(reverse.position)
     assert float(value_f) == pytest.approx(float(value_r), rel=1e-9)
@@ -431,7 +431,11 @@ def test_preconditioning_rejects_what_it_cannot_use(linear):
     with pytest.raises(ValueError, match="must have shape"):
         problem.preconditioned(precision=jnp.eye(3))
     other = make_problem(
-        linear_model(), problem.dataset, log_prior=normal_prior, noise="data", log_likelihood=custom
+        linear_model(),
+        problem.dataset,
+        log_prior=normal_prior,
+        noise_sd="data",
+        log_likelihood=custom,
     )
     with pytest.raises(ValueError, match="pass precision="):
         other.preconditioned()
@@ -467,8 +471,8 @@ def test_a_simulator_without_forward_mode_still_preconditions(x64):
         output_channel_names=("y",),
         solver=SOLVER,
     )
-    problem = make_problem(model, experiments, log_prior=normal_prior, noise="data")
-    assert problem.gradient == "reverse"
+    problem = make_problem(model, experiments, log_prior=normal_prior, noise_sd="data")
+    assert problem.ad_mode == "reverse"
     whitened = problem.preconditioned()
     # In the whitened coordinate the likelihood's curvature is about one.
     assert whitened._whitening is not None
@@ -488,7 +492,7 @@ def test_a_bad_prior_raises_when_the_problem_is_built():
         return predictors["missing"].value
 
     with pytest.raises(KeyError, match="missing"):
-        make_problem(linear_model(), experiments, log_prior=bad, noise="data")
+        make_problem(linear_model(), experiments, log_prior=bad, noise_sd="data")
 
 
 def test_a_nan_gradient_at_a_finite_density_stays_visible(x64):
@@ -504,7 +508,7 @@ def test_a_nan_gradient_at_a_finite_density_stays_visible(x64):
         return jnp.where(k > 1e6, jnp.sqrt(-k), 0.0)
 
     problem = make_problem(
-        linear_model(), experiments, log_prior=nan_slope, noise="data", gradient="reverse"
+        linear_model(), experiments, log_prior=nan_slope, noise_sd="data", ad_mode="reverse"
     )
     value, gradient = jax.value_and_grad(problem.log_density)(problem.position)
     assert np.isfinite(float(value))
@@ -538,7 +542,7 @@ def test_a_bad_input_to_a_warped_scaler_rejects_the_proposal(x64):
         solver=hm.SolverConfig(dt0=0.05, max_steps=256),
     )
     problem = make_problem(
-        model, [experiment], log_prior=normal_prior, noise="data", gradient="reverse"
+        model, [experiment], log_prior=normal_prior, noise_sd="data", ad_mode="reverse"
     )
     beyond = jax.tree_util.tree_map(lambda leaf: leaf - 3.0, problem.position)
     value, gradient = jax.value_and_grad(problem.log_density)(beyond)
@@ -568,7 +572,7 @@ def test_predict_drops_a_draw_that_fails_to_solve(x64):
         output_channel_names=("y",),
         solver=SOLVER,
     )
-    problem = make_problem(model, experiments, log_prior=normal_prior, noise="data")
+    problem = make_problem(model, experiments, log_prior=normal_prior, noise_sd="data")
     good = jax.tree_util.tree_map(lambda leaf: leaf[None], problem.position)
     bad = jax.tree_util.tree_map(lambda leaf: leaf + 5.0, good)
     mixed = jax.tree_util.tree_map(lambda *leaf: jnp.concatenate(leaf), good, bad, good)
@@ -590,7 +594,7 @@ def test_preconditioning_scales_inferred_noise_from_a_poor_start(x64):
         linear_model(hm.Parameter(TRUE_RATE)),
         experiments,
         log_prior=prior,
-        noise={"y": hm.Parameter(SIGMA * 5, bounds=(1e-3, 10.0), warp="log10")},
+        noise_sd={"y": hm.Parameter(SIGMA * 5, bounds=(1e-3, 10.0), warp="log10")},
     ).preconditioned()
     positions, divergent = run_nuts(problem, jr.key(10), warmup=200, draws=400)
     assert not np.asarray(divergent).any()
@@ -628,7 +632,7 @@ def test_explicit_forward_mode_fails_when_the_problem_is_built(x64):
         solver=SOLVER,
     )
     with pytest.raises(TypeError):
-        make_problem(model, experiments, log_prior=normal_prior, noise="data", gradient="forward")
+        make_problem(model, experiments, log_prior=normal_prior, noise_sd="data", ad_mode="forward")
 
 
 @jax.custom_vjp
@@ -645,7 +649,7 @@ def reverse_only_prior(predictors: Any, noise: Any) -> Any:
 
 
 def _bad_problem(**overrides: Any) -> Any:
-    arguments: dict[str, Any] = dict(log_prior=normal_prior, noise="data")
+    arguments: dict[str, Any] = dict(log_prior=normal_prior, noise_sd="data")
     arguments.update(overrides)
     experiments, *_ = measurements()
     model = arguments.pop("model", linear_model())
@@ -655,23 +659,25 @@ def _bad_problem(**overrides: Any) -> Any:
 @pytest.mark.parametrize(
     ("overrides", "error", "match"),
     [
-        pytest.param({"noise": "unit"}, ValueError, "noise must be", id="noise-name"),
-        pytest.param({"noise": 0.1}, TypeError, "noise must be", id="noise-type"),
-        pytest.param({"noise": {"y": 0.1}}, ValueError, "scalar hm.Parameter", id="noise-float"),
+        pytest.param({"noise_sd": "unit"}, ValueError, "noise_sd must be", id="noise-name"),
+        pytest.param({"noise_sd": 0.1}, TypeError, "noise_sd must be", id="noise-type"),
+        pytest.param({"noise_sd": {"y": 0.1}}, ValueError, "scalar hm.Parameter", id="noise-float"),
         pytest.param(
-            {"noise": {"z": hm.Parameter(0.1, bounds=(0.0, 1.0))}},
+            {"noise_sd": {"z": hm.Parameter(0.1, bounds=(0.0, 1.0))}},
             ValueError,
             "one per channel",
             id="noise-channel",
         ),
-        pytest.param({"gradient": "fast"}, ValueError, "gradient must", id="gradient"),
+        pytest.param({"ad_mode": "fast"}, ValueError, "ad_mode must", id="ad-mode"),
         pytest.param(
-            {"gradient": "forward", "log_prior": reverse_only_prior},
+            {"ad_mode": "forward", "log_prior": reverse_only_prior},
             TypeError,
             "custom_vjp",
             id="forward-prior",
         ),
-        pytest.param({"noise": {"y": hm.Parameter(0.1)}}, ValueError, "positive", id="noise-sign"),
+        pytest.param(
+            {"noise_sd": {"y": hm.Parameter(0.1)}}, ValueError, "positive", id="noise-sign"
+        ),
         pytest.param({"estimate": "nope"}, ValueError, "nope", id="estimate-path"),
         pytest.param({"log_prior": flat_prior}, ValueError, "improper", id="flat-prior-open-bound"),
         pytest.param(
@@ -697,7 +703,7 @@ def test_flat_prior_is_accepted_on_a_bounded_box_and_unset_variance_warns(x64):
             linear_model(hm.Parameter(0.5, bounds=(0.0, 2.0))),
             experiments,
             log_prior=flat_prior,
-            noise="data",
+            noise_sd="data",
         )
     assert jnp.isfinite(problem.log_density(problem.position))
 
@@ -733,7 +739,7 @@ def test_observation_noise_widens_the_interval_by_the_noise(x64):
         linear_model(hm.Parameter(0.7)),
         experiments,
         log_prior=normal_prior,
-        noise={"y": hm.Parameter(0.2, bounds=(0.01, 1.0))},
+        noise_sd={"y": hm.Parameter(0.2, bounds=(0.01, 1.0))},
     )
     positions = jax.tree_util.tree_map(
         lambda leaf: jnp.broadcast_to(leaf, (500, *leaf.shape)), problem.position
@@ -811,7 +817,7 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     _, experiments, ts, ys, _, _ = linear
     mle, error = least_squares(ts, ys)
 
-    frequentist = make_problem(linear_model(), experiments, log_prior=None, noise="data")
+    frequentist = make_problem(linear_model(), experiments, log_prior=None, noise_sd="data")
     with pytest.warns(UserWarning, match="not at the likelihood's maximum"):
         frequentist.fisher()
     optimum = frequentist.optimize()
@@ -837,7 +843,7 @@ def test_optimum_fisher_and_laplace_match_the_closed_form(linear):
     low, high = fisher.derived(lambda values: values["k"]).interval(confidence=0.95, side="lower")
     assert float(low) == pytest.approx(mle - 1.644854 * error, rel=1e-6) and high == np.inf
 
-    bayesian = make_problem(linear_model(), experiments, log_prior=normal_prior, noise="data")
+    bayesian = make_problem(linear_model(), experiments, log_prior=normal_prior, noise_sd="data")
     laplace = bayesian.optimize(target="posterior").problem.laplace()
     mean, sd = conjugate(ts, ys)
     assert float(laplace.estimate[0]) == pytest.approx(mean, rel=1e-6)
@@ -873,14 +879,14 @@ def test_a_value_far_from_its_only_bound_is_free(x64, rate, bounds, warp, profil
     experiments, ts, ys = measurements(rate)
     mle, error = least_squares(ts, ys)
     model = linear_model(hm.Parameter(rate, bounds=bounds, warp=warp))
-    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(model, experiments, log_prior=None, noise_sd="data").optimize().problem
     fisher = problem.fisher()
     assert fisher.standard_errors()["k"] == pytest.approx(error, rel=1e-5)
     if not profiled:
         return
     profile = problem.profile("k")
     assert profile.stop_reasons == ("threshold", "threshold")
-    assert profile.bounds == pytest.approx(
+    assert profile.interval == pytest.approx(
         (mle - 1.959964 * error, mle + 1.959964 * error), abs=0.01 * error
     )
     assert np.all(np.diff(profile.grid) > 0)
@@ -893,11 +899,11 @@ def test_a_value_pinned_at_its_only_bound_profiles_away_from_it(x64, warp):
     mle, error = least_squares(ts, ys)
     edge = mle + 2.0 * error
     model = linear_model(hm.Parameter(edge + 0.5, bounds=(edge, None), warp=warp))
-    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(model, experiments, log_prior=None, noise_sd="data").optimize().problem
     profile = problem.profile("k")
     assert profile.stop_reasons == ("bound", "threshold")
     high = mle + np.sqrt(3.841459 * error**2 + (edge - mle) ** 2)
-    assert profile.bounds[1] == pytest.approx(high, abs=0.01 * error)
+    assert profile.interval[1] == pytest.approx(high, abs=0.01 * error)
     # A pinned value has no Gaussian spread, so sample holds it at its estimate.
     with pytest.warns(RuntimeWarning, match="sit against"):
         fisher = problem.fisher()
@@ -926,7 +932,7 @@ def test_a_profile_releases_another_value_pinned_at_its_bound(x64):
         output_channel_names=("y",),
         solver=SOLVER,
     )
-    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(model, experiments, log_prior=None, noise_sd="data").optimize().problem
     profile = problem.profile("a")
     assert profile.stop_reasons == ("threshold", "threshold")
     # Every point is the bounded maximum: brute force over c >= 0 at each a.
@@ -938,7 +944,7 @@ def test_a_profile_releases_another_value_pinned_at_its_bound(x64):
         return float(np.sum((residual - c * design[:, 1]) ** 2)) / (2 * SIGMA**2)
 
     floor = min(best_given(a) for a in np.linspace(0.3, 1.2, 2001))
-    for a, ratio in zip(profile.grid, profile.log_likelihood_ratio, strict=True):
+    for a, ratio in zip(profile.grid, profile.statistic, strict=True):
         assert ratio == pytest.approx(2 * (best_given(float(a)) - floor), abs=1e-3)
 
 
@@ -949,7 +955,7 @@ def test_the_condition_number_ignores_how_a_value_is_bounded(x64):
     for bounds in (None, (0.0, 1e4)):
         model = linear_model(hm.Parameter(TRUE_RATE, bounds=bounds))
         noise = {"y": hm.Parameter(SIGMA, bounds=(1e-3, 1.0))}
-        problem = make_problem(model, experiments, log_prior=None, noise=noise)
+        problem = make_problem(model, experiments, log_prior=None, noise_sd=noise)
         numbers.append(problem.optimize().problem.fisher().condition_number)
     assert numbers[0] == pytest.approx(numbers[1], rel=1e-4)
 
@@ -972,7 +978,7 @@ def test_a_value_the_data_barely_see_is_not_identified(x64):
         output_channel_names=("y",),
         solver=SOLVER,
     )
-    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(model, experiments, log_prior=None, noise_sd="data").optimize().problem
     fisher = problem.fisher()
     errors = fisher.standard_errors()
     assert np.isfinite(errors["k"]) and errors["b"] == np.inf
@@ -1002,7 +1008,7 @@ def test_a_tiny_measurement_variance_is_not_floored(x64):
     ]
     ts = np.concatenate([np.asarray(grid) for grid in GRIDS.values()])
     model = linear_model(hm.Parameter(2e-4, bounds=(0.0, 1e-3)))
-    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(model, experiments, log_prior=None, noise_sd="data").optimize().problem
     expected = sigma / np.sqrt(np.sum(ts**2))
     for curvature in ("gauss_newton", "exact"):
         error = problem.fisher(curvature=curvature).standard_errors()["k"]
@@ -1029,7 +1035,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     # The latent is a squashed log of k, so the information is computed far from
     # physical units. At the MLE the delta method maps it back exactly.
     warped = linear_model(hm.Parameter(0.7, bounds=(0.01, 10.0), warp="log"))
-    problem = make_problem(warped, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(warped, experiments, log_prior=None, noise_sd="data").optimize().problem
     result = problem.fisher()
     assert result.standard_errors()["k"] == pytest.approx(least_squares(ts, ys)[1], rel=1e-6)
     assert result.standard_errors(latent=True)["k"] != pytest.approx(result.standard_errors()["k"])
@@ -1043,9 +1049,9 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
         hm.Parameter(0.7, bounds=(0.0, 1e7)),
         hm.Parameter(0.7, bounds=(1e-12, 1e4), warp="log10"),
     ):
-        problem = make_problem(linear_model(wide), experiments, log_prior=None, noise="data")
+        problem = make_problem(linear_model(wide), experiments, log_prior=None, noise_sd="data")
         result = problem.optimize().problem.fisher()
-        assert not result.at_bound.any()
+        assert not result.pinned.any()
         assert result.standard_errors()["k"] == pytest.approx(least_squares(ts, ys)[1], rel=1e-5)
 
     # With inferred noise the Gauss-Newton information must count the noise once:
@@ -1055,7 +1061,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
             linear_model(),
             experiments,
             log_prior=None,
-            noise={"y": hm.Parameter(0.3, bounds=(1e-3, 10.0), warp="log")},
+            noise_sd={"y": hm.Parameter(0.3, bounds=(1e-3, 10.0), warp="log")},
         )
         .optimize()
         .problem
@@ -1068,7 +1074,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     )
 
     product = product_model(hm.Parameter(1.0))
-    problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(product, experiments, log_prior=None, noise_sd="data").optimize().problem
     together = problem.fisher()
     (direction,) = together.unidentified()
     assert set(direction) == {"a", "b"}
@@ -1091,7 +1097,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
     # decrement test keeps it from closing the side.
     open_product = product_model(hm.Parameter(1.0, bounds=(0.0, None)))
     open_problem = (
-        make_problem(open_product, experiments, log_prior=None, noise="data").optimize().problem
+        make_problem(open_product, experiments, log_prior=None, noise_sd="data").optimize().problem
     )
     assert open_problem.profile("a").stop_reasons[0] != "threshold"
 
@@ -1100,7 +1106,7 @@ def test_fisher_reports_physical_errors_and_what_the_data_cannot_separate(x64):
         linear_model(hm.Parameter(0.7), unused=hm.Parameter(0.5)),
         experiments,
         log_prior=None,
-        noise="data",
+        noise_sd="data",
         estimate="unused",
     )
     blank = unused.fisher()
@@ -1128,7 +1134,7 @@ def test_a_profile_closes_where_the_closed_form_says_and_compiles_once(linear):
         output_channel_names=("y",),
         solver=SOLVER,
     )
-    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(model, experiments, log_prior=None, noise_sd="data").optimize().problem
     before = len(traces)
     first = problem.profile("k", max_points=4)
     with_compile = len(traces) - before
@@ -1139,20 +1145,20 @@ def test_a_profile_closes_where_the_closed_form_says_and_compiles_once(linear):
     assert len(traces) - before < with_compile
     assert profile.identifiable and profile.converged.all()
     assert profile.stop_reasons == ("threshold", "threshold")
-    assert profile.bounds == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
+    assert profile.interval == pytest.approx((mle - 1.959964 * error, mle + 1.959964 * error))
     assert list(profile.grid) == sorted(profile.grid)
-    assert profile.log_likelihood_ratio.min() == pytest.approx(0.0, abs=1e-9)
+    assert profile.statistic.min() == pytest.approx(0.0, abs=1e-9)
     assert "95% profile interval" in profile.summary() and first.name == "k"
 
 
 def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
     experiments, *_ = measurements()
     product = product_model(hm.Parameter(1.0, bounds=(0.1, 10.0)))
-    problem = make_problem(product, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(product, experiments, log_prior=None, noise_sd="data").optimize().problem
     profiles = problem.profiles()
     assert set(profiles) == {"a", "b"}
-    assert profiles["a"].bounds == (None, None) and not profiles["a"].identifiable
-    assert profiles["a"].stop_reasons == ("bound", "bound") and not profiles["a"].at_bound
+    assert profiles["a"].interval == (None, None) and not profiles["a"].identifiable
+    assert profiles["a"].stop_reasons == ("bound", "bound") and not profiles["a"].others_pinned
     # b compensates for a along the whole profile, keeping the product fixed.
     product_along = profiles["a"].grid * profiles["a"].others["b"]
     assert np.ptp(product_along) == pytest.approx(0.0, abs=1e-5)
@@ -1161,7 +1167,7 @@ def test_a_profile_stays_open_where_the_data_do_not_bound_the_value(x64):
     # drop: the interval holds for a's bounds, and the result says which bound.
     with pytest.warns(RuntimeWarning, match="reached its bound along the profile"):
         b = problem.profile("b")
-    assert b.identifiable and set(b.at_bound) == {"a"}
+    assert b.identifiable and set(b.others_pinned) == {"a"}
     assert "a pinned at its" in b.summary()
 
 
@@ -1174,12 +1180,12 @@ def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
     mle, error = least_squares(ts, ys)
     bound = mle - 2.0 * error
     model = linear_model(hm.Parameter(mle - 4.0 * error, bounds=(0.5 * mle, bound)))
-    problem = make_problem(model, experiments, log_prior=None, noise="data").optimize().problem
+    problem = make_problem(model, experiments, log_prior=None, noise_sd="data").optimize().problem
     profile = problem.profile("k")
     assert profile.stop_reasons == ("threshold", "bound")
     threshold = scipy_stats.chi2.ppf(0.95, 1)
     expected = mle - float(np.sqrt(threshold * error**2 + (bound - mle) ** 2))
-    low, high = profile.bounds
+    low, high = profile.interval
     # Not exact: the ratio is quadratic about the unconstrained optimum, not about
     # the estimate on the bound, so its root is only nearly linear in the value.
     # Bisecting the bracket close to the threshold keeps that error small.
@@ -1196,7 +1202,7 @@ def test_a_value_against_its_bound_still_closes_on_the_other_side(x64):
 
 def test_profile_rejects_what_it_cannot_profile(x64):
     experiments, *_ = measurements()
-    problem = make_problem(linear_model(), experiments, log_prior=None, noise="data")
+    problem = make_problem(linear_model(), experiments, log_prior=None, noise_sd="data")
     with pytest.raises(ValueError, match="not free Parameter entries"):
         problem.profile("q")
     with pytest.raises(ValueError, match="confidence"):
@@ -1214,7 +1220,7 @@ def test_profile_rejects_what_it_cannot_profile(x64):
 )
 def test_without_a_prior_the_posterior_methods_say_so(x64, call):
     experiments, *_ = measurements()
-    problem = make_problem(linear_model(), experiments, log_prior=None, noise="data")
+    problem = make_problem(linear_model(), experiments, log_prior=None, noise_sd="data")
     with pytest.raises(ValueError, match="needs a prior"):
         call(problem)
 
@@ -1240,7 +1246,7 @@ def test_simulation_based_calibration(x64):
             linear_model(hm.Parameter(1.0, bounds=(low, high))),
             experiments,
             log_prior=flat_prior,
-            noise="data",
+            noise_sd="data",
         )
         positions, _ = run_nuts(problem, k_chain, warmup=150, draws=kept * 4)
         draws = np.asarray(problem.physical(positions)["k"]).ravel()[::4]

@@ -24,11 +24,11 @@ make_problem(
     model: 'HybridModel',
     data: 'Data',
     *,
-    log_prior: 'Callable[[Any, Mapping[str, Array]], Array] | None',
-    noise: "Literal['data'] | Mapping[str, Parameter]",
+    noise_sd: "Literal['data'] | Mapping[str, Parameter]",
+    log_prior: 'Callable[[Any, Mapping[str, Array]], Array] | None' = None,
     estimate: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     log_likelihood: 'Callable[[Array, BucketPayload, Mapping[str, Array]], Array] | None' = None,
-    gradient: "Literal['auto', 'forward', 'reverse']" = 'auto',
+    ad_mode: "Literal['auto', 'forward', 'reverse']" = 'auto',
 ) -> InferenceProblem
 ```
 
@@ -44,13 +44,13 @@ a failed solve will end the chain with an exception.
 | --- | --- | --- |
 | `model` | `HybridModel` | Its current values are the starting position, so a fitted model starts a chain near the mode. |
 | `data` | `Dataset | Sequence[Experiment]` | The observations. Bucketing does not change the density. |
-| `log_prior` | `Callable | None` | ``(predictors, noise) -> scalar``, the log-prior on physical values: read ``predictors["k"].value``, and ``noise["a"]`` for inferred noise. There is no default because no prior is neutral. [`flat_prior`](/api/inference#flat_prior) is available for a bounded box. A free network's weights need a prior written here. ``None`` is for frequentist work: ``optimize``, ``fisher`` and ``profile`` use only the likelihood, and the posterior methods then raise. |
-| `noise` | `"data" | Mapping[str, Parameter]` | ``"data"`` trusts the variances in the data, and warns for a channel left at the default of 1.0. A mapping infers a standard deviation per channel, each a ``Parameter`` naming its starting value and bounds, which must keep it positive. With ``log_likelihood`` its keys are free-form, such as an AR(1) coefficient. |
+| `noise_sd` | `"data" | Mapping[str, Parameter]` | The measurement noise. ``"data"`` trusts the variances in the data, and warns for a channel left at the default of 1.0. A mapping infers the noise standard deviation of each channel it names, each a ``Parameter`` naming its starting value and bounds, which must keep it positive. With ``log_likelihood`` the mapping is passed to it as is, so its keys and meaning are yours, such as an AR(1) coefficient. |
+| `log_prior` | `Callable | None` | ``(predictors, noise) -> scalar``, the log-prior on physical values: read ``predictors["k"].value``, and ``noise["a"]`` for inferred noise. [`flat_prior`](/api/inference#flat_prior) is available for a bounded box. A free network's weights need a prior written here. ``None``, the default, is for frequentist work: ``optimize``, ``fisher`` and ``profile`` use only the likelihood, and the posterior methods (``laplace``, ``log_density``, ``preconditioned``, ``optimize(target="posterior")``) raise, asking for a prior. ``None`` is not a flat prior; no prior is neutral. |
 | `estimate` | `str | type | Callable | Sequence | None` | What to infer, named in the syntax ``fit(freeze=...)`` uses, though it selects rather than excludes. ``None`` means every ``Parameter``. A dotted path can name a network part, such as ``"g.inner.mlp.layers.2"``. |
 | `log_likelihood` | `Callable | None` | Replaces the Gaussian: ``(pred_obs, bp, noise) -> scalar``, called once per bucket and summed. ``pred_obs`` is ``[N, T, D]``, and ``bp.mask`` says which cells were measured. |
-| `gradient` | `{"auto", "forward", "reverse"}` | How the density is differentiated. ``"auto"`` uses forward mode for a few free values when the model allows it, and otherwise reverse mode with the model's own adjoint. Forward mode replaces the adjoint with ``diffrax.ForwardMode``, so a ``simulate_fn`` must use ``solver.diffeqsolve`` or pass ``adjoint=solver.adjoint``. ``problem.gradient`` says which was used. |
+| `ad_mode` | `{"auto", "forward", "reverse"}` | The autodiff mode for the density. ``"auto"`` uses forward mode for a few free values when the model allows it, and otherwise reverse mode with the model's own adjoint. Forward mode replaces the adjoint with ``diffrax.ForwardMode``, so a ``simulate_fn`` must use ``solver.diffeqsolve`` or pass ``adjoint=solver.adjoint``. ``problem.ad_mode`` says which was used. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2290)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2301)</small>
 
 ---
 
@@ -66,7 +66,7 @@ InferenceProblem(
     dataset: 'Dataset',
     position: 'Any',
     conditional_on: 'tuple[str, ...]',
-    gradient: 'str',
+    ad_mode: 'str',
 ) -> None
 ```
 
@@ -83,9 +83,9 @@ Build one with [`make_problem`](/api/inference#make_problem). Identity-hashed, s
 | `dataset` | `Dataset` | The data the likelihood reads. |
 | `position` | `PyTree` | The starting position: the free leaves' current values. Latents for a ``Parameter``, weights for a network, and inferred noise under ``"noise"``. After `preconditioned`, a flat array of zeros instead. ``physical``, ``to_model``, ``predict`` and ``to_arviz`` read either form. |
 | `conditional_on` | `tuple[str, ...]` | Dotted paths of the trainable leaves held fixed. The posterior is conditional on these values and its width does not account for them. |
-| `gradient` | `str` | The mode in use, ``"forward"`` or ``"reverse"``, after ``"auto"`` chose. |
+| `ad_mode` | `str` | The autodiff mode in use, ``"forward"`` or ``"reverse"``, after ``"auto"`` chose. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L233)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L234)</small>
 
 <a id="inferenceproblemfisher"></a>
 
@@ -106,12 +106,13 @@ position is far from one. ``"gauss_newton"`` is ``J^T J`` of the whitened
 residuals, plus the noise terms when noise is inferred: the expected
 information of the Gaussian likelihood. ``"exact"`` is the negative
 Hessian of the log-likelihood, the observed information, which also works
-with a custom ``log_likelihood``. ``laplace`` takes the same choice.
+with a custom ``log_likelihood`` and must be asked for there. ``laplace``
+takes the same choice with the same default.
 
 The matrices are in latent coordinates, where the problem lives. Standard
 errors and intervals are reported in physical units by default.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L629)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L631)</small>
 
 <a id="inferenceproblemlaplace"></a>
 
@@ -121,23 +122,23 @@ errors and intervals are reported in physical units by default.
 laplace(
     self,
     *,
-    curvature: "Literal['exact', 'gauss_newton']" = 'exact',
+    curvature: "Literal['gauss_newton', 'exact']" = 'gauss_newton',
 ) -> LaplaceResult
 ```
 
 A Gaussian approximation to the posterior over latents, at the current position.
 
 Call it at the posterior mode, from ``optimize(target="posterior")``; it warns
-when the position is far from one. ``"exact"`` uses the Hessian of the log
-density. ``"gauss_newton"`` replaces the likelihood's part with ``J^T J``,
-which is cheaper for many values and always positive semi-definite, and keeps
-the exact Hessian of the prior and change-of-variables terms, which need no
-solve.
+when the position is far from one. ``"gauss_newton"``, the default as for
+``fisher``, uses ``J^T J`` for the likelihood's part, which is cheaper for many
+values and always positive semi-definite, and the exact Hessian of the prior
+and change-of-variables terms, which need no solve. ``"exact"`` uses the
+Hessian of the whole log density; a custom ``log_likelihood`` needs it.
 
 ``sample`` draws positions that ``physical``, ``predict`` and ``to_arviz``
 take as they take a sampler's output.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L668)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L671)</small>
 
 <a id="inferenceproblemlog_density"></a>
 
@@ -158,7 +159,7 @@ Take its gradient with ``jax.grad``, as samplers do. Its custom gradient
 rule rules out ``jax.jvp`` and ``jax.jacfwd`` on this method, so use them on
 ``log_likelihood`` or ``residuals``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L390)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L392)</small>
 
 <a id="inferenceproblemlog_likelihood"></a>
 
@@ -174,7 +175,7 @@ The log-likelihood of the data, summed over every experiment.
 at a row no channel measured, since a failed solve leaves such rows
 non-finite too.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L329)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L331)</small>
 
 <a id="inferenceproblemoptimize"></a>
 
@@ -204,7 +205,7 @@ Uses ``optimistix.BFGS``. ``rtol`` and ``atol`` are its tolerances on the
 latent values and on the objective. The result's ``problem`` sits at the
 optimum and ``converged`` says whether BFGS met its tolerances.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L579)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L581)</small>
 
 <a id="inferenceproblemphysical"></a>
 
@@ -221,7 +222,7 @@ leaf under its path as it is, and inferred noise as ``"noise.<name>"``.
 ``position`` may be a sampler's output: leading axes such as
 ``[chain, draw]`` stay on every value.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L938)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L943)</small>
 
 <a id="inferenceproblempreconditioned"></a>
 
@@ -253,7 +254,7 @@ guess for the noise helps too.
 | `precision` | `Array | None` | The ``[P, P]`` curvature to use, for a custom likelihood or a better estimate. ``None`` computes the Gauss-Newton ``J^T J + ridge I`` from the whitened residuals and any inferred noise, which needs the Gaussian likelihood. |
 | `ridge` | `float` | Added to the diagonal of the Gauss-Newton curvature in latent units, standing in for the prior so an unidentified direction keeps a finite scale. Ignored with ``precision``. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L408)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L410)</small>
 
 <a id="inferenceproblempredict"></a>
 
@@ -292,7 +293,7 @@ at measured cells.
 A draw whose solve fails on this grid is dropped with a warning, so one bad
 draw on new data or a longer grid does not cost the others.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L961)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L966)</small>
 
 <a id="inferenceproblemprofile"></a>
 
@@ -332,7 +333,7 @@ all, unlike Wald intervals.
 ``name`` is a path as ``physical`` names it, with ``[i]`` for an element
 of an array ``Parameter``, such as ``"k"`` or ``"rates[2]"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L720)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L725)</small>
 
 <a id="inferenceproblemprofiles"></a>
 
@@ -358,7 +359,7 @@ each extra name costs only its own points. One that fails, for instance
 because the model stops solving far from the optimum, is skipped with a
 warning and the others still run.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L762)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L767)</small>
 
 <a id="inferenceproblemresiduals"></a>
 
@@ -374,7 +375,7 @@ Length is every ``[N, T, D]`` cell, with zero at unmeasured cells, so the
 shape does not depend on the data's mask. ``jax.jacfwd`` applies when the
 model's adjoint supports forward mode.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L297)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L299)</small>
 
 <a id="inferenceproblemto_arviz"></a>
 
@@ -398,7 +399,7 @@ sampler output with the same axes, such as ``{"diverging": ...}``.
 ``conditional_on`` is recorded in the attributes. Needs
 ``pip install jax-hybridmodels[bayes]``, and ArviZ needs Python 3.12.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1065)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1070)</small>
 
 <a id="inferenceproblemto_model"></a>
 
@@ -413,7 +414,7 @@ The given model with this position's values, for ``predict`` and ``save``.
 It keeps the model's own solver, so its solves raise on failure as usual.
 Inferred noise is not part of a model.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L930)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L935)</small>
 
 ---
 
@@ -449,7 +450,7 @@ What [`InferenceProblem.optimize`](/api/inference#inferenceproblemoptimize) foun
 | `gradient` | `dict[str, float]` | The gradient of the log-likelihood or log-posterior at the optimum, per entry as ``physical`` names it, taken in the latent coordinates the search runs in. Near zero at a maximum. An entry that stays large points at the value BFGS could not settle. A value against its bound shows a gradient near zero too, since the squash is flat there; ``fisher`` and the profile flag those. |
 | `gradient_norm` | `float` | The largest entry of ``gradient`` in size, a one-number convergence check. How small is small depends on the curvature: ``fisher`` and ``laplace`` apply the scale-free test, and warn when a Newton step from here would still raise the log density by more than 0.1. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1392)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1397)</small>
 
 ---
 
@@ -467,25 +468,26 @@ FisherResult(
     covariance: 'Array',
     slopes: 'Array',
     *,
-    at_bound: 'np.ndarray',
+    pinned: 'np.ndarray',
     scaled: 'np.ndarray',
     limits: 'tuple[np.ndarray, np.ndarray]',
     information: 'Array',
-    eigenvalues: 'Array',
-    eigenvectors: 'Array',
+    scaled_eigenvalues: 'Array',
+    scaled_eigenvectors: 'Array',
 ) -> None
 ```
 
 The Fisher information at a position, from [`InferenceProblem.fisher`](/api/inference#inferenceproblemfisher).
 
 ``information`` is the latent ``[P, P]`` information, and ``covariance`` its
-inverse with unconstrained directions left out. ``eigenvalues`` and
-``eigenvectors`` belong to the information scaled to a unit diagonal, its
-correlation form, so they do not change when a bound or a warp rescales a
-latent. ``eigenvalues`` ascend, and the columns of ``eigenvectors`` are the
-matching directions over ``names``.
+inverse with unconstrained directions left out. ``scaled_eigenvalues`` and
+``scaled_eigenvectors`` belong to the information scaled to a unit diagonal,
+its correlation form, so they do not change when a bound or a warp rescales
+a latent; ``condition_number`` is theirs too. ``scaled_eigenvalues`` ascend,
+and the columns of ``scaled_eigenvectors`` are the matching directions over
+``names``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1671)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1676)</small>
 
 <a id="fisherresultcondition_number"></a>
 
@@ -493,7 +495,7 @@ matching directions over ``names``.
 
 Largest over smallest eigenvalue; ``inf`` when the smallest is not positive.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1687)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1693)</small>
 
 <a id="fisherresultcorrelation"></a>
 
@@ -511,7 +513,7 @@ rescales each entry. An entry with unbounded spread gets ``nan``: the
 pseudo-inverse describes only the directions the data constrain, so its
 correlation there could even have the wrong sign.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1537)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1542)</small>
 
 <a id="fisherresultderived"></a>
 
@@ -537,7 +539,7 @@ it combines are not, such as the product of two rates when the data see
 only the product. One that depends on an entry against its bound is
 ``nan``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1581)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1586)</small>
 
 <a id="fisherresultintervals"></a>
 
@@ -555,7 +557,7 @@ unconstrained entry's interval reaches its bounds, or infinity without one.
 An entry against its bound gets ``(nan, nan)``, as in ``standard_errors``;
 a profile tells whether the data bound it away from there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1552)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1557)</small>
 
 <a id="fisherresultphysical_covariance"></a>
 
@@ -571,7 +573,7 @@ The ``[P, P]`` covariance in physical units, by the delta method, in ``names`` o
 physical values only as far as their transforms are close to linear over
 the latent spread; ``intervals`` does not rely on that.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1528)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1533)</small>
 
 <a id="fisherresultsample"></a>
 
@@ -590,7 +592,7 @@ sample(self, *, key: 'Array', n_draws: 'int') -> 'Any'
 distribution, which carries its uncertainty into any function of it, such as
 a prediction at new conditions.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1455)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1460)</small>
 
 <a id="fisherresultstandard_errors"></a>
 
@@ -607,7 +609,7 @@ infinite standard error. An entry against its bound has ``nan`` as its
 physical one: the curvature there describes the squash's flat tail, not
 how far the data let the value move, so no number would be honest.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1514)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1519)</small>
 
 <a id="fisherresultsummary"></a>
 
@@ -619,7 +621,7 @@ summary(self, *, confidence: 'float' = 0.95) -> 'str'
 
 Estimates, standard errors, Wald intervals, correlations and identifiability.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1753)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1761)</small>
 
 <a id="fisherresultunidentified"></a>
 
@@ -640,7 +642,7 @@ has a fixed scale (a box, or a log-warped one-sided bound) and its latent
 standard error passes 1e3. An unbounded value has no such scale, so only
 its collinearity is tested.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1693)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1699)</small>
 
 ---
 
@@ -658,7 +660,7 @@ LaplaceResult(
     covariance: 'Array',
     slopes: 'Array',
     *,
-    at_bound: 'np.ndarray',
+    pinned: 'np.ndarray',
     scaled: 'np.ndarray',
     limits: 'tuple[np.ndarray, np.ndarray]',
 ) -> None
@@ -669,7 +671,7 @@ A Gaussian approximation to the posterior, from [`InferenceProblem.laplace`](/ap
 ``latent`` is its mean and ``covariance`` its covariance, over the latent
 position in ``names`` order.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1761)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1769)</small>
 
 <a id="laplaceresultcorrelation"></a>
 
@@ -687,7 +689,7 @@ rescales each entry. An entry with unbounded spread gets ``nan``: the
 pseudo-inverse describes only the directions the data constrain, so its
 correlation there could even have the wrong sign.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1537)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1542)</small>
 
 <a id="laplaceresultderived"></a>
 
@@ -713,7 +715,7 @@ it combines are not, such as the product of two rates when the data see
 only the product. One that depends on an entry against its bound is
 ``nan``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1581)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1586)</small>
 
 <a id="laplaceresultintervals"></a>
 
@@ -731,7 +733,7 @@ unconstrained entry's interval reaches its bounds, or infinity without one.
 An entry against its bound gets ``(nan, nan)``, as in ``standard_errors``;
 a profile tells whether the data bound it away from there.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1552)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1557)</small>
 
 <a id="laplaceresultphysical_covariance"></a>
 
@@ -747,7 +749,7 @@ The ``[P, P]`` covariance in physical units, by the delta method, in ``names`` o
 physical values only as far as their transforms are close to linear over
 the latent spread; ``intervals`` does not rely on that.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1528)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1533)</small>
 
 <a id="laplaceresultsample"></a>
 
@@ -766,7 +768,7 @@ sample(self, *, key: 'Array', n_draws: 'int') -> 'Any'
 distribution, which carries its uncertainty into any function of it, such as
 a prediction at new conditions.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1455)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1460)</small>
 
 <a id="laplaceresultstandard_errors"></a>
 
@@ -783,7 +785,7 @@ infinite standard error. An entry against its bound has ``nan`` as its
 physical one: the curvature there describes the squash's flat tail, not
 how far the data let the value move, so no number would be honest.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1514)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1519)</small>
 
 <a id="laplaceresultsummary"></a>
 
@@ -795,7 +797,7 @@ summary(self, *, confidence: 'float' = 0.95) -> 'str'
 
 Posterior means, standard deviations, Wald intervals and correlations.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1769)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L1777)</small>
 
 ---
 
@@ -818,7 +820,7 @@ A function of the values with its delta-method standard error, from ``derived``.
 | `estimate` | `ndarray` | The function at the estimate, in the shape ``fn`` returns. |
 | `standard_error` | `ndarray` | Its standard error, same shape. ``inf`` where it depends on a value the data do not constrain, ``nan`` where it depends on one against its bound. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2193)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2204)</small>
 
 <a id="derivedquantityinterval"></a>
 
@@ -839,7 +841,7 @@ A Wald interval, ``estimate`` plus or minus ``z`` standard errors.
 ``z`` the ``confidence`` quantile, as a shelf-life claim needs;
 ``"upper"`` the mirror image.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2209)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2220)</small>
 
 ---
 
@@ -855,12 +857,12 @@ ProfileResult(
     confidence: 'float',
     threshold: 'float',
     grid: 'np.ndarray',
-    log_likelihood_ratio: 'np.ndarray',
+    statistic: 'np.ndarray',
     others: 'dict[str, np.ndarray]',
     converged: 'np.ndarray',
-    bounds: 'tuple[float | None, float | None]',
+    interval: 'tuple[float | None, float | None]',
     stop_reasons: 'tuple[str, str]',
-    at_bound: 'dict[str, str]' = <factory>,
+    others_pinned: 'dict[str, str]' = <factory>,
 ) -> None
 ```
 
@@ -872,16 +874,16 @@ The profile likelihood of one value, from [`InferenceProblem.profile`](/api/infe
 | --- | --- | --- |
 | `name` | `str` | The profiled entry, as ``physical`` names it. |
 | `confidence` | `float` | The level the interval is for. |
-| `threshold` | `float` | The chi-square(1) quantile for ``confidence``: the interval is where ``log_likelihood_ratio`` stays below it. |
+| `threshold` | `float` | The chi-square(1) quantile for ``confidence``: the interval is where ``statistic`` stays below it. |
 | `grid` | `ndarray` | The profiled value at each point, physical and ascending, the maximum likelihood included. |
-| `log_likelihood_ratio` | `ndarray` | ``2 (max log L - log L)`` at each point, with every other value re-optimised. |
+| `statistic` | `ndarray` | The likelihood-ratio statistic ``2 (max log L - log L)`` at each point, with every other value re-optimised. The interval is where it stays below ``threshold``. |
 | `others` | `dict[str, ndarray]` | Every other free entry along the profile, physical. How they move shows what compensates for the profiled value. |
 | `converged` | `ndarray` | Whether BFGS met its tolerances at each point, after one restart. The interval ignores points that did not. |
-| `bounds` | `tuple[float | None, float | None]` | The confidence interval's ends, ``None`` on a side that did not close. |
+| `interval` | `tuple[float | None, float | None]` | The confidence interval's ends, ``None`` on a side that did not close. |
 | `stop_reasons` | `tuple[str, str]` | Why each side, below and above, stopped. ``"threshold"`` closed it. The others leave it open: ``"bound"`` (the value reached its bound, so the data do not bound it), ``"max_points"`` (still inside; raise ``max_points``), ``"solve_failed"`` (the model stopped solving) and ``"not_converged"`` (BFGS did not converge where the ratio crossed). |
-| `at_bound` | `dict[str, str]` | Other values that sat against a bound, ``"lower"`` or ``"upper"``, at some converged point. Re-optimising could not move them further, so the profile may drop faster than it would with that bound widened, and the interval holds for the bounds as set. Empty when nothing was pinned. |
+| `others_pinned` | `dict[str, str]` | Other values that sat against a bound, ``"lower"`` or ``"upper"``, at some converged point. Re-optimising could not move them further, so the profile may drop faster than it would with that bound widened, and the interval holds for the bounds as set. Empty when nothing was pinned. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2117)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2125)</small>
 
 <a id="profileresultidentifiable"></a>
 
@@ -889,7 +891,7 @@ The profile likelihood of one value, from [`InferenceProblem.profile`](/api/infe
 
 Whether both sides closed at the threshold.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2168)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2177)</small>
 
 <a id="profileresultsummary"></a>
 
@@ -901,7 +903,7 @@ summary(self) -> 'str'
 
 One line: the interval, and why a side that did not close stopped.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2173)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L2182)</small>
 
 ---
 
@@ -921,4 +923,4 @@ Proper only on a bounded box, so [`make_problem`](/api/inference#make_problem) r
 value has an open bound or is a network weight. A flat prior is not neutral
 under a warp: on a log-warped parameter it still favours the upper decades.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L129)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/inference.py#L130)</small>

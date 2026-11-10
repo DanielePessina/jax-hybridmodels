@@ -39,7 +39,7 @@ Dynamic imports inside a load helper fail in confusing ways.
 Callables
 ---------
 JSON cannot encode a callable. A callable anywhere in a training config or
-an ``Objective`` (a custom ``loss``, a ``penalty_fn``, an optimizer factory,
+an ``Objective`` (a custom ``loss``, a ``bound_penalty_fn``, an optimizer factory,
 an lr schedule) is written as ``{"__callable__": "{module}.{qualname}"}``,
 and a raw ``optax.GradientTransformation`` as an ``"__opaque__"`` marker.
 ``load`` returns such a section as the raw dict rather than a typed
@@ -155,7 +155,7 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
 def _serialise_objective(objective: Objective) -> dict[str, Any]:
     """Return a JSON-encodable view of an ``Objective``.
 
-    Each ``penalty_points`` array becomes ``{"shape": [...], "data": [...]}``.
+    Each ``bound_penalty_points`` array becomes ``{"shape": [...], "data": [...]}``.
     The shape is kept because an empty ``[0, n_inputs]`` grid flattens to
     ``[]`` and would reload as shape ``(0,)``. Callables become
     ``__callable__`` markers.
@@ -163,20 +163,20 @@ def _serialise_objective(objective: Objective) -> dict[str, Any]:
     raw: dict[str, Any] = {
         f.name: getattr(objective, f.name) for f in dataclasses.fields(objective)
     }
-    if objective.penalty_points is not None:
-        raw["penalty_points"] = {
+    if objective.bound_penalty_points is not None:
+        raw["bound_penalty_points"] = {
             path: {"shape": list(np.shape(points)), "data": np.asarray(points).tolist()}
-            for path, points in objective.penalty_points.items()
+            for path, points in objective.bound_penalty_points.items()
         }
     return _json_safe(raw)
 
 
 def _decode_penalty_points(raw: dict[str, Any]) -> dict[str, Any]:
-    """Turn saved ``penalty_points`` entries back into arrays of their saved shape.
+    """Turn saved ``bound_penalty_points`` entries back into arrays of their saved shape.
 
     A bare nested list (the format before shapes were stored) is read as is.
     """
-    points = raw.get("penalty_points")
+    points = raw.get("bound_penalty_points")
     if not isinstance(points, dict):
         return raw
     decoded = {}
@@ -185,7 +185,7 @@ def _decode_penalty_points(raw: dict[str, Any]) -> dict[str, Any]:
             decoded[path] = np.asarray(entry["data"], dtype=float).reshape(entry["shape"])
         else:
             decoded[path] = np.asarray(entry, dtype=float)
-    return {**raw, "penalty_points": decoded}
+    return {**raw, "bound_penalty_points": decoded}
 
 
 def _build_objective(raw: dict[str, Any] | None) -> Objective | dict[str, Any] | None:
@@ -195,6 +195,9 @@ def _build_objective(raw: dict[str, Any] | None) -> Objective | dict[str, Any] |
     """
     if raw is None:
         return None
+    raw = _renamed(raw, _RENAMED_OBJECTIVE_FIELDS)
+    if isinstance(raw.get("loss"), str):
+        raw["loss"] = _RENAMED_LOSSES.get(raw["loss"], raw["loss"])
     raw = _decode_penalty_points(raw)
     if _contains_serialised_callable(raw):
         return raw
@@ -331,8 +334,10 @@ def _build_history(raw: dict[str, Any] | None) -> FitHistory:
         phase=tuple(int(v) for v in raw.get("phase", ())),
         validation_loss=tuple(_decode_float(v) for v in raw.get("validation_loss", ())),
         failed_candidates=tuple(int(v) for v in raw.get("failed_candidates", ())),
-        tournament_scores=tuple(_decode_float(v) for v in raw.get("tournament_scores", ())),
-        continuity=tuple(_decode_float(v) for v in raw.get("continuity", ())),
+        restart_scores=tuple(
+            _decode_float(v) for v in raw.get("restart_scores", raw.get("tournament_scores", ()))
+        ),
+        gap_term=tuple(_decode_float(v) for v in raw.get("gap_term", raw.get("continuity", ()))),
     )
 
 
@@ -457,7 +462,65 @@ def _coerce_tuple_fields(cls: type, kwargs: dict[str, Any]) -> dict[str, Any]:
     return coerced
 
 
-_RENAMED_FIELDS = {"sigma_init": "init_sigma"}
+# Field names changed before 0.3.0 was released, mapped so a run saved under an
+# older name still loads. Old name to new name, per object.
+_RENAMED_CONFIG_FIELDS = {
+    "sigma_init": "init_sigma",
+    "tournament_steps": "restart_steps",
+    "tournament_lr": "restart_lr",
+    "patience": "patience_steps",
+}
+_RENAMED_EVOSAX_FIELDS = {"steps": "generations"}
+_RENAMED_PHASE_FIELDS = {
+    "horizon": "loss_horizon",
+    "segments": "shooting_segments",
+    "penalty_weight": "bound_penalty_weight",
+}
+_RENAMED_OBJECTIVE_FIELDS = {
+    "penalty_weight": "bound_penalty_weight",
+    "penalty_points": "bound_penalty_points",
+    "penalty_fn": "bound_penalty_fn",
+}
+_RENAMED_LOSSES = {"bal_mse": "per_experiment_mse", "bal_mle": "per_experiment_mle"}
+# Static scaler fields, as they appear at the end of a saved fingerprint path.
+_RENAMED_STATIC_FIELDS = {
+    "transform": "squash",
+    "logit_eps": "edge_eps",
+    "z_knee": "saturation_knee",
+}
+
+
+def _renamed(raw: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
+    """``raw`` with every key in ``names`` replaced by its new name."""
+    return {names.get(name, name): value for name, value in raw.items()}
+
+
+def _upgrade_config_fields(kind: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """Map a saved config's pre-0.3.0 field names and values onto the current ones.
+
+    ``tournament_attempts`` counted every candidate, the user's start included;
+    ``restarts`` counts only the redrawn ones, so the value drops by one.
+    """
+    fields = _renamed(fields, _RENAMED_CONFIG_FIELDS)
+    if "tournament_attempts" in fields:
+        fields["restarts"] = int(fields.pop("tournament_attempts")) - 1
+    if kind == "evosax":
+        fields = _renamed(fields, _RENAMED_EVOSAX_FIELDS)
+        if fields.get("init") == "warm":
+            fields["init"] = "current"
+    if "phases" in fields:
+        fields["phases"] = [_renamed(phase, _RENAMED_PHASE_FIELDS) for phase in fields["phases"]]
+    return fields
+
+
+def _upgrade_static(static: dict[str, Any]) -> dict[str, Any]:
+    """A saved fingerprint's static entries under the current scaler field names."""
+    upgraded = {}
+    for path, value in static.items():
+        head, _, last = path.rpartition(".")
+        last = _RENAMED_STATIC_FIELDS.get(last, last)
+        upgraded[f"{head}.{last}" if head else last] = value
+    return upgraded
 
 
 def _build_training_config(raw: dict[str, Any] | None) -> Any:
@@ -477,8 +540,7 @@ def _build_training_config(raw: dict[str, Any] | None) -> Any:
     # 0.2 kept the display switch on the config. It never affected a result,
     # so dropping it cannot change the configuration a run was trained with.
     fields = {name: value for name, value in fields.items() if name != "verbose"}
-    # 0.2 names renamed for 0.3, mapped so a 0.2 run still loads.
-    fields = {_RENAMED_FIELDS.get(name, name): value for name, value in fields.items()}
+    fields = _upgrade_config_fields(raw["kind"], fields)
     kwargs = _filter_dataclass_kwargs(cls, fields)
     kwargs = _coerce_tuple_fields(cls, kwargs)
     if "phases" in kwargs:
@@ -522,6 +584,11 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
         )
 
     saved_description = metadata.get("predictors", {})
+    if "static" in saved_description:
+        saved_description = {
+            **saved_description,
+            "static": _upgrade_static(saved_description["static"]),
+        }
     actual_description = _describe_predictors(like.predictors)
     for field in ("tree_structure", "leaves", "static"):
         if field in saved_description and saved_description[field] != actual_description[field]:

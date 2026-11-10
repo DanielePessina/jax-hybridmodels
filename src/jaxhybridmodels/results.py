@@ -154,13 +154,13 @@ class FitHistory:
     generation had a non-finite fitness, usually a failed solve. They rank
     last and the search goes on.
 
-    ``tournament_scores`` is Optax only: each tournament attempt's score in
-    attempt order, ``inf`` for an attempt that failed. Empty when no
-    tournament ran. A wide spread says the starting point matters for this
-    model; a narrow one, that the tournament is not buying much.
+    ``restart_scores`` is Optax only: each restart candidate's score, your
+    starting values first, ``inf`` for a candidate that failed. Empty when
+    ``restarts=0``. A wide spread says the starting point matters for this
+    model; a narrow one, that the restarts are not buying much.
 
-    ``continuity`` is Optax only, and present when some phase used multiple
-    shooting (``TrainingPhase.segments``): the weighted gap term per step, 0
+    ``gap_term`` is Optax only, and present when some phase used multiple
+    shooting (``TrainingPhase.shooting_segments``): the weighted gap term per step, 0
     in single-shooting steps. ``loss`` in a segmented step is the data term
     on the assembled segments, and the optimiser minimised the two together.
     """
@@ -170,8 +170,8 @@ class FitHistory:
     phase: tuple[int, ...] = ()
     validation_loss: tuple[float, ...] = ()
     failed_candidates: tuple[int, ...] = ()
-    tournament_scores: tuple[float, ...] = ()
-    continuity: tuple[float, ...] = ()
+    restart_scores: tuple[float, ...] = ()
+    gap_term: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True, repr=False)
@@ -194,7 +194,7 @@ class FitResult:
     measured_validation: float | None = field(default=None, kw_only=True)
 
     @property
-    def final_loss(self) -> float:
+    def returned_loss(self) -> float:
         """The training loss at the returned parameters.
 
         ``measured_loss`` when the trainer measured it there: after the last
@@ -237,7 +237,7 @@ class FitResult:
         # The default would print the whole model and every history entry.
         return (
             f"FitResult(stop_reason={self.stop_reason!r}, best_step={self.best_step}, "
-            f"final_loss={self.final_loss:.6g}, steps={len(self.history.loss)})"
+            f"returned_loss={self.returned_loss:.6g}, steps={len(self.history.loss)})"
         )
 
 
@@ -252,7 +252,7 @@ class SavedRun:
     ``FitHistory`` and None.
 
     ``config`` and ``objective`` come back as typed objects. A section that
-    names a callable (a custom loss, a ``penalty_fn``, an optimizer factory,
+    names a callable (a custom loss, a ``bound_penalty_fn``, an optimizer factory,
     an lr schedule) cannot be rebuilt, so it comes back as the raw dict
     with each callable as ``{"__callable__": "module.qualname"}``; rebind
     those fields yourself. ``extras`` is the dict passed to ``save``.

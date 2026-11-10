@@ -117,9 +117,9 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "transforms",
         "Transforms: Squash Shapes and Axis Warps",
         (
-            "BoundTransform",
-            "BOUND_TRANSFORMS",
-            "register_bound_transform",
+            "Squash",
+            "SQUASHES",
+            "register_squash",
             "Warp",
             "WARPS",
             "register_warp",
@@ -167,8 +167,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "masked_mse",
             "masked_mle",
-            "bal_mse",
-            "bal_mle",
+            "per_experiment_mse",
+            "per_experiment_mle",
             "LOSS_REGISTRY",
             "resolve_loss_fn",
             "loss_pooling",
@@ -276,8 +276,8 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "flat_prior": "jaxhybridmodels.inference",
     "make_problem": "jaxhybridmodels.inference",
     "LOSS_REGISTRY": "jaxhybridmodels.losses",
-    "bal_mle": "jaxhybridmodels.losses",
-    "bal_mse": "jaxhybridmodels.losses",
+    "per_experiment_mle": "jaxhybridmodels.losses",
+    "per_experiment_mse": "jaxhybridmodels.losses",
     "masked_mle": "jaxhybridmodels.losses",
     "masked_mse": "jaxhybridmodels.losses",
     "resolve_loss_fn": "jaxhybridmodels.losses",
@@ -325,11 +325,11 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "build_penalty_step": "jaxhybridmodels.training.kernels",
     "build_score_bucket": "jaxhybridmodels.training.kernels",
     "predict_bucket_obs": "jaxhybridmodels.training.kernels",
-    "BOUND_TRANSFORMS": "jaxhybridmodels.transforms",
-    "BoundTransform": "jaxhybridmodels.transforms",
+    "SQUASHES": "jaxhybridmodels.transforms",
+    "Squash": "jaxhybridmodels.transforms",
     "WARPS": "jaxhybridmodels.transforms",
     "Warp": "jaxhybridmodels.transforms",
-    "register_bound_transform": "jaxhybridmodels.transforms",
+    "register_squash": "jaxhybridmodels.transforms",
     "register_warp": "jaxhybridmodels.transforms",
     "EvosaxUI": "jaxhybridmodels.ui",
     "RichEvosaxUI": "jaxhybridmodels.ui",
@@ -820,7 +820,7 @@ PAGE_INTROS: dict[str, str] = {
     "losses": (
         "Loss functions consume a model's predicted output `[N, T, D]` and "
         "the bucket payload, return a scalar, and respect the bucket mask. "
-        "Two families: `masked_*` weights every observation equally; `bal_*` "
+        "Two families: `masked_*` weights every observation equally; `per_experiment_*` "
         "normalises per-experiment so duplication of one experiment can't "
         "dominate the gradient.\n\n"
         'Pass them by name via training-config `loss="mse"` (resolved through '

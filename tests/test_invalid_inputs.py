@@ -182,9 +182,9 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     ),
     (
         "tournament-without-steps",
-        lambda: hm.OptaxTrainingConfig(steps=1, tournament_attempts=3),
+        lambda: hm.OptaxTrainingConfig(steps=1, restarts=2),
         ValueError,
-        "tournament_steps=0",
+        "restart_steps=0",
     ),
     (
         "steps-and-phases",
@@ -193,18 +193,28 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
         "not both",
     ),
     ("zero-steps", lambda: hm.TrainingPhase(steps=0), ValueError, "at least 1"),
-    ("bad-horizon", lambda: hm.TrainingPhase(steps=1, horizon=2.0), ValueError, "horizon"),
-    ("zero-segments", lambda: hm.TrainingPhase(steps=1, segments=0), ValueError, "segments"),
-    ("float-segments", lambda: hm.TrainingPhase(steps=1, segments=2.5), TypeError, "segments"),  # ty: ignore[invalid-argument-type]
+    ("bad-horizon", lambda: hm.TrainingPhase(steps=1, loss_horizon=2.0), ValueError, "horizon"),
+    (
+        "zero-segments",
+        lambda: hm.TrainingPhase(steps=1, shooting_segments=0),
+        ValueError,
+        "segments",
+    ),
+    (
+        "float-segments",
+        lambda: hm.TrainingPhase(steps=1, shooting_segments=2.5),  # ty: ignore[invalid-argument-type]
+        TypeError,
+        "segments",
+    ),
     (
         "negative-continuity",
-        lambda: hm.TrainingPhase(steps=1, segments=2, continuity_weight=-1.0),
+        lambda: hm.TrainingPhase(steps=1, shooting_segments=2, continuity_weight=-1.0),
         ValueError,
         "continuity_weight",
     ),
     (
         "ends-segmented",
-        lambda: hm.OptaxTrainingConfig(phases=(hm.TrainingPhase(steps=1, segments=4),)),
+        lambda: hm.OptaxTrainingConfig(phases=(hm.TrainingPhase(steps=1, shooting_segments=4),)),
         ValueError,
         "single shooting",
     ),
@@ -242,7 +252,7 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     (
         "evosax-int-key",
         lambda: parameter_model().fit(
-            decay_dataset(), hm.EvosaxTrainingConfig(steps=1), key=unchecked(0)
+            decay_dataset(), hm.EvosaxTrainingConfig(generations=1), key=unchecked(0)
         ),
         TypeError,
         "must be a JAX PRNG key",
@@ -290,7 +300,7 @@ CASES: list[tuple[str, Callable[[], Any], type[Exception], str]] = [
     (
         "ensemble-evosax",
         lambda: unchecked_model().fit_ensemble(
-            decay_dataset(), hm.EvosaxTrainingConfig(steps=1), key=jr.key(0), n_members=1
+            decay_dataset(), hm.EvosaxTrainingConfig(generations=1), key=jr.key(0), n_members=1
         ),
         TypeError,
         "Optax only",
@@ -342,8 +352,8 @@ def test_both_kinds_of_jax_key_are_accepted() -> None:
 
 def test_a_lone_tournament_budget_warns() -> None:
     # A legacy key too, to show one reaches a real fit.
-    config = hm.OptaxTrainingConfig(steps=1, tournament_steps=2)
-    with pytest.warns(RuntimeWarning, match="tournament_attempts=1"):
+    config = hm.OptaxTrainingConfig(steps=1, restart_steps=2)
+    with pytest.warns(RuntimeWarning, match="restarts=0"):
         parameter_model().fit(decay_dataset(), config, key=jr.PRNGKey(0))
 
 
@@ -447,14 +457,22 @@ INVALID = [
     ),
     # The horizon indexes a prefix of the observation times: zero scores
     # nothing, above one claims more timestamps than exist.
-    pytest.param(lambda: TrainingPhase(steps=2, horizon=0.0), "horizon", id="phase-horizon-0"),
-    pytest.param(lambda: TrainingPhase(steps=2, horizon=-0.1), "horizon", id="phase-horizon-neg"),
-    pytest.param(lambda: TrainingPhase(steps=2, horizon=1.5), "horizon", id="phase-horizon-1.5"),
+    pytest.param(lambda: TrainingPhase(steps=2, loss_horizon=0.0), "horizon", id="phase-horizon-0"),
     pytest.param(
-        lambda: TrainingPhase(steps=2, penalty_weight=-1.0), "non-negative", id="phase-pw-neg"
+        lambda: TrainingPhase(steps=2, loss_horizon=-0.1), "horizon", id="phase-horizon-neg"
     ),
-    pytest.param(lambda: TrainingPhase(steps=2, penalty_weight=_NAN), "finite", id="phase-pw-nan"),
-    pytest.param(lambda: TrainingPhase(steps=2, penalty_weight=_INF), "finite", id="phase-pw-inf"),
+    pytest.param(
+        lambda: TrainingPhase(steps=2, loss_horizon=1.5), "horizon", id="phase-horizon-1.5"
+    ),
+    pytest.param(
+        lambda: TrainingPhase(steps=2, bound_penalty_weight=-1.0), "non-negative", id="phase-pw-neg"
+    ),
+    pytest.param(
+        lambda: TrainingPhase(steps=2, bound_penalty_weight=_NAN), "finite", id="phase-pw-nan"
+    ),
+    pytest.param(
+        lambda: TrainingPhase(steps=2, bound_penalty_weight=_INF), "finite", id="phase-pw-inf"
+    ),
     # OptaxTrainingConfig: the phase schedule. Zero phases would run nothing
     # and return an empty history with no hint why.
     pytest.param(lambda: OptaxTrainingConfig(), "steps= for one phase", id="optax-no-phases"),
@@ -480,8 +498,10 @@ INVALID = [
         id="optax-switch-without-reset",
     ),
     # Objective: what is minimised.
-    pytest.param(lambda: Objective(penalty_weight=-1.0), "non-negative", id="objective-pw-neg"),
-    pytest.param(lambda: Objective(penalty_weight=_NAN), "finite", id="objective-pw-nan"),
+    pytest.param(
+        lambda: Objective(bound_penalty_weight=-1.0), "non-negative", id="objective-pw-neg"
+    ),
+    pytest.param(lambda: Objective(bound_penalty_weight=_NAN), "finite", id="objective-pw-nan"),
     pytest.param(
         lambda: Objective(trajectory_penalty_weight=-1.0), "non-negative", id="objective-traj-neg"
     ),
@@ -499,10 +519,10 @@ INVALID = [
     ),
     # Penalty points are [G, n_inputs] physical input vectors.
     pytest.param(
-        lambda: Objective(penalty_points={"rate": jnp.zeros(3)}), "rank-2", id="points-rank-1"
+        lambda: Objective(bound_penalty_points={"rate": jnp.zeros(3)}), "rank-2", id="points-rank-1"
     ),
     pytest.param(
-        lambda: Objective(penalty_points={"rate": jnp.zeros((2, 2, 1))}),
+        lambda: Objective(bound_penalty_points={"rate": jnp.zeros((2, 2, 1))}),
         "rank-2",
         id="points-rank-3",
     ),
@@ -523,15 +543,17 @@ INVALID = [
         "one weight per channel",
         id="weights-wrong-length",
     ),
-    pytest.param(lambda: OptaxTrainingConfig(steps=2, tournament_attempts=0), "attempts"),
-    pytest.param(lambda: OptaxTrainingConfig(steps=2, tournament_steps=-1), "tournament_steps"),
-    pytest.param(lambda: OptaxTrainingConfig(steps=2, tournament_lr=_NAN), "tournament_lr"),
-    pytest.param(lambda: OptaxTrainingConfig(steps=2, patience=-1), "patience"),
+    pytest.param(lambda: OptaxTrainingConfig(steps=2, restarts=-1), "non-negative"),
+    pytest.param(lambda: OptaxTrainingConfig(steps=2, restart_steps=-1), "restart_steps"),
+    pytest.param(lambda: OptaxTrainingConfig(steps=2, restart_lr=_NAN), "restart_lr"),
+    pytest.param(lambda: OptaxTrainingConfig(steps=2, patience_steps=-1), "patience"),
     # EvosaxTrainingConfig
     pytest.param(lambda: EvosaxTrainingConfig(algorithm="nope"), "available", id="evo-algorithm"),
     pytest.param(lambda: EvosaxTrainingConfig(init="nope"), "available", id="evo-init"),  # ty: ignore[invalid-argument-type]
     pytest.param(lambda: EvosaxTrainingConfig(population_size=0), "population_size"),
-    pytest.param(lambda: EvosaxTrainingConfig(steps=0), "steps", id="evo-steps-0"),
+    pytest.param(
+        lambda: EvosaxTrainingConfig(generations=0), "generations", id="evo-generations-0"
+    ),
     pytest.param(lambda: EvosaxTrainingConfig(init_box_extent=-1.0), "init_box_extent"),
     pytest.param(lambda: EvosaxTrainingConfig(init_sigma=0.0), "init_sigma"),
     pytest.param(lambda: EvosaxTrainingConfig(log_every=0), "log_every"),
@@ -561,16 +583,16 @@ INVALID = [
         id="adjoint-unregistered",
     ),
     # Schedules and profiles
-    pytest.param(lambda: annealing_schedule("cosine", total_epochs=0), "total_epochs"),
+    pytest.param(lambda: annealing_schedule("cosine", total_steps=0), "total_steps"),
     pytest.param(
-        lambda: annealing_schedule("warmup_cosine", total_epochs=10, warmup_epochs=10), "warmup"
+        lambda: annealing_schedule("warmup_cosine", total_steps=10, warmup_steps=10), "warmup"
     ),
-    pytest.param(lambda: annealing_schedule("cosine", total_epochs=10, init_value=0.0), "init"),
-    pytest.param(lambda: annealing_schedule("cosine", total_epochs=10, end_value=1.5), "end"),
+    pytest.param(lambda: annealing_schedule("cosine", total_steps=10, init_value=0.0), "init"),
+    pytest.param(lambda: annealing_schedule("cosine", total_steps=10, end_value=1.5), "end"),
     pytest.param(
-        lambda: annealing_schedule("exponential", total_epochs=10, end_value=0.0), "end_value > 0"
+        lambda: annealing_schedule("exponential", total_steps=10, end_value=0.0), "end_value > 0"
     ),
-    pytest.param(lambda: annealing_schedule("nope", total_epochs=10), "kind", id="schedule-kind"),
+    pytest.param(lambda: annealing_schedule("nope", total_steps=10), "kind", id="schedule-kind"),
     pytest.param(
         lambda: ramp_profile(start=3.0, end=3.0, before=0.0, after=1.0),
         "end > start",
@@ -610,9 +632,9 @@ def test_the_display_switch_is_not_a_config_field(config):
 
 
 def test_objective_names_the_mapping_form_for_old_tuple_points():
-    """The removed tuple form of ``penalty_points`` raises a TypeError saying what to pass."""
+    """The removed tuple form of ``bound_penalty_points`` raises a TypeError saying what to pass."""
     with pytest.raises(TypeError, match="mapping from predictor path"):
-        Objective(penalty_points=(jnp.zeros((3, 1)),))  # ty: ignore[invalid-argument-type]
+        Objective(bound_penalty_points=(jnp.zeros((3, 1)),))  # ty: ignore[invalid-argument-type]
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +870,9 @@ def _two_channel_scored() -> tuple[jax.Array, BucketPayload]:
 @pytest.mark.parametrize(
     "call, match",
     [
-        pytest.param(lambda: resolve_loss_fn("rmse", None, None), "bal_mle", id="unknown-name"),
+        pytest.param(
+            lambda: resolve_loss_fn("rmse", None, None), "per_experiment_mle", id="unknown-name"
+        ),
         # Weights must act inside the loss's own reduction, which an opaque
         # (pred_obs, bp) callable cannot do.
         pytest.param(
@@ -924,7 +948,7 @@ def test_positive_warp_rejects_nonpositive_runtime_inputs():
 @pytest.mark.parametrize(
     "kwargs,match",
     [
-        (dict(bounds=((0.0, 1.0),), transform="tanh"), "algebraic"),
+        (dict(bounds=((0.0, 1.0),), squash="tanh"), "algebraic"),
         (dict(bounds=((0.0, 1.0),), warp="nope"), "linear"),
         (dict(bounds=((math.nan, 1.0),)), "NaN"),
         (dict(bounds=((10.0, 0.0),)), "low < high"),
@@ -934,9 +958,9 @@ def test_positive_warp_rejects_nonpositive_runtime_inputs():
         (dict(bounds=((0.0, 1.0),), temperature=0.0), "temperature"),
         (dict(bounds=((0.0, 1.0),), temperature=math.nan), "temperature"),
         (dict(bounds=((0.0, 1.0),), temperature=jnp.array([1.0, 2.0])), "temperature"),
-        (dict(bounds=((0.0, 1.0),), logit_eps=0.5), "logit_eps"),
-        (dict(bounds=((0.0, 1.0),), logit_eps=0.0), "logit_eps"),
-        (dict(bounds=((0.0, 1.0),), z_knee=-1.0), "z_knee"),
+        (dict(bounds=((0.0, 1.0),), edge_eps=0.5), "edge_eps"),
+        (dict(bounds=((0.0, 1.0),), edge_eps=0.0), "edge_eps"),
+        (dict(bounds=((0.0, 1.0),), saturation_knee=-1.0), "saturation_knee"),
         (dict(bounds=((0.0, 1.0, 2.0),)), "one \\(low, high\\) pair"),
         (dict(bounds=(0.0, 1.0, 2.0)), "one \\(low, high\\) pair"),
     ],
@@ -1149,7 +1173,7 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
             make_model(predictors, simulate_pressure),
             temp_data,
             hm.OptaxTrainingConfig(steps=2),
-            objective=Objective(penalty_weight=1e-2),
+            objective=Objective(bound_penalty_weight=1e-2),
             key=jr.key(0),
         )
     # A phase override switches the penalty on for that phase alone, and
@@ -1159,7 +1183,7 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
             make_model(predictors, simulate_pressure),
             temp_data,
             hm.OptaxTrainingConfig(
-                phases=(TrainingPhase(steps=1), TrainingPhase(steps=1, penalty_weight=1e-2))
+                phases=(TrainingPhase(steps=1), TrainingPhase(steps=1, bound_penalty_weight=1e-2))
             ),
             key=jr.key(0),
         )
@@ -1173,7 +1197,7 @@ def test_an_uncovered_leaf_raises_before_training(temp_data):
     ],
 )
 def test_malformed_penalty_points_raise(temp_data, points, match):
-    objective = Objective(penalty_weight=1e-2, penalty_points=points)
+    objective = Objective(bound_penalty_weight=1e-2, bound_penalty_points=points)
     with pytest.raises(ValueError, match=match):
         train_with_optax(
             make_model(network_predictors(), simulate_network),
@@ -1276,6 +1300,62 @@ def test_load_rejects_a_mismatched_run(tmp_path, saved, template, edit, match):
         _edit_metadata(tmp_path, edit)
     with pytest.raises(ValueError, match=match):
         hm.load(tmp_path, like=make_model(template()))
+
+
+def _restore_old_names(metadata: dict[str, Any]) -> None:
+    """Rewrite a save's metadata into the field names used before the 0.3.0 renames."""
+    fields = metadata["config"]["fields"]
+    fields["tournament_attempts"] = fields.pop("restarts") + 1
+    fields["tournament_steps"] = fields.pop("restart_steps")
+    fields["tournament_lr"] = fields.pop("restart_lr")
+    fields["patience"] = fields.pop("patience_steps")
+    for phase in fields["phases"]:
+        phase["horizon"] = phase.pop("loss_horizon")
+        phase["segments"] = phase.pop("shooting_segments")
+        phase["penalty_weight"] = phase.pop("bound_penalty_weight")
+    objective = metadata["objective"]
+    objective["penalty_weight"] = objective.pop("bound_penalty_weight")
+    objective["penalty_points"] = objective.pop("bound_penalty_points")
+    objective["penalty_fn"] = objective.pop("bound_penalty_fn")
+    objective["loss"] = "bal_mse"
+    static = metadata["predictors"]["static"]
+    old = {"squash": "transform", "edge_eps": "logit_eps", "saturation_knee": "z_knee"}
+    metadata["predictors"]["static"] = {
+        ".".join([*path.split(".")[:-1], old.get(path.split(".")[-1], path.split(".")[-1])]): v
+        for path, v in static.items()
+    }
+
+
+def test_load_reads_a_run_saved_under_the_old_names(tmp_path):
+    """A save from before the renames loads into the current names, restarts one fewer."""
+    model = make_model(network_predictors(), simulate_network)
+    config = hm.OptaxTrainingConfig(
+        phases=(
+            hm.TrainingPhase(steps=3, lr=0.01, loss_horizon=0.5, bound_penalty_weight=0.1),
+            hm.TrainingPhase(steps=3, lr=0.01),
+        ),
+        restarts=2,
+        restart_steps=1,
+        patience_steps=4,
+    )
+    objective = Objective(loss="per_experiment_mse", bound_penalty_weight=0.01)
+    hm.save(tmp_path, model, config=config, objective=objective)
+    _edit_metadata(tmp_path, _restore_old_names)
+    loaded = hm.load(tmp_path, like=model)
+    assert loaded.config == config
+    assert loaded.objective.loss == "per_experiment_mse"
+    assert loaded.objective.bound_penalty_weight == 0.01
+
+    evosax = hm.EvosaxTrainingConfig(generations=7, init="current")
+    hm.save(tmp_path, model, config=evosax)
+
+    def old_evosax(metadata: dict[str, Any]) -> None:
+        fields = metadata["config"]["fields"]
+        fields["steps"] = fields.pop("generations")
+        fields["init"] = "warm"
+
+    _edit_metadata(tmp_path, old_evosax)
+    assert hm.load(tmp_path, like=model).config == evosax
 
 
 def _duplicate_ids() -> list[hm.Experiment]:
@@ -1408,7 +1488,13 @@ def test_compute_metrics_names_what_it_takes(fitted, decay_data):
     [
         (dict(n_members=3, n_seeds=2), ValueError, "exceeds n_seeds"),
         (dict(n_members=0), ValueError, "n_members must be >= 1"),
-        (dict(n_members=2, n_seeds=0, bootstrap=True), ValueError, "n_seeds must be >= 1"),
+        (
+            dict(n_members=2, seeds_per_member=0, bootstrap=True),
+            ValueError,
+            "seeds_per_member must",
+        ),
+        (dict(n_members=2, n_seeds=3, bootstrap=True), ValueError, "seeds_per_member"),
+        (dict(n_members=2, seeds_per_member=2), ValueError, "for the bootstrap ensemble"),
         (dict(n_members=2.0), TypeError, "must be an int"),
     ],
 )

@@ -124,7 +124,7 @@ def bounded_predictor_paths(predictors: Any) -> tuple[str, ...]:
     """Dotted path of every ``BoundedPredictor`` in ``predictors``, in traversal order.
 
     These are the keys :class:`~jaxhybridmodels.Objective` accepts in
-    ``penalty_points``: for ``{"rate": BoundedPredictor(...)}`` the path is
+    ``bound_penalty_points``: for ``{"rate": BoundedPredictor(...)}`` the path is
     ``"rate"``.
     """
     return tuple(path for path, _ in _bounded_leaves_with_paths(predictors))
@@ -181,9 +181,9 @@ def soft_logit(s: Array, eps: float = 1e-3) -> Array:
     (``logit(0.999) ~ 6.9`` plus about 1000 per unit past it), a number a
     network can still consume; 1e-6 would map it to ``|z| ~ 1e4``.
     """
-    from jaxhybridmodels.transforms import BOUND_TRANSFORMS
+    from jaxhybridmodels.transforms import SQUASHES
 
-    t = BOUND_TRANSFORMS["sigmoid"]
+    t = SQUASHES["sigmoid"]
     return soft_inverse(s, t.inverse, t.inverse_slope, eps)
 
 
@@ -437,7 +437,7 @@ def resolve_penalty_points(
     unknown = sorted(set(points) - set(valid))
     if unknown:
         raise ValueError(
-            f"penalty_points has no BoundedPredictor at {unknown}; valid paths are {valid}"
+            f"bound_penalty_points has no BoundedPredictor at {unknown}; valid paths are {valid}"
         )
     return tuple(
         jnp.asarray(points[path]) if path in points else jnp.zeros((0, len(leaf.in_scaler.bounds)))
@@ -483,13 +483,13 @@ def validate_penalty_points(
         if extra is not None:
             if extra.ndim != 2:
                 raise ValueError(
-                    f"penalty_points[{path!r}] must be a rank-2 [G, n_inputs] array "
+                    f"bound_penalty_points[{path!r}] must be a rank-2 [G, n_inputs] array "
                     f"of physical input vectors; got shape {extra.shape}"
                 )
             n_inputs = len(leaf.in_scaler.bounds)
             if extra.shape[0] > 0 and extra.shape[-1] != n_inputs:
                 raise ValueError(
-                    f"penalty_points[{path!r}] has {extra.shape[-1]} input columns but "
+                    f"bound_penalty_points[{path!r}] has {extra.shape[-1]} input columns but "
                     f"that predictor (input_keys={leaf.input_keys!r}) takes {n_inputs}; "
                     "columns follow input_keys order."
                 )
@@ -502,7 +502,7 @@ def validate_penalty_points(
             raise ValueError(
                 f"penalty: predictor {path!r} (input_keys={leaf.input_keys!r}) has no "
                 "penalty points: its inputs do not all resolve to dataset covariates and "
-                f"Objective.penalty_points has no entry for it. Add penalty_points="
+                f"Objective.bound_penalty_points has no entry for it. Add bound_penalty_points="
                 f"{{{path!r}: points}}, or use trajectory_penalty_fn for embedded predictors."
             )
 

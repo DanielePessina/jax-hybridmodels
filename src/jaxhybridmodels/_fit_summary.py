@@ -97,31 +97,31 @@ def _run_lines(
             f"  {failed} candidates failed to solve, in {generations} of "
             f"{len(history.failed_candidates)} generations, and ranked last"
         )
-    if history.tournament_scores:
-        lines.append(f"  {_tournament_line(history.tournament_scores)}")
+    if history.restart_scores:
+        lines.append(f"  {_tournament_line(history.restart_scores)}")
     return lines
 
 
 def _tournament_line(scores: Sequence[float], *, kept: int | None = None) -> str:
-    """One line on a tournament: its size, best and worst score, and failures.
+    """One line on the restarts: how many candidates, best and worst score, failures.
 
-    With ``kept``, the line also names the attempts kept, numbered from 1 in
-    the order the tournament ranks them (ties to the earlier attempt). The
-    trainer reports that as the tournament ends. A saved history does not
+    With ``kept``, the line also names the candidates kept, numbered from 1 in
+    the order they are ranked (ties to the earlier one); candidate 1 is the
+    starting values. The trainer reports that as the restarts end. A saved history does not
     record which attempt a seed-ensemble member came from, so the summary
     leaves it out.
     """
     finite = [s for s in scores if math.isfinite(s)]
     order = sorted(range(len(scores)), key=lambda i: scores[i])
     if kept is None:
-        line = f"tournament: {len(scores)} attempts"
+        line = f"restarts: {len(scores)} candidates"
     else:
-        which = "attempt" if kept == 1 else "attempts"
+        which = "candidate" if kept == 1 else "candidates"
         named = ", ".join(str(i + 1) for i in order[:kept])
-        line = f"tournament: kept {which} {named} of {len(scores)}"
+        line = f"restarts: kept {which} {named} of {len(scores)}"
     if not finite:
         # The trainer falls back to the starting predictors then.
-        return f"tournament: all {len(scores)} attempts failed, kept the starting values"
+        return f"restarts: all {len(scores)} candidates failed, kept the starting values"
     line += f", best score {scores[order[0]]:.4g}, worst {max(finite):.4g}"
     failed = len(scores) - len(finite)
     return line + (f", {failed} failed" if failed else "")
@@ -161,7 +161,7 @@ def _phase_lines(history: FitHistory) -> list[str]:
     phases = sorted(set(history.phase))
     if len(phases) < 2:
         return []
-    gaps = history.continuity if len(history.continuity) == len(history.loss) else ()
+    gaps = history.gap_term if len(history.gap_term) == len(history.loss) else ()
     header = f"  {'phase':>5} {'steps':>6} {'first loss':>13} {'last loss':>13}"
     lines = ["Phases", header + (f" {'last gap term':>14}" if gaps else "")]
     for phase in phases:
@@ -209,7 +209,7 @@ def _parameter_rows(path: str, parameter: Parameter) -> list[tuple[str, str, str
         one_sided = jnp.zeros_like(one_sided)
     pinned = jnp.where(
         one_sided,
-        -latent / temperature > scaler.z_knee,
+        -latent / temperature > scaler.saturation_knee,
         scaler._saturation_terms(latent) > 0.0,
     )
     rows = []

@@ -11,7 +11,7 @@ This loop targets small kinetic predictors, roughly 4 to 10 trainable
 scalars. Use ``jaxhybridmodels.training.optax`` for network-sized fits, or
 run this first and polish with Optax afterwards.
 
-There are no phases. The run is ``steps`` generations over a population of
+There are no phases. The run is ``generations`` generations over a population of
 ``population_size`` individuals; one generation is the Evosax step.
 
 JIT boundary
@@ -28,7 +28,7 @@ parallel.
 
 Initial-population modes
 ------------------------
-``"warm"``
+``"current"``
     CMA-ES starts with ``mean = flat`` and ``std = init_sigma``. Its
     first ``ask`` produces the initial population.
 ``"uniform_box"``
@@ -113,7 +113,7 @@ from jaxhybridmodels.ui.plain import PlainEvosaxUI, live_display_available
 if TYPE_CHECKING:
     from jaxhybridmodels.model import HybridModel
 
-_SUPPORTED_INIT_MODES: tuple[str, ...] = ("warm", "uniform_box", "lhs_box")
+_SUPPORTED_INIT_MODES: tuple[str, ...] = ("current", "uniform_box", "lhs_box")
 
 ALGORITHM_REGISTRY: dict[str, type] = {
     "CMA_ES": CMA_ES,
@@ -156,17 +156,19 @@ class EvosaxTrainingConfig:
         another strategy with :func:`register_algorithm`.
     population_size
         Individuals per generation, evaluated in parallel through ``vmap``.
-    steps
-        Number of generations, run in sequence. Named like the Optax
-        config's ``steps``: one generation is one Evosax step.
+    generations
+        Number of generations, run in sequence. Each one solves the whole
+        population once.
     init
-        Initial-population scheme, one of ``"warm"``, ``"uniform_box"``,
-        ``"lhs_box"``. The module docstring explains the difference.
+        Initial-population scheme: ``"current"`` centres the search on the
+        current values, ``"uniform_box"`` and ``"lhs_box"`` draw the first
+        population in a box around them. The module docstring explains the
+        difference.
     init_box_extent
         Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``.
-        Ignored by ``"warm"``.
+        Ignored by ``"current"``.
     init_sigma
-        Initial CMA-ES step size for ``"warm"``. The box-init modes start
+        Initial CMA-ES step size for ``"current"``. The box-init modes start
         at the box's own standard deviation, ``init_box_extent / sqrt(3)``,
         instead. CMA-ES adapts it after the first ``tell``.
     log_every
@@ -176,8 +178,8 @@ class EvosaxTrainingConfig:
 
     algorithm: str = "CMA_ES"
     population_size: int = 64
-    steps: int = 100
-    init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
+    generations: int = 100
+    init: Literal["current", "uniform_box", "lhs_box"] = "current"
     init_box_extent: float = 2.0
     init_sigma: float = 0.1
     log_every: int = 1
@@ -195,8 +197,8 @@ class EvosaxTrainingConfig:
             )
         if self.population_size <= 0:
             raise ValueError("EvosaxTrainingConfig.population_size must be > 0")
-        if self.steps <= 0:
-            raise ValueError("EvosaxTrainingConfig.steps must be > 0")
+        if self.generations <= 0:
+            raise ValueError("EvosaxTrainingConfig.generations must be > 0")
         if not math.isfinite(self.init_box_extent) or self.init_box_extent < 0.0:
             raise ValueError("EvosaxTrainingConfig.init_box_extent must be finite and non-negative")
         if not math.isfinite(self.init_sigma) or self.init_sigma <= 0.0:
@@ -215,9 +217,9 @@ def _build_single_eval(
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
-    penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
-    penalty_points: tuple[Array, ...] = (),
-    penalty_weight: float,
+    bound_penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
+    bound_penalty_points: tuple[Array, ...] = (),
+    bound_penalty_weight: float,
     trajectory_penalty_fn: Callable[[Array, BucketPayload], Array] | None = None,
     trajectory_penalty_weight: float = 0.0,
 ) -> Callable[[Array], Array]:
@@ -234,7 +236,7 @@ def _build_single_eval(
     training step, so the fitness is the loss over the whole dataset however
     the experiments were split into buckets.
 
-    The bound penalty evaluates at ``penalty_points``, the per-leaf point
+    The bound penalty evaluates at ``bound_penalty_points``, the per-leaf point
     arrays selected host-side by the caller (the output of
     :func:`jaxhybridmodels.penalties.select_penalty_points`). Evosax has no
     length-mask curriculum, so every observed cell counts.
@@ -263,7 +265,7 @@ def _build_single_eval(
             if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
                 penalty = trajectory_penalty_fn(full_state, bp)
                 total = total + penalty_share * trajectory_penalty_weight * penalty
-        if penalty_weight > 0.0:
+        if bound_penalty_weight > 0.0:
             # The search roams the latent space with nothing holding it in
             # range, and the squash keeps the physical output legal however
             # far the latent drifts, so an individual parked deep in
@@ -274,7 +276,7 @@ def _build_single_eval(
             # Folded into the fitness because evosax ranks by one scalar
             # with no aux channel. The weight is a closed-over Python float,
             # never traced, so it stays out of the vmap.
-            total = total + penalty_weight * penalty_fn(predictor, penalty_points)
+            total = total + bound_penalty_weight * bound_penalty_fn(predictor, bound_penalty_points)
         return jnp.where(solved, total, jnp.inf)
 
     return single_eval
@@ -351,7 +353,7 @@ def _box_population(
         sample = sampler.random(n=config.population_size)  # shape [pop, n], [0, 1]
         scaled = (sample * 2.0 - 1.0) * extent
         return flat[None, :] + jnp.asarray(scaled, dtype=flat.dtype)
-    # The "warm" mode is handled by the caller (CMA-ES's own ask); we should
+    # The "current" mode is handled by the caller (CMA-ES's own ask); we should
     # never be invoked with it.
     raise ValueError(f"_box_population called with non-box init {config.init!r}")
 
@@ -441,7 +443,7 @@ def train_with_evosax(
 ) -> FitResult:
     """Train ``model``'s predictors with an evolutionary strategy; ``fit`` for an Evosax config.
 
-    Runs ``config.steps`` generations over a population of
+    Runs ``config.generations`` generations over a population of
     ``config.population_size`` candidates, taking no gradient. See the
     module docstring for the JIT boundary and the initial-population modes.
     Every keyword means what it does for :meth:`HybridModel.fit
@@ -449,19 +451,19 @@ def train_with_evosax(
     be a ``Dataset`` or a list of experiments.
 
     Each individual's fitness is the pooled data loss plus any
-    trajectory penalty plus ``objective.penalty_weight`` times the bound
+    trajectory penalty plus ``objective.bound_penalty_weight`` times the bound
     penalty, since evosax ranks by one scalar.
 
     A candidate whose solve fails ranks last instead of failing the
     generation, and ``history.failed_candidates`` counts them; see the
     module docstring.
 
-    ``history.loss`` is the best fitness so far after each generation, so
-    it is monotone non-increasing; Optax records the raw per-step loss
-    instead, so the two series mean different things. Without
-    ``validation`` the returned model is rebuilt from the lowest-loss
-    candidate seen in any generation, the warm-up evaluation of the input
-    included. With it, each generation's best is scored on the validation
+    ``history.loss`` is each generation's best fitness, so like the Optax
+    per-step loss it can go up as well as down; ``min`` over it gives the
+    best so far. Without ``validation`` the returned model is rebuilt from
+    the lowest-loss candidate seen in any generation, the warm-up
+    evaluation of the input included, and ``measured_loss`` is its
+    fitness. With it, each generation's best is scored on the validation
     set and the returned model is the one that scored lowest there.
     """
     if not isinstance(config, EvosaxTrainingConfig):
@@ -551,7 +553,7 @@ def _train_with_evosax(
     # Resolved before the dashboard opens, so a bad channel name or penalty
     # path raises without leaving a Rich Live display on the terminal.
     resolved = resolve_objective(
-        objective, predictors, dataset, penalty_on=objective.penalty_weight > 0.0
+        objective, predictors, dataset, penalty_on=objective.bound_penalty_weight > 0.0
     )
     loss_fn = resolved.loss_fn
 
@@ -577,7 +579,9 @@ def _train_with_evosax(
     population_solver = dataclasses.replace(solver, throw=False)
 
     ui_ = _select_ui(ui, verbose, config.log_every)
-    ui_.on_run_start(total_steps=int(config.steps), population_size=int(config.population_size))
+    ui_.on_run_start(
+        total_steps=int(config.generations), population_size=int(config.population_size)
+    )
     with close_run_on_error(ui_):
         single_eval = _build_single_eval(
             static_predictor=static_predictors,
@@ -588,9 +592,9 @@ def _train_with_evosax(
             state_to_output=state_to_output,
             solver=population_solver,
             loss_fn=loss_fn,
-            penalty_fn=objective.bound_penalty_fn,
-            penalty_points=select_penalty_points(resolved.sources, resolved.extras, 1.0),
-            penalty_weight=float(objective.penalty_weight),
+            bound_penalty_fn=objective.resolved_bound_penalty_fn,
+            bound_penalty_points=select_penalty_points(resolved.sources, resolved.extras, 1.0),
+            bound_penalty_weight=float(objective.bound_penalty_weight),
             trajectory_penalty_fn=objective.trajectory_penalty_fn,
             trajectory_penalty_weight=objective.trajectory_penalty_weight,
         )
@@ -647,7 +651,7 @@ def _train_with_evosax(
         selection: list[float] = []
         failure: str | None = None
 
-        for gen in range(int(config.steps)):
+        for gen in range(int(config.generations)):
             ask_key = fold(key, f"evosax_ask_{gen}")
             if gen == 0 and config.init in ("uniform_box", "lhs_box"):
                 # Inject the box-init population directly, skipping CMA-ES's
@@ -717,12 +721,11 @@ def _train_with_evosax(
                 if score < best_selection:
                     best_selection = score
                     selected_flat = gen_flat
-                    # Its own training fitness: history holds the best so far,
-                    # which may belong to another candidate.
+                    # Its own training fitness, which history also records.
                     selected_loss = gen_best_loss
                     best_step = gen
 
-            history.append(best_loss)
+            history.append(gen_best_loss)
             ui_.on_generation_end(
                 gen_idx=gen,
                 best_loss=gen_best_loss,
@@ -738,7 +741,7 @@ def _train_with_evosax(
             warnings.warn(text, RuntimeWarning, stacklevel=2)
 
         final_flat = best_flat if select_score is None else selected_flat
-        ui_.on_run_end(final_loss=best_loss if select_score is None else best_selection)
+        ui_.on_run_end(returned_loss=best_loss if select_score is None else best_selection)
         return _EvosaxRun(
             predictors=rebuild(final_flat),
             loss=history,
@@ -746,6 +749,8 @@ def _train_with_evosax(
             validation=selection,
             best_step=best_step,
             failure=failure,
-            selected_loss=None if select_score is None else selected_loss,
+            # Without validation the returned candidate may be the warm-up's,
+            # which no history entry records, so its fitness is reported here.
+            selected_loss=best_loss if select_score is None else selected_loss,
             selected_validation=None if select_score is None else best_selection,
         )

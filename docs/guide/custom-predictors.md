@@ -70,7 +70,7 @@ template built with the same values. Do not put JAX arrays or lists there.
 
 ## Re-initialisation
 
-The [tournament](/guide/training#the-tournament) restarts every predictor
+[Restarts](/guide/training#restarts) re-initialise every predictor
 from a new key. By default each float array is replaced with a
 standard-normal sample of the same shape, which ignores any scaling your
 constructor applied. Define `reinitialized` to rebuild properly:
@@ -81,7 +81,7 @@ constructor applied. Define `reinitialized` to rebuild properly:
 ```
 
 The result must have the same pytree shape: same fields, array shapes and
-static values. The trainable mask built before the tournament is reused
+static values. The trainable mask built before the restarts is reused
 after it, and frozen leaves are put back to their given values, so only
 what trains is redrawn. The method is found with `hasattr`; nothing to
 register. To check it, call `hm.reinitialize(predictor, key=key)`,
@@ -115,7 +115,7 @@ rate = hm.BoundedPredictor(
 Your module sees latent inputs of roughly unit scale and its output is
 squashed into the output box, so unit-scale initialisation is the right
 default whatever the physical units. With one output bound the wrapper
-returns a scalar. To pick a `transform` or `warp`, pass
+returns a scalar. To pick a `squash` or `warp`, pass
 `in_scaler`/`out_scaler` instead; see
 [Predictors and bounds](/guide/predictors).
 

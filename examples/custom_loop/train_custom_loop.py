@@ -165,7 +165,7 @@ def main() -> None:
         loss_fn=huber_loss,
         trainable=mask,
     )
-    penalty_step = build_penalty_step(penalty_fn=weight_decay, trainable=mask)
+    penalty_step = build_penalty_step(bound_penalty_fn=weight_decay, trainable=mask)
     optimizer = optax.adamw(learning_rate=1e-2)
     apply_update = build_apply_update(optimizer=optimizer, trainable=mask)
     opt_state = optimizer.init(eqx.filter(predictors, mask))
@@ -174,7 +174,7 @@ def main() -> None:
     # The fraction of each time series the loss sees. 1.0 scores all of it;
     # a schedule over this value is how the stock trainer's horizon works.
     horizon = 1.0
-    penalty_weight = jnp.asarray(0.1)
+    bound_penalty_weight = jnp.asarray(0.1)
     print("\n[fit]")
     for step in range(args.steps):
         # Weighted mean over buckets of the loss and its gradient. Dividing
@@ -194,7 +194,7 @@ def main() -> None:
 
         # The regulariser is charged once per step, outside the bucket loop.
         # It ignores penalty points, so none are passed.
-        penalty, penalty_grads = penalty_step(predictors, penalty_weight, ())
+        penalty, penalty_grads = penalty_step(predictors, bound_penalty_weight, ())
         grads = jax.tree.map(jnp.add, grads, penalty_grads)
 
         predictors, opt_state = apply_update(predictors, grads, opt_state)

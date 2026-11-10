@@ -119,9 +119,9 @@ def main() -> None:
     )
     predictor = BoundedPredictor(
         input_keys=("omega_input",),
-        in_scaler=BoundScaler(bounds=(0.5, 2.0), transform="sigmoid"),
+        in_scaler=BoundScaler(bounds=(0.5, 2.0), squash="sigmoid"),
         inner=mlp,
-        out_scaler=BoundScaler(bounds=(0.5, 2.0), transform="sigmoid"),
+        out_scaler=BoundScaler(bounds=(0.5, 2.0), squash="sigmoid"),
     )
 
     model = HybridModel(

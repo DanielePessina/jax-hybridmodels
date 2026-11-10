@@ -17,8 +17,8 @@ ordinary one, fitted as one solve.
 
 Shows:
 
-- ``TrainingPhase(segments=...)`` for a schedule that ends in single shooting
-- ``history.continuity``, the gap term, and the summary's phase table
+- ``TrainingPhase(shooting_segments=...)`` for a schedule that ends in single shooting
+- ``history.gap_term``, the gap term, and the summary's phase table
 
 Run::
 
@@ -96,8 +96,8 @@ def make_data(key: Any) -> list[hm.Experiment]:
 SINGLE = hm.OptaxTrainingConfig(steps=900, lr=0.03)
 SEGMENTED = hm.OptaxTrainingConfig(
     phases=(
-        hm.TrainingPhase(steps=300, lr=0.03, segments=10),
-        hm.TrainingPhase(steps=300, lr=0.03, segments=4),
+        hm.TrainingPhase(steps=300, lr=0.03, shooting_segments=10),
+        hm.TrainingPhase(steps=300, lr=0.03, shooting_segments=4),
         hm.TrainingPhase(steps=300, lr=0.03),  # segments=1: single shooting
     )
 )
@@ -154,7 +154,7 @@ def plot(experiment: hm.Experiment, single: hm.FitResult, segmented: hm.FitResul
 
     steps = np.arange(len(single.history.loss))
     right.semilogy(steps, single.history.loss, lw=1.4, label="single shooting")
-    total = np.asarray(segmented.history.loss) + np.asarray(segmented.history.continuity)
+    total = np.asarray(segmented.history.loss) + np.asarray(segmented.history.gap_term)
     right.semilogy(steps, total, lw=1.4, label="segments: data + gap term")
     for boundary in (300, 600):
         right.axvline(boundary, color="0.7", lw=0.8, ls="--")

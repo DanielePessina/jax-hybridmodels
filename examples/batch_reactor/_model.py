@@ -91,7 +91,7 @@ class ArrheniusKinetics(eqx.Module):
     def __init__(self, *, key: Array) -> None:
         # A latent near zero puts both parameters near their box midpoints.
         self.latent = jr.normal(key, (2,)) * 0.1
-        self.out_scaler = hm.BoundScaler((LOG_KREF_BOUNDS, EA_BOUNDS), transform="sigmoid")
+        self.out_scaler = hm.BoundScaler((LOG_KREF_BOUNDS, EA_BOUNDS), squash="sigmoid")
 
     def __call__(self) -> Float[Array, " 2"]:
         """Return ``(log_k_ref, Ea)`` in physical units."""

@@ -74,7 +74,7 @@ The two networks, with their warps and squashes:
 
 <<< @/../examples/hybrid_ode/train_hybrid_ode.py#predictors
 
-A scaler stores its warp by name, which keeps a saved model to a small JSON sidecar plus an array file. A custom warp therefore has to be registered before a model that uses it can be loaded. [`register_bound_transform`](/api/transforms) does the same for squashes.
+A scaler stores its warp by name, which keeps a saved model to a small JSON sidecar plus an array file. A custom warp therefore has to be registered before a model that uses it can be loaded. [`register_squash`](/api/transforms) does the same for squashes.
 
 The solver uses a checkpointing adjoint. `DirectAdjoint`, the default, stores the whole forward trajectory, and with a network in the vector field that is usually the memory bottleneck:
 
@@ -84,7 +84,7 @@ The saturation penalty and where it is charged go in an [`Objective`](/guide/pen
 
 <<< @/../examples/hybrid_ode/train_hybrid_ode.py#fit
 
-The saturation penalty is charged on the latent, not the physical output: a penalty on the physical value would carry the same $\sigma'(z/T)$ factor and die exactly where saturation is worst. By default it is evaluated at the measured input points. The residual reads the ODE state, which the dataset cannot resolve to measured points, so both networks get a `box_grid` sweep over their declared input box instead. `penalty_points` is keyed by each network's name in the predictors dict.
+The saturation penalty is charged on the latent, not the physical output: a penalty on the physical value would carry the same $\sigma'(z/T)$ factor and die exactly where saturation is worst. By default it is evaluated at the measured input points. The residual reads the ODE state, which the dataset cannot resolve to measured points, so both networks get a `box_grid` sweep over their declared input box instead. `bound_penalty_points` is keyed by each network's name in the predictors dict.
 
 ## Results
 

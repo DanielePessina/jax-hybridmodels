@@ -8,7 +8,7 @@ or an Optimistix MAP search can all take it::
     def log_prior(predictors, noise):
         return -0.5 * jnp.log(predictors["k"].value / 0.3) ** 2
 
-    problem = hm.inference.make_problem(model, data, log_prior=log_prior, noise="data")
+    problem = hm.inference.make_problem(model, data, log_prior=log_prior, noise_sd="data")
     warmup = blackjax.window_adaptation(blackjax.nuts, problem.log_density)
     (state, params), _ = warmup.run(key, problem.position, num_steps=1000)
 
@@ -16,7 +16,8 @@ Without a sampler, :meth:`InferenceProblem.optimize` finds the maximum likelihoo
 or the posterior mode, :meth:`InferenceProblem.fisher` gives standard errors and the
 directions the data cannot separate, :meth:`InferenceProblem.profile` profile
 likelihood intervals, and :meth:`InferenceProblem.laplace` a Gaussian approximation
-to the posterior. ``log_prior=None`` is enough for all but the last.
+to the posterior. These need no prior: ``log_prior`` defaults to ``None``, which
+only the posterior methods refuse.
 
 Three things make this density differ from the training loss.
 
@@ -30,7 +31,7 @@ Three things make this density differ from the training loss.
   proposal instead of an exception that ends the chain.
 
 A sampler's cost is its number of gradients, often tens of thousands, so two
-things matter more than solver settings. ``gradient="auto"`` differentiates a few
+things matter more than solver settings. ``ad_mode="auto"`` differentiates a few
 parameters in forward mode, which is cheaper than reversing through the solve.
 :meth:`InferenceProblem.preconditioned` whitens the position with the Gauss-Newton
 curvature at the fit, which removes the correlations and scale differences that
@@ -97,7 +98,7 @@ __all__ = (
 _PREDICTORS = "predictors"
 _NOISE = "noise"
 
-# gradient="auto" uses forward mode up to this many free values. Forward cost grows
+# ad_mode="auto" uses forward mode up to this many free values. Forward cost grows
 # with the count, and reverse does not: on the tubular reactor forward took 8 ms
 # against 25 ms at 2 values, and 368 ms against 187 ms at 17.
 _FORWARD_MODE_LIMIT = 8
@@ -251,15 +252,16 @@ class InferenceProblem:
     conditional_on : tuple[str, ...]
         Dotted paths of the trainable leaves held fixed. The posterior is
         conditional on these values and its width does not account for them.
-    gradient : str
-        The mode in use, ``"forward"`` or ``"reverse"``, after ``"auto"`` chose.
+    ad_mode : str
+        The autodiff mode in use, ``"forward"`` or ``"reverse"``, after ``"auto"``
+        chose.
     """
 
     model: HybridModel
     dataset: Dataset
     position: Any
     conditional_on: tuple[str, ...]
-    gradient: str
+    ad_mode: str
     _log_prior: Callable[..., Array] | None
     _log_likelihood: Callable[..., Array] | None
     _static: Any
@@ -400,7 +402,7 @@ class InferenceProblem:
         ``log_likelihood`` or ``residuals``.
         """
         self._require_prior("log_density")
-        if self.gradient == "forward":
+        if self.ad_mode == "forward":
             density = self._forward_view()._density
             return _guarded(density, _forward_value_and_grad(density))(position)
         return _guarded(self._density, jax.value_and_grad(self._density))(position)
@@ -481,7 +483,7 @@ class InferenceProblem:
         P + 1 solves in forward mode, against one reverse pass per cell. Reverse is for
         a simulate_fn whose own adjoint has no forward rule.
         """
-        if self.gradient == "forward" or _supports_forward(self):
+        if self.ad_mode == "forward" or _supports_forward(self):
             residuals = self._forward_view()._curvature_residuals
             jacobian = jax.jacfwd(lambda x: residuals(unravel(x)))(flat)
         else:
@@ -515,7 +517,7 @@ class InferenceProblem:
         self, target: str, unravel: Callable[[Array], Any]
     ) -> Callable[[Array], tuple[Array, Array]]:
         """Value and gradient of the log-likelihood or log-posterior, in this problem's mode."""
-        if self.gradient == "forward":
+        if self.ad_mode == "forward":
             return _forward_value_and_grad(self._scalar(target, unravel, forward=True))
         return jax.value_and_grad(self._scalar(target, unravel, forward=False))
 
@@ -526,7 +528,7 @@ class InferenceProblem:
         forward over reverse, which needs an adjoint that supports both, such as the
         default ``DirectAdjoint``.
         """
-        if self.gradient == "forward":
+        if self.ad_mode == "forward":
             return jax.jacfwd(jax.jacfwd(self._scalar(target, unravel, forward=True)))(flat)
         try:
             return jax.hessian(self._scalar(target, unravel, forward=False))(flat)
@@ -560,8 +562,8 @@ class InferenceProblem:
         if gauss_newton:
             if self._log_likelihood is not None:
                 raise ValueError(
-                    f"{caller}: Gauss-Newton needs the Gaussian likelihood; with a custom "
-                    "log_likelihood, use the Hessian option"
+                    f"{caller}: curvature='gauss_newton' needs the Gaussian likelihood; with "
+                    f"a custom log_likelihood pass {caller}(curvature='exact'), the Hessian"
                 )
             matrix = self._gauss_newton(flat, unravel)
             if target == "posterior":
@@ -636,7 +638,8 @@ class InferenceProblem:
         residuals, plus the noise terms when noise is inferred: the expected
         information of the Gaussian likelihood. ``"exact"`` is the negative
         Hessian of the log-likelihood, the observed information, which also works
-        with a custom ``log_likelihood``. ``laplace`` takes the same choice.
+        with a custom ``log_likelihood`` and must be asked for there. ``laplace``
+        takes the same choice with the same default.
 
         The matrices are in latent coordinates, where the problem lives. Standard
         errors and intervals are reported in physical units by default.
@@ -649,7 +652,7 @@ class InferenceProblem:
         coordinates = problem._coordinates()
         result = problem._fisher(coordinates, gauss_newton=curvature == "gauss_newton")
         problem._warn_if_not_at_optimum("fisher", "likelihood", coordinates, result.covariance)
-        _warn_about_pinned("fisher", result.names, result.at_bound)
+        _warn_about_pinned("fisher", result.names, result.pinned)
         return result
 
     def _fisher(self, coordinates: _Coordinates, *, gauss_newton: bool) -> FisherResult:
@@ -661,26 +664,28 @@ class InferenceProblem:
             **coordinates.summary_fields(covariance),
             _to_position=self._position_from(coordinates),
             information=matrix,
-            eigenvalues=eigenvalues,
-            eigenvectors=eigenvectors,
+            scaled_eigenvalues=eigenvalues,
+            scaled_eigenvectors=eigenvectors,
         )
 
-    def laplace(self, *, curvature: Literal["exact", "gauss_newton"] = "exact") -> LaplaceResult:
+    def laplace(
+        self, *, curvature: Literal["gauss_newton", "exact"] = "gauss_newton"
+    ) -> LaplaceResult:
         """A Gaussian approximation to the posterior over latents, at the current position.
 
         Call it at the posterior mode, from ``optimize(target="posterior")``; it warns
-        when the position is far from one. ``"exact"`` uses the Hessian of the log
-        density. ``"gauss_newton"`` replaces the likelihood's part with ``J^T J``,
-        which is cheaper for many values and always positive semi-definite, and keeps
-        the exact Hessian of the prior and change-of-variables terms, which need no
-        solve.
+        when the position is far from one. ``"gauss_newton"``, the default as for
+        ``fisher``, uses ``J^T J`` for the likelihood's part, which is cheaper for many
+        values and always positive semi-definite, and the exact Hessian of the prior
+        and change-of-variables terms, which need no solve. ``"exact"`` uses the
+        Hessian of the whole log density; a custom ``log_likelihood`` needs it.
 
         ``sample`` draws positions that ``physical``, ``predict`` and ``to_arviz``
         take as they take a sampler's output.
         """
         if curvature not in ("exact", "gauss_newton"):
             raise ValueError(
-                f"laplace: curvature must be 'exact' or 'gauss_newton'; got {curvature!r}"
+                f"laplace: curvature must be 'gauss_newton' or 'exact'; got {curvature!r}"
             )
         problem = self._unwhitened()
         problem._require_prior("laplace")
@@ -703,7 +708,7 @@ class InferenceProblem:
         result = LaplaceResult(
             **coordinates.summary_fields(covariance), _to_position=self._position_from(coordinates)
         )
-        _warn_about_pinned("laplace", result.names, result.at_bound)
+        _warn_about_pinned("laplace", result.names, result.pinned)
         return result
 
     def _position_from(self, coordinates: _Coordinates) -> Callable[[Array], Any]:
@@ -1005,7 +1010,7 @@ class InferenceProblem:
         if observation_noise and not set(channels) <= set(self._mask[_NOISE]):
             raise ValueError(
                 "InferenceProblem.predict: observation_noise needs noise inferred for every "
-                f"channel {list(channels)}; make_problem(noise={{...}}) provides it"
+                f"channel {list(channels)}; make_problem(noise_sd={{...}}) provides it"
             )
         choice_key, noise_key = jr.split(key)
         draws = self._unstack(positions, n_draws, choice_key)
@@ -1287,7 +1292,7 @@ class _Coordinates:
             "latent": self.flat,
             "covariance": covariance,
             "slopes": self.slopes,
-            "at_bound": self.at_bound != "",
+            "pinned": self.at_bound != "",
             "scaled": self.to_physical.scaled(self.flat),
             "limits": self.limits,
             "_to_physical": self.to_physical,
@@ -1436,7 +1441,7 @@ class _GaussianSummary:
     ``names`` labels every scalar entry, as ``physical`` names it, with ``[i]`` for
     an element of an array. ``estimate`` holds the physical values at the centre,
     ``latent`` the latent ones, and ``covariance`` the latent covariance, all in
-    ``names`` order. ``slopes`` is ``d value / d latent`` per entry. ``at_bound``
+    ``names`` order. ``slopes`` is ``d value / d latent`` per entry. ``pinned``
     flags the entries whose estimate sits against a bound of their ``Parameter``,
     and ``limits`` holds every entry's lower and upper bounds, infinite without.
     """
@@ -1446,7 +1451,7 @@ class _GaussianSummary:
     latent: Array
     covariance: Array
     slopes: Array
-    at_bound: np.ndarray = dataclasses.field(kw_only=True)
+    pinned: np.ndarray = dataclasses.field(kw_only=True)
     scaled: np.ndarray = dataclasses.field(kw_only=True, repr=False)
     limits: tuple[np.ndarray, np.ndarray] = dataclasses.field(kw_only=True, repr=False)
     _to_physical: _PhysicalMap = dataclasses.field(repr=False)
@@ -1479,7 +1484,7 @@ class _GaussianSummary:
         # A value against its bound has no Gaussian spread: its latent sits in the
         # squash's tail, where a draw would land anywhere in the box. It is held
         # at its estimate, and the others are drawn from their Gaussian given it.
-        pinned = np.asarray(self.at_bound, dtype=bool)
+        pinned = np.asarray(self.pinned, dtype=bool)
         covariance = self.covariance
         if pinned.any():
             names = [name for name, flag in zip(self.names, pinned, strict=True) if flag]
@@ -1522,7 +1527,7 @@ class _GaussianSummary:
         if latent:
             spread = np.asarray(self._spread(self.covariance))
         else:
-            spread = np.where(self.at_bound, np.nan, self._spread(self.physical_covariance()))
+            spread = np.where(self.pinned, np.nan, self._spread(self.physical_covariance()))
         return dict(zip(self.names, spread.tolist(), strict=True))
 
     def physical_covariance(self) -> Array:
@@ -1546,7 +1551,7 @@ class _GaussianSummary:
         spread = jnp.sqrt(jnp.clip(jnp.diagonal(self.covariance), jnp.finfo(float).tiny))
         correlation = self.covariance / spread[:, None] / spread[None, :]
         # A pinned entry is left out too: its covariance is conditioned away.
-        hidden = self._unbounded() | jnp.asarray(self.at_bound, dtype=bool)
+        hidden = self._unbounded() | jnp.asarray(self.pinned, dtype=bool)
         return jnp.where(hidden[:, None] | hidden[None, :], jnp.nan, correlation)
 
     def intervals(self, *, confidence: float = 0.95) -> dict[str, tuple[float, float]]:
@@ -1574,8 +1579,8 @@ class _GaussianSummary:
         )
         low = np.where(unbounded, self.limits[0], ends.min(axis=0))
         high = np.where(unbounded, self.limits[1], ends.max(axis=0))
-        low = np.where(self.at_bound, np.nan, low)
-        high = np.where(self.at_bound, np.nan, high)
+        low = np.where(self.pinned, np.nan, low)
+        high = np.where(self.pinned, np.nan, high)
         return {name: (float(low[i]), float(high[i])) for i, name in enumerate(self.names)}
 
     def derived(self, fn: Callable[[dict[str, Array]], Any]) -> DerivedQuantity:
@@ -1624,7 +1629,7 @@ class _GaussianSummary:
         along = np.abs(latent_gradient @ loose).max(axis=1, initial=0.0)
         size = np.linalg.norm(latent_gradient, axis=1)
         spread = np.where(along > 1e-3 * np.maximum(size, np.finfo(float).tiny), np.inf, spread)
-        spread = np.where((uses & self.at_bound).any(axis=1), np.nan, spread)
+        spread = np.where((uses & self.pinned).any(axis=1), np.nan, spread)
         return DerivedQuantity(
             estimate=np.asarray(estimate), standard_error=spread.reshape(np.shape(estimate))
         )
@@ -1640,7 +1645,7 @@ class _GaussianSummary:
         ]
         for i, name in enumerate(self.names):
             low, high = bounds[name]
-            if self.at_bound[i]:
+            if self.pinned[i]:
                 spread, reach = f"{'at bound':>11}", "not reported"
             elif math.isinf(errors[name]):
                 # The interval would be the whole box, which is not information
@@ -1673,22 +1678,23 @@ class FisherResult(_GaussianSummary):
     """The Fisher information at a position, from :meth:`InferenceProblem.fisher`.
 
     ``information`` is the latent ``[P, P]`` information, and ``covariance`` its
-    inverse with unconstrained directions left out. ``eigenvalues`` and
-    ``eigenvectors`` belong to the information scaled to a unit diagonal, its
-    correlation form, so they do not change when a bound or a warp rescales a
-    latent. ``eigenvalues`` ascend, and the columns of ``eigenvectors`` are the
-    matching directions over ``names``.
+    inverse with unconstrained directions left out. ``scaled_eigenvalues`` and
+    ``scaled_eigenvectors`` belong to the information scaled to a unit diagonal,
+    its correlation form, so they do not change when a bound or a warp rescales
+    a latent; ``condition_number`` is theirs too. ``scaled_eigenvalues`` ascend,
+    and the columns of ``scaled_eigenvectors`` are the matching directions over
+    ``names``.
     """
 
     information: Array = dataclasses.field(kw_only=True)
-    eigenvalues: Array = dataclasses.field(kw_only=True)
-    eigenvectors: Array = dataclasses.field(kw_only=True)
+    scaled_eigenvalues: Array = dataclasses.field(kw_only=True)
+    scaled_eigenvectors: Array = dataclasses.field(kw_only=True)
 
     @property
     def condition_number(self) -> float:
         """Largest over smallest eigenvalue; ``inf`` when the smallest is not positive."""
-        smallest = float(self.eigenvalues[0])
-        return float(self.eigenvalues[-1]) / smallest if smallest > 0.0 else math.inf
+        smallest = float(self.scaled_eigenvalues[0])
+        return float(self.scaled_eigenvalues[-1]) / smallest if smallest > 0.0 else math.inf
 
     def unidentified(self, *, threshold: float = _UNIDENTIFIED) -> list[dict[str, float]]:
         """The directions the data does not constrain, as ``{name: loading}`` per direction.
@@ -1703,11 +1709,13 @@ class FisherResult(_GaussianSummary):
         its collinearity is tested.
         """
         # At or below, so an information that is exactly zero counts as loose.
-        loose = np.asarray(self.eigenvalues <= threshold * self.eigenvalues[-1])
-        directions = [_loadings(self.eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)]
+        loose = np.asarray(self.scaled_eigenvalues <= threshold * self.scaled_eigenvalues[-1])
+        directions = [
+            _loadings(self.scaled_eigenvectors[:, k], self.names) for k in np.flatnonzero(loose)
+        ]
         # A direction along pinned values only is their flat squash, reported as
         # pinned instead.
-        pinned = {name for name, flag in zip(self.names, self.at_bound, strict=True) if flag}
+        pinned = {name for name, flag in zip(self.names, self.pinned, strict=True) if flag}
         directions = [d for d in directions if not set(d) <= pinned]
         listed = {name for direction in directions for name in direction}
         weak = np.asarray(self._weak())
@@ -1728,13 +1736,13 @@ class FisherResult(_GaussianSummary):
         spread = jnp.sqrt(jnp.clip(jnp.diagonal(self.covariance), 0.0))
         bounded = jnp.asarray(self.scaled, dtype=bool)
         weak = bounded & (spread > _WEAK)
-        return weak & ~jnp.asarray(self.at_bound, dtype=bool)
+        return weak & ~jnp.asarray(self.pinned, dtype=bool)
 
     def _loose_directions(self) -> Array:
         # Back from the scaled coordinates to latent directions, unit length, and
         # one axis per weakly seen entry.
-        loose = np.asarray(self.eigenvalues <= _UNIDENTIFIED * self.eigenvalues[-1])
-        directions = _unit_scale(self.information)[:, None] * self.eigenvectors[:, loose]
+        loose = np.asarray(self.scaled_eigenvalues <= _UNIDENTIFIED * self.scaled_eigenvalues[-1])
+        directions = _unit_scale(self.information)[:, None] * self.scaled_eigenvectors[:, loose]
         directions = directions / jnp.linalg.norm(directions, axis=0, keepdims=True)
         axes = jnp.eye(len(self.names), dtype=directions.dtype)[:, np.asarray(self._weak())]
         return jnp.concatenate([directions, axes], axis=1)
@@ -1743,11 +1751,11 @@ class FisherResult(_GaussianSummary):
         # Any loading on an unconstrained direction makes that entry's variance
         # unbounded, not only the loadings large enough to list. 1e-3 is well above
         # the rounding in the eigenvectors of a near-null direction.
-        loose = self.eigenvalues <= _UNIDENTIFIED * self.eigenvalues[-1]
-        collinear = jnp.any(loose[None, :] & (jnp.abs(self.eigenvectors) >= 1e-3), axis=1)
+        loose = self.scaled_eigenvalues <= _UNIDENTIFIED * self.scaled_eigenvalues[-1]
+        collinear = jnp.any(loose[None, :] & (jnp.abs(self.scaled_eigenvectors) >= 1e-3), axis=1)
         # A pinned value is reported as pinned, not as unconstrained: its flat
         # squash, not the data, is what leaves its own row near zero.
-        pinned = jnp.asarray(self.at_bound, dtype=bool)
+        pinned = jnp.asarray(self.pinned, dtype=bool)
         return (collinear & ~pinned) | self._weak()
 
     def summary(self, *, confidence: float = 0.95) -> str:
@@ -2103,14 +2111,14 @@ class _Profiler:
             confidence=self.confidence,
             threshold=self.threshold,
             grid=physical[:, index],
-            log_likelihood_ratio=np.array([p[1] for p in points]),
+            statistic=np.array([p[1] for p in points]),
             others={
                 other: physical[:, i] for i, other in enumerate(coordinates.names) if i != index
             },
             converged=converged,
-            bounds=(end(lower, stopped_lower), end(upper, stopped_upper)),
+            interval=(end(lower, stopped_lower), end(upper, stopped_upper)),
             stop_reasons=(stopped_lower, stopped_upper),
-            at_bound=at_bound,
+            others_pinned=at_bound,
         )
 
 
@@ -2126,20 +2134,21 @@ class ProfileResult:
         The level the interval is for.
     threshold : float
         The chi-square(1) quantile for ``confidence``: the interval is where
-        ``log_likelihood_ratio`` stays below it.
+        ``statistic`` stays below it.
     grid : ndarray
         The profiled value at each point, physical and ascending, the maximum
         likelihood included.
-    log_likelihood_ratio : ndarray
-        ``2 (max log L - log L)`` at each point, with every other value
-        re-optimised.
+    statistic : ndarray
+        The likelihood-ratio statistic ``2 (max log L - log L)`` at each point,
+        with every other value re-optimised. The interval is where it stays
+        below ``threshold``.
     others : dict[str, ndarray]
         Every other free entry along the profile, physical. How they move shows
         what compensates for the profiled value.
     converged : ndarray
         Whether BFGS met its tolerances at each point, after one restart. The
         interval ignores points that did not.
-    bounds : tuple[float | None, float | None]
+    interval : tuple[float | None, float | None]
         The confidence interval's ends, ``None`` on a side that did not close.
     stop_reasons : tuple[str, str]
         Why each side, below and above, stopped. ``"threshold"`` closed it. The
@@ -2147,7 +2156,7 @@ class ProfileResult:
         do not bound it), ``"max_points"`` (still inside; raise ``max_points``),
         ``"solve_failed"`` (the model stopped solving) and ``"not_converged"``
         (BFGS did not converge where the ratio crossed).
-    at_bound : dict[str, str]
+    others_pinned : dict[str, str]
         Other values that sat against a bound, ``"lower"`` or ``"upper"``, at some
         converged point. Re-optimising could not move them further, so the profile
         may drop faster than it would with that bound widened, and the interval
@@ -2158,12 +2167,12 @@ class ProfileResult:
     confidence: float
     threshold: float
     grid: np.ndarray
-    log_likelihood_ratio: np.ndarray
+    statistic: np.ndarray
     others: dict[str, np.ndarray]
     converged: np.ndarray
-    bounds: tuple[float | None, float | None]
+    interval: tuple[float | None, float | None]
     stop_reasons: tuple[str, str]
-    at_bound: dict[str, str] = dataclasses.field(default_factory=dict)
+    others_pinned: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @property
     def identifiable(self) -> bool:
@@ -2172,7 +2181,7 @@ class ProfileResult:
 
     def summary(self) -> str:
         """One line: the interval, and why a side that did not close stopped."""
-        low, high = self.bounds
+        low, high = self.interval
         shown = (
             f"[{'open' if low is None else f'{low:.4g}'}, "
             f"{'open' if high is None else f'{high:.4g}'}]"
@@ -2185,7 +2194,9 @@ class ProfileResult:
         unconverged = int((~self.converged).sum())
         if unconverged:
             notes.append(f"{unconverged} points did not converge")
-        notes += [f"{other} pinned at its {side} bound" for other, side in self.at_bound.items()]
+        notes += [
+            f"{other} pinned at its {side} bound" for other, side in self.others_pinned.items()
+        ]
         note = "".join(f"; {text}" for text in notes)
         return f"{self.name}: {round(self.confidence * 100)}% profile interval {shown}{note}"
 
@@ -2291,11 +2302,11 @@ def make_problem(
     model: HybridModel,
     data: Data,
     *,
-    log_prior: Callable[[Any, Mapping[str, Array]], Array] | None,
-    noise: Literal["data"] | Mapping[str, Parameter],
+    noise_sd: Literal["data"] | Mapping[str, Parameter],
+    log_prior: Callable[[Any, Mapping[str, Array]], Array] | None = None,
     estimate: Sequence[FreezeSpec] | FreezeSpec | None = None,
     log_likelihood: Callable[[Array, BucketPayload, Mapping[str, Array]], Array] | None = None,
-    gradient: Literal["auto", "forward", "reverse"] = "auto",
+    ad_mode: Literal["auto", "forward", "reverse"] = "auto",
 ) -> InferenceProblem:
     """Build the log-density for ``model`` on ``data``.
 
@@ -2310,19 +2321,22 @@ def make_problem(
         chain near the mode.
     data : Dataset | Sequence[Experiment]
         The observations. Bucketing does not change the density.
+    noise_sd : "data" | Mapping[str, Parameter]
+        The measurement noise. ``"data"`` trusts the variances in the data, and
+        warns for a channel left at the default of 1.0. A mapping infers the noise
+        standard deviation of each channel it names, each a ``Parameter`` naming its
+        starting value and bounds, which must keep it positive. With
+        ``log_likelihood`` the mapping is passed to it as is, so its keys and
+        meaning are yours, such as an AR(1) coefficient.
     log_prior : Callable | None
         ``(predictors, noise) -> scalar``, the log-prior on physical values: read
-        ``predictors["k"].value``, and ``noise["a"]`` for inferred noise. There is
-        no default because no prior is neutral. :func:`flat_prior` is available
-        for a bounded box. A free network's weights need a prior written here.
-        ``None`` is for frequentist work: ``optimize``, ``fisher`` and ``profile``
-        use only the likelihood, and the posterior methods then raise.
-    noise : "data" | Mapping[str, Parameter]
-        ``"data"`` trusts the variances in the data, and warns for a channel left
-        at the default of 1.0. A mapping infers a standard deviation per channel,
-        each a ``Parameter`` naming its starting value and bounds, which must keep it
-        positive. With ``log_likelihood`` its keys are
-        free-form, such as an AR(1) coefficient.
+        ``predictors["k"].value``, and ``noise["a"]`` for inferred noise.
+        :func:`flat_prior` is available for a bounded box. A free network's
+        weights need a prior written here. ``None``, the default, is for
+        frequentist work: ``optimize``, ``fisher`` and ``profile`` use only the
+        likelihood, and the posterior methods (``laplace``, ``log_density``,
+        ``preconditioned``, ``optimize(target="posterior")``) raise, asking for a
+        prior. ``None`` is not a flat prior; no prior is neutral.
     estimate : str | type | Callable | Sequence | None
         What to infer, named in the syntax ``fit(freeze=...)`` uses, though it
         selects rather than excludes. ``None`` means every ``Parameter``. A dotted
@@ -2331,21 +2345,21 @@ def make_problem(
         Replaces the Gaussian: ``(pred_obs, bp, noise) -> scalar``, called once per
         bucket and summed. ``pred_obs`` is ``[N, T, D]``, and ``bp.mask`` says
         which cells were measured.
-    gradient : {"auto", "forward", "reverse"}
-        How the density is differentiated. ``"auto"`` uses forward mode for a few
+    ad_mode : {"auto", "forward", "reverse"}
+        The autodiff mode for the density. ``"auto"`` uses forward mode for a few
         free values when the model allows it, and otherwise reverse mode with the
         model's own adjoint. Forward mode replaces the adjoint with
         ``diffrax.ForwardMode``, so a ``simulate_fn`` must use ``solver.diffeqsolve``
-        or pass ``adjoint=solver.adjoint``. ``problem.gradient`` says which was used.
+        or pass ``adjoint=solver.adjoint``. ``problem.ad_mode`` says which was used.
     """
-    if gradient not in ("auto", "forward", "reverse"):
+    if ad_mode not in ("auto", "forward", "reverse"):
         raise ValueError(
-            f"make_problem: gradient must be 'auto', 'forward' or 'reverse'; got {gradient!r}"
+            f"make_problem: ad_mode must be 'auto', 'forward' or 'reverse'; got {ad_mode!r}"
         )
     dataset = model._dataset(data, "make_problem")
     model._check_shapes(dataset.bucket_payloads[0], "make_problem")
     predictors = model.predictors
-    noise_map = _check_noise(noise, dataset, custom=log_likelihood is not None)
+    noise_map = _check_noise(noise_sd, dataset, custom=log_likelihood is not None)
 
     base = trainable_mask(predictors)
     free_mask = _free_mask(predictors, base, estimate)
@@ -2390,7 +2404,7 @@ def make_problem(
         dataset=dataset,
         position=position,
         conditional_on=conditional_on,
-        gradient="reverse" if gradient == "auto" else gradient,
+        ad_mode="reverse" if ad_mode == "auto" else ad_mode,
         _log_prior=log_prior,
         _log_likelihood=log_likelihood,
         _static=static,
@@ -2399,11 +2413,11 @@ def make_problem(
     )
     # A bug in simulate_fn or log_prior raises here, not at the sampler's first step.
     eqx.filter_eval_shape(problem._target, position)
-    if gradient == "forward":
+    if ad_mode == "forward":
         eqx.filter_eval_shape(jax.jacfwd(problem._forward_view()._target), position)
     few = ravel_pytree(position)[0].size <= _FORWARD_MODE_LIMIT
-    if gradient == "auto" and few and _supports_forward(problem):
-        return dataclasses.replace(problem, gradient="forward")
+    if ad_mode == "auto" and few and _supports_forward(problem):
+        return dataclasses.replace(problem, ad_mode="forward")
     return problem
 
 
@@ -2429,27 +2443,27 @@ def _free_mask(predictors: Any, base: Any, estimate: Any) -> Any:
 def _check_noise(noise: Any, dataset: Dataset, *, custom: bool) -> dict[str, Parameter]:
     if isinstance(noise, str):
         if noise != "data":
-            raise ValueError(f"make_problem: noise must be 'data' or a mapping; got {noise!r}")
+            raise ValueError(f"make_problem: noise_sd must be 'data' or a mapping; got {noise!r}")
         if not custom:
             _warn_on_default_variance(dataset)
         return {}
     if not isinstance(noise, Mapping):
         raise TypeError(
-            f"make_problem: noise must be 'data' or a mapping; got {type(noise).__name__}"
+            f"make_problem: noise_sd must be 'data' or a mapping; got {type(noise).__name__}"
         )
     for name, value in noise.items():
         if not isinstance(value, Parameter) or value.latent.size != 1:
-            raise ValueError(f"make_problem: noise[{name!r}] must be a scalar hm.Parameter")
+            raise ValueError(f"make_problem: noise_sd[{name!r}] must be a scalar hm.Parameter")
     if not custom:
         for name, value in noise.items():
             if value.scaler.bounds[0][0] < 0.0:
                 raise ValueError(
-                    f"make_problem: noise[{name!r}] is a standard deviation, so its bounds must "
+                    f"make_problem: noise_sd[{name!r}] is a standard deviation, so its bounds must "
                     f"keep it positive, as in bounds=(1e-4, 1.0); got {value.scaler.bounds[0]}"
                 )
     if not custom and set(noise) != set(dataset.output_channel_names):
         raise ValueError(
-            f"make_problem: noise names {sorted(noise)} but the channels are "
+            f"make_problem: noise_sd names {sorted(noise)} but the channels are "
             f"{sorted(dataset.output_channel_names)}; the Gaussian needs one per channel"
         )
     return dict(noise)
@@ -2465,7 +2479,7 @@ def _warn_on_default_variance(dataset: Dataset) -> None:
             warnings.warn(
                 f"make_problem: every variance in channel {name!r} is 1.0, the default for "
                 "unset data. If that is not the real noise, the posterior's width is wrong; "
-                "set variance= on the data, or infer it with noise={...}.",
+                "set variance= on the data, or infer it with noise_sd={...}.",
                 UserWarning,
                 stacklevel=4,
             )

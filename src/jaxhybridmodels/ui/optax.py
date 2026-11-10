@@ -229,8 +229,8 @@ class RichTrainingUI:
                 pass
         self._refresh()
 
-    def on_run_end(self, *, final_loss: float) -> None:
-        self._final_loss = float(final_loss)
+    def on_run_end(self, *, returned_loss: float) -> None:
+        self._final_loss = float(returned_loss)
         self._run_active = False
         # Push the terminal frame into Live, then stop. With a non-TTY
         # console (tests) Live's stop() flushes the renderable into the

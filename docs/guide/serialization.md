@@ -48,7 +48,7 @@ differs from the saved solver record.
 
 `run.config` comes back as an `OptaxTrainingConfig` or
 `EvosaxTrainingConfig`, and `run.objective` as an `Objective`. Each
-`penalty_points` grid is stored with its shape and comes back as an array
+`bound_penalty_points` grid is stored with its shape and comes back as an array
 of that shape, empty grids included. A section holding callables, such as
 a custom loss, an optimiser factory or an lr schedule, cannot be rebuilt,
 so it comes back as its raw dict with each callable stored as

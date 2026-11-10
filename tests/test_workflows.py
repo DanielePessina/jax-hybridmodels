@@ -175,7 +175,7 @@ def events_named(ui: RecordingUI, name: str) -> list[dict[str, Any]]:
 
 MECHANISTIC_CONFIG = hm.OptaxTrainingConfig(
     phases=(
-        hm.TrainingPhase(steps=40, lr=optax.linear_schedule(0.1, 0.02, 40), horizon=0.5),
+        hm.TrainingPhase(steps=40, lr=optax.linear_schedule(0.1, 0.02, 40), loss_horizon=0.5),
         hm.TrainingPhase(steps=60, lr=0.05, reset_optimizer=True),
     ),
 )
@@ -216,7 +216,7 @@ def test_mechanistic_history_covers_every_step_of_every_phase(mechanistic):
     assert result.stop_reason == "budget_exhausted"
     # restore_best: the returned parameters carry the minimum of the last horizon.
     assert result.best_step is not None and result.best_step >= 40
-    assert result.final_loss == min(result.history.loss[40:])
+    assert result.returned_loss == min(result.history.loss[40:])
 
 
 def test_mechanistic_ui_sees_the_lifecycle_in_order(mechanistic, mechanistic_data):
@@ -456,7 +456,7 @@ def test_trajectory_penalty_is_charged_on_top_of_the_data_loss(mechanistic_data)
 @pytest.fixture(scope="session")
 def overshoot(mechanistic_data):
     """A learning rate far too large from a good start, so the best step is an early one."""
-    config = hm.OptaxTrainingConfig(steps=60, lr=0.6, patience=5)
+    config = hm.OptaxTrainingConfig(steps=60, lr=0.6, patience_steps=5)
     model = mechanistic_model(rate=TRUE_RATE + 0.01)
     data = hm.make_dataset(
         experiments(extent=feed_integral, one_length=True), output_channel_names=CHANNELS
@@ -480,19 +480,19 @@ def test_patience_stops_early_and_the_best_step_labels_the_model(overshoot):
     remeasured = keep_best.model.fit(
         data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
     )
-    assert remeasured.history.loss[0] == pytest.approx(keep_best.final_loss, rel=1e-5)
+    assert remeasured.history.loss[0] == pytest.approx(keep_best.returned_loss, rel=1e-5)
 
 
 def test_restore_best_off_returns_the_last_step(overshoot):
     _, keep_last, data = overshoot
     assert keep_last.best_step is None
-    # The last recorded loss predates the last update; final_loss is measured
+    # The last recorded loss predates the last update; returned_loss is measured
     # at the parameters that came back.
     remeasured = keep_last.model.fit(
         data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
     )
-    assert remeasured.history.loss[0] == pytest.approx(keep_last.final_loss, rel=1e-5)
-    assert keep_last.final_loss != keep_last.history.loss[-1]
+    assert remeasured.history.loss[0] == pytest.approx(keep_last.returned_loss, rel=1e-5)
+    assert keep_last.returned_loss != keep_last.history.loss[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +511,7 @@ def network_splits() -> tuple[hm.Dataset, hm.Dataset, hm.Dataset]:
 @pytest.fixture(scope="session")
 def network_objective() -> hm.Objective:
     points = box_grid(rate_network(jr.key(0)).in_scaler, 5)
-    return hm.Objective(penalty_weight=1e-3, penalty_points={"rate": points})
+    return hm.Objective(bound_penalty_weight=1e-3, bound_penalty_points={"rate": points})
 
 
 @pytest.fixture(scope="session")
@@ -519,9 +519,9 @@ def network_config() -> hm.OptaxTrainingConfig:
     return hm.OptaxTrainingConfig(
         steps=NETWORK_STEPS,
         lr=0.02,
-        tournament_attempts=3,
-        tournament_steps=5,
-        tournament_lr=1e-3,
+        restarts=2,
+        restart_steps=5,
+        restart_lr=1e-3,
     )
 
 
@@ -599,10 +599,12 @@ def saturated_fit(network_splits, network_objective):
         start.predictors["rate"].inner.mlp.layers[-1].weight * 50.0,
     )
     ui = RecordingUI()
-    objective = hm.Objective(penalty_weight=100.0, penalty_points=network_objective.penalty_points)
+    objective = hm.Objective(
+        bound_penalty_weight=100.0, bound_penalty_points=network_objective.bound_penalty_points
+    )
     config = hm.OptaxTrainingConfig(
         phases=(
-            hm.TrainingPhase(steps=10, lr=0.05, penalty_weight=0.0),
+            hm.TrainingPhase(steps=10, lr=0.05, bound_penalty_weight=0.0),
             hm.TrainingPhase(steps=20, lr=0.05),
         ),
     )
@@ -646,18 +648,18 @@ def tournaments(plain_data):
     its horizon and learning rate from it.
     """
 
-    def run(attempts: int) -> hm.FitResult:
+    def run(restarts: int) -> hm.FitResult:
         config = hm.OptaxTrainingConfig(
             phases=(
-                hm.TrainingPhase(steps=1, lr=0.01, horizon=0.5),
+                hm.TrainingPhase(steps=1, lr=0.01, loss_horizon=0.5),
                 hm.TrainingPhase(steps=1, lr=1e-6),
             ),
-            tournament_attempts=attempts,
-            tournament_steps=3,
+            restarts=restarts,
+            restart_steps=3,
         )
         return plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(9), verbose=False)
 
-    return run(2), run(8)
+    return run(1), run(7)
 
 
 def test_more_tournament_attempts_never_give_a_worse_start(tournaments, plain_start_loss):
@@ -670,20 +672,20 @@ def test_more_tournament_attempts_never_give_a_worse_start(tournaments, plain_st
 
 def test_the_tournament_records_every_attempt(tournaments, tmp_path):
     few, many = tournaments
-    scores = many.history.tournament_scores
-    assert len(scores) == 8 and few.history.tournament_scores == scores[:2]
+    scores = many.history.restart_scores
+    assert len(scores) == 8 and few.history.restart_scores == scores[:2]
     # The winner starts the first phase, scored on the same half horizon.
     assert many.history.loss[0] == pytest.approx(min(scores), rel=1e-5)
-    assert f"tournament: 8 attempts, best score {min(scores):.4g}" in many.summary()
+    assert f"restarts: 8 candidates, best score {min(scores):.4g}" in many.summary()
     hm.save(tmp_path, many)
-    assert hm.load(tmp_path, like=plain_model()).history.tournament_scores == scores
+    assert hm.load(tmp_path, like=plain_model()).history.restart_scores == scores
 
 
 def test_validation_drives_patience_as_well_as_the_returned_step(plain_data):
     # An unreachable validation target: its loss stops improving long before the
     # training loss does, so patience fires on it.
     far = hm.make_dataset(experiments(rate=lambda temp: 2.5), output_channel_names=CHANNELS)
-    config = hm.OptaxTrainingConfig(steps=200, lr=0.05, patience=5)
+    config = hm.OptaxTrainingConfig(steps=200, lr=0.05, patience_steps=5)
     result = plain_model(TRUE_RATE).fit(
         plain_data, config, validation=far, freeze="frozen", key=jr.key(0), verbose=False
     )
@@ -692,7 +694,7 @@ def test_validation_drives_patience_as_well_as_the_returned_step(plain_data):
 
 
 def test_the_same_key_reproduces_a_run_and_another_key_does_not(plain_data):
-    config = hm.OptaxTrainingConfig(steps=3, lr=0.05, tournament_attempts=2, tournament_steps=2)
+    config = hm.OptaxTrainingConfig(steps=3, lr=0.05, restarts=1, restart_steps=2)
     first, second, other = (
         plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(seed), verbose=False)
         for seed in (11, 11, 12)
@@ -706,7 +708,7 @@ def test_the_same_key_reproduces_a_run_and_another_key_does_not(plain_data):
 # ---------------------------------------------------------------------------
 
 EVOSAX_RUNS: dict[str, dict[str, Any]] = {
-    "cma-warm": {"algorithm": "CMA_ES", "init": "warm", "init_sigma": 0.5},
+    "cma-warm": {"algorithm": "CMA_ES", "init": "current", "init_sigma": 0.5},
     "sep-uniform": {"algorithm": "Sep_CMA_ES", "init": "uniform_box", "init_sigma": 0.5},
     "simple-lhs": {"algorithm": "SimpleES", "init": "lhs_box", "init_sigma": 0.5},
 }
@@ -729,22 +731,23 @@ def evolved(plain_data):
     runs = {}
     for name, settings in EVOSAX_RUNS.items():
         ui = RecordingUI()
-        config = hm.EvosaxTrainingConfig(population_size=16, steps=25, **settings)
+        config = hm.EvosaxTrainingConfig(population_size=16, generations=25, **settings)
         result = plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(3), ui=ui)
         runs[name] = (result, ui)
     return runs
 
 
 @pytest.mark.parametrize("run", EVOSAX_RUNS)
-def test_evosax_improves_on_the_start_and_records_the_best_so_far(evolved, plain_start_loss, run):
+def test_evosax_improves_on_the_start_and_records_each_generation(evolved, plain_start_loss, run):
     result, ui = evolved[run]
     assert fitted_rate(result) == pytest.approx(TRUE_RATE, abs=0.15)
     assert len(result.history.loss) == 25
-    assert list(result.history.loss) == sorted(result.history.loss, reverse=True)
+    # Each generation's best; the returned candidate is the best of them all.
+    assert result.returned_loss <= min(result.history.loss)
     assert result.stop_reason == "budget_exhausted"
     assert len(events_named(ui, "on_generation_end")) == 25
-    assert events_named(ui, "on_run_end")[0]["final_loss"] == pytest.approx(result.final_loss)
-    assert result.final_loss < plain_start_loss
+    assert events_named(ui, "on_run_end")[0]["returned_loss"] == pytest.approx(result.returned_loss)
+    assert result.returned_loss < plain_start_loss
 
 
 @pytest.mark.parametrize("run", EVOSAX_RUNS)
@@ -756,7 +759,7 @@ def test_evosax_keeps_frozen_leaves(evolved, run):
 def test_evosax_validation_selects_a_generation(plain_data):
     result = plain_model().fit(
         plain_data,
-        hm.EvosaxTrainingConfig(population_size=8, steps=8, init_sigma=0.5),
+        hm.EvosaxTrainingConfig(population_size=8, generations=8, init_sigma=0.5),
         validation=plain_data,
         freeze="frozen",
         key=jr.key(4),
@@ -779,7 +782,7 @@ def test_evosax_ranks_failed_solves_last_and_keeps_searching(plain_data, tmp_pat
     )
     ui = RecordingUI()
     config = hm.EvosaxTrainingConfig(
-        population_size=16, steps=20, init="uniform_box", init_box_extent=4.0
+        population_size=16, generations=20, init="uniform_box", init_box_extent=4.0
     )
     result = model.fit(plain_data, config, key=jr.key(0), ui=ui)
 
@@ -803,7 +806,7 @@ def test_evosax_ranks_failed_solves_last_and_keeps_searching(plain_data, tmp_pat
 
 @pytest.fixture(scope="session")
 def ensembles(plain_data):
-    config = hm.OptaxTrainingConfig(steps=40, lr=0.05, tournament_steps=5, tournament_lr=0.05)
+    config = hm.OptaxTrainingConfig(steps=40, lr=0.05, restart_steps=5, restart_lr=0.05)
     model = plain_model()
     ui = RecordingUI()
     seeds = model.fit_ensemble(
@@ -824,14 +827,14 @@ def ensembles(plain_data):
 def test_seed_ensemble_returns_trained_members_best_first(ensembles):
     seeds, _, ui = ensembles
     assert len(seeds) == 2
-    assert seeds[0].final_loss <= seeds[1].final_loss
+    assert seeds[0].returned_loss <= seeds[1].returned_loss
     assert all(fitted_rate(member) == pytest.approx(TRUE_RATE, abs=0.1) for member in seeds)
     assert len(events_named(ui, "on_run_end")) == 2, "each member is its own UI run"
     # Both members came out of one tournament of three seeds.
-    assert len(seeds[0].history.tournament_scores) == 3
-    assert seeds[0].history.tournament_scores == seeds[1].history.tournament_scores
+    assert len(seeds[0].history.restart_scores) == 3
+    assert seeds[0].history.restart_scores == seeds[1].history.restart_scores
     [line] = [e["text"] for e in events_named(ui, "on_message") if e["level"] == "info"]
-    assert line.startswith("tournament: kept attempts ") and " of 3, best score " in line
+    assert line.startswith("restarts: kept candidates ") and " of 3, best score " in line
 
 
 def test_bootstrap_ensemble_trains_one_member_per_resample(ensembles):
@@ -839,7 +842,7 @@ def test_bootstrap_ensemble_trains_one_member_per_resample(ensembles):
     assert len(bootstrap) == 2
     # One seed per resample still trains no tournament, and every member
     # starts from a fresh draw rather than the model as given.
-    assert bootstrap[0].history.tournament_scores == ()
+    assert bootstrap[0].history.restart_scores == ()
     assert fitted_rate(bootstrap[0]) == pytest.approx(TRUE_RATE, abs=0.1)
     assert fitted_rate(bootstrap[0]) != fitted_rate(bootstrap[1])
 
@@ -930,13 +933,13 @@ def oscillator_data() -> hm.Dataset:
 def shooting_fits(oscillator_data):
     """From frequency 1.75: single shooting, then segments, then segments with a tournament."""
     segmented = (
-        hm.TrainingPhase(steps=100, lr=0.05, segments=8),
+        hm.TrainingPhase(steps=100, lr=0.05, shooting_segments=8),
         hm.TrainingPhase(steps=100, lr=0.05),
     )
     configs = (
         hm.OptaxTrainingConfig(steps=200, lr=0.05),
         hm.OptaxTrainingConfig(phases=segmented),
-        hm.OptaxTrainingConfig(phases=segmented, tournament_attempts=2, tournament_steps=10),
+        hm.OptaxTrainingConfig(phases=segmented, restarts=1, restart_steps=10),
     )
     return tuple(
         oscillator(1.75).fit(oscillator_data, config, key=jr.key(0), verbose=False)
@@ -953,12 +956,12 @@ def test_segments_recover_a_frequency_single_shooting_misses(shooting_fits):
     assert abs(frequency(single) - 1.0) > 0.5
     assert frequency(segmented) == pytest.approx(1.0, abs=0.01)
     assert frequency(tournament) == pytest.approx(1.0, abs=0.01)
-    assert len(tournament.history.tournament_scores) == 2
+    assert len(tournament.history.restart_scores) == 2
 
 
 def test_the_gap_term_is_recorded_and_closes(shooting_fits, tmp_path):
     _, segmented, _ = shooting_fits
-    gaps = segmented.history.continuity
+    gaps = segmented.history.gap_term
     assert len(gaps) == len(segmented.history.loss) == 200
     # The nodes start on a solve at the current frequency, so the segments
     # start joined; training then pulls them apart towards the data.
@@ -969,7 +972,7 @@ def test_the_gap_term_is_recorded_and_closes(shooting_fits, tmp_path):
     assert segmented.best_step is not None and segmented.best_step >= 100
     assert "last gap term" in segmented.summary()
     hm.save(tmp_path, segmented)
-    assert hm.load(tmp_path, like=oscillator(1.0)).history.continuity == gaps
+    assert hm.load(tmp_path, like=oscillator(1.0)).history.gap_term == gaps
 
 
 def test_segments_assemble_into_the_single_solve(oscillator_data):
@@ -1315,7 +1318,10 @@ def test_a_failure_right_after_a_horizon_change_returns_a_measured_step(fast_rea
     # one update of the first phase jumps past the limit, so the second phase
     # fails on its first step and the only measured parameters are the start.
     config = hm.OptaxTrainingConfig(
-        phases=(hm.TrainingPhase(steps=1, lr=3.0, horizon=0.5), hm.TrainingPhase(steps=5, lr=0.1)),
+        phases=(
+            hm.TrainingPhase(steps=1, lr=3.0, loss_horizon=0.5),
+            hm.TrainingPhase(steps=5, lr=0.1),
+        ),
     )
     with pytest.warns(RuntimeWarning, match="diverged"):
         result = failing_model("nan-loss").fit(
@@ -1325,13 +1331,13 @@ def test_a_failure_right_after_a_horizon_change_returns_a_measured_step(fast_rea
     assert result.best_step is None
     assert len(result.history.loss) == 1
     assert fitted_rate(result) == pytest.approx(0.3, rel=1e-4)
-    # That one loss was on the half horizon; final_loss is measured again on the
+    # That one loss was on the half horizon; returned_loss is measured again on the
     # final phase's full horizon, at the same parameters.
     remeasured = result.model.fit(
         fast_reaction_data, hm.OptaxTrainingConfig(steps=1, lr=0.0), key=jr.key(0), verbose=False
     )
-    assert result.final_loss == pytest.approx(remeasured.history.loss[0], rel=1e-5)
-    assert result.final_loss != result.history.loss[0]
+    assert result.returned_loss == pytest.approx(remeasured.history.loss[0], rel=1e-5)
+    assert result.returned_loss != result.history.loss[0]
 
 
 @pytest.mark.parametrize("mode", ["solver-error", "nan-loss"])
@@ -1374,7 +1380,7 @@ def test_evosax_returns_its_best_when_a_later_generation_fails(
         return PoisonedStrategy(strategy, poison_from), params
 
     monkeypatch.setattr(evosax_module, "_build_strategy", poisoned)
-    config = hm.EvosaxTrainingConfig(population_size=8, steps=10, init_sigma=0.1)
+    config = hm.EvosaxTrainingConfig(population_size=8, generations=10, init_sigma=0.1)
     if not reaches_history:
         with pytest.raises((FloatingPointError, eqx.EquinoxRuntimeError)):
             plain_model().fit(plain_data, config, freeze="frozen", key=jr.key(0), verbose=False)
@@ -1407,11 +1413,11 @@ def test_a_full_run_reloads_and_predicts_bit_exactly(
 
     assert isinstance(saved.config, hm.OptaxTrainingConfig) and saved.config == network_config
     assert isinstance(saved.objective, hm.Objective)
-    assert saved.objective.penalty_weight == network_objective.penalty_weight
-    assert saved.objective.penalty_points is not None
-    assert network_objective.penalty_points is not None
+    assert saved.objective.bound_penalty_weight == network_objective.bound_penalty_weight
+    assert saved.objective.bound_penalty_points is not None
+    assert network_objective.bound_penalty_points is not None
     np.testing.assert_array_equal(
-        saved.objective.penalty_points["rate"], network_objective.penalty_points["rate"]
+        saved.objective.bound_penalty_points["rate"], network_objective.bound_penalty_points["rate"]
     )
     assert saved.history == result.history
     assert (saved.best_step, saved.stop_reason) == (result.best_step, result.stop_reason)
@@ -1504,7 +1510,7 @@ def stiff_experiments() -> tuple[hm.Dataset, hm.SolverConfig]:
         pytest.param(hm.OptaxTrainingConfig(steps=2, lr=1e-3), id="optax"),
         # Evosax solves its population with throw off, so it must recover the
         # solver's own error to give the same advice.
-        pytest.param(hm.EvosaxTrainingConfig(population_size=4, steps=2), id="evosax"),
+        pytest.param(hm.EvosaxTrainingConfig(population_size=4, generations=2), id="evosax"),
     ],
 )
 def test_a_failed_first_step_names_the_experiment_and_a_better_solver(config):
@@ -1543,7 +1549,7 @@ def test_summary_reports_whether_the_loss_was_still_moving():
     history = hm.FitHistory(loss=tuple(falling), phase=(0,) * 50 + (1,) * 100)
     assert _loss_trend(history) == pytest.approx(0.99**10 - 1.0, rel=1e-6)
     assert _loss_trend(hm.FitHistory(loss=(1.0, 0.9))) is None
-    # Evosax records no phases, and its best-so-far series can settle exactly.
+    # Evosax records no phases, and its per-generation best can settle exactly.
     assert _loss_trend(hm.FitHistory(loss=(1.0,) * 40)) == 0.0
 
 
@@ -1677,7 +1683,7 @@ def custom_fits():
 @pytest.mark.parametrize("name", INNERS)
 def test_other_predictors_train_inside_a_bounded_predictor(custom_fits, name):
     result = custom_fits[name]
-    assert result.final_loss < result.history.loss[0]
+    assert result.returned_loss < result.history.loss[0]
     assert hm.count_trainable_params(result.model.predictors) > 1
 
 

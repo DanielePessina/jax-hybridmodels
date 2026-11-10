@@ -127,7 +127,7 @@ class TestPolicySplit:
         # and with a reparameterisation it cannot leave the interior at all.
         agent = agent._replace(log_std=jnp.full((1,), 3.0))
         rollout = example.rollout_batch(
-            agent, episodes, jr.PRNGKey(5), solver=solver, penalty_weight=0.0, n_samples=8
+            agent, episodes, jr.PRNGKey(5), solver=solver, bound_penalty_weight=0.0, n_samples=8
         )
         low, high = example.ACTIVITY_BOUNDS
         assert float(jnp.min(rollout.activity)) > low
@@ -151,7 +151,7 @@ class TestPPOTurnsOver:
             n_updates=12,
             n_samples=8,
             lr=3e-3,
-            penalty_weight=1e-3,
+            bound_penalty_weight=1e-3,
             truth_return=truth,
             val_episodes=episodes,
             key=jr.PRNGKey(7),

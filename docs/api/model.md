@@ -86,7 +86,7 @@ quietly. ``ui`` is a display of your own and overrides ``verbose``.
 
 With ``validation``, the validation loss replaces the training loss
 for choosing the returned step (Optax) or generation (Evosax), and
-for ``patience``. It costs one extra forward pass over the
+for ``patience_steps``. It costs one extra forward pass over the
 validation set per step or generation. The validation score is
 always single shooting at the full horizon, so Optax picks the best
 step across all phases: the returned model can come from an earlier
@@ -121,6 +121,7 @@ fit_ensemble(
     n_members: 'int',
     n_seeds: 'int | None' = None,
     bootstrap: 'bool' = False,
+    seeds_per_member: 'int' = 1,
     objective: 'Objective | None' = None,
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
@@ -133,13 +134,13 @@ fit_ensemble(
 Train an ensemble of up to ``n_members`` models, best first.
 
 Every member starts from a fresh initialisation of the predictors
-drawn from ``key``, redrawn as the tournament redraws them: a
+drawn from ``key``, redrawn as restarts redraw them: a
 ``Parameter`` without two finite bounds keeps its starting value in
 every member. A candidate seed is trained briefly
-(``config.tournament_steps`` steps, with the first phase's optimiser,
-horizon and learning rate unless ``config.tournament_lr`` is set) and
-scored, as in the tournament, then the chosen seeds get the full
-phase schedule. Each member's ``history.tournament_scores`` holds the
+(``config.restart_steps`` steps, with the first phase's optimiser,
+``loss_horizon`` and learning rate unless ``config.restart_lr`` is
+set) and scored, as a restart is, then the chosen seeds get the full
+phase schedule. Each member's ``history.restart_scores`` holds the
 scores of the seeds it was chosen from, when there was a choice.
 
 Seed ensemble (``bootstrap=False``)
@@ -149,17 +150,19 @@ Seed ensemble (``bootstrap=False``)
 Bootstrap ensemble (``bootstrap=True``)
     Draw ``n_members`` resamples of the experiments with replacement
     ([`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset)) and train one
-    member on each: the best of ``n_seeds`` seeds scored on that
-    resample. ``n_seeds`` defaults to 1, one fresh seed per resample.
+    member on each: the best of ``seeds_per_member`` seeds scored on
+    that resample. The default, 1, is one fresh seed per resample.
 
-``config.tournament_attempts`` is not used: ``n_seeds`` takes its
+``n_seeds`` belongs to the seed ensemble and ``seeds_per_member`` to
+the bootstrap one; setting the other mode's keyword raises.
+``config.restarts`` is not used: the seed counts take its
 place. ``objective``, ``freeze``, ``trainable`` and ``ui`` are as
 for `fit`; each member is its own UI run. The result is sorted
 by each member's final loss, the loss at its returned parameters
 when ``config.restore_best`` is set.
 
 With ``validation``, each member picks its returned step and runs
-``patience`` on the validation loss, as in `fit`, and members are
+``patience_steps`` on the validation loss, as in `fit`, and members are
 sorted by that loss. Seeds are still scored on the training data.
 
 A seed whose warm-up or first step fails is dropped, so fewer than
@@ -222,7 +225,7 @@ still integrates from its own start, so ``y0`` stays in place.
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
 experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L429)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L433)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -258,7 +261,7 @@ must be finite, strictly increasing, and not before ``t0``. When
 ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
 returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L455)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L459)</small>
 
 <a id="hybridmodelwith_predictors"></a>
 
@@ -306,9 +309,9 @@ the run (it warned, and the model holds the best parameters so far), else
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L177)</small>
 
-<a id="fitresultfinal_loss"></a>
+<a id="fitresultreturned_loss"></a>
 
-#### `FitResult.final_loss`
+#### `FitResult.returned_loss`
 
 The training loss at the returned parameters.
 
@@ -363,8 +366,8 @@ FitHistory(
     phase: 'tuple[int, ...]' = (),
     validation_loss: 'tuple[float, ...]' = (),
     failed_candidates: 'tuple[int, ...]' = (),
-    tournament_scores: 'tuple[float, ...]' = (),
-    continuity: 'tuple[float, ...]' = (),
+    restart_scores: 'tuple[float, ...]' = (),
+    gap_term: 'tuple[float, ...]' = (),
 ) -> None
 ```
 
@@ -390,13 +393,13 @@ generation's best individual for Evosax.
 generation had a non-finite fitness, usually a failed solve. They rank
 last and the search goes on.
 
-``tournament_scores`` is Optax only: each tournament attempt's score in
-attempt order, ``inf`` for an attempt that failed. Empty when no
-tournament ran. A wide spread says the starting point matters for this
-model; a narrow one, that the tournament is not buying much.
+``restart_scores`` is Optax only: each restart candidate's score, your
+starting values first, ``inf`` for a candidate that failed. Empty when
+``restarts=0``. A wide spread says the starting point matters for this
+model; a narrow one, that the restarts are not buying much.
 
-``continuity`` is Optax only, and present when some phase used multiple
-shooting (``TrainingPhase.segments``): the weighted gap term per step, 0
+``gap_term`` is Optax only, and present when some phase used multiple
+shooting (``TrainingPhase.shooting_segments``): the weighted gap term per step, 0
 in single-shooting steps. ``loss`` in a segmented step is the data term
 on the assembled segments, and the optimiser minimised the two together.
 

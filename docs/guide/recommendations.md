@@ -46,7 +46,7 @@ Use it when Diffrax reports `max_steps` on some seeds and not others.
 
 ### Pick the squash for how close to the edge you will sit
 
-In float32, `transform="sigmoid"` loses its gradient at a latent of about
+In float32, `squash="sigmoid"` loses its gradient at a latent of about
 17, `"algebraic"` at about `3e3`, and `"softsign"` at about `1e7`.
 `softsign` has a kink at the box midpoint, which solver steps cross often.
 Use `sigmoid` by default and `algebraic` for a learned term inside a vector
@@ -157,15 +157,15 @@ rank-1 array straight to a predictor that takes the whole vector.
 
 Start with one phase, `OptaxTrainingConfig(steps=1000, lr=1e-3)`, for a model
 with networks. Add a lower-rate phase when the loss plateaus, or a first phase
-with `horizon=0.5` when the tail of each trajectory diverges early on.
+with `loss_horizon=0.5` when the tail of each trajectory diverges early on.
 
 A model of a few `Parameter` scalars usually wants a larger rate: the shelf-life
 and Arrhenius examples use `lr=0.05` for 1500 steps. Adam still stops short of
 the maximum along a correlated direction, so finish a mechanistic fit with
-`hm.inference.make_problem(model, data, log_prior=None, noise="data").optimize()`,
+`hm.inference.make_problem(model, data, log_prior=None, noise_sd="data").optimize()`,
 which runs BFGS to the maximum likelihood.
 
-Turn on the tournament (`tournament_attempts=8, tournament_steps=20`) when
+Turn on restarts (`restarts=7, restart_steps=20`) when
 `max_steps` errors appear on some seeds, or when several seeds all settle
 at a poor loss.
 

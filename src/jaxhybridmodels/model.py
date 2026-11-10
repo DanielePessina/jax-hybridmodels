@@ -314,7 +314,7 @@ class HybridModel(eqx.Module):
 
         With ``validation``, the validation loss replaces the training loss
         for choosing the returned step (Optax) or generation (Evosax), and
-        for ``patience``. It costs one extra forward pass over the
+        for ``patience_steps``. It costs one extra forward pass over the
         validation set per step or generation. The validation score is
         always single shooting at the full horizon, so Optax picks the best
         step across all phases: the returned model can come from an earlier
@@ -360,6 +360,7 @@ class HybridModel(eqx.Module):
         n_members: int,
         n_seeds: int | None = None,
         bootstrap: bool = False,
+        seeds_per_member: int = 1,
         objective: Objective | None = None,
         freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
         trainable: Any = None,
@@ -370,13 +371,13 @@ class HybridModel(eqx.Module):
         """Train an ensemble of up to ``n_members`` models, best first.
 
         Every member starts from a fresh initialisation of the predictors
-        drawn from ``key``, redrawn as the tournament redraws them: a
+        drawn from ``key``, redrawn as restarts redraw them: a
         ``Parameter`` without two finite bounds keeps its starting value in
         every member. A candidate seed is trained briefly
-        (``config.tournament_steps`` steps, with the first phase's optimiser,
-        horizon and learning rate unless ``config.tournament_lr`` is set) and
-        scored, as in the tournament, then the chosen seeds get the full
-        phase schedule. Each member's ``history.tournament_scores`` holds the
+        (``config.restart_steps`` steps, with the first phase's optimiser,
+        ``loss_horizon`` and learning rate unless ``config.restart_lr`` is
+        set) and scored, as a restart is, then the chosen seeds get the full
+        phase schedule. Each member's ``history.restart_scores`` holds the
         scores of the seeds it was chosen from, when there was a choice.
 
         Seed ensemble (``bootstrap=False``)
@@ -386,17 +387,19 @@ class HybridModel(eqx.Module):
         Bootstrap ensemble (``bootstrap=True``)
             Draw ``n_members`` resamples of the experiments with replacement
             (:func:`~jaxhybridmodels.make_bootstrap_dataset`) and train one
-            member on each: the best of ``n_seeds`` seeds scored on that
-            resample. ``n_seeds`` defaults to 1, one fresh seed per resample.
+            member on each: the best of ``seeds_per_member`` seeds scored on
+            that resample. The default, 1, is one fresh seed per resample.
 
-        ``config.tournament_attempts`` is not used: ``n_seeds`` takes its
+        ``n_seeds`` belongs to the seed ensemble and ``seeds_per_member`` to
+        the bootstrap one; setting the other mode's keyword raises.
+        ``config.restarts`` is not used: the seed counts take its
         place. ``objective``, ``freeze``, ``trainable`` and ``ui`` are as
         for :meth:`fit`; each member is its own UI run. The result is sorted
         by each member's final loss, the loss at its returned parameters
         when ``config.restore_best`` is set.
 
         With ``validation``, each member picks its returned step and runs
-        ``patience`` on the validation loss, as in :meth:`fit`, and members are
+        ``patience_steps`` on the validation loss, as in :meth:`fit`, and members are
         sorted by that loss. Seeds are still scored on the training data.
 
         A seed whose warm-up or first step fails is dropped, so fewer than
@@ -418,6 +421,7 @@ class HybridModel(eqx.Module):
             n_members=n_members,
             n_seeds=n_seeds,
             bootstrap=bootstrap,
+            seeds_per_member=seeds_per_member,
             objective=objective,
             freeze=freeze,
             trainable=trainable,

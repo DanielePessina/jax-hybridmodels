@@ -71,9 +71,9 @@ def make_synth_dataset(key):
 
 
 def make_predictor(key):
-    in_scaler = BoundScaler(bounds=((280.0, 320.0),), transform="sigmoid", warp="linear")
+    in_scaler = BoundScaler(bounds=((280.0, 320.0),), squash="sigmoid", warp="linear")
     inner = MLPPredictor(in_size=1, out_size=1, width_size=16, depth=2, activation="tanh", key=key)
-    out_scaler = BoundScaler(bounds=((-1.0, 1.0),), transform="sigmoid")
+    out_scaler = BoundScaler(bounds=((-1.0, 1.0),), squash="sigmoid")
     return BoundedPredictor(
         input_keys=("temperature",),
         in_scaler=in_scaler,

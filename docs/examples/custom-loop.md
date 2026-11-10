@@ -28,12 +28,12 @@ The custom part is the accumulation. Each bucket's loss and gradients are
 weighted by its experiment count, so the three-experiment bucket counts
 three times the one-experiment bucket. The stock trainer pools buckets by
 what the loss averages over: a mean-type loss such as `mse` (and a custom
-loss by default) weights each bucket by its measured cells, and `bal_mse`
+loss by default) weights each bucket by its measured cells, and `per_experiment_mse`
 or a loss with `pooling = "experiments"` by its measured experiments. A
 custom loop can weight however it likes. The loop also passes a masked Huber loss as `loss_fn` and an L2 term
 on a second [`Parameter`](/api/predictors#parameter), `scale`, as
-`penalty_fn`. [`Objective`](/guide/penalties) accepts both of those too
-(`loss=` and `penalty_fn=`); they are here to show where each hook enters
+`bound_penalty_fn`. [`Objective`](/guide/penalties) accepts both of those too
+(`loss=` and `bound_penalty_fn=`); they are here to show where each hook enters
 a hand-written loop.
 
 ## Code
@@ -79,4 +79,4 @@ reached the noise floor.
   `1.0` to weight every bucket the same.
 - Swap `huber_loss` for `jaxhybridmodels.losses.masked_mse`.
 - Schedule `horizon` from 0.3 to 1.0 over the run, which is how the stock
-  trainer's `TrainingPhase.horizon` works.
+  trainer's `TrainingPhase.loss_horizon` works.

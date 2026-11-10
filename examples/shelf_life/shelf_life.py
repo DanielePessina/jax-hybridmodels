@@ -127,7 +127,7 @@ def main() -> None:
     fit = model.fit(
         study, hm.OptaxTrainingConfig(steps=1500, lr=0.05), key=jr.key(1), verbose=False
     )
-    problem = hm.inference.make_problem(fit.model, study, log_prior=None, noise="data")
+    problem = hm.inference.make_problem(fit.model, study, log_prior=None, noise_sd="data")
     mle = problem.optimize().problem
     fisher = mle.fisher()
     print(fisher.summary())
@@ -151,7 +151,7 @@ def main() -> None:
     # A two-sided 90% interval has a one-sided 95% bound at each end. The fastest
     # plausible rate gives the shortest plausible shelf life.
     profile = mle.profile("log_k25", confidence=0.90)
-    slowest, fastest = profile.bounds
+    slowest, fastest = profile.interval
     if slowest is None or fastest is None:
         raise SystemExit(
             f"the data do not bound the rate, so no claim can be set: {profile.stop_reasons}"

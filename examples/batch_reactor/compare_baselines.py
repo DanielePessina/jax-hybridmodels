@@ -265,7 +265,7 @@ def main() -> None:
     cma_es = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=32,
-        steps=args.generations,
+        generations=args.generations,
         init="lhs_box",
         init_box_extent=2.0,
         init_sigma=0.5,

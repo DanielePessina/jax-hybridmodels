@@ -123,11 +123,11 @@ def main() -> None:
 
     bounded = BoundedPredictor(
         input_keys=("temperature_C", "loading"),
-        in_scaler=BoundScaler(bounds=((20.0, 40.0), (0.05, 0.30)), transform="sigmoid"),
+        in_scaler=BoundScaler(bounds=((20.0, 40.0), (0.05, 0.30)), squash="sigmoid"),
         inner=mlp,
         out_scaler=BoundScaler(
             bounds=((1e8, 1e14), (1e-8, 1e-4)),
-            transform="sigmoid",
+            squash="sigmoid",
         ),
     )
     cov = {"temperature_C": jnp.array(28.0), "loading": jnp.array(0.18)}
