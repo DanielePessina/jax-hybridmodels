@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import jax.random as jr
 import pytest
-from _models import decay_dataset, parameter_model, quiet, temp_rate
+from _models import decay_dataset, parameter_model, temp_rate
 
+import jaxhybridmodels as hm
 from jaxhybridmodels.training import TrainingPhase
 from jaxhybridmodels.ui.testing import RecordingUI
 
@@ -35,10 +36,10 @@ def fitted(decay_data):
     Read-only: tests that need a different config train their own model.
     """
     ui = RecordingUI()
-    config = quiet(
+    config = hm.OptaxTrainingConfig(
         phases=(
-            TrainingPhase(25, lr=0.1, horizon=0.5),
-            TrainingPhase(25, lr=0.05),
+            TrainingPhase(steps=25, lr=0.1, loss_horizon=0.5),
+            TrainingPhase(steps=25, lr=0.05),
         )
     )
     result = parameter_model().fit(decay_data, config, key=jr.key(0), ui=ui)

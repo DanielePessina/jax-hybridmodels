@@ -61,7 +61,29 @@ jobs:
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
       - name: Test
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=jaxhybridmodels --cov-fail-under=90
+
+  lowest-dependencies:
+    # The floors in pyproject.toml are a promise, so they get run. --frozen in
+    # the job above only ever tests the versions in uv.lock.
+    name: Lowest allowed dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv venv --python 3.12
+          uv pip install --resolution lowest-direct -e . 'pytest>=9.0.3' 'pytest-cov>=7.1.0' 'pandas>=2.2.3' 'rlax>=0.1.9' 'blackjax>=1.7.1'
+
+      - name: Test
+        run: .venv/bin/python -m pytest -q
 
   package:
     name: Build and validate distributions
@@ -93,5 +115,6 @@ jobs:
           wheel_env="${RUNNER_TEMP}/jaxhybridmodels-wheel"
           uv venv --python 3.12 "$wheel_env"
           uv pip install --python "$wheel_env/bin/python" dist/*.whl
+          version=$(uv run --no-project python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           uv run --python "$wheel_env/bin/python" --no-project python -c \
-            'import jaxhybridmodels; from jaxhybridmodels import MLPPredictor; assert jaxhybridmodels.__version__ == "0.2.0b1"'
+            "import jaxhybridmodels; from jaxhybridmodels import MLPPredictor; assert jaxhybridmodels.__version__ == '$version'"

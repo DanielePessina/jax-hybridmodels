@@ -63,6 +63,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "make_experiment",
             "experiment_from_array",
             "experiments_from_dataframe",
+            "experiments_from_long_dataframe",
             "BucketPayload",
             "Dataset",
             "make_dataset",
@@ -83,8 +84,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "MLPPredictor",
             "KANPredictor",
             "NeuralNPolynomial",
-            "reinitialize_with_key",
-            "reinitialize_pytree_with_key",
+            "reinitialize",
+            "reinitialize_pytree",
         ),
     ),
     (
@@ -116,9 +117,9 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "transforms",
         "Transforms: Squash Shapes and Axis Warps",
         (
-            "BoundTransform",
-            "BOUND_TRANSFORMS",
-            "register_bound_transform",
+            "Squash",
+            "SQUASHES",
+            "register_squash",
             "Warp",
             "WARPS",
             "register_warp",
@@ -166,10 +167,13 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "masked_mse",
             "masked_mle",
-            "bal_mse",
-            "bal_mle",
+            "per_experiment_mse",
+            "per_experiment_mle",
             "LOSS_REGISTRY",
             "resolve_loss_fn",
+            "loss_pooling",
+            "Pooling",
+            "POOLING_KINDS",
         ),
     ),
     (
@@ -203,6 +207,7 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "profiles",
         "Profiles: Time-Varying Inputs",
         (
+            "Profile",
             "constant_profile",
             "step_profile",
             "ramp_profile",
@@ -232,6 +237,8 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "TrainingUI",
             "EvosaxUI",
             "SilentUI",
+            "PlainTrainingUI",
+            "PlainEvosaxUI",
             "RichTrainingUI",
             "RichEvosaxUI",
         ),
@@ -241,17 +248,43 @@ PAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "RNG: Named-Fold Keys",
         ("fold",),
     ),
+    (
+        "inference",
+        "Inference: Log-Density, Fisher, Laplace and Profiles",
+        (
+            "make_problem",
+            "InferenceProblem",
+            "OptimizeResult",
+            "FisherResult",
+            "LaplaceResult",
+            "DerivedQuantity",
+            "ProfileResult",
+            "flat_prior",
+        ),
+    ),
 )
 
 # Documented names that are not top-level exports, with the module to import
 # them from. Top-level names resolve through ``jaxhybridmodels._EXPORTS``.
 SUBMODULE_SYMBOLS: dict[str, str] = {
+    "DerivedQuantity": "jaxhybridmodels.inference",
+    "FisherResult": "jaxhybridmodels.inference",
+    "InferenceProblem": "jaxhybridmodels.inference",
+    "LaplaceResult": "jaxhybridmodels.inference",
+    "OptimizeResult": "jaxhybridmodels.inference",
+    "ProfileResult": "jaxhybridmodels.inference",
+    "flat_prior": "jaxhybridmodels.inference",
+    "make_problem": "jaxhybridmodels.inference",
     "LOSS_REGISTRY": "jaxhybridmodels.losses",
-    "bal_mle": "jaxhybridmodels.losses",
-    "bal_mse": "jaxhybridmodels.losses",
+    "per_experiment_mle": "jaxhybridmodels.losses",
+    "per_experiment_mse": "jaxhybridmodels.losses",
     "masked_mle": "jaxhybridmodels.losses",
     "masked_mse": "jaxhybridmodels.losses",
     "resolve_loss_fn": "jaxhybridmodels.losses",
+    "loss_pooling": "jaxhybridmodels.losses",
+    "Profile": "jaxhybridmodels.profiles",
+    "Pooling": "jaxhybridmodels.losses",
+    "POOLING_KINDS": "jaxhybridmodels.losses",
     "PenaltyPointSource": "jaxhybridmodels.penalties",
     "attach_penalty_state": "jaxhybridmodels.penalties",
     "bound_penalty": "jaxhybridmodels.penalties",
@@ -271,8 +304,8 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "strip_penalty_state": "jaxhybridmodels.penalties",
     "trajectory_saturation_penalty": "jaxhybridmodels.penalties",
     "validate_penalty_points": "jaxhybridmodels.penalties",
-    "reinitialize_pytree_with_key": "jaxhybridmodels.predictors",
-    "reinitialize_with_key": "jaxhybridmodels.predictors",
+    "reinitialize_pytree": "jaxhybridmodels.predictors",
+    "reinitialize": "jaxhybridmodels.predictors",
     "fold": "jaxhybridmodels.rng",
     "annealing_schedule": "jaxhybridmodels.schedules",
     "ADJOINT_REGISTRY": "jaxhybridmodels.solver",
@@ -292,15 +325,17 @@ SUBMODULE_SYMBOLS: dict[str, str] = {
     "build_penalty_step": "jaxhybridmodels.training.kernels",
     "build_score_bucket": "jaxhybridmodels.training.kernels",
     "predict_bucket_obs": "jaxhybridmodels.training.kernels",
-    "BOUND_TRANSFORMS": "jaxhybridmodels.transforms",
-    "BoundTransform": "jaxhybridmodels.transforms",
+    "SQUASHES": "jaxhybridmodels.transforms",
+    "Squash": "jaxhybridmodels.transforms",
     "WARPS": "jaxhybridmodels.transforms",
     "Warp": "jaxhybridmodels.transforms",
-    "register_bound_transform": "jaxhybridmodels.transforms",
+    "register_squash": "jaxhybridmodels.transforms",
     "register_warp": "jaxhybridmodels.transforms",
     "EvosaxUI": "jaxhybridmodels.ui",
     "RichEvosaxUI": "jaxhybridmodels.ui",
     "RichTrainingUI": "jaxhybridmodels.ui",
+    "PlainEvosaxUI": "jaxhybridmodels.ui",
+    "PlainTrainingUI": "jaxhybridmodels.ui",
     "SilentUI": "jaxhybridmodels.ui",
     "TrainingUI": "jaxhybridmodels.ui",
 }
@@ -511,6 +546,10 @@ def render_signature(name: str, obj: Any) -> str | None:
 def _stabilise_signature(sig: inspect.Signature) -> inspect.Signature:
     new_params: list[inspect.Parameter] = []
     for p in sig.parameters.values():
+        # A private parameter, such as a result dataclass's internal field, is
+        # filled in by the package and is not part of what a reader calls.
+        if p.name.startswith("_"):
+            continue
         if p.default is not inspect.Parameter.empty and callable(p.default):
             stable = _StableDefault(getattr(p.default, "__qualname__", repr(p.default)))
             new_params.append(p.replace(default=stable))
@@ -530,7 +569,18 @@ class _StableDefault:
 
 
 def _wrap_signature(name: str, sig: inspect.Signature) -> str:
-    parts = [f"{p}" for p in sig.parameters.values()]
+    params = list(sig.parameters.values())
+    parts: list[str] = []
+    for i, p in enumerate(params):
+        before = params[i - 1].kind if i else None
+        # ``str(sig)`` adds these markers itself; joining parameters does not.
+        if p.kind is p.KEYWORD_ONLY and before not in (p.KEYWORD_ONLY, p.VAR_POSITIONAL):
+            parts.append("*")
+        if before is p.POSITIONAL_ONLY and p.kind is not p.POSITIONAL_ONLY:
+            parts.append("/")
+        parts.append(f"{p}")
+    if params and params[-1].kind is inspect.Parameter.POSITIONAL_ONLY:
+        parts.append("/")
     indent = "    "
     body = (",\n" + indent).join(parts)
     ret = (
@@ -636,10 +686,9 @@ def render_entry(name: str, module_name: str) -> str:
     if link is not None:
         parts.append(f"<small>[Source]({link})</small>")
 
-    # For classes, emit a sub-entry per public method defined on the class
-    # itself (not inherited). Keeps method docstrings — like
-    # ``MLPPredictor.with_zero_final_head`` — inside the API page rather
-    # than buried in source.
+    # For classes, emit a sub-entry per public method and property, so their
+    # docstrings, like ``MLPPredictor.with_zero_final_head``, sit on the API
+    # page rather than only in the source.
     if inspect.isclass(obj):
         for method_name, method_obj in _public_methods(obj):
             parts.append(_render_method_entry(name, method_name, method_obj))
@@ -648,37 +697,49 @@ def render_entry(name: str, module_name: str) -> str:
 
 
 def _public_methods(cls: type) -> list[tuple[str, Any]]:
-    """Return ``(name, fn)`` pairs for documentable methods defined on ``cls``.
+    """Return ``(name, member)`` pairs for the documentable methods and properties of ``cls``.
 
-    A method is documentable when it satisfies all of:
+    A member is documentable when it satisfies all of:
 
-    - public name (no leading underscore — dunder methods are noisy and
+    - public name (no leading underscore: dunder methods are noisy and
       typically restate framework conventions)
     - has a docstring (no point emitting a heading with nothing under it)
-    - is defined on this class, not inherited (``__qualname__`` starts
-      with the class name)
+    - is defined on ``cls`` itself, or on a private base class of this
+      package. A private base, such as ``_GaussianSummary``, has no entry of
+      its own, so its methods would otherwise appear nowhere. A public base
+      documents its own methods, and repeating them on every subclass would
+      only bloat the page.
     """
     out: list[tuple[str, Any]] = []
-    for name, member in inspect.getmembers(cls, predicate=inspect.isfunction):
+    for name, member in inspect.getmembers(cls):
         if name.startswith("_"):
+            continue
+        if not (inspect.isfunction(member) or isinstance(member, property)):
             continue
         if not inspect.getdoc(member):
             continue
-        qualname = getattr(member, "__qualname__", "")
-        if not qualname.startswith(cls.__name__ + "."):
+        owner = next(base for base in cls.__mro__ if name in vars(base))
+        private_base = owner.__name__.startswith("_") and owner.__module__.startswith(
+            "jaxhybridmodels"
+        )
+        if owner is not cls and not private_base:
             continue
         out.append((name, member))
     return out
 
 
 def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> str:
-    """Render one ``#### ClassName.method()`` sub-entry inside a class entry."""
+    """Render one ``#### ClassName.method()`` sub-entry inside a class entry.
+
+    A property gets its name without parentheses and no signature.
+    """
+    is_property = isinstance(method_obj, property)
     parsed = parse_docstring(inspect.getdoc(method_obj))
     parts: list[str] = []
     parts.append(f'<a id="{_slugify(f"{class_name}.{method_name}")}"></a>')
-    parts.append(f"#### `{class_name}.{method_name}()`")
+    parts.append(f"#### `{class_name}.{method_name}{'' if is_property else '()'}`")
 
-    sig = render_signature(method_name, method_obj)
+    sig = None if is_property else render_signature(method_name, method_obj)
     if sig is not None:
         parts.append(f"```python\n{sig}\n```")
 
@@ -706,7 +767,7 @@ def _render_method_entry(class_name: str, method_name: str, method_obj: Any) -> 
         else:
             parts.append(f"**{title}**\n\n{_normalise_doc_markup(body)}")
 
-    link = get_source_link(method_obj)
+    link = get_source_link(method_obj.fget if is_property else method_obj)
     if link is not None:
         parts.append(f"<small>[Source]({link})</small>")
 
@@ -759,7 +820,7 @@ PAGE_INTROS: dict[str, str] = {
     "losses": (
         "Loss functions consume a model's predicted output `[N, T, D]` and "
         "the bucket payload, return a scalar, and respect the bucket mask. "
-        "Two families: `masked_*` weights every observation equally; `bal_*` "
+        "Two families: `masked_*` weights every observation equally; `per_experiment_*` "
         "normalises per-experiment so duplication of one experiment can't "
         "dominate the gradient.\n\n"
         'Pass them by name via training-config `loss="mse"` (resolved through '

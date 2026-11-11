@@ -153,9 +153,8 @@ def main() -> None:
             hm.TrainingPhase(steps=200, lr=0.05),
             hm.TrainingPhase(steps=100, lr=0.01),
         ),
-        verbose=False,
     )
-    result = model.fit(dataset, config, key=k_train)
+    result = model.fit(dataset, config, key=k_train, verbose=False)
     # endregion fit
     omega = float(result.model.predictors["omega"].value)
     print(f"omega {OMEGA_INIT} -> {omega:.4f} (true {OMEGA_TRUE})")
@@ -167,9 +166,7 @@ def main() -> None:
     # Indexed by experiment, then channel. ``times`` starts at t0, where
     # nothing was measured.
     first = predictions["osc_0"]
-    print(
-        f"osc_0 at t = {float(first.times[1]):.2f}: x = {float(first.outputs['position'][1]):.4f}"
-    )
+    print(f"osc_0 at t = {float(first.ts[1]):.2f}: x = {float(first.outputs['position'][1]):.4f}")
     # A new oscillator, run past the end of the training window.
     new = result.model.simulate(ts=jnp.linspace(0.5, 10.0, 50), t0=0.0, y0=[0.5, 0.0])
     print(f"new oscillator at t = 10: x = {float(new.outputs['position'][-1]):.4f}")

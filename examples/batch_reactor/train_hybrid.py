@@ -109,7 +109,7 @@ def _trajectory_grid_plot(
             label="observed",
         )
         ax.plot(
-            np.asarray(pred.times),
+            np.asarray(pred.ts),
             np.asarray(pred.outputs["Ca"]),
             color="C3",
             linestyle="--",
@@ -356,22 +356,22 @@ def main() -> None:
     config_p1 = hm.EvosaxTrainingConfig(
         algorithm="CMA_ES",
         population_size=args.population_size,
-        steps=args.generations,
+        generations=args.generations,
         init="lhs_box",
         init_box_extent=args.init_box_extent,
-        sigma_init=args.sigma_init,
+        init_sigma=args.sigma_init,
     )
     # The default mask already holds BoundScaler leaves fixed. Freezing every
     # BoundedPredictor on top leaves the trunk's two latent scalars.
     fit_p1 = model.fit(train_dataset, config_p1, key=k_p1, freeze=hm.BoundedPredictor)
     model_p1 = fit_p1.model
     # endregion phase-1
-    # Evosax records the best-so-far loss, one entry per generation.
-    history_p1 = fit_p1.history.loss
+    # Evosax records each generation's best loss; the running minimum is the
+    # best so far, the curve the plot shows.
+    history_p1 = tuple(np.minimum.accumulate(fit_p1.history.loss).tolist())
     log_k_ref, Ea = model_p1.predictors[0]()
-    print(f"  {len(history_p1)} generations, best loss {history_p1[-1]:.6f}")
+    print(f"  {len(history_p1)} generations, best loss {fit_p1.returned_loss:.6f}")
     print(f"  recovered log_k_ref={float(log_k_ref):.3f}, Ea={float(Ea):.2f} kJ/mol")
-    assert history_p1[-1] <= history_p1[0], "the best-so-far loss cannot rise"
     assert jnp.array_equal(residual_before, _inner_weights(model_p1.predictors[1])), (
         "freeze= should have held the residual fixed during phase 1"
     )
@@ -390,7 +390,7 @@ def main() -> None:
     # The residual starts at zero decades, so phase 2 starts where phase 1
     # ended and the seam is invisible in the loss curve. Both checks warn
     # rather than fail, so short runs with --steps or --generations finish.
-    gap = abs(history_p2[0] - history_p1[-1])
+    gap = abs(history_p2[0] - fit_p1.returned_loss)
     if gap > 1e-3:
         warnings.warn(f"phase 2 started {gap:.2e} away from the phase-1 loss", stacklevel=1)
     if not history_p2[-1] < 0.5 * history_p2[0]:

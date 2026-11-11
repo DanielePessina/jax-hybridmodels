@@ -71,7 +71,7 @@ learned `Vmax` is within 5% of `2 * dose` at every training dose.
 
 - Replace a different flux with `replace_flux`, for example a
   Michaelis-Menten step further down the cascade.
-- Set `hm.Objective(penalty_weight=0.0)` and watch whether the output
+- Set `hm.Objective(bound_penalty_weight=0.0)` and watch whether the output
   squash saturates.
 - Drop `0.2` from `DOSES` and check how well the learned `Vmax`
   interpolates across the gap.

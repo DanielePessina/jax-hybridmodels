@@ -77,13 +77,26 @@ experiments = hm.experiments_from_dataframe(
 )
 ```
 
+The `y0_fn` there reads the first measured concentration, which is the
+starting state only when every run measures it at its first time. `y0` belongs to
+`t0` when set, else to the earliest time of any channel the model outputs.
+
 A list names each channel or covariate after its column; a mapping renames.
 `t0` may be one number or a column, and `y0` one shared state or a mapping
 `{exp_id: state}`. Experiments come back in order of first appearance, with
-the run column's values as `exp_id`. A long table (one row per measurement)
-becomes wide with
-`df.pivot_table(index=["run", "time_h"], columns="channel", values="value").reset_index()`.
-pandas is imported only by your code.
+the run column's values as `exp_id`. pandas is imported only by your code.
+
+A table with one row per measurement goes to
+[`experiments_from_long_dataframe`](/api/data#experiments_from_long_dataframe)
+instead. It takes `channel=` and `value=` columns in place of `channels=`,
+and `variance=` is a column or one number:
+
+```python
+experiments = hm.experiments_from_long_dataframe(
+    df, time="time_h", experiment="run", channel="channel", value="value",
+    variance="variance", covariates=["temp"], y0=[1.0],
+)
+```
 
 ## Union timestamps and masks
 
@@ -116,8 +129,8 @@ them.
 | Quantity | Shape |
 | --- | --- |
 | `bp.ts` | `[N, T]` |
-| `bp.y_observed` | `[N, T, D]` |
-| `bp.yvar` | `[N, T, D]` |
+| `bp.observed` | `[N, T, D]` |
+| `bp.variance` | `[N, T, D]` |
 | `bp.mask` | `[N, T, D]` |
 | scalar covariate | `[N]` |
 | vector covariate | `[N, K]` |
@@ -125,6 +138,30 @@ them.
 
 Training loops over buckets in Python, and each bucket shape compiles once.
 Fewer distinct lengths means less compile time.
+
+### Fewer buckets
+
+Many distinct lengths mean many compiled shapes, and a slow start. Cap them:
+
+```python
+dataset = hm.make_dataset(
+    experiments, output_channel_names=("conc",), max_buckets=3
+)
+```
+
+Shorter experiments gain unobserved rows at the midpoints of their largest gaps,
+which leaves their span and every measurement alone. `make_dataset` chooses the
+buckets that add the fewest rows. `predict` still reports each experiment's own
+times, and only `predictions.buckets` shows the padded grids. Splits and
+resamples apply the same cap to their own experiments. An experiment with a
+single time has no gap to pad, so it stays in a bucket of its own.
+
+Capping leaves the data loss alone: the trainers pool buckets by what each
+loss averages over, so `mse` stays the mean over every measurement and
+`per_experiment_mse` over every experiment, however the experiments are grouped. A
+phase's `loss_horizon` is measured on each experiment's own span, which the added
+rows do not change. Only a trajectory penalty differs, since it also sees the
+state at the added rows.
 
 ## Validation
 
@@ -147,7 +184,7 @@ Split at the experiment level. Each result is re-bucketed independently:
 train, validation, test = hm.split_dataset(
     dataset,
     train=0.8,
-    val=0.1,
+    validation=0.1,
     test=0.1,
     key=jr.key(0),
 )
@@ -169,4 +206,5 @@ experiment = hm.make_experiment(
 The dataset inserts `t0` as an unobserved timestamp, so the simulator
 receives it as `ts[0]` and losses ignore it. A `t0` after the first
 observation raises. Without `t0`, `y0` belongs to the first union timestamp.
-The inserted point counts towards the length that a phase `horizon` cuts.
+A phase's `loss_horizon` measures each experiment's span from `t0`, and always scores
+its first measurement.

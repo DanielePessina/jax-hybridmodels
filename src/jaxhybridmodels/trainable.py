@@ -57,16 +57,32 @@ def trainable_mask(
     set: a trainable temperature moves gradient between the scaler and the
     inner network and tends to slow convergence. Both optimisers take the
     result unchanged.
+
+    A ``Parameter``'s own scaler stays fixed even with ``train_scalers``. Its
+    temperature only rescales its latent, so training both gives one value
+    two coordinates: the optimiser drifts along the redundant one and the
+    Fisher information is singular. ``train_scalers`` is for the scalers
+    around a network, whose temperature sets how fast the output saturates.
     """
-    from jaxhybridmodels.predictors.base import BoundScaler, Constant
+    from jaxhybridmodels.predictors.base import BoundScaler, Constant, Parameter
 
     def fixed(node: Any) -> bool:
         return isinstance(node, Constant) or (not train_scalers and isinstance(node, BoundScaler))
 
+    def frozen(node: Any) -> Any:
+        return jtu.tree_map(lambda _: False, node)
+
+    def mask_of(node: Any) -> Any:
+        if fixed(node):
+            return frozen(node)
+        if isinstance(node, Parameter):
+            return eqx.tree_at(
+                lambda p: p.scaler, jtu.tree_map(predicate, node), replace=frozen(node.scaler)
+            )
+        return predicate(node)
+
     return jtu.tree_map(
-        lambda node: jtu.tree_map(lambda _: False, node) if fixed(node) else predicate(node),
-        predictors,
-        is_leaf=fixed,
+        mask_of, predictors, is_leaf=lambda node: fixed(node) or isinstance(node, Parameter)
     )
 
 

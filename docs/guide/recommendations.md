@@ -9,7 +9,9 @@ Defaults that worked in the shipped examples. None are enforced.
 A fresh network outputs a latent near zero, which maps to the middle of the
 output box. If the middle is physically absurd, the first solve can be so
 stiff that it hits `max_steps` before training starts. A log10 nucleation
-box of `(0, 15)` starts at `J ≈ 3e7`, about 17,000 times too large. Pick the
+box of `(0, 15)` starts at `J ≈ 3e7` whatever the data say, about 600 times
+below the `1.85e10` the [crystallisation example](/examples/crystallisation)
+learns at 17 °C. Pick the
 order of magnitude you would guess by hand and allow a few decades either
 side, with `warp="log10"` if the box spans decades.
 
@@ -19,6 +21,12 @@ Make input boxes slightly wider than the data, for example
 `(13.0, 27.0)` for temperatures measured from 14 to 26 °C. The squash is
 flattest at the edges, so a margin keeps the gradient usable across the
 measured range.
+
+Outside the box an input continues linearly and the network still returns a
+value, with no warning. A network does not extrapolate past the data, so do not
+read a prediction at a condition the data never reached, such as a storage
+temperature below an accelerated study, from a network rate. Use a mechanistic
+law there, compared out of sample as below.
 
 ### Zero the readout when the box is very wide
 
@@ -30,7 +38,7 @@ output is exactly the midpoint whatever the key. Hidden layers stay random.
 
 ```python
 inner = hm.MLPPredictor(
-    in_size=2, out_size=1, width_size=64, depth=1, activation_name="relu", key=key
+    in_size=2, out_size=1, width_size=64, depth=1, activation="relu", key=key
 ).with_zero_final_head()
 ```
 
@@ -38,7 +46,7 @@ Use it when Diffrax reports `max_steps` on some seeds and not others.
 
 ### Pick the squash for how close to the edge you will sit
 
-In float32, `transform="sigmoid"` loses its gradient at a latent of about
+In float32, `squash="sigmoid"` loses its gradient at a latent of about
 17, `"algebraic"` at about `3e3`, and `"softsign"` at about `1e7`.
 `softsign` has a kink at the box midpoint, which solver steps cross often.
 Use `sigmoid` by default and `algebraic` for a learned term inside a vector
@@ -105,6 +113,28 @@ and
 [`train_crystallisation_mechanistic.py`](/examples/crystallisation-mechanistic)
 fits four scalars with CMA-ES.
 
+### Compare a hybrid with a mechanistic model out of sample
+
+In-sample metrics favour the more flexible model: a network with hundreds of
+weights fits the training runs better than a two-constant law even when the law
+is right. Hold out whole conditions instead, for example leave one temperature
+out, fit on the rest, and compare predictions on the held-out runs. Count the
+parameters each model spends, and prefer the mechanistic law where it predicts
+the held-out conditions as well, especially when you need to extrapolate.
+
+For a positive rate spanning decades that is exactly zero below a threshold, warp
+the output and gate it in the vector field:
+
+```python
+nucleation = hm.BoundedPredictor(
+    inner=mlp, input_keys=("S",), input_bounds=(1.0, 3.0),
+    output_bounds=(1e-12, 1e-2), output_warp="log10",
+)
+# In the vector field. Keep the gate outside the network, and its input warp linear,
+# since both branches of jnp.where are evaluated.
+rate = jnp.where(S > 1.0 + 1e-5, predictors["nucleation"]({"S": S}), 0.0)
+```
+
 ### One input dict per step
 
 Build one dict of inputs in the vector field and pass it to every
@@ -125,16 +155,26 @@ rank-1 array straight to a predictor that takes the whole vector.
 
 ## Training
 
-Start with one phase, `OptaxTrainingConfig(steps=1000, lr=1e-3)`. Add a
-lower-rate phase when the loss plateaus, or a first phase with
-`horizon=0.5` when the tail of each trajectory diverges early on.
+Start with one phase, `OptaxTrainingConfig(steps=1000, lr=1e-3)`, for a model
+with networks. Add a lower-rate phase when the loss plateaus, or a first phase
+with `loss_horizon=0.5` when the tail of each trajectory diverges early on.
 
-Turn on the tournament (`tournament_attempts=8, tournament_steps=20`) when
+A model of a few `Parameter` scalars usually wants a larger rate: the shelf-life
+and Arrhenius examples use `lr=0.05` for 1500 steps. Adam still stops short of
+the maximum along a correlated direction, so finish a mechanistic fit with
+`hm.inference.make_problem(model, data, log_prior=None, noise_sd="data").optimize()`,
+which runs BFGS to the maximum likelihood.
+
+Turn on restarts (`restarts=7, restart_steps=20`) when
 `max_steps` errors appear on some seeds, or when several seeds all settle
 at a poor loss.
 
 Use Evosax for roughly 4 to 10 kinetic scalars, then refine with Optax.
 See [Training](/guide/training#evosax-then-optax).
+
+When channels differ in scale, plain MSE fits the largest and ignores the rest. Put
+measurement variances in the data and use `Objective(loss="mle")`, which divides
+each residual by them.
 
 ### Check the wiring with everything frozen
 

@@ -20,24 +20,23 @@ The compiled pieces the stock trainers are assembled from. `build_bucket_step` i
 <small>`from jaxhybridmodels.training.kernels import apply_length_mask`</small>
 
 ```python
-apply_length_mask(bp: 'BucketPayload', length_mask_fraction: 'Array') -> 'BucketPayload'
+apply_length_mask(bp: 'BucketPayload', horizon: 'Array') -> 'BucketPayload'
 ```
 
-Narrow the bucket's mask to the first ``fraction`` of its timestamps.
+Narrow the bucket's mask to the first ``horizon`` of each experiment's timeline.
 
 This masks the **loss**, never the integration: the solver still runs the
-full trajectory, and only the leading prefix of the observation times is
-scored. That is what keeps a long-horizon divergence from drowning the
-gradient early in a run.
+full trajectory, and only the measurements in the first ``horizon`` of
+each experiment's time span are scored (see
+`jaxhybridmodels.data.horizon_rows`). That is what keeps a
+long-horizon divergence from drowning the gradient early in a run.
 
-``length_mask_fraction`` stays traced rather than becoming a Python
-branch, so a phase that changes the fraction costs no recompile.
+``horizon`` stays traced rather than becoming a Python branch, so a
+phase that changes it costs no recompile. Each experiment's first
+measurement, in any channel, is always kept. A loss that reads only
+channels first measured later can still score nothing at a small horizon.
 
-The cutoff is clamped at 1. A fraction small enough to floor to zero
-would otherwise give an all-false mask, and every loss here divides by a
-count clamped at 1, so the step would silently score nothing.
-
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L64)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L194)</small>
 
 ---
 
@@ -51,6 +50,7 @@ count clamped at 1, so the step would silently score nothing.
 predict_bucket_obs(
     predictors: 'Any',
     bp: 'BucketPayload',
+    *,
     simulate_fn: 'Callable[..., Array]',
     state_to_output: 'Callable[[Array], Array]',
     solver: 'SolverConfig',
@@ -65,7 +65,7 @@ Each caller wraps it in its own ``eqx.filter_jit``, which is what keeps
 the training and prediction jit caches separate (R-J1): this body is
 traced into whichever kernel calls it.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L111)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L235)</small>
 
 ---
 
@@ -77,6 +77,7 @@ traced into whichever kernel calls it.
 
 ```python
 build_bucket_step(
+    *,
     simulate_fn: 'Callable[..., Array]',
     state_to_output: 'Callable[[Array], Array]',
     solver: 'SolverConfig',
@@ -84,14 +85,21 @@ build_bucket_step(
     trainable: 'Any',
     trajectory_penalty_fn: 'Callable[[Array, BucketPayload], Array] | None' = None,
     trajectory_penalty_weight: 'float' = 0.0,
-) -> Callable[[Any, BucketPayload, Array], tuple[Array, Any]]
+) -> Callable[..., tuple[Array, Any]]
 ```
 
-Return a jitted ``bucket_step(predictors, bp, fraction) -> (loss, grads)``.
+Return ``bucket_step(predictors, bp, horizon=1.0, share=1.0) -> (loss, grads)``.
 
-One trace per bucket shape (R-T5). Takes no ``opt_state``: the optimiser
-update lives in a separate jitted ``apply_update``, and the **bound**
-penalty is charged once per step by
+``horizon`` is the leading fraction of each experiment's timeline that
+the loss scores. ``share`` weights the bucket in the dataset loss: a
+``(data, penalty)`` pair from [`Pooling.shares`](/api/losses#poolingshares)
+multiplies the data loss and the trajectory penalty, and a scalar
+multiplies both. With the pooling shares, the plain sum over buckets is
+the loss over the whole dataset. One
+trace per bucket shape (R-T5): a new horizon or share does not retrace.
+
+Takes no ``opt_state``: the optimiser update lives in a separate jitted
+``apply_update``, and the **bound** penalty is charged once per step by
 [`build_penalty_step`](/api/kernels#build_penalty_step), outside the bucket loop. This kernel
 charges the data loss (plus any configured trajectory penalty, below).
 
@@ -104,7 +112,7 @@ in a step contributes its own trajectory penalty, unlike the bound
 penalty's once-per-step charge. When it is ``None`` (the default) the loss
 is the data term alone.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L131)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L255)</small>
 
 ---
 
@@ -116,16 +124,17 @@ is the data term alone.
 
 ```python
 build_score_bucket(
+    *,
     simulate_fn: 'Callable[..., Array]',
     state_to_output: 'Callable[[Array], Array]',
     solver: 'SolverConfig',
     loss_fn: 'Callable[[Array, BucketPayload], Array]',
     trajectory_penalty_fn: 'Callable[[Array, BucketPayload], Array] | None' = None,
     trajectory_penalty_weight: 'float' = 0.0,
-) -> Callable[[Any, BucketPayload, Array], Array]
+) -> Callable[..., Array]
 ```
 
-Return a forward-only ``score_bucket(predictors, bp, fraction) -> loss``.
+Return a forward-only ``score_bucket(predictors, bp, horizon=1.0, share=1.0) -> loss``.
 
 Scoring through ``bucket_step`` would run a full ``value_and_grad`` and
 discard the gradients, roughly tripling the cost of a scoring sweep.
@@ -134,7 +143,7 @@ two attempts. The returned score includes the data loss and, when
 configured, the trajectory penalty; the bound penalty remains
 outside this per-bucket scorer.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L192)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L338)</small>
 
 ---
 
@@ -146,7 +155,8 @@ outside this per-bucket scorer.
 
 ```python
 build_penalty_step(
-    penalty_fn: 'Callable[[Any, tuple[Array, ...]], Array]',
+    *,
+    bound_penalty_fn: 'Callable[[Any, tuple[Array, ...]], Array]',
     trainable: 'Any',
 ) -> Callable[[Any, Array, tuple[Array, ...]], tuple[Array, Any]]
 ```
@@ -162,9 +172,9 @@ bucket.
 (the output of [`select_penalty_points`](/api/penalties#select_penalty_points)),
 passed as traced arrays, so a shape change (a phase boundary) retraces
 this small kernel and nothing else. The default ``()`` suits a custom
-``penalty_fn`` that ignores points.
+``bound_penalty_fn`` that ignores points.
 
-``penalty_fn`` is the regulariser, required here and defaulted to
+``bound_penalty_fn`` is the regulariser, required here and defaulted to
 [`bound_penalty`](/api/penalties#bound_penalty) by the stock trainers.
 Passing a different callable (weight decay on inner weights, a
 monotonicity term, ...) is how a custom regulariser composes with the
@@ -172,10 +182,10 @@ loop. It must take ``(predictors, points)`` and return a scalar; a
 custom term that does not need points just ignores them.
 
 Returns the gradient of ``weight * penalty``, to add straight onto the
-averaged data gradient. ``penalty`` comes back unweighted, since that
+pooled data gradient. ``penalty`` comes back unweighted, since that
 is what gets reported.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L264)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L430)</small>
 
 ---
 
@@ -187,6 +197,7 @@ is what gets reported.
 
 ```python
 build_apply_update(
+    *,
     optimizer: 'optax.GradientTransformation',
     trainable: 'Any',
 ) -> Callable[[Any, Any, Any], tuple[Any, Any]]
@@ -198,4 +209,4 @@ The single optimiser update per training step. Build once per
 optimiser; reuse its returned state across steps, rebuilding only at a
 reset/phase boundary.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L313)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/training/kernels.py#L479)</small>

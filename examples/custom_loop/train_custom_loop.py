@@ -4,15 +4,16 @@
 pieces in ``jaxhybridmodels.training.kernels``. When you need a loop it cannot
 express, compose the same pieces instead of forking the trainer. This
 script recovers a harmonic oscillator's frequency with a loop that weights
-each bucket's loss and gradients by its experiment count, which the stock
-trainer has no option for.
+each bucket's loss and gradients by its experiment count. The stock trainer
+weights a mean-type loss like this one by each bucket's measured cells; a
+custom loop can weight however it likes.
 
 Shows:
 
 - ``build_bucket_step``, ``build_penalty_step`` and ``build_apply_update``
 - a custom loss (masked Huber) and a custom regulariser (L2 on a second
   ``Parameter``) entering a hand-written loop
-- ``eqx.tree_at`` to put the loop's predictors back into the model, then
+- ``HybridModel.with_predictors`` to put the loop's predictors back, then
   ``predict`` and ``compute_metrics`` as after ``fit``
 
 Run::
@@ -81,7 +82,7 @@ def state_to_output(state: Array) -> Array:
 
 def huber_loss(pred_obs: Array, bp) -> Array:
     """Masked Huber loss. Any ``(pred_obs, bp) -> scalar`` callable works."""
-    abs_res = jnp.abs(pred_obs - bp.y_observed)
+    abs_res = jnp.abs(pred_obs - bp.observed)
     delta = 0.1
     quadratic = jnp.minimum(abs_res, delta)
     loss = 0.5 * quadratic**2 + delta * (abs_res - quadratic)
@@ -98,8 +99,12 @@ def weight_decay(predictors, points):
 
 
 def bucket_weight(bp) -> float:
-    """Weight a bucket by its experiment count, so 3 experiments outweigh 1."""
-    return float(bp.y_observed.shape[0])
+    """Weight a bucket by its experiment count, so 3 experiments outweigh 1.
+
+    ``float(bp.mask.sum())`` would match the stock trainer, which weights a
+    mean-type loss by the measured cells in each bucket.
+    """
+    return float(bp.observed.shape[0])
 
 
 def build_dataset() -> hm.Dataset:
@@ -160,7 +165,7 @@ def main() -> None:
         loss_fn=huber_loss,
         trainable=mask,
     )
-    penalty_step = build_penalty_step(penalty_fn=weight_decay, trainable=mask)
+    penalty_step = build_penalty_step(bound_penalty_fn=weight_decay, trainable=mask)
     optimizer = optax.adamw(learning_rate=1e-2)
     apply_update = build_apply_update(optimizer=optimizer, trainable=mask)
     opt_state = optimizer.init(eqx.filter(predictors, mask))
@@ -168,8 +173,8 @@ def main() -> None:
 
     # The fraction of each time series the loss sees. 1.0 scores all of it;
     # a schedule over this value is how the stock trainer's horizon works.
-    horizon = jnp.asarray(1.0)
-    penalty_weight = jnp.asarray(0.1)
+    horizon = 1.0
+    bound_penalty_weight = jnp.asarray(0.1)
     print("\n[fit]")
     for step in range(args.steps):
         # Weighted mean over buckets of the loss and its gradient. Dividing
@@ -189,7 +194,7 @@ def main() -> None:
 
         # The regulariser is charged once per step, outside the bucket loop.
         # It ignores penalty points, so none are passed.
-        penalty, penalty_grads = penalty_step(predictors, penalty_weight, ())
+        penalty, penalty_grads = penalty_step(predictors, bound_penalty_weight, ())
         grads = jax.tree.map(jnp.add, grads, penalty_grads)
 
         predictors, opt_state = apply_update(predictors, grads, opt_state)
@@ -204,7 +209,9 @@ def main() -> None:
     print(f"recovered omega = {float(predictors['omega'].value):.4f}  (truth {OMEGA_TRUE})")
     print(f"final scale     = {float(predictors['scale'].value):.6f}  (regularised toward 0)")
 
-    fitted = eqx.tree_at(lambda m: m.predictors, model, predictors)
+    # region put-back
+    fitted = model.with_predictors(predictors)
+    # endregion put-back
     predictions = fitted.predict(ds)
     hm.print_metrics(predictions, header="custom-loop result")
 

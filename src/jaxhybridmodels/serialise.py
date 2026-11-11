@@ -39,7 +39,7 @@ Dynamic imports inside a load helper fail in confusing ways.
 Callables
 ---------
 JSON cannot encode a callable. A callable anywhere in a training config or
-an ``Objective`` (a custom ``loss``, a ``penalty_fn``, an optimizer factory,
+an ``Objective`` (a custom ``loss``, a ``bound_penalty_fn``, an optimizer factory,
 an lr schedule) is written as ``{"__callable__": "{module}.{qualname}"}``,
 and a raw ``optax.GradientTransformation`` as an ``"__opaque__"`` marker.
 ``load`` returns such a section as the raw dict rather than a typed
@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.tree_util as jtu
 import numpy as np
 import optax
@@ -93,6 +94,12 @@ def load_predictors(path: str | Path, *, like: Any) -> Any:
     every ``MLPPredictor`` leaf. The file's values overwrite its array
     leaves; its static fields supply the structure ``equinox`` needs.
     ``like`` is not mutated.
+
+    Nothing checks the static fields against the saved ones, since the file
+    holds only array leaves. A ``Parameter`` in ``like`` with different
+    bounds reads the saved latent under its own bounds and gets a different
+    value. :func:`load` records the static configuration and refuses such a
+    template.
     """
     path = Path(path)
     return eqx.tree_deserialise_leaves(path, like)
@@ -148,7 +155,7 @@ def _serialise_training_config(config: Any) -> dict[str, Any]:
 def _serialise_objective(objective: Objective) -> dict[str, Any]:
     """Return a JSON-encodable view of an ``Objective``.
 
-    Each ``penalty_points`` array becomes ``{"shape": [...], "data": [...]}``.
+    Each ``bound_penalty_points`` array becomes ``{"shape": [...], "data": [...]}``.
     The shape is kept because an empty ``[0, n_inputs]`` grid flattens to
     ``[]`` and would reload as shape ``(0,)``. Callables become
     ``__callable__`` markers.
@@ -156,20 +163,20 @@ def _serialise_objective(objective: Objective) -> dict[str, Any]:
     raw: dict[str, Any] = {
         f.name: getattr(objective, f.name) for f in dataclasses.fields(objective)
     }
-    if objective.penalty_points is not None:
-        raw["penalty_points"] = {
+    if objective.bound_penalty_points is not None:
+        raw["bound_penalty_points"] = {
             path: {"shape": list(np.shape(points)), "data": np.asarray(points).tolist()}
-            for path, points in objective.penalty_points.items()
+            for path, points in objective.bound_penalty_points.items()
         }
     return _json_safe(raw)
 
 
 def _decode_penalty_points(raw: dict[str, Any]) -> dict[str, Any]:
-    """Turn saved ``penalty_points`` entries back into arrays of their saved shape.
+    """Turn saved ``bound_penalty_points`` entries back into arrays of their saved shape.
 
     A bare nested list (the format before shapes were stored) is read as is.
     """
-    points = raw.get("penalty_points")
+    points = raw.get("bound_penalty_points")
     if not isinstance(points, dict):
         return raw
     decoded = {}
@@ -178,7 +185,7 @@ def _decode_penalty_points(raw: dict[str, Any]) -> dict[str, Any]:
             decoded[path] = np.asarray(entry["data"], dtype=float).reshape(entry["shape"])
         else:
             decoded[path] = np.asarray(entry, dtype=float)
-    return {**raw, "penalty_points": decoded}
+    return {**raw, "bound_penalty_points": decoded}
 
 
 def _build_objective(raw: dict[str, Any] | None) -> Objective | dict[str, Any] | None:
@@ -188,6 +195,9 @@ def _build_objective(raw: dict[str, Any] | None) -> Objective | dict[str, Any] |
     """
     if raw is None:
         return None
+    raw = _renamed(raw, _RENAMED_OBJECTIVE_FIELDS)
+    if isinstance(raw.get("loss"), str):
+        raw["loss"] = _RENAMED_LOSSES.get(raw["loss"], raw["loss"])
     raw = _decode_penalty_points(raw)
     if _contains_serialised_callable(raw):
         return raw
@@ -323,6 +333,11 @@ def _build_history(raw: dict[str, Any] | None) -> FitHistory:
         penalty=tuple(_decode_float(v) for v in raw.get("penalty", ())),
         phase=tuple(int(v) for v in raw.get("phase", ())),
         validation_loss=tuple(_decode_float(v) for v in raw.get("validation_loss", ())),
+        failed_candidates=tuple(int(v) for v in raw.get("failed_candidates", ())),
+        restart_scores=tuple(
+            _decode_float(v) for v in raw.get("restart_scores", raw.get("tournament_scores", ()))
+        ),
+        gap_term=tuple(_decode_float(v) for v in raw.get("gap_term", raw.get("continuity", ()))),
     )
 
 
@@ -351,7 +366,7 @@ def save(
         structural fingerprint ``load`` checks ``like`` against),
         ``output_channel_names``, ``solver`` (``SolverConfig.to_dict()``),
         ``config`` (``{"kind": "optax" | "evosax", "fields": {...}}``),
-        ``objective``, ``history`` (the four ``FitHistory`` series),
+        ``objective``, ``history`` (every ``FitHistory`` series),
         ``best_step``, ``stop_reason`` and ``extras``. Callables are
         described, not pickled (see the module docstring).
 
@@ -373,12 +388,17 @@ def save(
         "version": _resolve_version(),
         "predictors": _describe_predictors(model.predictors),
         "output_channel_names": list(model.output_channel_names),
+        "x64": bool(jax.config.read("jax_enable_x64")),
         "solver": _solver_metadata(model.solver),
         "config": _serialise_config(config) if config is not None else None,
         "objective": _serialise_objective(objective) if objective is not None else None,
         "history": _serialise_history(result.history) if result is not None else None,
         "best_step": result.best_step if result is not None else None,
         "stop_reason": result.stop_reason if result is not None else None,
+        "measured_loss": _json_safe(result.measured_loss) if result is not None else None,
+        "measured_validation": (
+            _json_safe(result.measured_validation) if result is not None else None
+        ),
         "extras": dict(extras) if extras is not None else {},
     }
     encoded = json.dumps(metadata, indent=2, sort_keys=True)
@@ -442,6 +462,67 @@ def _coerce_tuple_fields(cls: type, kwargs: dict[str, Any]) -> dict[str, Any]:
     return coerced
 
 
+# Field names changed before 0.3.0 was released, mapped so a run saved under an
+# older name still loads. Old name to new name, per object.
+_RENAMED_CONFIG_FIELDS = {
+    "sigma_init": "init_sigma",
+    "tournament_steps": "restart_steps",
+    "tournament_lr": "restart_lr",
+    "patience": "patience_steps",
+}
+_RENAMED_EVOSAX_FIELDS = {"steps": "generations"}
+_RENAMED_PHASE_FIELDS = {
+    "horizon": "loss_horizon",
+    "segments": "shooting_segments",
+    "penalty_weight": "bound_penalty_weight",
+}
+_RENAMED_OBJECTIVE_FIELDS = {
+    "penalty_weight": "bound_penalty_weight",
+    "penalty_points": "bound_penalty_points",
+    "penalty_fn": "bound_penalty_fn",
+}
+_RENAMED_LOSSES = {"bal_mse": "per_experiment_mse", "bal_mle": "per_experiment_mle"}
+# Static scaler fields, as they appear at the end of a saved fingerprint path.
+_RENAMED_STATIC_FIELDS = {
+    "transform": "squash",
+    "logit_eps": "edge_eps",
+    "z_knee": "saturation_knee",
+}
+
+
+def _renamed(raw: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
+    """``raw`` with every key in ``names`` replaced by its new name."""
+    return {names.get(name, name): value for name, value in raw.items()}
+
+
+def _upgrade_config_fields(kind: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """Map a saved config's pre-0.3.0 field names and values onto the current ones.
+
+    ``tournament_attempts`` counted every candidate, the user's start included;
+    ``restarts`` counts only the redrawn ones, so the value drops by one.
+    """
+    fields = _renamed(fields, _RENAMED_CONFIG_FIELDS)
+    if "tournament_attempts" in fields:
+        fields["restarts"] = int(fields.pop("tournament_attempts")) - 1
+    if kind == "evosax":
+        fields = _renamed(fields, _RENAMED_EVOSAX_FIELDS)
+        if fields.get("init") == "warm":
+            fields["init"] = "current"
+    if "phases" in fields:
+        fields["phases"] = [_renamed(phase, _RENAMED_PHASE_FIELDS) for phase in fields["phases"]]
+    return fields
+
+
+def _upgrade_static(static: dict[str, Any]) -> dict[str, Any]:
+    """A saved fingerprint's static entries under the current scaler field names."""
+    upgraded = {}
+    for path, value in static.items():
+        head, _, last = path.rpartition(".")
+        last = _RENAMED_STATIC_FIELDS.get(last, last)
+        upgraded[f"{head}.{last}" if head else last] = value
+    return upgraded
+
+
 def _build_training_config(raw: dict[str, Any] | None) -> Any:
     """Rebuild a training config from its tagged dict.
 
@@ -456,6 +537,10 @@ def _build_training_config(raw: dict[str, Any] | None) -> Any:
     if _contains_serialised_callable(fields):
         return fields
     cls = _CONFIG_TYPES[raw["kind"]]
+    # 0.2 kept the display switch on the config. It never affected a result,
+    # so dropping it cannot change the configuration a run was trained with.
+    fields = {name: value for name, value in fields.items() if name != "verbose"}
+    fields = _upgrade_config_fields(raw["kind"], fields)
     kwargs = _filter_dataclass_kwargs(cls, fields)
     kwargs = _coerce_tuple_fields(cls, kwargs)
     if "phases" in kwargs:
@@ -499,6 +584,11 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
         )
 
     saved_description = metadata.get("predictors", {})
+    if "static" in saved_description:
+        saved_description = {
+            **saved_description,
+            "static": _upgrade_static(saved_description["static"]),
+        }
     actual_description = _describe_predictors(like.predictors)
     for field in ("tree_structure", "leaves", "static"):
         if field in saved_description and saved_description[field] != actual_description[field]:
@@ -513,6 +603,22 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
             f"like.output_channel_names {like.output_channel_names}"
         )
 
+    # The predictors file holds arrays in the precision they were saved at, so
+    # name a mismatch here instead of letting a dtype error surface below.
+    saved_x64, x64 = metadata.get("x64"), bool(jax.config.read("jax_enable_x64"))
+    if saved_x64 is False and x64:
+        raise ValueError(
+            "load: the run was saved in float32 (jax_enable_x64 off), but x64 is on now. "
+            "Load it with x64 off, or save it again with x64 on."
+        )
+    if saved_x64 and not x64:
+        warnings.warn(
+            "load: the run was saved in float64 (jax_enable_x64 on) and is read back in "
+            "float32, which rounds every value",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     saved_solver = metadata.get("solver")
     if saved_solver is not None and saved_solver != _solver_metadata(like.solver):
         warnings.warn(
@@ -522,7 +628,7 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
             stacklevel=2,
         )
 
-    model = like._with_predictors(
+    model = like.with_predictors(
         load_predictors(directory / _PREDICTORS_FILENAME, like=like.predictors)
     )
     return SavedRun(
@@ -530,6 +636,16 @@ def load(path: str | Path, *, like: HybridModel) -> SavedRun:
         history=_build_history(metadata.get("history")),
         best_step=metadata.get("best_step"),
         stop_reason=metadata.get("stop_reason"),
+        measured_loss=(
+            None
+            if metadata.get("measured_loss") is None
+            else _decode_float(metadata["measured_loss"])
+        ),
+        measured_validation=(
+            None
+            if metadata.get("measured_validation") is None
+            else _decode_float(metadata["measured_validation"])
+        ),
         config=_build_training_config(metadata.get("config")),
         objective=_build_objective(metadata.get("objective")),
         extras=metadata.get("extras", {}),

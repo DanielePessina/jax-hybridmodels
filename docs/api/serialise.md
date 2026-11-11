@@ -24,6 +24,7 @@
 save(
     path: 'str | Path',
     run: 'HybridModel | FitResult',
+    *,
     config: 'OptaxTrainingConfig | EvosaxTrainingConfig | None' = None,
     objective: 'Objective | None' = None,
     extras: 'dict[str, Any] | None' = None,
@@ -47,14 +48,14 @@ Read it back with [`load`](/api/serialise#load).
     structural fingerprint ``load`` checks ``like`` against),
     ``output_channel_names``, ``solver`` (``SolverConfig.to_dict()``),
     ``config`` (``{"kind": "optax" | "evosax", "fields": {...}}``),
-    ``objective``, ``history`` (the four ``FitHistory`` series),
+    ``objective``, ``history`` (every ``FitHistory`` series),
     ``best_step``, ``stop_reason`` and ``extras``. Callables are
     described, not pickled (see the module docstring).
 
 The directory is created, parents included. Existing files are
 overwritten.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L329)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L344)</small>
 
 ---
 
@@ -85,7 +86,7 @@ installed one, when ``like`` does not match the saved predictors or
 channel names, or when a saved config has a field the current class
 does not know.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L466)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L551)</small>
 
 ---
 
@@ -104,6 +105,8 @@ SavedRun(
     config: 'OptaxTrainingConfig | EvosaxTrainingConfig | dict[str, Any] | None',
     objective: 'Objective | dict[str, Any] | None',
     extras: 'dict[str, Any]',
+    measured_loss: 'float | None' = None,
+    measured_validation: 'float | None' = None,
 ) -> None
 ```
 
@@ -116,12 +119,24 @@ A run read back by [`load`](/api/serialise#load).
 ``FitHistory`` and None.
 
 ``config`` and ``objective`` come back as typed objects. A section that
-names a callable (a custom loss, a ``penalty_fn``, an optimizer factory,
+names a callable (a custom loss, a ``bound_penalty_fn``, an optimizer factory,
 an lr schedule) cannot be rebuilt, so it comes back as the raw dict
 with each callable as ``{"__callable__": "module.qualname"}``; rebind
 those fields yourself. ``extras`` is the dict passed to ``save``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L160)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L244)</small>
+
+<a id="savedrunsummary"></a>
+
+#### `SavedRun.summary()`
+
+```python
+summary(self, data: 'Any' = None) -> 'str'
+```
+
+The report [`FitResult.summary`](/api/model#fitresultsummary) gives, for a run read back from disk.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L271)</small>
 
 ---
 
@@ -141,7 +156,7 @@ Write ``predictors`` to ``path`` via ``eqx.tree_serialise_leaves``.
 the container shape, writing a flat binary stream of ``np.save``-encoded
 leaves. The caller picks the file extension; ``save`` uses ``.eqx``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L77)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L78)</small>
 
 ---
 
@@ -163,4 +178,10 @@ every ``MLPPredictor`` leaf. The file's values overwrite its array
 leaves; its static fields supply the structure ``equinox`` needs.
 ``like`` is not mutated.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L88)</small>
+Nothing checks the static fields against the saved ones, since the file
+holds only array leaves. A ``Parameter`` in ``like`` with different
+bounds reads the saved latent under its own bounds and gets a different
+value. [`load`](/api/serialise#load) records the static configuration and refuses such a
+template.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/serialise.py#L89)</small>

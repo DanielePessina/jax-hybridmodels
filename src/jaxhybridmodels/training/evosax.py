@@ -11,7 +11,7 @@ This loop targets small kinetic predictors, roughly 4 to 10 trainable
 scalars. Use ``jaxhybridmodels.training.optax`` for network-sized fits, or
 run this first and polish with Optax afterwards.
 
-There are no phases. The run is ``steps`` generations over a population of
+There are no phases. The run is ``generations`` generations over a population of
 ``population_size`` individuals; one generation is the Evosax step.
 
 JIT boundary
@@ -28,20 +28,34 @@ parallel.
 
 Initial-population modes
 ------------------------
-``"warm"``
-    CMA-ES starts with ``mean = flat`` and ``std = sigma_init``. Its
+``"current"``
+    CMA-ES starts with ``mean = flat`` and ``std = init_sigma``. Its
     first ``ask`` produces the initial population.
 ``"uniform_box"``
     A per-individual ``flat + Uniform(-extent, extent)`` is built
     host-side and **evaluated directly in generation 0**, bypassing
-    CMA-ES's first ``ask``. The strategy is still initialised with
-    ``mean = flat``, so the following ``tell`` updates its mean and
-    covariance consistently with the rest of the run.
+    CMA-ES's first ``ask``. The strategy is initialised with ``mean =
+    flat`` and a step size of ``extent / sqrt(3)``, the standard deviation
+    of that box, so the following ``tell`` reads the injected offsets as
+    steps of their true size. With ``init_sigma`` there, a box wider than
+    the step size reads as huge steps and the next generation spreads far
+    past the box.
 ``"lhs_box"``
     Same shape as ``uniform_box`` with offsets from
     ``scipy.stats.qmc.LatinHypercube``, computed host-side (``scipy`` is
     a hard dependency). Skipping the first ``ask`` is required here: a
     prescribed LHS pattern reaches generation 0 only by direct injection.
+
+Failed candidates
+-----------------
+The population is solved with ``SolverConfig.throw`` off, so a candidate
+whose solve fails gets a non-finite fitness instead of raising for the
+whole population. Host-side, those candidates are given a fitness just
+above the generation's worst finite one, so CMA-ES ranks them last and the
+search goes on. ``history.failed_candidates`` counts them per generation.
+A generation where every candidate fails ends the run. A ``simulate_fn``
+that calls ``diffrax.diffeqsolve`` itself must pass ``throw=solver.throw``
+for this to apply; one that ignores it still fails the generation.
 
 Best-ever tracking
 ------------------
@@ -60,6 +74,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -83,17 +98,22 @@ from jaxhybridmodels.rng import fold
 from jaxhybridmodels.solver import SolverConfig
 from jaxhybridmodels.trainable import FreezeSpec, trainable_mask
 from jaxhybridmodels.training.kernels import (
+    FIT_FAILURES,
     build_dataset_score,
     build_score_bucket,
+    failure_details,
+    failure_summary,
     simulate_bucket,
+    split_share,
 )
 from jaxhybridmodels.ui.base import EvosaxUI, SilentUI, close_run_on_error
 from jaxhybridmodels.ui.evosax import RichEvosaxUI
+from jaxhybridmodels.ui.plain import PlainEvosaxUI, live_display_available
 
 if TYPE_CHECKING:
     from jaxhybridmodels.model import HybridModel
 
-_SUPPORTED_INIT_MODES: tuple[str, ...] = ("warm", "uniform_box", "lhs_box")
+_SUPPORTED_INIT_MODES: tuple[str, ...] = ("current", "uniform_box", "lhs_box")
 
 ALGORITHM_REGISTRY: dict[str, type] = {
     "CMA_ES": CMA_ES,
@@ -136,35 +156,33 @@ class EvosaxTrainingConfig:
         another strategy with :func:`register_algorithm`.
     population_size
         Individuals per generation, evaluated in parallel through ``vmap``.
-    steps
-        Number of generations, run in sequence. Named like the Optax
-        config's ``steps``: one generation is one Evosax step.
+    generations
+        Number of generations, run in sequence. Each one solves the whole
+        population once.
     init
-        Initial-population scheme, one of ``"warm"``, ``"uniform_box"``,
-        ``"lhs_box"``. The module docstring explains the difference.
+        Initial-population scheme: ``"current"`` centres the search on the
+        current values, ``"uniform_box"`` and ``"lhs_box"`` draw the first
+        population in a box around them. The module docstring explains the
+        difference.
     init_box_extent
         Half-width of the box for ``"uniform_box"`` and ``"lhs_box"``.
-        Ignored by ``"warm"``.
-    sigma_init
-        Initial CMA-ES step size. Used directly by ``"warm"`` and as the
-        prior step size for the box-init modes. CMA-ES adapts it after
-        the first ``tell``.
+        Ignored by ``"current"``.
+    init_sigma
+        Initial CMA-ES step size for ``"current"``. The box-init modes start
+        at the box's own standard deviation, ``init_box_extent / sqrt(3)``,
+        instead. CMA-ES adapts it after the first ``tell``.
     log_every
         UI heartbeat cadence. Honoured only by the Rich UIs; the silent
         and recording UIs see every generation.
-    verbose
-        Selects ``RichEvosaxUI`` over ``SilentUI`` when ``ui=None``. An
-        explicit ``ui=...`` argument always wins.
     """
 
     algorithm: str = "CMA_ES"
     population_size: int = 64
-    steps: int = 100
-    init: Literal["warm", "uniform_box", "lhs_box"] = "warm"
+    generations: int = 100
+    init: Literal["current", "uniform_box", "lhs_box"] = "current"
     init_box_extent: float = 2.0
-    sigma_init: float = 0.1
+    init_sigma: float = 0.1
     log_every: int = 1
-    verbose: bool = True
 
     def __post_init__(self) -> None:
         if self.algorithm not in ALGORITHM_REGISTRY:
@@ -179,12 +197,12 @@ class EvosaxTrainingConfig:
             )
         if self.population_size <= 0:
             raise ValueError("EvosaxTrainingConfig.population_size must be > 0")
-        if self.steps <= 0:
-            raise ValueError("EvosaxTrainingConfig.steps must be > 0")
+        if self.generations <= 0:
+            raise ValueError("EvosaxTrainingConfig.generations must be > 0")
         if not math.isfinite(self.init_box_extent) or self.init_box_extent < 0.0:
             raise ValueError("EvosaxTrainingConfig.init_box_extent must be finite and non-negative")
-        if not math.isfinite(self.sigma_init) or self.sigma_init <= 0.0:
-            raise ValueError("EvosaxTrainingConfig.sigma_init must be finite and positive")
+        if not math.isfinite(self.init_sigma) or self.init_sigma <= 0.0:
+            raise ValueError("EvosaxTrainingConfig.init_sigma must be finite and positive")
         if self.log_every < 1:
             raise ValueError("EvosaxTrainingConfig.log_every must be at least 1")
 
@@ -194,13 +212,14 @@ def _build_single_eval(
     static_predictor: Any,
     unflatten: Callable[[Array], Any],
     bucket_payloads: tuple[BucketPayload, ...],
+    shares: tuple[Array, ...],
     simulate_fn: Callable[..., Array],
     state_to_output: Callable[[Array], Array],
     solver: SolverConfig,
     loss_fn: Callable[[Array, BucketPayload], Array],
-    penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
-    penalty_points: tuple[Array, ...] = (),
-    penalty_weight: float,
+    bound_penalty_fn: Callable[[Any, tuple[Array, ...]], Array],
+    bound_penalty_points: tuple[Array, ...] = (),
+    bound_penalty_weight: float,
     trajectory_penalty_fn: Callable[[Array, BucketPayload], Array] | None = None,
     trajectory_penalty_weight: float = 0.0,
 ) -> Callable[[Array], Array]:
@@ -212,11 +231,12 @@ def _build_single_eval(
     and the resolved loss. The bucket loop unrolls inside the trace, so
     the multi-bucket forward pass becomes one fused kernel.
 
-    Loss aggregation across buckets is a simple average, matching the Optax
-    training step. Each bucket therefore contributes one equally weighted
-    term, regardless of how many distinct timestamp lengths the dataset has.
+    Each bucket's loss is weighted by its pooling share
+    (:meth:`~jaxhybridmodels.losses.Pooling.shares`), as in the Optax
+    training step, so the fitness is the loss over the whole dataset however
+    the experiments were split into buckets.
 
-    The bound penalty evaluates at ``penalty_points``, the per-leaf point
+    The bound penalty evaluates at ``bound_penalty_points``, the per-leaf point
     arrays selected host-side by the caller (the output of
     :func:`jaxhybridmodels.penalties.select_penalty_points`). Evosax has no
     length-mask curriculum, so every observed cell counts.
@@ -232,14 +252,20 @@ def _build_single_eval(
         predictor = eqx.combine(params, static_predictor)
 
         total = jnp.asarray(0.0)
-        for bp in bucket_payloads:
+        solved = jnp.asarray(True)
+        for bp, share in zip(bucket_payloads, shares, strict=True):
             full_state = simulate_bucket(predictor, bp, simulate_fn=simulate_fn, solver=solver)
+            # The loss reads measured cells only, so a solve that fails after the
+            # last measurement could still score finite. Any non-finite state is a
+            # failure, as it is for inference.
+            solved = solved & jnp.all(jnp.isfinite(full_state))
             pred_obs = jax.vmap(state_to_output)(full_state)
-            total = total + loss_fn(pred_obs, bp)
+            data_share, penalty_share = split_share(share)
+            total = total + data_share * loss_fn(pred_obs, bp)
             if trajectory_penalty_fn is not None and trajectory_penalty_weight != 0.0:
-                total = total + trajectory_penalty_weight * trajectory_penalty_fn(full_state, bp)
-        total = total / float(max(len(bucket_payloads), 1))
-        if penalty_weight > 0.0:
+                penalty = trajectory_penalty_fn(full_state, bp)
+                total = total + penalty_share * trajectory_penalty_weight * penalty
+        if bound_penalty_weight > 0.0:
             # The search roams the latent space with nothing holding it in
             # range, and the squash keeps the physical output legal however
             # far the latent drifts, so an individual parked deep in
@@ -250,8 +276,8 @@ def _build_single_eval(
             # Folded into the fitness because evosax ranks by one scalar
             # with no aux channel. The weight is a closed-over Python float,
             # never traced, so it stays out of the vmap.
-            total = total + penalty_weight * penalty_fn(predictor, penalty_points)
-        return total
+            total = total + bound_penalty_weight * bound_penalty_fn(predictor, bound_penalty_points)
+        return jnp.where(solved, total, jnp.inf)
 
     return single_eval
 
@@ -265,9 +291,10 @@ def _build_strategy(
 
     The strategy class comes from ``ALGORITHM_REGISTRY``. The returned
     ``params`` are the strategy's frozen hyperparameters with ``std_init``
-    set to ``config.sigma_init``.
+    set to ``config.init_sigma``, or to the box's standard deviation,
+    ``init_box_extent / sqrt(3)``, for a box-init population.
 
-    The ``sigma_init`` override is a property of the CMA-ES family. A
+    The ``init_sigma`` override is a property of the CMA-ES family. A
     strategy whose ``default_params`` lacks ``std_init`` (e.g. many of
     evosax's gradient-free search strategies) cannot take the override, so
     it is refused with a message pointing at ``register_algorithm`` rather
@@ -275,12 +302,19 @@ def _build_strategy(
     """
     strategy_cls = ALGORITHM_REGISTRY[config.algorithm]
     strategy = strategy_cls(population_size=config.population_size, solution=flat)
+    # A box-init population is told to the strategy as its first generation,
+    # so the step size must match the box's spread, not init_sigma.
+    sigma = (
+        config.init_box_extent / math.sqrt(3.0)
+        if config.init in ("uniform_box", "lhs_box") and config.init_box_extent > 0.0
+        else config.init_sigma
+    )
     try:
-        params = dataclasses.replace(strategy.default_params, std_init=config.sigma_init)
+        params = dataclasses.replace(strategy.default_params, std_init=sigma)
     except TypeError as exc:
         raise ValueError(
             f"EvosaxTrainingConfig.algorithm={config.algorithm!r} does not carry a "
-            "std_init hyperparameter, so config.sigma_init cannot be applied. "
+            "std_init hyperparameter, so config.init_sigma cannot be applied. "
             "Register a CMA-ES-family strategy (e.g. CMA_ES, Sep_CMA_ES, SimpleES) "
             "via register_algorithm(name, cls)."
         ) from exc
@@ -319,20 +353,54 @@ def _box_population(
         sample = sampler.random(n=config.population_size)  # shape [pop, n], [0, 1]
         scaled = (sample * 2.0 - 1.0) * extent
         return flat[None, :] + jnp.asarray(scaled, dtype=flat.dtype)
-    # The "warm" mode is handled by the caller (CMA-ES's own ask); we should
+    # The "current" mode is handled by the caller (CMA-ES's own ask); we should
     # never be invoked with it.
     raise ValueError(f"_box_population called with non-box init {config.init!r}")
 
 
+def _solver_error(
+    predictors: Any, dataset: Dataset, *, simulate_fn: Callable[..., Array], solver: SolverConfig
+) -> BaseException | None:
+    """The error a solve of ``predictors`` raises with the user's own solver, if any.
+
+    The population solves with ``throw`` off, so a failure shows only as a
+    non-finite fitness. Re-solving one candidate with ``throw`` on recovers
+    diffrax's message, such as an exhausted step budget, which
+    ``failure_details`` turns into advice. ``None`` when it solves, so the
+    non-finite value came from the loss or the penalty instead.
+    """
+    solve = eqx.filter_jit(simulate_bucket)
+    try:
+        for bp in dataset.bucket_payloads:
+            jax.block_until_ready(solve(predictors, bp, simulate_fn=simulate_fn, solver=solver))  # type: ignore[no-untyped-call]
+    except FIT_FAILURES as exc:
+        return exc
+    return None
+
+
+def _rank_failures_last(fitness: Array, finite: Array) -> Array:
+    """``fitness`` with each non-finite entry set just above the worst finite one.
+
+    CMA-ES ranks by fitness, so a failed candidate then counts as the worst
+    in its generation without an inf or NaN reaching the strategy's update.
+    At least one entry must be finite.
+    """
+    worst = jnp.max(jnp.where(finite, fitness, -jnp.inf))
+    return jnp.where(finite, fitness, worst + jnp.abs(worst) + 1.0)
+
+
 def _select_ui(ui: EvosaxUI | None, verbose: bool, log_every: int) -> EvosaxUI:
     """Pick the concrete UI. An explicit ``ui`` always wins, and otherwise
-    ``verbose`` toggles between ``RichEvosaxUI`` and ``SilentUI``. The
-    config's ``log_every`` throttles the Rich UI's recent-generation table."""
+    ``verbose`` shows ``RichEvosaxUI``, or plain lines if nothing can redraw,
+    and otherwise ``SilentUI``. The config's ``log_every`` throttles the Rich
+    UI's recent-generation table."""
     if ui is not None:
         return ui
-    if verbose:
+    if not verbose:
+        return SilentUI()
+    if live_display_available():
         return RichEvosaxUI(log_every=log_every)
-    return SilentUI()
+    return PlainEvosaxUI()
 
 
 @dataclass
@@ -340,15 +408,24 @@ class _EvosaxRun:
     """What one :func:`_train_with_evosax` run produced, generation by generation.
 
     ``loss`` is the best-so-far fitness after each generation (monotone).
-    ``validation`` holds the validation score of each generation's best
+    ``failed`` counts the candidates whose fitness was non-finite in each
+    generation. ``validation`` holds the validation score of each generation's best
     individual and is empty without a validation set. ``best_step`` indexes
-    both at the returned predictors.
+    both at the returned predictors. ``failure`` says why the run ended early
+    on a solver error or a non-finite fitness, and is ``None`` otherwise.
+    ``selected_loss`` and ``selected_validation`` are the training fitness and
+    validation score of the candidate validation chose, which may be the
+    starting point, and ``None`` without validation.
     """
 
     predictors: Any
     loss: list[float]
+    failed: list[int]
     validation: list[float]
     best_step: int
+    failure: str | None = None
+    selected_loss: float | None = None
+    selected_validation: float | None = None
 
 
 def train_with_evosax(
@@ -361,27 +438,32 @@ def train_with_evosax(
     freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
     trainable: Any = None,
     ui: EvosaxUI | None = None,
+    verbose: bool = True,
     validation: Data | None = None,
 ) -> FitResult:
     """Train ``model``'s predictors with an evolutionary strategy; ``fit`` for an Evosax config.
 
-    Runs ``config.steps`` generations over a population of
+    Runs ``config.generations`` generations over a population of
     ``config.population_size`` candidates, taking no gradient. See the
     module docstring for the JIT boundary and the initial-population modes.
     Every keyword means what it does for :meth:`HybridModel.fit
     <jaxhybridmodels.HybridModel.fit>`, and ``data`` and ``validation`` may
     be a ``Dataset`` or a list of experiments.
 
-    Each individual's fitness is the bucket-averaged data loss plus any
-    trajectory penalty plus ``objective.penalty_weight`` times the bound
+    Each individual's fitness is the pooled data loss plus any
+    trajectory penalty plus ``objective.bound_penalty_weight`` times the bound
     penalty, since evosax ranks by one scalar.
 
-    ``history.loss`` is the best fitness so far after each generation, so
-    it is monotone non-increasing; Optax records the raw per-step loss
-    instead, so the two series mean different things. Without
-    ``validation`` the returned model is rebuilt from the lowest-loss
-    candidate seen in any generation, the warm-up evaluation of the input
-    included. With it, each generation's best is scored on the validation
+    A candidate whose solve fails ranks last instead of failing the
+    generation, and ``history.failed_candidates`` counts them; see the
+    module docstring.
+
+    ``history.loss`` is each generation's best fitness, so like the Optax
+    per-step loss it can go up as well as down; ``min`` over it gives the
+    best so far. Without ``validation`` the returned model is rebuilt from
+    the lowest-loss candidate seen in any generation, the warm-up
+    evaluation of the input included, and ``measured_loss`` is its
+    fitness. With it, each generation's best is scored on the validation
     set and the returned model is the one that scored lowest there.
     """
     if not isinstance(config, EvosaxTrainingConfig):
@@ -389,26 +471,46 @@ def train_with_evosax(
             f"train_with_evosax takes an EvosaxTrainingConfig; got {type(config).__name__}"
         )
     dataset, validation_set, mask = model._prepare_fit(
-        data, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
+        data, key=key, validation=validation, freeze=freeze, trainable=trainable, caller="fit"
     )
-    run = _train_with_evosax(
-        model.predictors,
-        dataset,
-        config,
-        objective=objective,
-        simulate_fn=model.simulate_fn,
-        state_to_output=model.state_to_output,
-        solver=model.solver,
-        trainable=mask,
-        key=key,
-        ui=ui,
-        validation=validation_set,
-    )
+    try:
+        run = _train_with_evosax(
+            model.predictors,
+            dataset,
+            config,
+            objective=objective,
+            simulate_fn=model.simulate_fn,
+            state_to_output=model.state_to_output,
+            solver=model.solver,
+            trainable=mask,
+            key=key,
+            ui=ui,
+            verbose=verbose,
+            validation=validation_set,
+        )
+    except FIT_FAILURES as exc:
+        # The warm-up evaluates copies of the starting values, so they can be re-solved.
+        details = failure_details(
+            exc,
+            model.predictors,
+            dataset=dataset,
+            simulate_fn=model.simulate_fn,
+            solver=model.solver,
+        )
+        if details:
+            exc.add_note(details)
+        raise
     return FitResult(
-        model=model._with_predictors(run.predictors),
-        history=FitHistory(loss=tuple(run.loss), validation_loss=tuple(run.validation)),
+        model=model.with_predictors(run.predictors),
+        history=FitHistory(
+            loss=tuple(run.loss),
+            validation_loss=tuple(run.validation),
+            failed_candidates=tuple(run.failed),
+        ),
         best_step=run.best_step,
-        stop_reason="budget_exhausted",
+        stop_reason="budget_exhausted" if run.failure is None else "diverged",
+        measured_loss=run.selected_loss,
+        measured_validation=run.selected_validation,
     )
 
 
@@ -424,6 +526,7 @@ def _train_with_evosax(
     trainable: Any = None,
     key: Array,
     ui: EvosaxUI | None = None,
+    verbose: bool = True,
     validation: Dataset | None = None,
 ) -> _EvosaxRun:
     """Train loose predictors and return the per-generation record.
@@ -450,7 +553,7 @@ def _train_with_evosax(
     # Resolved before the dashboard opens, so a bad channel name or penalty
     # path raises without leaving a Rich Live display on the terminal.
     resolved = resolve_objective(
-        objective, predictors, dataset, penalty_on=objective.penalty_weight > 0.0
+        objective, predictors, dataset, penalty_on=objective.bound_penalty_weight > 0.0
     )
     loss_fn = resolved.loss_fn
 
@@ -465,23 +568,33 @@ def _train_with_evosax(
             trajectory_penalty_weight=objective.trajectory_penalty_weight,
         )
         select_score = build_dataset_score(
-            score_bucket, validation, output_channel_names=dataset.output_channel_names
+            score_bucket,
+            validation,
+            pooling=resolved.pooling,
+            output_channel_names=dataset.output_channel_names,
         )
 
-    ui_ = _select_ui(ui, config.verbose, config.log_every)
-    ui_.on_run_start(total_steps=int(config.steps), population_size=int(config.population_size))
+    # One failed solve must not raise for the whole vmapped population, so
+    # failures come back as non-finite fitness and are ranked last below.
+    population_solver = dataclasses.replace(solver, throw=False)
+
+    ui_ = _select_ui(ui, verbose, config.log_every)
+    ui_.on_run_start(
+        total_steps=int(config.generations), population_size=int(config.population_size)
+    )
     with close_run_on_error(ui_):
         single_eval = _build_single_eval(
             static_predictor=static_predictors,
             unflatten=unflatten,
             bucket_payloads=bucket_payloads,
+            shares=resolved.pooling.shares(bucket_payloads),
             simulate_fn=simulate_fn,
             state_to_output=state_to_output,
-            solver=solver,
+            solver=population_solver,
             loss_fn=loss_fn,
-            penalty_fn=objective.bound_penalty_fn,
-            penalty_points=select_penalty_points(resolved.sources, resolved.extras, 1.0),
-            penalty_weight=float(objective.penalty_weight),
+            bound_penalty_fn=objective.resolved_bound_penalty_fn,
+            bound_penalty_points=select_penalty_points(resolved.sources, resolved.extras, 1.0),
+            bound_penalty_weight=float(objective.bound_penalty_weight),
             trajectory_penalty_fn=objective.trajectory_penalty_fn,
             trajectory_penalty_weight=objective.trajectory_penalty_weight,
         )
@@ -496,16 +609,21 @@ def _train_with_evosax(
         warm_pop = jnp.broadcast_to(flat0[None, :], (config.population_size, flat0.shape[0]))
         warm_fitness = population_eval(warm_pop)
         jax.block_until_ready(warm_fitness)  # type: ignore[no-untyped-call]
+
+        def rebuild(flat: Array) -> Any:
+            return eqx.combine(unflatten(flat), static_predictors)
+
+        def failed_solve(flat: Array, message: str) -> BaseException:
+            found = _solver_error(rebuild(flat), dataset, simulate_fn=simulate_fn, solver=solver)
+            return FloatingPointError(message) if found is None else found
+
         if not bool(jnp.all(jnp.isfinite(warm_fitness))):
-            raise FloatingPointError("non-finite fitness in the initial population")
+            raise failed_solve(flat0, "non-finite fitness in the initial population")
         ui_.on_compile_done(bucket_idx=0)
 
         strategy, strat_params = _build_strategy(config=config, flat=flat0)
         init_key = fold(key, "evosax_init")
         state = strategy.init(init_key, flat0, strat_params)
-
-        def rebuild(flat: Array) -> Any:
-            return eqx.combine(unflatten(flat), static_predictors)
 
         # Best-ever bookkeeping starts from the warm-up evaluation, so an
         # unlucky initial population cannot replace a perfectly good seed.
@@ -514,14 +632,26 @@ def _train_with_evosax(
         best_flat = jnp.asarray(warm_pop[best_idx])
         best_step = 0
         # With a validation set, selection follows the validation score of each
-        # generation's best individual instead of the training fitness.
+        # generation's best individual instead of the training fitness. The
+        # warm-up best is scored too, so here also a short or wide search
+        # cannot replace a good seed with a worse one.
         best_selection = math.inf
         selected_flat = best_flat
+        selected_loss = best_loss
+        if select_score is not None:
+            try:
+                best_selection = select_score(rebuild(best_flat))
+            except (*FIT_FAILURES, FloatingPointError):
+                # A start that does not validate is simply not a candidate.
+                best_selection = math.inf
 
         history: list[float] = []
+        failed: list[int] = []
+        warned = False
         selection: list[float] = []
+        failure: str | None = None
 
-        for gen in range(int(config.steps)):
+        for gen in range(int(config.generations)):
             ask_key = fold(key, f"evosax_ask_{gen}")
             if gen == 0 and config.init in ("uniform_box", "lhs_box"):
                 # Inject the box-init population directly, skipping CMA-ES's
@@ -533,42 +663,94 @@ def _train_with_evosax(
             else:
                 population, state = strategy.ask(ask_key, state, strat_params)
 
-            fitness = population_eval(population)
-            if not bool(jnp.all(jnp.isfinite(fitness))):
-                raise FloatingPointError(f"non-finite fitness in generation {gen}")
+            try:
+                fitness = population_eval(population)
+                finite = jnp.isfinite(fitness)
+                n_failed = int(fitness.shape[0] - jnp.sum(finite))
+                if n_failed == fitness.shape[0]:
+                    raise failed_solve(
+                        population[0],
+                        f"every candidate in generation {gen} has a non-finite fitness",
+                    )
+                if n_failed:
+                    fitness = _rank_failures_last(fitness, finite)
+                gen_best_idx = int(jnp.argmin(fitness))
+                gen_flat = jnp.asarray(population[gen_best_idx])
+                score = None
+                if select_score is not None:
+                    try:
+                        score = select_score(rebuild(gen_flat))
+                    except FIT_FAILURES:
+                        # Only the validation solve failed; the search goes on,
+                        # and this generation's best cannot be selected.
+                        score = math.inf
+            except FIT_FAILURES as exc:
+                # Nothing finished, so there is nothing to hand back.
+                if not history:
+                    raise
+                # A generation fails as a whole, so no one candidate can be re-solved.
+                details = failure_details(
+                    exc, None, dataset=dataset, simulate_fn=simulate_fn, solver=solver
+                )
+                failure = f"{failure_summary(exc)} {details}".strip()
+                break
             tell_key = fold(key, f"evosax_tell_{gen}")
             state, _metrics = strategy.tell(tell_key, population, fitness, state, strat_params)
 
-            gen_best_idx = int(jnp.argmin(fitness))
             gen_best_loss = float(fitness[gen_best_idx])
-            gen_mean_loss = float(jnp.mean(fitness))
+            gen_mean_loss = float(jnp.mean(fitness, where=finite))
+            if n_failed and not warned:
+                warned = True
+                ui_.on_message(
+                    level="warning",
+                    text=(
+                        f"{n_failed} of {fitness.shape[0]} candidates in generation {gen} "
+                        "failed to solve and rank last. history.failed_candidates counts "
+                        "them for every generation."
+                    ),
+                )
+            failed.append(n_failed)
             if gen_best_loss < best_loss:
                 best_loss = gen_best_loss
                 best_flat = jnp.asarray(population[gen_best_idx])
                 if select_score is None:
                     best_step = gen
 
-            if select_score is not None:
-                gen_flat = jnp.asarray(population[gen_best_idx])
-                score = select_score(rebuild(gen_flat))
+            if score is not None:
                 selection.append(score)
                 if score < best_selection:
                     best_selection = score
                     selected_flat = gen_flat
+                    # Its own training fitness, which history also records.
+                    selected_loss = gen_best_loss
                     best_step = gen
 
-            history.append(best_loss)
+            history.append(gen_best_loss)
             ui_.on_generation_end(
                 gen_idx=gen,
                 best_loss=gen_best_loss,
                 mean_loss=gen_mean_loss,
             )
 
+        if failure is not None:
+            text = (
+                f"fit failed at generation {len(history)} and returned the best parameters "
+                f"so far (stop_reason='diverged'): {failure}"
+            )
+            ui_.on_message(level="error", text=text)
+            warnings.warn(text, RuntimeWarning, stacklevel=2)
+
         final_flat = best_flat if select_score is None else selected_flat
-        ui_.on_run_end(final_loss=best_loss if select_score is None else best_selection)
+        ui_.on_run_end(returned_loss=best_loss if select_score is None else best_selection)
         return _EvosaxRun(
             predictors=rebuild(final_flat),
             loss=history,
+            failed=failed,
             validation=selection,
             best_step=best_step,
+            failure=failure,
+            # Without validation the returned candidate may be the warm-up's,
+            # which no history entry records, so its fitness is reported here.
+            selected_loss=best_loss if select_score is None else selected_loss,
+            selected_validation=None if select_score is None else best_selection,
         )

@@ -26,22 +26,48 @@ step.
 
 `fit` returns a `FitResult`: the fitted `model`, its `history`, the
 `best_step` that `restore_best` returned, and a `stop_reason` of
-`"budget_exhausted"` or `"patience"`. The original model is unchanged.
+`"budget_exhausted"`, `"patience"` or `"diverged"`. The original model is
+unchanged.
 `fit_ensemble` trains several members and returns a list of `FitResult`s;
 see [Ensembles](/guide/ensembles).
+
+`result.model.named_values()` returns every `Parameter` and `Constant` in physical
+units by path, such as `{"omega": 0.9997, "damping": 0.0}`.
+
+`print(result.summary())` reports how the run ended, the loss by phase, each
+`Parameter`, and how much of each network's input box has a saturated output.
+The line `loss change over the last 10% of steps` (of the final phase, when there
+are several) shows whether a fit that ran out of budget had settled: on one
+reactor fit, it read -5% to -10% with a fitted constant still well off and under
+0.1% once it had arrived. It is a relative change, so it means nothing when the
+loss is near zero, as on noise-free data, and it can look flat while a slow,
+correlated direction is still far off. Also compare the final loss with the noise:
+for `"mse"` with the right model it should come close to the noise variance, and
+a loss several times larger means the fit or the model is not there yet. A
+saturated output is near its bound, where gradients vanish.
+`result.summary(experiments)` also predicts on the data and adds the metrics
+and the worst experiment per channel. A flagged parameter has its latent past
+the squash's knee, the outer 5% of its warped box for the default sigmoid. The
+bound penalty charges network outputs, never a `Parameter`. The
+network figure sweeps the whole declared box, so a large share can be harmless
+if the data never reaches those inputs.
 
 ## Predicting
 
 `predict` returns a `PredictionResult` keyed by experiment ID, in dataset
-order. Each entry has `times`, `outputs`, `observed` and `observation_mask`,
+order. Each entry has `ts`, `outputs`, `observed` and `mask`,
 all aligned on the experiment's own time axis; `observed` is NaN where a
 channel was not measured. Experiments without an ID are named
 `experiment_<index>`, and duplicate IDs raise. `predictions.to_dataframe()`
-returns a long table (needs pandas), and `predictions.buckets` keeps the raw
+returns a long table (needs pandas: `pip install jax-hybridmodels[pandas]`), and `predictions.buckets` keeps the raw
 `[N, T, D]` arrays for custom JAX code.
 
 `hm.compute_metrics(predictions)` returns per-channel statistics over the
 measured cells, and `hm.print_metrics(predictions)` prints them as a table.
+`hm.print_metrics(hm.compute_metrics(predictions, by="experiment"))` scores
+each experiment alone and lists them per channel with the worst RMSE first,
+which finds the run a pooled number hides. Its R^2 compares against that experiment's own
+mean, so a good fit to a nearly flat run can still score low.
 
 By default each experiment is predicted on its measured times. For smooth
 plots, pick another grid:
@@ -54,7 +80,7 @@ shared = fitted.predict(experiments, ts=jnp.linspace(0.0, 10.0, 200))  # one gri
 `n_points` spans each experiment from its `t0` (or first observation) to
 its last observation. `ts` must not start before any experiment's start.
 Each experiment still integrates from its own start, so `y0` stays in
-place. Off the measured grid, `observed` and `observation_mask` are empty.
+place. Off the measured grid, `observed` and `mask` are empty.
 For several models, `hm.predict_ensemble(models, data)` takes the same
 arguments and returns the mean with its spread; see
 [Ensembles](/guide/ensembles).
@@ -226,10 +252,10 @@ parameters as covariates and evaluate a profile inside the vector field.
 
 ```python
 temperature = hm.ramp_profile(
-    t0=covariates["heat_start"],
-    t1=covariates["heat_end"],
-    v0=covariates["temperature_initial"],
-    v1=covariates["temperature_final"],
+    start=covariates["heat_start"],
+    end=covariates["heat_end"],
+    before=covariates["temperature_initial"],
+    after=covariates["temperature_final"],
 )
 
 def vector_field(t, y, args):

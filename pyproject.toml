@@ -1,6 +1,6 @@
 [project]
 name = "jax-hybridmodels"
-version = "0.2.0b1"
+version = "0.3.0"
 description = "Hybrid ODE and neural models in JAX"
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -22,25 +22,28 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "diffrax>=0.7.2",
+    "diffrax>=0.7.0",
     "equinox>=0.13.7",
     "evosax>=0.2.0",
     "flax>=0.12.1,<0.12.9",
     "jax>=0.10.0,<0.11",
     "jaxkan>=0.3.7",
     "jaxlib>=0.10.0,<0.11",
-    "jaxtyping>=0.3.9",
-    "numpy>=2.4.4",
-    "optax>=0.2.8",
-    "rich>=15.0.0",
-    "scipy>=1.17.1",
+    "jaxtyping>=0.3.0",
+    "numpy>=2.3",
+    "optax>=0.2.6",
+    "optimistix>=0.1.0",
+    "rich>=13.0",
+    "scipy>=1.16",
 ]
 
 [project.optional-dependencies]
+pandas = ["pandas>=2.2.3"]
+bayes = ["blackjax>=1.7.1", "arviz-base>=1.3; python_version >= '3.12'"]
 examples = [
     "matplotlib>=3.10.9",
     "openpyxl>=3.1.5",
-    "pandas>=3.0.2",
+    "pandas>=2.2.3",
     "python-libsbml>=5.20.4",
     "rlax>=0.1.9",
     "sympy>=1.14",
@@ -58,7 +61,8 @@ build-backend = "hatchling.build"
 
 # The wheel ships only the package (packages = src/jaxhybridmodels). The sdist
 # ships source + docs/examples markdown and scripts, but deliberately not
-# the dependency tree, build artifacts, figures, or large data files.
+# the dependency tree, build artifacts, figures, or large data files. The docs
+# site's figures live in the repository and are not needed to install or test.
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
@@ -69,7 +73,6 @@ include = [
     "/docs/**/*.md",
     "/docs/.vitepress/config.ts",
     "/docs/package.json",
-    "/docs/examples/assets/**",
     "/examples/**/*.py",
     "/scripts/**/*.py",
     "/tests/**/*.py",
@@ -79,6 +82,7 @@ exclude = [
     "/docs/.vitepress/cache",
     "/docs/.vitepress/dist",
     "/docs/public",
+    "/docs/examples/assets",
     "/examples/**/__pycache__",
     "/examples/**/figures",
     "/examples/**/figures_rl",
@@ -101,6 +105,8 @@ dev = [
     "rlax>=0.1.9",
     # tests cover experiments_from_dataframe and PredictionResult.to_dataframe
     "pandas>=3.0.2",
+    "blackjax>=1.7.1",
+    "arviz-base>=1.3 ; python_full_version >= '3.12'",
 ]
 
 [tool.ruff]
@@ -108,7 +114,9 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+# W605 catches an invalid escape in a docstring, which Python only warns about
+# when it compiles the file.
+select = ["E", "F", "I", "UP", "B", "W605"]
 ignore = []
 
 [tool.pytest.ini_options]

@@ -14,11 +14,20 @@ Check that:
 - the initial output of each predictor is plausible
   ([Centre the box](/guide/recommendations#centre-the-box-on-your-guess)).
 
-If only some seeds fail, turn on the
-[tournament](/guide/training#the-tournament) or zero the readout with
+A failed fit names the experiments that failed, and says whether more steps are
+likely to help. If only some seeds fail, turn on the
+[restarts](/guide/training#restarts) or zero the readout with
 `with_zero_final_head()`. If every seed fails, the problem may be stiff:
 try `diffrax.Kvaerno3()`, per-state `atol`, or x64. See
 [Recommendations](/guide/recommendations#solver).
+
+## A fit returns `stop_reason="diverged"`
+
+The solver failed or the loss went non-finite partway through, and the warning
+names the cause. `result.model` holds the best parameters reached before that,
+and `result.history` stops at the last good step. Lower the learning rate, add
+bounds that keep the parameters out of the bad region, or check the points in
+the first section above. If the first step fails, `fit` raises instead.
 
 ## `TracerBoolConversionError`
 
@@ -59,12 +68,24 @@ two experiments. A guarded division is the usual culprit; see
 Each bucket shape compiles once. Further compiles mean something static
 changed: a static predictor field, the solver config, or the identity of
 `simulate_fn` or `state_to_output`. Define those functions once at module
-level; a closure rebuilt per call is a new function to JAX.
+level; a closure rebuilt per call is a new function to JAX. A new `loss_horizon` or
+learning rate does not recompile.
+
+## `Algebraic simplifier is likely stuck` in stderr
+
+XLA can print this many times while compiling a solve, most often under
+forward-mode differentiation, which sampling uses for a few parameters, and with
+an implicit solver such as `Kvaerno5`, including inside an Evosax population. It
+comes from XLA's optimiser, and the results in this package's posterior tests are correct with it
+printing. To silence it, set `TF_CPP_MIN_LOG_LEVEL=3` before importing JAX. That
+hides XLA's other errors too, and level 2 does not remove this message.
 
 ## A saved run does not load
 
 The `like=` model passed to `load` (or template passed to `load_predictors`)
 must be built with the same container, predictor classes, sizes, bounds,
 warps, activation names and output channels as the saved model. `load`
-names the part that differs. See
+names the part that differs. It also needs the same precision: a run saved
+with `jax_enable_x64` off does not load with it on, and one saved with it on
+loads with it off only rounded to float32, with a warning. See
 [Saving and loading](/guide/serialization).

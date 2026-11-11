@@ -146,7 +146,7 @@ def main() -> int:
             out_size=1,
             width_size=8,
             depth=1,
-            activation_name="tanh",
+            activation="tanh",
             key=jax.random.PRNGKey(0),
         ),
         out_scaler=BoundScaler(bounds=(0.5, 2.0)),
@@ -179,7 +179,7 @@ def main() -> int:
             state_to_output=_state_to_output,
             solver=solver,
         )
-        return jnp.sum((pred - bucket.y_observed) ** 2)
+        return jnp.sum((pred - bucket.observed) ** 2)
 
     grad_step = eqx.filter_jit(eqx.filter_value_and_grad(loss)).lower(predictor, bp).compile()
     kernels["bucket_step (value_and_grad)"] = grad_step.compiled.as_text()

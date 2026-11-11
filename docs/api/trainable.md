@@ -42,6 +42,7 @@ values, which is what a gradient-based optimiser can actually update.
 ```python
 trainable_mask(
     predictors: 'Any',
+    *,
     predicate: 'Callable[[Any], bool]' = <default_trainable>,
     train_scalers: 'bool' = False,
 ) -> Any
@@ -55,6 +56,12 @@ fixed. ``BoundScaler`` subtrees are fixed unless ``train_scalers`` is
 set: a trainable temperature moves gradient between the scaler and the
 inner network and tends to slow convergence. Both optimisers take the
 result unchanged.
+
+A ``Parameter``'s own scaler stays fixed even with ``train_scalers``. Its
+temperature only rescales its latent, so training both gives one value
+two coordinates: the optimiser drifts along the redundant one and the
+Fisher information is singular. ``train_scalers`` is for the scalers
+around a network, whose temperature sets how fast the output saturates.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L46)</small>
 
@@ -70,6 +77,7 @@ result unchanged.
 freeze_mask(
     predictors: 'Any',
     freeze: 'Sequence[FreezeSpec] | FreezeSpec',
+    *,
     mask: 'Any' = None,
 ) -> Any
 ```
@@ -104,7 +112,7 @@ wrong experiment rather than a wrong program.
     base = trainable_mask(predictors, train_scalers=True)
     mask = freeze_mask(predictors, "offset", mask=base)
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L136)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L152)</small>
 
 ---
 
@@ -124,4 +132,4 @@ Number of trainable scalar parameters ``mask`` selects in ``predictors``.
 sizes of every leaf the mask marks ``True``. Useful for reporting the
 effective search dimension before a run, say to check an Evosax budget.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L198)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/trainable.py#L214)</small>

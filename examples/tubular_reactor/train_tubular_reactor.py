@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import diffrax
 import jax.numpy as jnp
@@ -53,7 +54,10 @@ import jaxhybridmodels as hm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _shared import apply_default_style  # noqa: E402
 
-# Tube and flow. Residence time L / u = 1; Peclet number u L / D = 100.
+# Tube and flow. Residence time L / u = 1; Peclet number u L / D = 100. The
+# upwind scheme below adds numerical dispersion of about u DZ / 2 = 0.01, as
+# much again as D, so the discretised tube behaves as Peclet about 50. The data
+# and the model share the scheme, so the fit is unaffected.
 LENGTH, VELOCITY, DISPERSION = 1.0, 1.0, 0.01
 N_CELLS = 50
 DZ = LENGTH / N_CELLS
@@ -71,9 +75,10 @@ CONDITIONS = ((310.0, 2.0), (320.0, 1.0), (325.0, 1.5), (335.0, 2.0), (345.0, 0.
 NOISE_STD = 0.01
 T_REF = 330.0
 
-# Not stiff at this resolution: the fastest mode is dispersion, about
-# 4 D / DZ^2 = 100 per unit time, so explicit Tsit5 needs a few hundred
-# steps. Halving DZ quadruples that rate; past roughly 200 cells an implicit
+# Not stiff at this resolution: the fastest mode decays at about
+# 4 D / DZ^2 + 2 u / DZ = 100 + 100 = 200 per unit time, dispersion plus upwind
+# advection, so explicit Tsit5 needs a few hundred steps. Refining DZ raises
+# the dispersion part as 1 / DZ^2; past roughly 200 cells an implicit
 # solver such as Kvaerno3 wins. RecursiveCheckpoint keeps the backward pass
 # through the network in the vector field at O(log steps) memory; the
 # default DirectAdjoint stores every step and compiles in time that grows
@@ -90,7 +95,13 @@ def true_g(c: ArrayLike, temp: ArrayLike) -> Array:
 
 # region pde
 def transport(c: Array, c_in: Array) -> Array:
-    """Upwind advection and central dispersion, inlet held at ``c_in``, zero-gradient outlet."""
+    """Upwind advection and central dispersion, inlet held at ``c_in``, zero-gradient outlet.
+
+    The ghost cell at ``c_in`` makes the inlet close to a Dirichlet condition,
+    ``c(0) = c_in``, rather than Danckwerts, which would balance the feed flux
+    against advection plus dispersion. The zero-gradient outlet is the
+    Danckwerts outlet condition.
+    """
     left = jnp.concatenate([c_in[None], c[:-1]])
     right = jnp.concatenate([c[1:], c[-1:]])
     return -VELOCITY * (c - left) / DZ + DISPERSION * (left - 2.0 * c + right) / DZ**2
@@ -99,13 +110,15 @@ def transport(c: Array, c_in: Array) -> Array:
 def solve_tube(g_fn, ts: Array, covariates, y0: Array, solver: hm.SolverConfig) -> diffrax.Solution:
     """Integrate the discretised tube for a rate ``g_fn(c, T) * c``."""
     temp, feed = covariates["T"], covariates["c_feed"]
-    c_in = hm.step_profile(before=feed, after=0.3 * feed, jump_at=T_DROP)
+    c_in = hm.step_profile(before=feed, after=0.3 * feed, at=T_DROP)
 
     def vector_field(t, c, args):
         return transport(c, c_in(t)) - g_fn(c, temp) * c
 
-    # The framework reads the state at ``ts`` from the Solution's ``ys``.
-    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0)
+    # The framework reads the state at ``ts`` from the Solution's ``ys``. The
+    # feed steps at ``T_DROP``, so the solver ends a step there instead of
+    # stepping across the jump.
+    return solver.diffeqsolve(diffrax.ODETerm(vector_field), ts, y0, jump_ts=c_in.jump_ts)
     # endregion pde
 
 
@@ -123,11 +136,16 @@ def state_to_output(state: Array) -> Array:
     # endregion simulate
 
 
+def arrhenius_g(k_ref: Any, ea_over_r: Any, c: Any, temp: Any) -> Array:
+    """The first-order Arrhenius law the mechanistic model assumes, ``r = g c``."""
+    return k_ref * jnp.exp(-ea_over_r * (1.0 / temp - 1.0 / T_REF)) * jnp.ones_like(c)
+
+
 def simulate_mechanistic(predictors, ts, covariates, y0, solver):
     k_ref, ea_over_r = predictors["k_ref"].value, predictors["Ea_over_R"].value
 
     def g_fn(c, temp):
-        return k_ref * jnp.exp(-ea_over_r * (1.0 / temp - 1.0 / T_REF)) * jnp.ones_like(c)
+        return arrhenius_g(k_ref, ea_over_r, c, temp)
 
     return solve_tube(g_fn, ts, covariates, y0, solver)
 
@@ -136,11 +154,11 @@ def exp_name(temp: float, feed: float) -> str:
     return f"T{temp:.0f}_c{feed:g}"
 
 
-def make_data(key: Array) -> hm.Dataset:
+def make_data(key: Array, rate_law=true_g, variance: float = 1.0) -> hm.Dataset:
     """Each sensor samples 8 random times per experiment, so no two grids match."""
     truth = hm.HybridModel(
         predictors={},
-        simulate_fn=lambda p, ts, cov, y0, s: solve_tube(true_g, ts, cov, y0, s),
+        simulate_fn=lambda p, ts, cov, y0, s: solve_tube(rate_law, ts, cov, y0, s),
         state_to_output=state_to_output,
         output_channel_names=CHANNELS,
         solver=SOLVER,
@@ -156,7 +174,9 @@ def make_data(key: Array) -> hm.Dataset:
             clean = truth.simulate(
                 ts=times[i], y0=jnp.zeros(N_CELLS), covariates=covariates, t0=0.0
             )
-            channels[name] = hm.ChannelObs(ts=times[i], values=clean.outputs[name] + noise[i])
+            channels[name] = hm.ChannelObs(
+                ts=times[i], values=clean.outputs[name] + noise[i], variance=variance
+            )
         experiments.append(
             hm.make_experiment(
                 channels=channels,
@@ -173,7 +193,7 @@ def build_models(key: Array) -> tuple[hm.HybridModel, hm.HybridModel]:
     # region models
     net = hm.BoundedPredictor(
         inner=hm.MLPPredictor(
-            in_size=2, out_size=1, width_size=16, depth=2, activation_name="tanh", key=key
+            in_size=2, out_size=1, width_size=16, depth=2, activation="tanh", key=key
         ),
         input_keys=("c", "T"),
         input_bounds=((0.0, 2.2), (300.0, 360.0)),
@@ -218,8 +238,8 @@ def plot(args, dataset, hybrid, mechanistic) -> None:
         sim_m = mechanistic.simulate(experiment=exp, ts=dense)
         for ax, name in zip(row, CHANNELS, strict=True):
             obs = pred_h[exp.exp_id]
-            mask = np.asarray(obs.observation_mask[name])
-            ax.plot(np.asarray(obs.times)[mask], np.asarray(obs.observed[name])[mask], "ko", ms=3)
+            mask = np.asarray(obs.mask[name])
+            ax.plot(np.asarray(obs.ts)[mask], np.asarray(obs.observed[name])[mask], "ko", ms=3)
             ax.plot(dense, sim_h.outputs[name], color="tab:red", label="hybrid")
             ax.plot(dense, sim_m.outputs[name], color="tab:blue", ls="--", label="first order")
             ax.set_title(f"{exp_name(temp, feed)}, {name}", fontsize=9)
@@ -283,16 +303,15 @@ def main() -> None:
     config = hm.OptaxTrainingConfig(
         phases=(
             # Fit the start-up front first, then the whole run with the feed drop.
-            hm.TrainingPhase(args.steps // 3, lr=1e-2, horizon=0.5),
-            hm.TrainingPhase(args.steps - args.steps // 3, lr=3e-3),
+            hm.TrainingPhase(steps=args.steps // 3, lr=1e-2, loss_horizon=0.5),
+            hm.TrainingPhase(steps=args.steps - args.steps // 3, lr=3e-3),
         ),
-        verbose=False,
     )
     # endregion fit
     print("\n[fit]")
     fits = {}
     for name, model in (("hybrid", hybrid), ("first order", mechanistic)):
-        fits[name] = model.fit(dataset, config, key=k_fit)
+        fits[name] = model.fit(dataset, config, key=k_fit, verbose=False)
         print(
             f"  {name}: loss {fits[name].history.loss[0]:.3e} -> {min(fits[name].history.loss):.3e}"
         )

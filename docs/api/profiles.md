@@ -2,10 +2,34 @@
 
 ## Quick links
 
+- [`Profile`](#profile)
 - [`constant_profile`](#constant_profile)
 - [`step_profile`](#step_profile)
 - [`ramp_profile`](#ramp_profile)
 - [`piecewise_linear_profile`](#piecewise_linear_profile)
+
+---
+
+<a id="profile"></a>
+
+### `Profile`
+
+<small>`from jaxhybridmodels.profiles import Profile`</small>
+
+```python
+Profile(
+    fn: 'Callable[[ArrayLike], Array]',
+    jump_ts: 'ArrayLike | None' = None,
+) -> None
+```
+
+A time profile: call it with ``t``, and read where it jumps or bends.
+
+``jump_ts`` holds the times where the profile or its slope changes, empty
+for a smooth one. Concatenate several profiles' ``jump_ts`` to pass them
+to one solve.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L44)</small>
 
 ---
 
@@ -25,7 +49,7 @@ The degenerate case, included so a code path can treat every
 quantity uniformly (a quantity is either a covariate or
 ``constant_profile(v)`` evaluated at ``t``).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L36)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L62)</small>
 
 ---
 
@@ -36,20 +60,19 @@ quantity uniformly (a quantity is either a covariate or
 <small>`from jaxhybridmodels.profiles import step_profile` &nbsp;·&nbsp; also re-exported as `jaxhybridmodels.step_profile`</small>
 
 ```python
-step_profile(
-    before: 'ArrayLike',
-    after: 'ArrayLike',
-    jump_at: 'ArrayLike',
-) -> Profile
+step_profile(*, at: 'ArrayLike', before: 'ArrayLike', after: 'ArrayLike') -> 'Profile'
 ```
 
-Return ``t -> before if t < jump_at else after``: a step change.
+Return ``t -> before if t < at else after``: a step change.
 
 For a reactor, the moment a feed valve opens or a heater switches.
-Discontinuous at ``jump_at``; an adaptive solver sees a kink, so
-place the jump at a known event time or accept a short transient.
+Discontinuous at ``at``, which is its ``jump_ts``. To fit or infer
+``at`` itself, pass ``jump_ts`` to the solve: the switch has no
+derivative in ``at``, so without them the gradient with respect to it is
+exactly 0. With them the solver ends a step on ``at`` and the gradient
+comes through the step's end.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L50)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L76)</small>
 
 ---
 
@@ -61,25 +84,27 @@ place the jump at a known event time or accept a short transient.
 
 ```python
 ramp_profile(
-    t0: 'ArrayLike',
-    t1: 'ArrayLike',
-    v0: 'ArrayLike',
-    v1: 'ArrayLike',
+    *,
+    start: 'ArrayLike',
+    end: 'ArrayLike',
+    before: 'ArrayLike',
+    after: 'ArrayLike',
 ) -> Profile
 ```
 
-Return a flat-ramp-flat profile: ``v0`` until ``t0``, linear to ``v1`` by ``t1``, then flat.
+Return a flat-ramp-flat profile: ``before`` until ``start``, linear to ``after`` by ``end``.
 
 The reactor heat-up shape: hold at the initial set point, ramp to the
-final set point, hold there. Values before ``t0`` and after ``t1``
-are exactly the edge values (the two flat profiles on either edge).
+final set point, hold there. Values before ``start`` and after ``end``
+are exactly ``before`` and ``after``, the names ``step_profile`` uses
+for the same two levels.
 
-``t1 > t0`` is required; equal times would be a discontinuity. The
+``end > start`` is required; equal times would be a discontinuity. The
 check runs when the times are host-side values; inside ``jit``/``vmap``
 (per-experiment parameters from traced covariates) it is skipped, so
 the factory stays trace-safe.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L64)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L93)</small>
 
 ---
 
@@ -98,6 +123,7 @@ Return a piecewise-linear interpolation of ``(t, v)`` knots.
 The general shape: any finite profile that is linear between its
 knots. Constant on both edges (the first and last values extend
 outward). Knots must be strictly increasing in ``t`` and contain at
-least two entries.
+least two entries. Its slope changes at every knot, so the knot times are
+its ``jump_ts``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L99)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/profiles.py#L132)</small>

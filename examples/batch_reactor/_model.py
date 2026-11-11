@@ -43,7 +43,8 @@ LOG_KREF_BOUNDS: tuple[float, float] = (-3.0, 2.0)
 EA_BOUNDS: tuple[float, float] = (0.0, 80.0)
 
 # Residual box, symmetric so a fresh MLP contributes no correction. Two
-# decades is generous against the truth's one-decade pH modulation.
+# decades either side is generous against the truth's pH modulation, a factor
+# of about 2.6 (0.4 decades) over the data's pH range.
 RES_LOG10_BOUNDS: tuple[float, float] = (-2.0, 2.0)
 
 INPUT_KEYS: tuple[str, ...] = ("temperature_C", "pH")
@@ -90,7 +91,7 @@ class ArrheniusKinetics(eqx.Module):
     def __init__(self, *, key: Array) -> None:
         # A latent near zero puts both parameters near their box midpoints.
         self.latent = jr.normal(key, (2,)) * 0.1
-        self.out_scaler = hm.BoundScaler((LOG_KREF_BOUNDS, EA_BOUNDS), transform="sigmoid")
+        self.out_scaler = hm.BoundScaler((LOG_KREF_BOUNDS, EA_BOUNDS), squash="sigmoid")
 
     def __call__(self) -> Float[Array, " 2"]:
         """Return ``(log_k_ref, Ea)`` in physical units."""
@@ -136,10 +137,10 @@ def _integrate_ramp(
     differentiates and vmaps like the rest of the model.
     """
     T_profile = hm.ramp_profile(
-        t0=covariates["ramp_t0"],
-        t1=covariates["ramp_t1"],
-        v0=covariates["T_lo"],
-        v1=covariates["T_hi"],
+        start=covariates["ramp_t0"],
+        end=covariates["ramp_t1"],
+        before=covariates["T_lo"],
+        after=covariates["T_hi"],
     )
 
     def vector_field(t: ArrayLike, y: Float[Array, " 2"], args: object) -> Array:
@@ -200,7 +201,7 @@ def build_predictors(*, key: Array) -> tuple[ArrheniusKinetics, hm.BoundedPredic
             out_size=1,
             width_size=16,
             depth=1,
-            activation_name="relu",
+            activation="relu",
             key=k_residual,
         ),
         output_bounds=RES_LOG10_BOUNDS,

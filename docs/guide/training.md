@@ -17,13 +17,18 @@ result.history.loss         # data loss plus weighted trajectory penalty, per st
 result.history.penalty      # weighted bound penalty, per step
 result.history.phase        # phase index of each step
 result.best_step            # step whose parameters were returned
-result.stop_reason          # "budget_exhausted" or "patience"
+result.stop_reason          # "budget_exhausted", "patience" or "diverged"
 ```
 
 The data may be a list of experiments or a `Dataset`. Each history entry is
 measured at the parameters before that step's update, and `loss + penalty`
 is what the optimiser minimised. `key=` is keyword-only and required, so the
 seed is visible at every call.
+
+A solver error or a non-finite loss partway through a run ends it. `fit` warns
+and returns the best parameters so far, with `stop_reason="diverged"`, so a long
+run keeps its work. If the first step fails there is nothing to return, so `fit`
+raises. Errors in your own code always raise.
 
 ## The objective
 
@@ -32,15 +37,36 @@ the default, is MSE over every channel with no penalty.
 
 ```python
 objective = hm.Objective(
-    loss="bal_mse",                                  # or "mse", "mle", "bal_mle", a callable
+    loss="per_experiment_mse",                                  # or "mse", "mle", "per_experiment_mle", a callable
     channel_weights={"concentration": 1.0, "size": 0.1},
-    penalty_weight=1e-3,
+    bound_penalty_weight=1e-3,
 )
 result = model.fit(experiments, config, objective=objective, key=key)
 ```
 
 `loss` takes a name from [`LOSS_REGISTRY`](/api/losses#loss_registry) or a
-callable `(pred_obs: [N, T, D], bp: BucketPayload) -> scalar`.
+callable `(pred_obs: [N, T, D], bp: BucketPayload) -> scalar`. To use a callable
+with `channel_weights` other than 1, give it the keywords the built-in losses
+take, `(pred_obs, bp, *, channel_idx=None, channel_weights=None)`, and apply
+them in its own reduction. A loss that wraps a built-in one passes them on:
+
+```python
+def my_loss(pred_obs, bp, *, channel_idx=None, channel_weights=None):
+    data = hm.losses.per_experiment_mle(
+        pred_obs, bp, channel_idx=channel_idx, channel_weights=channel_weights
+    )
+    return data + my_extra_term(pred_obs, bp)
+
+
+my_loss.pooling = "experiments"
+```
+
+Each bucket is scored on its own, and `pooling` says how the buckets add up
+to the loss over the dataset, one of `jaxhybridmodels.losses.POOLING_KINDS`:
+`"observations"` for a mean over
+measured cells, the default for a custom loss; `"experiments"` for a mean over
+experiments, as here, since `per_experiment_mle` is one; `"sum"` for a summed likelihood.
+`jaxhybridmodels.losses.loss_pooling` reads it.
 
 `channel_weights` keyed by channel name scores only the channels it names,
 so `{"concentration": 1.0}` fits one channel of several. A sequence gives
@@ -48,10 +74,17 @@ one weight per output channel, in `output_channel_names` order. Names are
 checked against the data when training starts, and an unknown one raises
 before anything compiles. A named channel with weight `0.0` adds nothing
 but still counts in the loss's denominator, which scales the loss down;
-leave the name out to drop the channel. [Extending](/guide/extending#losses) covers how
+leave the name out to drop the channel.
+
+The `per_experiment_*` losses average each channel over time within an experiment before
+summing channels, so a channel with one point per run counts as much as one
+with ten. The `mle` losses divide by each point's variance, which handles
+channels on different scales. A weight is left for a model that cannot fit
+every channel at once: raising one channel's weight trades fit on the others,
+and the best value is found by trying a few. [Extending](/guide/extending#losses) covers how
 weights combine with a custom loss.
 
-`penalty_weight`, `penalty_points` and `penalty_fn` set the bound penalty,
+`bound_penalty_weight`, `bound_penalty_points` and `bound_penalty_fn` set the bound penalty,
 and `trajectory_penalty_fn` and `trajectory_penalty_weight` the trajectory
 penalty; see [Penalties](/guide/penalties).
 
@@ -67,7 +100,7 @@ result.history.validation_loss
 ```
 
 The full-horizon data loss on `validation` then picks the returned step and
-drives `patience`. It costs one extra forward pass per step. Evosax takes
+drives `patience_steps`. It costs one extra forward pass per step. Evosax takes
 `validation=` too; see [below](#evosax).
 
 ### The functional trainers
@@ -100,7 +133,7 @@ move onto each phase:
 ```python
 config = hm.OptaxTrainingConfig(
     phases=(
-        hm.TrainingPhase(steps=200, lr=1e-2, horizon=0.5),
+        hm.TrainingPhase(steps=200, lr=1e-2, loss_horizon=0.5),
         hm.TrainingPhase(steps=800, lr=1e-3, reset_optimizer=True),
     ),
 )
@@ -110,23 +143,32 @@ That is 200 steps at `lr=1e-2` scored on the first half of every
 trajectory, then 800 at `lr=1e-3` scored on all of it. Mixing `steps=`
 with `phases=` raises. `config.total_steps` sums the phases.
 
-**`horizon`**, in `(0, 1]`, is the fraction of each trajectory the loss
-scores. The solver still integrates the whole trajectory. Fitting the early
+**`loss_horizon`**, in `(0, 1]`, is the fraction of each experiment's own span
+the loss scores, from `t0` (or its first measurement) to its last measurement.
+Each experiment's first measurement is always scored, and the rows a bucket
+adds for padding do not count. It masks the loss only: the solver still
+integrates the whole trajectory, so it saves no solver time. Fitting the early
 dynamics first keeps a diverging tail from swamping the gradient. It is a
 runtime mask, so changing it between phases costs no recompile.
 
 **`reset_optimizer=True`** discards the optimiser state at the start of the
 phase. It is required when the phase changes optimiser, and useful after a
-large horizon jump. Changing `lr` alone keeps the state.
+large `loss_horizon` jump. Changing `lr` alone keeps the state.
 
-**`penalty_weight`** on a phase overrides `Objective.penalty_weight` for
+**`bound_penalty_weight`** on a phase overrides `Objective.bound_penalty_weight` for
 that phase; `None`, the default, keeps the objective's. Use it to switch
 the bound penalty on only after a warm-up phase.
 
-`patience` counts steps without improvement and resets at every phase. The
-running best behind `restore_best=True` (the default) resets whenever the
-horizon changes, since losses over different horizons are not comparable.
-The returned model therefore always comes from the last horizon trained.
+`patience_steps` counts steps without improvement and resets at every
+phase. The running best behind `restore_best=True` (the default) resets
+whenever `loss_horizon` or `shooting_segments` changes, since losses over
+different horizons are not comparable. Without validation the returned model
+therefore always comes from the last horizon trained:
+
+| | What "best" tracks | Where the returned step can be |
+|---|---|---|
+| without `validation=` | training loss, reset when `loss_horizon` or `shooting_segments` changes | the last stretch of phases with the final horizon |
+| with `validation=` | validation loss, full horizon, single shooting | any phase |
 
 ### Learning-rate schedules
 
@@ -151,33 +193,111 @@ learning rate, so pairing one with a schedule raises.
 
 ### What "loss" means
 
-The recorded loss, `restore_best`, `patience` and the tournament all use
+The recorded loss, `restore_best`, `patience_steps` and restarts all use
 the data term plus any trajectory penalty. The bound penalty, or your
-`penalty_fn`, is left out. The optimiser still descends the full objective,
+`bound_penalty_fn`, is left out. The optimiser still descends the full objective,
 but leaving the penalty out of the recorded loss keeps runs with different
 penalty weights comparable.
 
-### The tournament
+### Restarts
 
 A bad initialisation can put the solver in a stiff regime it never leaves.
-The tournament re-initialises the predictors from `tournament_attempts`
-keys, trains each for `tournament_steps` at `tournament_lr`, scores each
-with a forward pass, and keeps the best:
+`restarts` adds that many fresh starts to your own. Your predictors as given
+are always the first candidate; each restart re-initialises them, redrawing
+networks and the entries of a `Parameter` with two finite bounds. Every
+candidate trains for `restart_steps` and is scored with a forward pass, and
+the best is kept. Here eight candidates compete, yours and seven redraws:
 
 ```python
 config = hm.OptaxTrainingConfig(
     steps=1000, lr=1e-3,
-    tournament_attempts=8, tournament_steps=20, tournament_lr=1e-2,
+    restarts=7, restart_steps=30,
 )
 ```
 
-It runs only when `tournament_steps > 0` and `tournament_attempts > 1`. It
-reuses the compiled training step, so it adds no compile time. An attempt
-that hits a Diffrax runtime error or a non-finite loss is dropped; any
-other error propagates. If every attempt fails, training continues from
-your original predictors with a `RuntimeWarning`. Ties keep the earlier
-attempt, so the result is deterministic in the key. `Constant` leaves are
-never re-initialised.
+`restarts=0`, the default, is off. `restarts > 0` needs `restart_steps > 0`,
+and `restart_steps` without restarts warns. The candidates train with the
+first phase's optimiser, learning rate, `loss_horizon` and
+`shooting_segments`, since the winner goes on to train in that phase.
+`restart_lr` overrides the rate; `None`, the default, means the first
+phase's. Keep it close to the phase's: at a hundredth of it the candidates
+barely move, and the comparison ranks random starting points rather than
+where each is heading.
+
+Restarts reuse the compiled training step, so they add no compile time. A
+candidate that hits a Diffrax runtime error or a non-finite loss is dropped;
+any other error propagates. If every candidate fails, training continues
+from your original predictors with a `RuntimeWarning`. Ties keep the earlier
+candidate, so the result is deterministic in the key.
+
+Every candidate's score is in `result.history.restart_scores`, yours first,
+and the summary prints the best and worst. A wide spread means the starting
+point matters for this model. A narrow one means the restarts are not buying
+much, and their steps are better spent training.
+
+What gets redrawn:
+
+- Networks get fresh weights.
+- A `Parameter` with two finite bounds gets a random value across the middle
+  of its box. One without keeps its starting value, since there is no range
+  to draw from.
+- `Constant` leaves are never re-initialised, and frozen leaves go back to
+  their given values after each redraw, so a restart cannot leave a frozen
+  array at random values. To compare different frozen arrays, build a model
+  for each.
+
+### Multiple shooting
+
+Single shooting solves each experiment once, from `y0` to its last sample.
+From a poor guess, an oscillating or stiff system or a long horizon can
+drift away from the data early. The loss then stops measuring how wrong the
+parameters are, and training stalls in the nearest dip. Multiple shooting
+splits each trajectory into segments. Segment 0 starts from `y0`, and every
+later segment starts from its own trainable state, a node. A gap term pulls
+the segments back into one trajectory:
+
+<<< @/../examples/multiple_shooting/oscillator.py#configs
+
+- **Segments are counted in samples.** Consecutive segments share one sample.
+  A bucket with too few samples uses fewer segments.
+- **A node is the full state**, unmeasured components included. When a
+  segmented phase starts, the nodes are read off a solve at the current
+  predictors, so the segments start joined. An experiment whose solve fails
+  starts its nodes at `y0`.
+- **The loss** is the data term on the joined-up segments, plus
+  `continuity_weight * mean((gap / scale)^2)`. The scale is each state's
+  largest size along that starting solve, so the gap term has no units. A
+  plain `"mse"` loss is in the units of the data, so the balance between
+  the two depends on the data's scale.
+- **The schedule must end with `shooting_segments=1`.** The nodes are dropped when
+  the run ends, and the returned model has been fitted as the single solve
+  that `predict` runs. `restore_best` picks from that last phase. With
+  `validation=`, it picks by the validation score instead, which is always
+  single shooting at the full horizon, so it can pick from any phase.
+- **A change in `shooting_segments` resets the optimiser**, because the nodes change
+  shape. Expect a short spike in the loss there.
+- **`history.gap_term`** records the gap term per step, and the summary's
+  phase table shows it at the end of each segmented phase.
+
+Segments must be short compared with how fast the model at its starting
+guess moves. A rule of thumb for the first phase:
+
+- each segment spans 5 to 10 samples, so the union length divided by 5 to
+  10 gives the count;
+- each segment is no longer than about half the period of the fastest
+  oscillation, or a decay time, at the starting guess and in the data;
+- then cut the count by about four per phase, such as 16, 4 and then 1, with
+  a few hundred steps each.
+
+On 81 predator-prey samples from a poor guess, 16, 4 and 1 recovered the
+parameters where single shooting stalled. If a segmented fit still settles in
+the wrong place, use more segments. Too many is safe but slow to tie back
+together, since every node must be pulled into line. The [multiple shooting
+example](/examples/multiple-shooting) fits a frequency that single shooting
+gets wrong from two of three starts.
+
+Restarts whose first phase is segmented train their candidates in
+segments too. Evosax and `predict` always use single shooting.
 
 ## Evosax
 
@@ -185,35 +305,42 @@ never re-initialised.
 config = hm.EvosaxTrainingConfig(
     algorithm="CMA_ES",
     population_size=64,
-    steps=200,            # generations
+    generations=200,
     init="lhs_box",       # Latin hypercube over the start box
     init_box_extent=0.5,  # half-width of that box, in latent units
-    sigma_init=0.3,       # CMA-ES initial step size
+    init_sigma=0.3,       # CMA-ES initial step size, used by init="current"
 )
 result = model.fit(experiments, config, objective=objective, key=key)
-result.history.loss       # best-so-far loss, one entry per generation
+result.history.loss       # each generation's best loss
 ```
 
-There are no phases: the run is `steps` generations of `population_size`
-candidates. `history.loss` holds the best loss found so far, so it never
-rises; with a bound penalty on, it includes the penalty. Do not plot it
-against an Optax `loss`. `history.penalty` and `history.phase` stay empty.
+There are no phases: the run is `generations` generations of
+`population_size` candidates. `history.loss` holds each generation's best
+loss, so it can rise; `min(history.loss)` is the best so far, and
+`result.returned_loss` is the loss of the returned candidate. With a bound
+penalty on, both include it. `history.penalty` and `history.phase` stay
+empty.
 
 With `validation=`, each generation's best candidate is scored on the
 validation data, `history.validation_loss` records that score, and the
 returned model is the candidate with the lowest one.
 
-`init` sets where generation 0 sits in latent space: `"warm"` (the
+`init` sets where generation 0 sits in latent space: `"current"` (the
 default) centres it on the current parameters, `"uniform_box"` samples
 uniformly within `±init_box_extent` of them, and `"lhs_box"` uses a Latin
 hypercube over that box, which covers it more evenly with a small
 population.
 
 The search runs on latents, so `Parameter` and `BoundedPredictor` values
-stay inside their bounds without any constraint handling. There is no
-per-candidate error handling: one candidate that hits a Diffrax error or a
-non-finite loss fails the generation. Keep `sigma_init` and
-`init_box_extent` conservative.
+stay inside their bounds without any constraint handling.
+
+A wide box often holds candidates the solver cannot finish, such as a stiff
+one under an explicit solver. Such a candidate ranks last in its generation
+and the search goes on. `result.history.failed_candidates` counts them per
+generation, the progress display notes the first one, and `summary()` gives the
+total. Only a generation where every candidate fails ends the run, with the
+best parameters so far. A `simulate_fn` that calls `diffrax.diffeqsolve`
+itself must pass `throw=solver.throw`, or a failed solve still ends the run.
 
 ### Evosax, then Optax
 
@@ -274,10 +401,12 @@ modules.
 
 ## Progress display
 
-`verbose=True` (the default) shows [`RichTrainingUI`](/api/ui#richtrainingui),
-a live terminal dashboard that also reports per-bucket compile time.
-`verbose=False` uses [`SilentUI`](/api/ui#silentui). `ui=` overrides both
-with any object implementing [`TrainingUI`](/api/ui#trainingui). If a run
+`fit(..., verbose=True)`, the default, shows
+[`RichTrainingUI`](/api/ui#richtrainingui), a live terminal dashboard that
+also reports per-bucket compile time. `verbose=False` uses
+[`SilentUI`](/api/ui#silentui). When output is not a terminal, such as a log
+file or CI, `verbose=True` prints a plain line about every 10% of the run
+instead. `ui=` overrides all of these with any object implementing [`TrainingUI`](/api/ui#trainingui). If a run
 raises after the dashboard opens, the UI gets `on_run_end` with a NaN loss
 before the error propagates.
 

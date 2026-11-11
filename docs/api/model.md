@@ -18,6 +18,7 @@
 
 ```python
 HybridModel(
+    *,
     predictors: 'Any',
     simulate_fn: 'Callable[..., Any]',
     state_to_output: 'Callable[[Array], Array]',
@@ -32,7 +33,8 @@ An ``eqx.Module``: ``predictors`` is its only array subtree, and the
 other fields are static. Equinox tools work on it directly, for example
 ``eqx.tree_at(lambda m: m.predictors["rate"], model, new_rate)`` to swap
 one predictor, or ``eqx.filter_vmap`` over a function that builds models
-from different keys.
+from different keys. Fitting returns a new model; the original is
+unchanged.
 
 **Parameters**
 
@@ -43,9 +45,8 @@ from different keys.
 | `state_to_output` |  | Pure ``[T, S] -> [T, D]``. |
 | `output_channel_names` |  | Names of the ``D`` output columns, in order. Must match the ``output_channel_names`` of every dataset passed in. |
 | `solver` |  | Integration settings, default ``SolverConfig()``. |
-| `Fitting returns a new model; the original is unchanged.` |  |  |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L71)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L75)</small>
 
 <a id="hybridmodelfit"></a>
 
@@ -56,11 +57,13 @@ fit(
     self,
     data: 'Data',
     config: 'OptaxTrainingConfig | EvosaxTrainingConfig',
+    *,
     key: 'Array',
     objective: 'Objective | None' = None,
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'Any' = None,
+    verbose: 'bool' = True,
     validation: 'Data | None' = None,
 ) -> FitResult
 ```
@@ -78,20 +81,31 @@ predictor classes (``hm.MLPPredictor``), or predicates
 ``(module) -> bool``. ``trainable`` is an explicit mask for full
 control; pass one or the other.
 
-With ``validation``, the validation data loss replaces the training
-loss for choosing the returned step (Optax) or generation (Evosax),
-and for ``patience``. It costs one extra forward pass over the
-validation set per step or generation.
+``verbose`` shows a live display of the run, and ``False`` runs
+quietly. ``ui`` is a display of your own and overrides ``verbose``.
+
+With ``validation``, the validation loss replaces the training loss
+for choosing the returned step (Optax) or generation (Evosax), and
+for ``patience_steps``. It costs one extra forward pass over the
+validation set per step or generation. The validation score is
+always single shooting at the full horizon, so Optax picks the best
+step across all phases: the returned model can come from an earlier
+horizon or from a segmented phase.
 
 ``data`` and ``validation`` may be a ``Dataset`` or a sequence of
 experiments. ``simulate_fn`` and ``state_to_output`` shapes are
 checked once on the first experiment before anything compiles.
 
+A solver error or a non-finite loss partway through ends the run: it
+warns and returns the best parameters so far, with ``stop_reason``
+``"diverged"``. If the first step fails there is nothing to return, so
+it raises.
+
 Same as ``train_with_optax(model, ...)`` or
 ``train_with_evosax(model, ...)`` in `jaxhybridmodels.training`,
 picked by the type of ``config``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L249)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L286)</small>
 
 <a id="hybridmodelfit_ensemble"></a>
 
@@ -102,24 +116,32 @@ fit_ensemble(
     self,
     data: 'Data',
     config: 'OptaxTrainingConfig',
+    *,
     key: 'Array',
     n_members: 'int',
     n_seeds: 'int | None' = None,
     bootstrap: 'bool' = False,
+    seeds_per_member: 'int' = 1,
     objective: 'Objective | None' = None,
     freeze: 'Sequence[FreezeSpec] | FreezeSpec | None' = None,
     trainable: 'Any' = None,
     ui: 'Any' = None,
+    verbose: 'bool' = True,
+    validation: 'Data | None' = None,
 ) -> list[FitResult]
 ```
 
 Train an ensemble of up to ``n_members`` models, best first.
 
 Every member starts from a fresh initialisation of the predictors
-drawn from ``key``. A candidate seed is trained briefly
-(``config.tournament_steps`` steps at ``config.tournament_lr``) and
-scored, as in the tournament, then the chosen seeds get the full
-phase schedule.
+drawn from ``key``, redrawn as restarts redraw them: a
+``Parameter`` without two finite bounds keeps its starting value in
+every member. A candidate seed is trained briefly
+(``config.restart_steps`` steps, with the first phase's optimiser,
+``loss_horizon`` and learning rate unless ``config.restart_lr`` is
+set) and scored, as a restart is, then the chosen seeds get the full
+phase schedule. Each member's ``history.restart_scores`` holds the
+scores of the seeds it was chosen from, when there was a choice.
 
 Seed ensemble (``bootstrap=False``)
     Score ``n_seeds`` seeds on all of ``data`` and fully train the
@@ -128,19 +150,51 @@ Seed ensemble (``bootstrap=False``)
 Bootstrap ensemble (``bootstrap=True``)
     Draw ``n_members`` resamples of the experiments with replacement
     ([`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset)) and train one
-    member on each: the best of ``n_seeds`` seeds scored on that
-    resample. ``n_seeds`` defaults to 1, one fresh seed per resample.
+    member on each: the best of ``seeds_per_member`` seeds scored on
+    that resample. The default, 1, is one fresh seed per resample.
 
-``config.tournament_attempts`` is not used: ``n_seeds`` takes its
+``n_seeds`` belongs to the seed ensemble and ``seeds_per_member`` to
+the bootstrap one; setting the other mode's keyword raises.
+``config.restarts`` is not used: the seed counts take its
 place. ``objective``, ``freeze``, ``trainable`` and ``ui`` are as
 for `fit`; each member is its own UI run. The result is sorted
 by each member's final loss, the loss at its returned parameters
-when ``config.restore_best`` is set. A seed whose warm-up fails is
-dropped, so fewer than ``n_members`` may come back; if every seed
-fails it raises ``RuntimeError``. Optax only. The list goes straight
+when ``config.restore_best`` is set.
+
+With ``validation``, each member picks its returned step and runs
+``patience_steps`` on the validation loss, as in `fit`, and members are
+sorted by that loss. Seeds are still scored on the training data.
+
+A seed whose warm-up or first step fails is dropped, so fewer than
+``n_members`` may come back; if every seed fails it raises
+``RuntimeError``. A member that fails later comes back with
+``stop_reason`` ``"diverged"``. Optax only. The list goes straight
 into [`predict_ensemble`](/api/prediction#predict_ensemble).
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L304)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L354)</small>
+
+<a id="hybridmodelnamed_values"></a>
+
+#### `HybridModel.named_values()`
+
+```python
+named_values(self) -> 'dict[str, Any]'
+```
+
+Every ``Parameter`` and ``Constant`` in physical units, by dotted path.
+
+A scalar comes back as a Python number and anything larger as it is
+stored. Networks are left out, and ``summary`` shows bounds and which
+values sit near them.
+
+**Examples**
+
+::
+
+    result.model.named_values()
+    # {"omega": 0.9997, "damping": 0.1}
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L260)</small>
 
 <a id="hybridmodelpredict"></a>
 
@@ -150,6 +204,7 @@ into [`predict_ensemble`](/api/prediction#predict_ensemble).
 predict(
     self,
     data: 'Data',
+    *,
     ts: 'Any' = None,
     n_points: 'int | None' = None,
 ) -> PredictionResult
@@ -164,13 +219,13 @@ an even grid of that many points over its own time span, from its
 ``t0`` (or first observation) to its last observation, for smooth
 plots. ``ts`` gives one explicit grid for every experiment; it must
 not start before any experiment's start. Off the measured grid,
-``observed`` and ``observation_mask`` are empty. Each experiment
+``observed`` and ``mask`` are empty. Each experiment
 still integrates from its own start, so ``y0`` stays in place.
 
 ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
 experiments.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L364)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L433)</small>
 
 <a id="hybridmodelsimulate"></a>
 
@@ -180,6 +235,7 @@ experiments.
 simulate(
     self,
     experiment: 'Experiment | None' = None,
+    *,
     ts: 'Any' = None,
     n_points: 'int | None' = None,
     y0: 'Any' = None,
@@ -205,7 +261,22 @@ must be finite, strictly increasing, and not before ``t0``. When
 ``t0`` precedes ``ts[0]`` it is integrated from but left out of the
 returned times and outputs.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L390)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L459)</small>
+
+<a id="hybridmodelwith_predictors"></a>
+
+#### `HybridModel.with_predictors()`
+
+```python
+with_predictors(self, predictors: 'Any') -> 'HybridModel'
+```
+
+This model with its predictors replaced, for the end of a custom loop.
+
+``predictors`` must have the same structure as ``self.predictors``.
+Everything else about the model stays the same.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/model.py#L158)</small>
 
 ---
 
@@ -221,6 +292,9 @@ FitResult(
     history: 'FitHistory',
     best_step: 'int | None',
     stop_reason: 'StopReason',
+    *,
+    measured_loss: 'float | None' = None,
+    measured_validation: 'float | None' = None,
 ) -> None
 ```
 
@@ -229,9 +303,53 @@ The fitted model, its history, and how the run ended.
 ``best_step`` indexes the history at the returned parameters. It is
 None when ``restore_best=False`` returned the final update instead.
 ``stop_reason`` is ``"patience"`` when early stopping cut the final
-phase short, else ``"budget_exhausted"``.
+phase short, ``"diverged"`` when a solver error or a non-finite loss ended
+the run (it warned, and the model holds the best parameters so far), else
+``"budget_exhausted"``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L132)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L177)</small>
+
+<a id="fitresultreturned_loss"></a>
+
+#### `FitResult.returned_loss`
+
+The training loss at the returned parameters.
+
+``measured_loss`` when the trainer measured it there: after the last
+update with ``restore_best=False``, and for an Evosax candidate chosen
+by validation, whose own fitness is not the best-so-far in
+``history.loss``. Else ``history.loss[best_step]``, or the last entry
+when ``best_step`` is None. ``measured_validation`` is the validation
+loss at the same parameters when they are not a recorded step.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L196)</small>
+
+<a id="fitresultsummary"></a>
+
+#### `FitResult.summary()`
+
+```python
+summary(self, data: 'Any' = None) -> 'str'
+```
+
+A readable report on the run; ``print(result.summary())``.
+
+Says how the run ended, the loss by phase, each ``Parameter`` with any
+that sit near a bound, and how much of each network's input box is
+pinned against an output bound. With ``data``, a list of experiments or
+a ``Dataset``, it also predicts on them and adds the metrics and the
+worst experiment per channel.
+
+A parameter is flagged when its latent is past the squash's knee: the
+outer 5% of its box for the default sigmoid, measured in warped units
+(log units under a log warp), or for a one-sided bound under a linear
+warp, close to its edge. The bound penalty never charges a
+``Parameter``; it charges only ``BoundedPredictor`` outputs, so the
+flag is a warning that its gradient is fading, nothing more. The network
+figure covers the whole declared box, including inputs no experiment
+reached, so a large share can be harmless if the data never goes there.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L214)</small>
 
 ---
 
@@ -247,6 +365,9 @@ FitHistory(
     penalty: 'tuple[float, ...]' = (),
     phase: 'tuple[int, ...]' = (),
     validation_loss: 'tuple[float, ...]' = (),
+    failed_candidates: 'tuple[int, ...]' = (),
+    restart_scores: 'tuple[float, ...]' = (),
+    gap_term: 'tuple[float, ...]' = (),
 ) -> None
 ```
 
@@ -264,10 +385,25 @@ monotone non-increasing; with a bound penalty on, that fitness includes
 it. ``penalty`` and ``phase`` stay empty.
 
 ``validation_loss`` is the full-horizon data loss on the validation set,
+plus any configured trajectory penalty,
 present when one was given: per step for Optax, and for each
 generation's best individual for Evosax.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L106)</small>
+``failed_candidates`` is Evosax only: how many candidates in each
+generation had a non-finite fitness, usually a failed solve. They rank
+last and the search goes on.
+
+``restart_scores`` is Optax only: each restart candidate's score, your
+starting values first, ``inf`` for a candidate that failed. Empty when
+``restarts=0``. A wide spread says the starting point matters for this
+model; a narrow one, that the restarts are not buying much.
+
+``gap_term`` is Optax only, and present when some phase used multiple
+shooting (``TrainingPhase.shooting_segments``): the weighted gap term per step, 0
+in single-shooting steps. ``loss`` in a segmented step is the data term
+on the assembled segments, and the optimiser minimised the two together.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L133)</small>
 
 ---
 
@@ -293,7 +429,7 @@ dataset predicted on, for custom JAX analysis. For an ensemble,
 ``outputs`` and ``buckets`` hold the member mean and ``members`` holds
 each member's own result, in the order the models were given.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L49)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L50)</small>
 
 <a id="predictionresultto_dataframe"></a>
 
@@ -307,9 +443,10 @@ Long table: one row per experiment, time and channel.
 
 Columns are ``experiment_id``, ``time``, ``channel``,
 ``prediction``, ``observed`` and ``is_observed``, plus ``std`` for
-an ensemble. Needs pandas, which the ``examples`` extra installs.
+an ensemble and ``q0.05``-style columns for requested quantiles. Needs
+pandas: ``pip install jax-hybridmodels[pandas]``.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L73)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/results.py#L82)</small>
 
 ---
 
@@ -321,12 +458,13 @@ an ensemble. Needs pandas, which the ``examples`` extra installs.
 
 ```python
 ExperimentPrediction(
-    times: 'Array',
+    ts: 'Array',
     outputs: 'dict[str, Array]',
     observed: 'dict[str, Array]' = <factory>,
-    observation_mask: 'dict[str, Array]' = <factory>,
+    mask: 'dict[str, Array]' = <factory>,
     state: 'Array | None' = None,
     std: 'dict[str, Array]' = <factory>,
+    quantiles: 'dict[str, dict[float, Array]]' = <factory>,
 ) -> None
 ```
 
@@ -334,7 +472,7 @@ One experiment's times, named outputs, and optional observed values.
 
 ``outputs`` maps each channel name to its ``[T]`` prediction.
 ``observed`` holds the measurements on the same grid, NaN where a cell
-was not measured, and ``observation_mask`` says which cells were. Both
+was not measured, and ``mask`` says which cells were. Both
 are empty when the times are not the measured grid: for
 [`HybridModel.simulate`](/api/model#hybridmodelsimulate), and for ``predict`` with ``ts=`` or
 ``n_points=``. ``simulate`` fills ``state`` with the full ``[T, S]``

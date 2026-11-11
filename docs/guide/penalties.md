@@ -15,7 +15,7 @@ charge stays alive where the squash gradient is dead.
 | Question | Is the predictor saturated at these input points? | Did this solve drive it into saturation? |
 | Evaluated at | Measured points plus any you add | The trajectories of each solve |
 | Your code | Nothing extra | Cooperation from `simulate_fn` for embedded predictors |
-| Switch | `Objective(penalty_weight > 0)` | `Objective(trajectory_penalty_fn=..., trajectory_penalty_weight=...)` |
+| Switch | `Objective(bound_penalty_weight > 0)` | `Objective(trajectory_penalty_fn=..., trajectory_penalty_weight=...)` |
 
 The bound penalty covers `BoundedPredictor` leaves only. A `Parameter` is
 never charged, so a bounded `Parameter` that drifts to an edge stays there
@@ -24,28 +24,30 @@ without warning. Check its `.value` after training if that matters.
 ## The bound penalty
 
 The bound penalty is the mean output saturation of each `BoundedPredictor`
-leaf over a set of input points. It needs no simulation. It is added once
-per training step to the bucket-averaged data gradient, so a given
-`penalty_weight` means the same thing at any dataset size or point count.
+leaf over a set of input points. Only outputs with two finite bounds are
+charged: one with a single bound is log-like near its edge, so a small
+value there is not stuck. It needs no simulation. It is added once
+per training step to the pooled data gradient, so a given
+`bound_penalty_weight` means the same thing at any dataset size or point count.
 
 ```python
-objective = hm.Objective(penalty_weight=1e-3)
+objective = hm.Objective(bound_penalty_weight=1e-3)
 result = model.fit(data, hm.OptaxTrainingConfig(steps=400, lr=1e-2), objective=objective, key=key)
 ```
 
-`TrainingPhase(penalty_weight=...)` overrides the weight for one phase, for
+`TrainingPhase(bound_penalty_weight=...)` overrides the weight for one phase, for
 example `0.0` during a warm-up.
 
 ### Measured points
 
 By default the points are the inputs the loss sees: for each observed cell,
 the leaf's `input_keys` looked up in the experiment's covariates. When a
-phase's `horizon` shortens the scored prefix, the penalty uses the same
+phase's `loss_horizon` shortens the scored prefix, the penalty uses the same
 prefix.
 
 ### Penalty-only points
 
-`penalty_points` adds points where no measurement exists, typically a
+`bound_penalty_points` adds points where no measurement exists, typically a
 region the process will run at but the data does not cover. It maps the
 path of a `BoundedPredictor` to a `[G, n_inputs]` array in physical units,
 with columns in that predictor's `input_keys` order. The path is the dotted
@@ -56,8 +58,8 @@ uses measured and added points together.
 deploy = jnp.asarray([[20.0, 1.5], [20.0, 2.0], [25.0, 1.5], [25.0, 2.0]])
 
 objective = hm.Objective(
-    penalty_weight=1e-4,
-    penalty_points={"growth": deploy, "nucleation": deploy},
+    bound_penalty_weight=1e-4,
+    bound_penalty_points={"growth": deploy, "nucleation": deploy},
 )
 ```
 
@@ -72,29 +74,29 @@ at `1e-6, 1e-4, 1e-2, 1, 1e2`:
 from jaxhybridmodels.penalties import box_grid
 
 sweep = box_grid(rate.in_scaler, n_per_dim=7)   # [49, 2] for a 2-D box
-objective = hm.Objective(penalty_weight=1e-3, penalty_points={"rate": sweep})
+objective = hm.Objective(bound_penalty_weight=1e-3, bound_penalty_points={"rate": sweep})
 ```
 
 It needs finite input bounds.
 
 ### Every leaf needs points
 
-With `penalty_weight > 0`, a predictor with neither measured nor added points
+With `bound_penalty_weight > 0`, a predictor with neither measured nor added points
 raises rather than training silently without its penalty:
 
 ```text
 ValueError: penalty: predictor 'nucleation' (input_keys=('temperature_C', 'supersaturation'))
 has no penalty points: its inputs do not all resolve to dataset covariates and
-Objective.penalty_points has no entry for it. ...
+Objective.bound_penalty_points has no entry for it. ...
 ```
 
 This happens to **embedded** predictors, whose inputs come from the ODE
-state rather than covariates. Give them `penalty_points` or use the
+state rather than covariates. Give them `bound_penalty_points` or use the
 trajectory penalty.
 
 ### Replacing it
 
-`Objective(penalty_fn=...)` replaces the bound penalty with any
+`Objective(bound_penalty_fn=...)` replaces the bound penalty with any
 `(predictors, points) -> scalar`, charged the same way. `points` holds one
 `[G, n_inputs]` array per `BoundedPredictor`, in pytree traversal order.
 Coverage is not checked for a custom function, and one that has no use for
@@ -104,7 +106,7 @@ Coverage is not checked for a custom function, and one that has no use for
 def weight_decay(predictors, points):
     return jnp.sum(predictors["rate"].inner.mlp.layers[-1].weight ** 2)
 
-objective = hm.Objective(penalty_fn=weight_decay, penalty_weight=0.1)
+objective = hm.Objective(bound_penalty_fn=weight_decay, bound_penalty_weight=0.1)
 ```
 
 ## The trajectory penalty
@@ -122,7 +124,10 @@ you wire it depends on where the predictor sits.
   wired together.
 - **Parallel** predictors produce an output channel directly, so no state
   change is needed: `trajectory_saturation_penalty(state, out_scaler)`
-  charges saturation of that channel over time.
+  charges the mean saturation of that channel over time. It rebuilds the
+  latents from the outputs, so it acts near the knee and caps once the
+  outputs have rounded onto a bound. Charge `out_scaler.saturation` on the
+  latents themselves if your model returns them.
 
 `trajectory_penalty_fn` receives the full state `[N, T, S]` and the
 `BucketPayload`, and is added to the data loss in the same forward pass.

@@ -25,7 +25,6 @@ import jax.random as jr
 from jax import Array
 
 import jaxhybridmodels as hm
-from jaxhybridmodels.training import OptaxTrainingConfig
 
 TRUE_RATE = 0.8
 CHANNELS = ("conc",)
@@ -99,7 +98,7 @@ def parameter_predictors(rate: float = 0.3) -> dict[str, Any]:
 def network_predictors(key: Array | None = None) -> dict[str, Any]:
     key = jr.key(0) if key is None else key
     inner = hm.MLPPredictor(
-        in_size=1, out_size=1, width_size=4, depth=1, activation_name="tanh", key=key
+        in_size=1, out_size=1, width_size=4, depth=1, activation="tanh", key=key
     )
     rate = hm.BoundedPredictor(
         inner=inner, input_keys=("temp",), input_bounds=((0.0, 2.0),), output_bounds=((0.05, 3.0),)
@@ -125,11 +124,6 @@ def network_model(key: Array | None = None) -> hm.HybridModel:
         output_channel_names=CHANNELS,
         solver=SOLVER,
     )
-
-
-def quiet(**kwargs: Any) -> OptaxTrainingConfig:
-    """An Optax config with the Rich UI off, which tests never want on by accident."""
-    return OptaxTrainingConfig(verbose=False, **kwargs)
 
 
 def make_model(

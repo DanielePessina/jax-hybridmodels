@@ -74,7 +74,7 @@ def _print_buckets(label: str, dataset: Dataset) -> None:
     print(f"\n[{label}] {len(dataset.bucket_payloads)} bucket(s)")
     for i, bp in enumerate(dataset.bucket_payloads):
         print(
-            f"  bucket {i}: ts {bp.ts.shape} | y_observed {bp.y_observed.shape} "
+            f"  bucket {i}: ts {bp.ts.shape} | observed {bp.observed.shape} "
             f"| mask {bp.mask.shape} | y0 {bp.y0.shape} | n_obs={int(bp.n_obs)}"
         )
 
@@ -88,7 +88,9 @@ def main() -> None:
     )
     _print_buckets("full", dataset)
 
-    train, val, test = split_dataset(dataset, train=0.6, val=0.2, test=0.2, key=jr.PRNGKey(42))
+    train, val, test = split_dataset(
+        dataset, train=0.6, validation=0.2, test=0.2, key=jr.PRNGKey(42)
+    )
     print(
         f"\nsplit sizes: train={len(train._experiments)}, "
         f"val={len(val._experiments)}, test={len(test._experiments)}"
@@ -113,7 +115,7 @@ def main() -> None:
         out_size=2,
         width_size=8,
         depth=2,
-        activation_name="tanh",
+        activation="tanh",
         key=jr.PRNGKey(7),
     )
     raw_input = jnp.array([0.5, -0.3])
@@ -121,11 +123,11 @@ def main() -> None:
 
     bounded = BoundedPredictor(
         input_keys=("temperature_C", "loading"),
-        in_scaler=BoundScaler(bounds=((20.0, 40.0), (0.05, 0.30)), transform="sigmoid"),
+        in_scaler=BoundScaler(bounds=((20.0, 40.0), (0.05, 0.30)), squash="sigmoid"),
         inner=mlp,
         out_scaler=BoundScaler(
             bounds=((1e8, 1e14), (1e-8, 1e-4)),
-            transform="sigmoid",
+            squash="sigmoid",
         ),
     )
     cov = {"temperature_C": jnp.array(28.0), "loading": jnp.array(0.18)}

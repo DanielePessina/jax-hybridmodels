@@ -2,23 +2,23 @@
 
 ## Quick links
 
-- [`BoundTransform`](#boundtransform)
-- [`BOUND_TRANSFORMS`](#bound_transforms)
-- [`register_bound_transform`](#register_bound_transform)
+- [`Squash`](#squash)
+- [`SQUASHES`](#squashes)
+- [`register_squash`](#register_squash)
 - [`Warp`](#warp)
 - [`WARPS`](#warps)
 - [`register_warp`](#register_warp)
 
 ---
 
-<a id="boundtransform"></a>
+<a id="squash"></a>
 
-### `BoundTransform`
+### `Squash`
 
-<small>`from jaxhybridmodels.transforms import BoundTransform`</small>
+<small>`from jaxhybridmodels.transforms import Squash`</small>
 
 ```python
-BoundTransform(
+Squash(
     forward: ForwardRef('Callable[[Array], Array]'),
     inverse: ForwardRef('Callable[[Array], Array]'),
     inverse_slope: ForwardRef('Callable[[Array], Array]'),
@@ -35,23 +35,23 @@ A squash from the whole real line into ``(0, 1)``, with its inverse and metadata
 | `forward` | `Callable` | ``R -> (0, 1)``. Applied by ``from_latent`` on the way from latent to physical. |
 | `inverse` | `Callable` | ``(0, 1) -> R``. Applied by ``to_latent`` on the way back. |
 | `inverse_slope` | `Callable` | ``d(inverse)/ds``. Builds the linear continuation that keeps ``to_latent`` differentiable for inputs that fall outside the box. |
-| `knee` | `float` | The latent at which ``forward`` reaches 0.95, where the physical value enters the outer 5% of its box. Default for ``BoundScaler.z_knee``. It must come from the transform: reusing sigmoid's 2.944 for softsign would start charging at 12.5% from the bound instead of 5%. |
+| `knee` | `float` | The latent at which ``forward`` reaches 0.95, where the value enters the outer 5% of its warped box (under a log warp, 5% of the box in log units, not of the physical range). Default for ``BoundScaler.saturation_knee``. It must come from the transform: reusing sigmoid's 2.944 for softsign would start charging at 12.7% from the bound instead of 5%. |
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L67)</small>
 
 ---
 
-<a id="bound_transforms"></a>
+<a id="squashes"></a>
 
-### `BOUND_TRANSFORMS`
+### `SQUASHES`
 
-<small>`from jaxhybridmodels.transforms import BOUND_TRANSFORMS`</small>
+<small>`from jaxhybridmodels.transforms import SQUASHES`</small>
 
 ```python
-BOUND_TRANSFORMS = {
-  'algebraic': BoundTransform
-  'sigmoid': BoundTransform
-  'softsign': BoundTransform
+SQUASHES = {
+  'algebraic': Squash
+  'sigmoid': Squash
+  'softsign': Squash
 }
 ```
 
@@ -68,24 +68,24 @@ dict(**kwargs) -> new dictionary initialized with the name=value pairs
 
 ---
 
-<a id="register_bound_transform"></a>
+<a id="register_squash"></a>
 
-### `register_bound_transform()`
+### `register_squash()`
 
-<small>`from jaxhybridmodels.transforms import register_bound_transform`</small>
+<small>`from jaxhybridmodels.transforms import register_squash`</small>
 
 ```python
-register_bound_transform(name: 'str', transform: 'BoundTransform') -> 'None'
+register_squash(name: 'str', squash: 'Squash') -> 'None'
 ```
 
 Register a squash under ``name`` for use by ``BoundScaler``.
 
 Mirrors [`register_solver`](/api/solver#register_solver). A scaler stores
-only the name, so a custom transform must be registered before a saved
+only the name, so a custom squash must be registered before a saved
 scaler that references it can be rebuilt. Re-registering an existing
 name overwrites without warning.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L200)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L201)</small>
 
 ---
 
@@ -116,7 +116,7 @@ coordinates, then the transform's inverse takes it to the latent.
 | `inverse` | `Callable` | Warped coordinate back to physical. Must invert ``forward`` exactly on the declared box. |
 | `requires_positive` | `bool` | Whether the warp is undefined at or below zero. Checked against the declared bounds at construction, where it raises a useful error rather than a silent nan inside a compiled solve. |
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L94)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L95)</small>
 
 ---
 
@@ -159,8 +159,8 @@ register_warp(name: 'str', warp: 'Warp') -> 'None'
 
 Register an axis warp under ``name`` for use by ``BoundScaler``.
 
-Same contract as [`register_bound_transform`](/api/transforms#register_bound_transform). A warp must be
+Same contract as [`register_squash`](/api/transforms#register_squash). A warp must be
 monotone on the declared box and ``inverse`` must undo ``forward``
 there, or the scaler's round trip stops being the identity.
 
-<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L211)</small>
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/transforms.py#L212)</small>

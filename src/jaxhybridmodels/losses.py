@@ -20,13 +20,20 @@ does not divide by zero.
 
 Variants in this module
 -----------------------
-- ``masked_*`` uses a single denominator across the whole bucket. This is
-  the same as concatenating every observation into one flat vector and
-  reducing that.
-- ``bal_*`` normalises per experiment. Each experiment contributes its own
-  per-channel average across time, then the bucket takes the mean over the
-  ``N`` axis. Use it when experiments differ widely in observation count
-  and you do not want long trajectories to dominate the gradient.
+- ``mse`` is the mean over every measured cell, and ``mle`` the summed
+  Gaussian negative log-likelihood.
+- ``per_experiment_*`` normalises per experiment. Each experiment contributes its own
+  per-channel average across time, then the experiments are averaged. Use
+  it when experiments differ widely in observation count and you do not
+  want long trajectories to dominate the gradient. ``per_experiment_*`` adds the
+  channels where ``mse`` averages them, so it is about ``D`` times larger
+  for ``D`` channels.
+
+Each function here reduces one bucket. The trainers put the buckets back
+together with :class:`Pooling`, weighting each bucket by what its value is
+an average over (see :func:`loss_pooling`). So ``mse`` over a dataset is
+the mean over all its measurements, and ``per_experiment_mse`` the mean over all its
+experiments, however the experiments were split into buckets.
 
 All four accept ``channel_idx`` (which trailing-``D`` indices to keep) and
 ``channel_weights`` (per-channel multipliers, length matching
@@ -39,13 +46,15 @@ resolves them to this pair.
 
 from __future__ import annotations
 
+import functools
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import NamedTuple
 
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, ArrayLike, Float
 
-from jaxhybridmodels.data import BucketPayload
+from jaxhybridmodels.data import BucketPayload, horizon_rows
 
 
 def _validate_channel_idx(channel_idx: tuple[int, ...], total_channels: int) -> None:
@@ -86,7 +95,7 @@ def _select(
     indices: Array,
 ) -> tuple[Array, Array, Array]:
     p = pred_obs[..., indices]
-    y = bp.y_observed[..., indices]
+    y = bp.observed[..., indices]
     m = bp.mask[..., indices].astype(bool)
     return p, y, m
 
@@ -116,14 +125,16 @@ def _gaussian_nll_terms(p: Array, y: Array, var: Array, m: Array) -> Array:
 
     Every input that could be NaN at a masked-out cell is replaced with a
     benign value before any arithmetic, and only then gated by the mask.
-    ``var_safe`` swaps masked variance for ``1.0``; ``var_stable`` clips at
-    ``1e-12`` so a real but tiny variance still gives finite ``log`` and
-    division.
+    ``var_safe`` swaps masked variance for ``1.0``. ``var_stable`` clips at
+    the dtype's machine epsilon squared (about 1e-14 in float32, 5e-32 in
+    float64), only to keep the gradient in the variance, ``r^2 / var^2``,
+    finite. A fixed floor such as 1e-12 would change the likelihood of data
+    measured in small units, where a variance of 1e-14 is real.
 
     Same ``[N, T, D]`` shape as the inputs, exactly zero where masked out.
     """
     var_safe = jnp.where(m, var, 1.0)
-    var_stable = jnp.maximum(var_safe, 1e-12)
+    var_stable = jnp.maximum(var_safe, jnp.finfo(jnp.result_type(var_safe)).eps ** 2)
     p_safe, y_safe = _masked_safe(p, y, m)
     log_term = jnp.where(m, 0.5 * jnp.log(2.0 * jnp.pi * var_stable), 0.0)
     sq_term = jnp.where(m, 0.5 * (p_safe - y_safe) ** 2 / var_stable, 0.0)
@@ -139,10 +150,10 @@ def masked_mse(
 ) -> Array:
     """Mean squared error reduced over a single global denominator.
 
-    Computes ``sum(mask * weights * (pred - y_observed)**2) / max(mask.sum(), 1)``
+    Computes ``sum(mask * weights * (pred - observed)**2) / max(mask.sum(), 1)``
     over the selected channels. A long-trajectory experiment adds terms to
     the numerator and the denominator in proportion, and gets no explicit
-    per-experiment weighting. Use ``bal_mse`` when you want that weighting.
+    per-experiment weighting. Use ``per_experiment_mse`` when you want that weighting.
 
     Parameters
     ----------
@@ -150,7 +161,7 @@ def masked_mse(
         Predicted output channels, one ``[T, D]`` block per experiment in
         the bucket, from ``state_to_output(simulate_fn(...))``.
     bp : BucketPayload
-        Bucket data. Reads ``mask`` and ``y_observed``.
+        Bucket data. Reads ``mask`` and ``observed``.
     channel_idx
         Trailing-axis indices to keep. ``None`` keeps all ``D`` channels.
     channel_weights
@@ -175,23 +186,23 @@ def masked_mle(
     """Total Gaussian negative log-likelihood across the bucket.
 
     Sums the pointwise Gaussian negative log-likelihood (variance from
-    ``bp.yvar``) over the time axis, giving one NLL per experiment and
+    ``bp.variance``) over the time axis, giving one NLL per experiment and
     channel, shape ``[N, D]``. Multiplies by the per-channel ``weights`` and
     sums those.
 
     Nothing is averaged. The result is a sum of log-likelihoods and grows
-    linearly with the number of observations. Use ``bal_mle`` for the
+    linearly with the number of observations. Use ``per_experiment_mle`` for the
     per-experiment averaged version.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    var = bp.yvar[..., indices]
+    var = bp.variance[..., indices]
     nll = _gaussian_nll_terms(p, y, var, m)
     nll_per_exp_channel = nll.sum(axis=1)
     return (nll_per_exp_channel * weights[None, :]).sum()
 
 
-def bal_mse(
+def per_experiment_mse(
     pred_obs: Float[Array, "N T D"],
     bp: BucketPayload,
     *,
@@ -224,7 +235,7 @@ def bal_mse(
     return jnp.where(has_observations, per_experiment, 0.0).sum() / n_experiments
 
 
-def bal_mle(
+def per_experiment_mle(
     pred_obs: Float[Array, "N T D"],
     bp: BucketPayload,
     *,
@@ -234,14 +245,14 @@ def bal_mle(
     """Per-experiment-balanced Gaussian NLL.
 
     Averages over time within each observed experiment, then over those
-    experiments. Same reduction as ``bal_mse``, with
-    ``_gaussian_nll_terms`` (which reads ``bp.yvar``) in place of the
+    experiments. Same reduction as ``per_experiment_mse``, with
+    ``_gaussian_nll_terms`` (which reads ``bp.variance``) in place of the
     pointwise squared error. Experiments with no observations in any selected
     channel are excluded from the outer mean.
     """
     indices, weights = _resolve_channels(pred_obs, channel_idx, channel_weights)
     p, y, m = _select(pred_obs, bp, indices)
-    var = bp.yvar[..., indices]
+    var = bp.variance[..., indices]
     nll = _gaussian_nll_terms(p, y, var, m)
     sum_nll = nll.sum(axis=1)
     count = jnp.maximum(m.sum(axis=1), 1)
@@ -256,10 +267,105 @@ def bal_mle(
 LOSS_REGISTRY: dict[str, Callable[..., Array]] = {
     "mse": masked_mse,
     "mle": masked_mle,
-    "bal_mse": bal_mse,
-    "bal_mle": bal_mle,
+    "per_experiment_mse": per_experiment_mse,
+    "per_experiment_mle": per_experiment_mle,
 }
 """Short name to loss function, so an ``Objective`` can name its loss as a string."""
+
+POOLING_KINDS = ("observations", "experiments", "sum")
+"""How a loss's per-bucket values combine into the loss over the whole dataset."""
+
+_BUILTIN_POOLING: tuple[tuple[Callable[..., Array], str], ...] = (
+    (masked_mse, "observations"),
+    (masked_mle, "sum"),
+    (per_experiment_mse, "experiments"),
+    (per_experiment_mle, "experiments"),
+)
+
+
+def loss_pooling(loss: Callable[..., Array] | str) -> str:
+    """How ``loss`` combines across buckets: one of :data:`POOLING_KINDS`.
+
+    Each bucket is scored on its own, so the trainers need to know what a
+    bucket's value is an average over to put the buckets back together:
+
+    - ``"observations"``: a mean over measured cells (``mse``). Buckets are
+      weighted by their measured-cell count, which gives the mean over every
+      measurement in the dataset.
+    - ``"experiments"``: a mean over experiments (``per_experiment_mse``, ``per_experiment_mle``).
+      Buckets are weighted by how many measured experiments they hold, so
+      every experiment counts the same across the dataset.
+    - ``"sum"``: already a sum (``mle``). Bucket values are added.
+
+    A ``functools.partial`` of a built-in pools as the built-in. Any other
+    custom loss declares its kind with a ``pooling`` attribute, for example
+    ``my_loss.pooling = "sum"``, and defaults to ``"observations"``: a
+    wrapper around ``per_experiment_mse`` must set ``"experiments"`` itself.
+    """
+    if isinstance(loss, str):
+        loss = LOSS_REGISTRY[loss.lower().strip()]
+    # A partial of a built-in reduces the same way the built-in does.
+    base: object = loss
+    while isinstance(base, functools.partial):
+        base = base.func
+    kind = next((k for fn, k in _BUILTIN_POOLING if fn is base), None)
+    if kind is None:
+        kind = getattr(loss, "pooling", None) or getattr(base, "pooling", "observations")
+    if kind not in POOLING_KINDS:
+        raise ValueError(f"loss pooling must be one of {POOLING_KINDS}; got {kind!r}")
+    return kind
+
+
+class Pooling(NamedTuple):
+    """How to weight each bucket's loss so that the buckets add up to one loss.
+
+    Build it with :meth:`jaxhybridmodels.Objective.pooling`. ``channel_idx``
+    is the objective's channel selection, so only the channels the loss
+    reads are counted.
+    """
+
+    kind: str
+    channel_idx: tuple[int, ...] | None = None
+
+    def weight(self, bp: BucketPayload) -> Array:
+        """What one bucket's loss is an average over, after any horizon mask."""
+        mask = bp.mask if self.channel_idx is None else bp.mask[..., jnp.asarray(self.channel_idx)]
+        if self.kind == "observations":
+            return mask.sum().astype(float)
+        if self.kind == "experiments":
+            return mask.any(axis=(1, 2)).sum().astype(float)
+        return jnp.asarray(1.0)
+
+    def shares(
+        self, buckets: Sequence[BucketPayload], horizon: ArrayLike = 1.0
+    ) -> tuple[Array, ...]:
+        """Each bucket's ``(data, penalty)`` multipliers for the dataset loss.
+
+        The data multiplier makes ``sum(share * bucket_loss)`` the loss over
+        the whole dataset: the shares of a mean-type loss add up to 1, and
+        with ``"sum"`` each is 1. A dataset with nothing measured inside
+        ``horizon`` gets equal data shares, so the loss stays defined.
+
+        The penalty multiplier weights each bucket's trajectory penalty, and a
+        segmented phase's gap term, by its share of the experiments. Both are
+        means over a bucket's experiments, so this makes them means over the
+        dataset's, whatever the loss, and a bucket of unmeasured probe
+        experiments still counts. Computed on the host, once per dataset and
+        horizon, not per step.
+        """
+        sizes = [float(bp.ts.shape[0]) for bp in buckets]
+        penalty = [size / sum(sizes) for size in sizes]
+        if self.kind == "sum":
+            data = [1.0] * len(buckets)
+        else:
+            weights = []
+            for bp in buckets:
+                keep = horizon_rows(bp.ts, bp.mask.any(axis=-1), horizon)
+                weights.append(float(self.weight(bp._replace(mask=bp.mask & keep[:, :, None]))))
+            total = sum(weights)
+            equal = [1.0 / len(buckets)] * len(buckets)
+            data = [w / total for w in weights] if total > 0.0 else equal
+        return tuple(jnp.asarray([d, q]) for d, q in zip(data, penalty, strict=True))
 
 
 def resolve_loss_fn(
@@ -334,10 +440,10 @@ def resolve_loss_fn(
     def projected_loss(pred_obs: Array, bp: BucketPayload) -> Array:
         _validate_channel_idx(channel_idx, int(pred_obs.shape[-1]))
         p = pred_obs[..., indices]
-        y = bp.y_observed[..., indices]
-        var = bp.yvar[..., indices]
+        y = bp.observed[..., indices]
+        var = bp.variance[..., indices]
         m = bp.mask[..., indices]
-        return loss(p, bp._replace(y_observed=y, yvar=var, mask=m))
+        return loss(p, bp._replace(observed=y, variance=var, mask=m))
 
     return projected_loss
 

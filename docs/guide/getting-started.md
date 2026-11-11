@@ -7,11 +7,8 @@ inside it.
 ## Install
 
 ```bash
-uv add jax-hybridmodels==0.2.0b1
+uv add jax-hybridmodels
 ```
-
-The 0.2.0b1 release predates `HybridModel`, `Parameter` and `Constant`, which
-this page uses. Until the next release, run `uv sync` in a checkout.
 
 ## Fit a physical parameter
 
@@ -53,7 +50,7 @@ model = hm.HybridModel(
     solver=hm.SolverConfig(rtol=1e-6, atol=1e-8, dt0=0.05),
 )
 result = model.fit([experiment], hm.OptaxTrainingConfig(steps=200, lr=0.03), key=jr.key(0))
-print(result.model.predictors["omega"].value)
+print(result.model.named_values())
 print(result.stop_reason)
 
 predictions = result.model.predict([experiment])
@@ -74,7 +71,7 @@ defaults to `Tsit5` with `rtol=1e-5`, `atol=1e-7` and 4096 steps; pass only
 the settings that differ.
 
 `t0=0.0` places the initial state before the first measurement at 0.2. The
-dataset adds an unobserved point at t0, so `predictions["oscillator"].times`
+dataset adds an unobserved point at t0, so `predictions["oscillator"].ts`
 has 21 entries for 20 measurements. Without `t0`, the initial state belongs to
 the first observation time.
 

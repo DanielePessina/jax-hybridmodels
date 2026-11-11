@@ -53,8 +53,38 @@ jobs:
       - name: Run the tubular reactor example (short)
         run: uv run python examples/tubular_reactor/train_tubular_reactor.py --steps 5 --no-plot
 
+      - name: Run the tubular reactor posterior example (short)
+        run: uv run python examples/tubular_reactor/sample_tubular_reactor.py --warmup 10 --draws 10 --chains 2 --steps 5 --predict-draws 5
+
+      - name: Run the shelf life example
+        run: uv run python examples/shelf_life/shelf_life.py --no-plot
+
+      - name: Run the identifiability example
+        run: uv run python examples/identifiability/arrhenius.py
+
+      - name: Run the multiple shooting example
+        run: uv run python examples/multiple_shooting/oscillator.py --no-plot
+
       - name: Run the hybrid ODE example (short)
         run: uv run python examples/hybrid_ode/train_hybrid_ode.py --steps 40 --no-plot
+
+      - name: Run the custom predictor example
+        run: uv run python examples/custom_predictor/train_custom_predictor.py --no-plot
+
+      - name: Run the mechanistic crystallisation example (short)
+        run: uv run python examples/crystallisation/train_crystallisation_mechanistic.py --generations 5 --population-size 16 --no-plot
+
+      - name: Run the kinetic crystallisation example (short)
+        run: uv run python examples/crystallisation/train_kinetic.py --steps 20 --no-plot
+
+      - name: Run the batch reactor example (short)
+        run: uv run python examples/batch_reactor/train_hybrid.py --generations 5 --steps 20 --no-plot
+
+      - name: Run the batch reactor baselines (short)
+        run: uv run python examples/batch_reactor/compare_baselines.py --generations 3 --steps 20 --no-plot
+
+      - name: Run the batch reactor RL example (short)
+        run: uv run python examples/batch_reactor/train_rl_deactivation.py --updates 3 --baseline-steps 5 --no-plot
 
       - name: Run the slow example tests
         run: uv run pytest -q -m slow

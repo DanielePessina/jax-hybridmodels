@@ -226,10 +226,10 @@ class SBMLKineticModel:
                 y0.append(float(val))
             else:
                 y0.append(_species_amount(model, name))
-        y0 = jnp.asarray(y0, dtype=jnp.float32)
+        y0 = jnp.asarray(y0, dtype=float)
 
         reactions = {r.getId(): r for r in model.getListOfReactions()}
-        stoich = jnp.zeros((len(species_names), len(reactions)), dtype=jnp.float32)
+        stoich = jnp.zeros((len(species_names), len(reactions)), dtype=float)
         for j, rid in enumerate(reactions):
             r = reactions[rid]
             for ref in r.getListOfReactants():
@@ -251,7 +251,7 @@ class SBMLKineticModel:
 
         compartment_sizes = jnp.asarray(
             [compartments.get(species_compartment[name], 1.0) for name in species_names],
-            dtype=jnp.float32,
+            dtype=float,
         )
         km = cls(
             species_names,

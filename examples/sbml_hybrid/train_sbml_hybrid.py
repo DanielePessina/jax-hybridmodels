@@ -20,7 +20,7 @@ Run (needs the ``examples`` extra for python-libsbml and sympy)::
 
 Prints the buckets, per-channel metrics and the learned ``Vmax`` at each
 dose; writes ``parity.png`` and ``recovered_vmax.png`` to ``figures/``.
-About a minute on CPU.
+About 20 seconds on CPU.
 """
 
 from __future__ import annotations
@@ -128,7 +128,7 @@ def main() -> None:
     # region model
     vmax = hm.BoundedPredictor(
         inner=hm.MLPPredictor(
-            in_size=1, out_size=1, width_size=16, depth=2, activation_name="tanh", key=k_model
+            in_size=1, out_size=1, width_size=16, depth=2, activation="tanh", key=k_model
         ),
         input_keys=("dose",),
         input_bounds=(0.03, 0.5),
@@ -143,7 +143,7 @@ def main() -> None:
     )
     config = hm.OptaxTrainingConfig(steps=args.steps, lr=1e-2)
     # A small bound penalty keeps the output squash away from saturation.
-    objective = hm.Objective(penalty_weight=1e-2)
+    objective = hm.Objective(bound_penalty_weight=1e-2)
     # endregion model
     print("\n[fit]")
     result = model.fit(dataset, config, objective=objective, key=k_train)

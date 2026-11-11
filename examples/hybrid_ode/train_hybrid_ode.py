@@ -115,7 +115,7 @@ def _inner(kind: str, *, in_size: int, out_size: int, width: int, key: Array) ->
             out_size=out_size,
             width_size=width,
             depth=2,
-            activation_name="softplus",
+            activation="softplus",
             key=key,
         )
     if kind == "kan":
@@ -173,7 +173,7 @@ def main() -> None:
         help="Drop the residual network, leaving the rate network alone.",
     )
     parser.add_argument(
-        "--penalty-weight",
+        "--bound-penalty-weight",
         type=float,
         default=1e-3,
         help="Saturation penalty weight; 0 disables it.",
@@ -212,10 +212,10 @@ def main() -> None:
 
     # ``temperature -> k``, evaluated once per experiment above the solver.
     # ``warp="log10"`` is what makes this read well: a linear box over
-    # ``(1e-3, 1)`` has midpoint ``0.5``, putting every rate in the data in
-    # the bottom 3% of the box, reachable only through large negative
-    # latents. Under ``log10`` the midpoint is ``0.032`` and the true range
-    # covers the middle of the box.
+    # ``(1e-3, 1)`` has midpoint ``0.5``, and the true rates, 0.0063 to
+    # 0.276, sit between 0.5% and 27.5% of the box, the two coldest levels in
+    # the bottom 3%, reached only through large negative latents. Under
+    # ``log10`` the midpoint is ``0.032`` and they spread over 27% to 81%.
     # ``input_bounds`` builds the default sigmoid scaler; ``out_scaler`` is
     # spelled out where the warp or squash differs from the default.
     # region predictors
@@ -223,7 +223,7 @@ def main() -> None:
         input_keys=("temperature",),
         input_bounds=TEMPERATURE_BOUNDS,
         inner=_inner(args.inner, in_size=1, out_size=1, width=16, key=k_rate),
-        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, transform="sigmoid", warp="log10"),
+        out_scaler=hm.BoundScaler(bounds=K_BOUNDS, squash="sigmoid", warp="log10"),
     )
     predictors = {"rate": rate_net}
     if not args.mechanistic_only:
@@ -238,7 +238,7 @@ def main() -> None:
             # A scaler on its own cannot infer its size, so the shared pair
             # is repeated once per output.
             out_scaler=hm.BoundScaler(
-                bounds=(RESIDUAL_BOUNDS,) * 2, transform="softsign", warp="symlog"
+                bounds=(RESIDUAL_BOUNDS,) * 2, squash="softsign", warp="symlog"
             ),
         )
     # endregion predictors
@@ -256,8 +256,8 @@ def main() -> None:
     # grid over their input box in warped space instead (``box_grid``),
     # keyed by their name in the predictors dict.
     objective = hm.Objective(
-        penalty_weight=args.penalty_weight,
-        penalty_points={
+        bound_penalty_weight=args.bound_penalty_weight,
+        bound_penalty_points={
             name: box_grid(leaf.in_scaler, n_per_dim=7) for name, leaf in predictors.items()
         },
     )
@@ -265,13 +265,12 @@ def main() -> None:
     # penalty applies in both phases.
     config = hm.OptaxTrainingConfig(
         phases=(
-            hm.TrainingPhase(steps=args.steps // 2, lr=5e-3, horizon=0.4),
+            hm.TrainingPhase(steps=args.steps // 2, lr=5e-3, loss_horizon=0.4),
             hm.TrainingPhase(steps=args.steps, lr=1e-3),
         ),
-        verbose=False,
     )
     print(f"\n[fit] {list(predictors)} with {args.inner!r} inner networks, two phases")
-    result = model.fit(dataset, config, objective=objective, key=k_train)
+    result = model.fit(dataset, config, objective=objective, key=k_train, verbose=False)
     # endregion fit
     trained = result.model.predictors
     loss, phase = result.history.loss, result.history.phase

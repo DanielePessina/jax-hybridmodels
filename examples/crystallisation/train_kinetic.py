@@ -308,7 +308,7 @@ def main() -> None:
 
     def mlp(key: Array) -> hm.MLPPredictor:
         return hm.MLPPredictor(
-            in_size=2, out_size=1, width_size=64, depth=1, activation_name="relu", key=key
+            in_size=2, out_size=1, width_size=64, depth=1, activation="relu", key=key
         )
 
     def kan(key: Array) -> hm.KANPredictor:

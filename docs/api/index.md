@@ -8,11 +8,11 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Data: Experiments, Channels, Datasets](/api/data)
 
-[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`experiment_from_array`](/api/data#experiment_from_array), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
+[`ChannelObs`](/api/data#channelobs), [`Experiment`](/api/data#experiment), [`make_experiment`](/api/data#make_experiment), [`experiment_from_array`](/api/data#experiment_from_array), [`experiments_from_dataframe`](/api/data#experiments_from_dataframe), [`experiments_from_long_dataframe`](/api/data#experiments_from_long_dataframe), [`BucketPayload`](/api/data#bucketpayload), [`Dataset`](/api/data#dataset), [`make_dataset`](/api/data#make_dataset), [`make_bootstrap_dataset`](/api/data#make_bootstrap_dataset), [`split_dataset`](/api/data#split_dataset), [`describe_buckets`](/api/data#describe_buckets)
 
 ## [Predictors: Trainable Components](/api/predictors)
 
-[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize_with_key`](/api/predictors#reinitialize_with_key), [`reinitialize_pytree_with_key`](/api/predictors#reinitialize_pytree_with_key)
+[`Predictor`](/api/predictors#predictor), [`BoundScaler`](/api/predictors#boundscaler), [`BoundedPredictor`](/api/predictors#boundedpredictor), [`Parameter`](/api/predictors#parameter), [`Constant`](/api/predictors#constant), [`MLPPredictor`](/api/predictors#mlppredictor), [`KANPredictor`](/api/predictors#kanpredictor), [`NeuralNPolynomial`](/api/predictors#neuralnpolynomial), [`reinitialize`](/api/predictors#reinitialize), [`reinitialize_pytree`](/api/predictors#reinitialize_pytree)
 
 ## [Penalties: Gradient-Safe Bound Handling](/api/penalties)
 
@@ -20,7 +20,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Transforms: Squash Shapes and Axis Warps](/api/transforms)
 
-[`BoundTransform`](/api/transforms#boundtransform), [`BOUND_TRANSFORMS`](/api/transforms#bound_transforms), [`register_bound_transform`](/api/transforms#register_bound_transform), [`Warp`](/api/transforms#warp), [`WARPS`](/api/transforms#warps), [`register_warp`](/api/transforms#register_warp)
+[`Squash`](/api/transforms#squash), [`SQUASHES`](/api/transforms#squashes), [`register_squash`](/api/transforms#register_squash), [`Warp`](/api/transforms#warp), [`WARPS`](/api/transforms#warps), [`register_warp`](/api/transforms#register_warp)
 
 ## [Solver: ODE Integration](/api/solver)
 
@@ -36,7 +36,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Losses: Masked & Balanced Objectives](/api/losses)
 
-[`masked_mse`](/api/losses#masked_mse), [`masked_mle`](/api/losses#masked_mle), [`bal_mse`](/api/losses#bal_mse), [`bal_mle`](/api/losses#bal_mle), [`LOSS_REGISTRY`](/api/losses#loss_registry), [`resolve_loss_fn`](/api/losses#resolve_loss_fn)
+[`masked_mse`](/api/losses#masked_mse), [`masked_mle`](/api/losses#masked_mle), [`per_experiment_mse`](/api/losses#per_experiment_mse), [`per_experiment_mle`](/api/losses#per_experiment_mle), [`LOSS_REGISTRY`](/api/losses#loss_registry), [`resolve_loss_fn`](/api/losses#resolve_loss_fn), [`loss_pooling`](/api/losses#loss_pooling), [`Pooling`](/api/losses#pooling), [`POOLING_KINDS`](/api/losses#pooling_kinds)
 
 ## [Trainable Masks: Freezing Leaves](/api/trainable)
 
@@ -52,7 +52,7 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [Profiles: Time-Varying Inputs](/api/profiles)
 
-[`constant_profile`](/api/profiles#constant_profile), [`step_profile`](/api/profiles#step_profile), [`ramp_profile`](/api/profiles#ramp_profile), [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile)
+[`Profile`](/api/profiles#profile), [`constant_profile`](/api/profiles#constant_profile), [`step_profile`](/api/profiles#step_profile), [`ramp_profile`](/api/profiles#ramp_profile), [`piecewise_linear_profile`](/api/profiles#piecewise_linear_profile)
 
 ## [Schedules: Epoch-Scaled Annealing](/api/schedules)
 
@@ -64,8 +64,12 @@ The public surface is split across the pages below, grouped by concern. The mode
 
 ## [UI: Training Dashboards](/api/ui)
 
-[`TrainingUI`](/api/ui#trainingui), [`EvosaxUI`](/api/ui#evosaxui), [`SilentUI`](/api/ui#silentui), [`RichTrainingUI`](/api/ui#richtrainingui), [`RichEvosaxUI`](/api/ui#richevosaxui)
+[`TrainingUI`](/api/ui#trainingui), [`EvosaxUI`](/api/ui#evosaxui), [`SilentUI`](/api/ui#silentui), [`PlainTrainingUI`](/api/ui#plaintrainingui), [`PlainEvosaxUI`](/api/ui#plainevosaxui), [`RichTrainingUI`](/api/ui#richtrainingui), [`RichEvosaxUI`](/api/ui#richevosaxui)
 
 ## [RNG: Named-Fold Keys](/api/rng)
 
 [`fold`](/api/rng#fold)
+
+## [Inference: Log-Density, Fisher, Laplace and Profiles](/api/inference)
+
+[`make_problem`](/api/inference#make_problem), [`InferenceProblem`](/api/inference#inferenceproblem), [`OptimizeResult`](/api/inference#optimizeresult), [`FisherResult`](/api/inference#fisherresult), [`LaplaceResult`](/api/inference#laplaceresult), [`DerivedQuantity`](/api/inference#derivedquantity), [`ProfileResult`](/api/inference#profileresult), [`flat_prior`](/api/inference#flat_prior)

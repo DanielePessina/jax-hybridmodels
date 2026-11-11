@@ -51,6 +51,9 @@ if TYPE_CHECKING:
         data as data,
     )
     from jaxhybridmodels import (
+        inference as inference,
+    )
+    from jaxhybridmodels import (
         losses as losses,
     )
     from jaxhybridmodels import (
@@ -106,6 +109,7 @@ if TYPE_CHECKING:
         describe_buckets,
         experiment_from_array,
         experiments_from_dataframe,
+        experiments_from_long_dataframe,
         make_bootstrap_dataset,
         make_dataset,
         make_experiment,
@@ -124,6 +128,8 @@ if TYPE_CHECKING:
         NeuralNPolynomial,
         Parameter,
         Predictor,
+        reinitialize,
+        reinitialize_pytree,
     )
     from jaxhybridmodels.profiles import (
         constant_profile,
@@ -160,6 +166,8 @@ _EXPORTS: dict[str, str] = {
     "BoundedPredictor": "jaxhybridmodels.predictors",
     "BoundScaler": "jaxhybridmodels.predictors",
     "Predictor": "jaxhybridmodels.predictors",
+    "reinitialize": "jaxhybridmodels.predictors",
+    "reinitialize_pytree": "jaxhybridmodels.predictors",
     "MLPPredictor": "jaxhybridmodels.predictors",
     "KANPredictor": "jaxhybridmodels.predictors",
     "NeuralNPolynomial": "jaxhybridmodels.predictors",
@@ -171,6 +179,7 @@ _EXPORTS: dict[str, str] = {
     "make_experiment": "jaxhybridmodels.data",
     "experiment_from_array": "jaxhybridmodels.data",
     "experiments_from_dataframe": "jaxhybridmodels.data",
+    "experiments_from_long_dataframe": "jaxhybridmodels.data",
     "make_dataset": "jaxhybridmodels.data",
     "split_dataset": "jaxhybridmodels.data",
     "make_bootstrap_dataset": "jaxhybridmodels.data",
@@ -204,6 +213,7 @@ _EXPORTS: dict[str, str] = {
 _SUBMODULES: frozenset[str] = frozenset(
     {
         "data",
+        "inference",
         "losses",
         "metrics",
         "model",
@@ -236,6 +246,8 @@ __all__: list[str] = [
     "BoundedPredictor",
     "BoundScaler",
     "Predictor",
+    "reinitialize",
+    "reinitialize_pytree",
     "MLPPredictor",
     "KANPredictor",
     "NeuralNPolynomial",
@@ -246,6 +258,7 @@ __all__: list[str] = [
     "make_experiment",
     "experiment_from_array",
     "experiments_from_dataframe",
+    "experiments_from_long_dataframe",
     "make_dataset",
     "split_dataset",
     "make_bootstrap_dataset",

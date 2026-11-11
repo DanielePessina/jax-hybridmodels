@@ -27,7 +27,7 @@ from scipy.stats import qmc
 
 import jaxhybridmodels as hm
 
-EA_TRUE: float = 30.0  # kJ/mol; the rate doubles about every 10 °C near T_REF
+EA_TRUE: float = 30.0  # kJ/mol; the rate rises about 1.5 times per 10 °C near T_REF
 
 # The hidden pH dependence, a Hill-type saturation curve: fast below pH 5,
 # a plateau above pH 7, and a knee at K_SAT_PH50.
@@ -88,7 +88,7 @@ def true_ca(ts: Float[Array, " T"], *, T_C: float, pH: float) -> Float[Array, " 
     """
     ramp = ramp_covariates(T_C)
     T_profile = hm.ramp_profile(
-        t0=ramp["ramp_t0"], t1=ramp["ramp_t1"], v0=ramp["T_lo"], v1=ramp["T_hi"]
+        start=ramp["ramp_t0"], end=ramp["ramp_t1"], before=ramp["T_lo"], after=ramp["T_hi"]
     )
 
     def field(t: ArrayLike, y: Array, args: object) -> Array:
@@ -100,7 +100,7 @@ def true_ca(ts: Float[Array, " T"], *, T_C: float, pH: float) -> Float[Array, " 
         t0=float(ts[0]),
         t1=float(ts[-1]),
         dt0=0.01,
-        y0=jnp.asarray(CA0, dtype=jnp.float32),
+        y0=jnp.asarray(CA0, dtype=float),
         saveat=diffrax.SaveAt(ts=ts),
         stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-10),
         max_steps=10_000,

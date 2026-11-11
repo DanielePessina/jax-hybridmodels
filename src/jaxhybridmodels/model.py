@@ -19,6 +19,7 @@ import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 from jaxtyping import Array
 
@@ -31,11 +32,14 @@ from jaxhybridmodels.data import (
     make_dataset,
 )
 from jaxhybridmodels.objective import Objective
-from jaxhybridmodels.prediction import _check_grid_args, _predict
+from jaxhybridmodels.prediction import _check_grid_args, _note_user_code, _predict
+from jaxhybridmodels.predictors import Constant, Parameter
 from jaxhybridmodels.results import ExperimentPrediction, FitResult, PredictionResult
+from jaxhybridmodels.rng import check_key
 from jaxhybridmodels.solver import SolverConfig, simulation_state
 from jaxhybridmodels.trainable import (
     FreezeSpec,
+    _path_to_dotted,
     count_trainable_params,
     freeze_mask,
     trainable_mask,
@@ -75,7 +79,8 @@ class HybridModel(eqx.Module):
     other fields are static. Equinox tools work on it directly, for example
     ``eqx.tree_at(lambda m: m.predictors["rate"], model, new_rate)`` to swap
     one predictor, or ``eqx.filter_vmap`` over a function that builds models
-    from different keys.
+    from different keys. Fitting returns a new model; the original is
+    unchanged.
 
     Parameters
     ----------
@@ -93,8 +98,6 @@ class HybridModel(eqx.Module):
         ``output_channel_names`` of every dataset passed in.
     solver
         Integration settings, default ``SolverConfig()``.
-
-    Fitting returns a new model; the original is unchanged.
     """
 
     predictors: Any
@@ -152,7 +155,12 @@ class HybridModel(eqx.Module):
             solver=solver,
         )
 
-    def _with_predictors(self, predictors: Any) -> HybridModel:
+    def with_predictors(self, predictors: Any) -> HybridModel:
+        """This model with its predictors replaced, for the end of a custom loop.
+
+        ``predictors`` must have the same structure as ``self.predictors``.
+        Everything else about the model stays the same.
+        """
         return eqx.tree_at(lambda m: m.predictors, self, predictors)
 
     def _dataset(self, data: Data, caller: str) -> Dataset:
@@ -190,10 +198,11 @@ class HybridModel(eqx.Module):
         def state_of(predictors: Any) -> Array:
             return simulation_state(self.simulate_fn(predictors, ts, covariates, y0, self.solver))
 
-        state = eqx.filter_eval_shape(state_of, self.predictors)
-        self._check_state_shape(state.shape, ts.shape[0], caller)
-        output = jax.eval_shape(self.state_to_output, state)
-        self._check_output_shape(output.shape, state.shape, caller)
+        with _note_user_code(caller, self.predictors, covariates, y0.shape):
+            state = eqx.filter_eval_shape(state_of, self.predictors)
+            self._check_state_shape(state.shape, ts.shape[0], caller)
+            output = jax.eval_shape(self.state_to_output, state)
+            self._check_output_shape(output.shape, state.shape, caller)
 
     def _check_state_shape(self, shape: tuple[int, ...], n_times: int, caller: str) -> None:
         if len(shape) != 2 or shape[0] != n_times:
@@ -217,16 +226,18 @@ class HybridModel(eqx.Module):
         self,
         data: Data,
         *,
+        key: Any,
         validation: Data | None,
         freeze: Sequence[FreezeSpec] | FreezeSpec | None,
         trainable: Any,
         caller: str,
     ) -> tuple[Dataset, Dataset | None, Any]:
-        """Everything the trainers check before compiling: data, mask and shapes.
+        """Everything the trainers check before compiling: key, data, mask and shapes.
 
         Returns the training ``Dataset``, the validation one (or None) and
         the trainable mask built from ``freeze`` or ``trainable``.
         """
+        check_key(key, caller)
         dataset = self._dataset(data, caller)
         validation_set = None if validation is None else self._dataset(validation, "validation")
         if freeze is not None and trainable is not None:
@@ -246,6 +257,32 @@ class HybridModel(eqx.Module):
         self._check_shapes(dataset.bucket_payloads[0], caller)
         return dataset, validation_set, mask
 
+    def named_values(self) -> dict[str, Any]:
+        """Every ``Parameter`` and ``Constant`` in physical units, by dotted path.
+
+        A scalar comes back as a Python number and anything larger as it is
+        stored. Networks are left out, and ``summary`` shows bounds and which
+        values sit near them.
+
+        Examples
+        --------
+        ::
+
+            result.model.named_values()
+            # {"omega": 0.9997, "damping": 0.1}
+        """
+        leaves, _ = jtu.tree_flatten_with_path(
+            self.predictors, is_leaf=lambda node: isinstance(node, Parameter | Constant)
+        )
+        values: dict[str, Any] = {}
+        for path, leaf in leaves:
+            if isinstance(leaf, Parameter | Constant):
+                value = leaf.value
+                values[_path_to_dotted(path)] = (
+                    value.item() if isinstance(value, jax.Array) and value.ndim == 0 else value
+                )
+        return values
+
     def fit(
         self,
         data: Data,
@@ -256,6 +293,7 @@ class HybridModel(eqx.Module):
         freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
         trainable: Any = None,
         ui: Any = None,
+        verbose: bool = True,
         validation: Data | None = None,
     ) -> FitResult:
         """Train the predictors and return a new model with the result.
@@ -271,14 +309,25 @@ class HybridModel(eqx.Module):
         ``(module) -> bool``. ``trainable`` is an explicit mask for full
         control; pass one or the other.
 
-        With ``validation``, the validation data loss replaces the training
-        loss for choosing the returned step (Optax) or generation (Evosax),
-        and for ``patience``. It costs one extra forward pass over the
-        validation set per step or generation.
+        ``verbose`` shows a live display of the run, and ``False`` runs
+        quietly. ``ui`` is a display of your own and overrides ``verbose``.
+
+        With ``validation``, the validation loss replaces the training loss
+        for choosing the returned step (Optax) or generation (Evosax), and
+        for ``patience_steps``. It costs one extra forward pass over the
+        validation set per step or generation. The validation score is
+        always single shooting at the full horizon, so Optax picks the best
+        step across all phases: the returned model can come from an earlier
+        horizon or from a segmented phase.
 
         ``data`` and ``validation`` may be a ``Dataset`` or a sequence of
         experiments. ``simulate_fn`` and ``state_to_output`` shapes are
         checked once on the first experiment before anything compiles.
+
+        A solver error or a non-finite loss partway through ends the run: it
+        warns and returns the best parameters so far, with ``stop_reason``
+        ``"diverged"``. If the first step fails there is nothing to return, so
+        it raises.
 
         Same as ``train_with_optax(model, ...)`` or
         ``train_with_evosax(model, ...)`` in :mod:`jaxhybridmodels.training`,
@@ -290,6 +339,7 @@ class HybridModel(eqx.Module):
             freeze=freeze,
             trainable=trainable,
             ui=ui,
+            verbose=verbose,
             validation=validation,
         )
         if isinstance(config, EvosaxTrainingConfig):
@@ -310,18 +360,25 @@ class HybridModel(eqx.Module):
         n_members: int,
         n_seeds: int | None = None,
         bootstrap: bool = False,
+        seeds_per_member: int = 1,
         objective: Objective | None = None,
         freeze: Sequence[FreezeSpec] | FreezeSpec | None = None,
         trainable: Any = None,
         ui: Any = None,
+        verbose: bool = True,
+        validation: Data | None = None,
     ) -> list[FitResult]:
         """Train an ensemble of up to ``n_members`` models, best first.
 
         Every member starts from a fresh initialisation of the predictors
-        drawn from ``key``. A candidate seed is trained briefly
-        (``config.tournament_steps`` steps at ``config.tournament_lr``) and
-        scored, as in the tournament, then the chosen seeds get the full
-        phase schedule.
+        drawn from ``key``, redrawn as restarts redraw them: a
+        ``Parameter`` without two finite bounds keeps its starting value in
+        every member. A candidate seed is trained briefly
+        (``config.restart_steps`` steps, with the first phase's optimiser,
+        ``loss_horizon`` and learning rate unless ``config.restart_lr`` is
+        set) and scored, as a restart is, then the chosen seeds get the full
+        phase schedule. Each member's ``history.restart_scores`` holds the
+        scores of the seeds it was chosen from, when there was a choice.
 
         Seed ensemble (``bootstrap=False``)
             Score ``n_seeds`` seeds on all of ``data`` and fully train the
@@ -330,16 +387,25 @@ class HybridModel(eqx.Module):
         Bootstrap ensemble (``bootstrap=True``)
             Draw ``n_members`` resamples of the experiments with replacement
             (:func:`~jaxhybridmodels.make_bootstrap_dataset`) and train one
-            member on each: the best of ``n_seeds`` seeds scored on that
-            resample. ``n_seeds`` defaults to 1, one fresh seed per resample.
+            member on each: the best of ``seeds_per_member`` seeds scored on
+            that resample. The default, 1, is one fresh seed per resample.
 
-        ``config.tournament_attempts`` is not used: ``n_seeds`` takes its
+        ``n_seeds`` belongs to the seed ensemble and ``seeds_per_member`` to
+        the bootstrap one; setting the other mode's keyword raises.
+        ``config.restarts`` is not used: the seed counts take its
         place. ``objective``, ``freeze``, ``trainable`` and ``ui`` are as
         for :meth:`fit`; each member is its own UI run. The result is sorted
         by each member's final loss, the loss at its returned parameters
-        when ``config.restore_best`` is set. A seed whose warm-up fails is
-        dropped, so fewer than ``n_members`` may come back; if every seed
-        fails it raises ``RuntimeError``. Optax only. The list goes straight
+        when ``config.restore_best`` is set.
+
+        With ``validation``, each member picks its returned step and runs
+        ``patience_steps`` on the validation loss, as in :meth:`fit`, and members are
+        sorted by that loss. Seeds are still scored on the training data.
+
+        A seed whose warm-up or first step fails is dropped, so fewer than
+        ``n_members`` may come back; if every seed fails it raises
+        ``RuntimeError``. A member that fails later comes back with
+        ``stop_reason`` ``"diverged"``. Optax only. The list goes straight
         into :func:`~jaxhybridmodels.predict_ensemble`.
         """
         if not isinstance(config, OptaxTrainingConfig):
@@ -355,10 +421,13 @@ class HybridModel(eqx.Module):
             n_members=n_members,
             n_seeds=n_seeds,
             bootstrap=bootstrap,
+            seeds_per_member=seeds_per_member,
             objective=objective,
             freeze=freeze,
             trainable=trainable,
             ui=ui,
+            verbose=verbose,
+            validation=validation,
         )
 
     def predict(
@@ -377,7 +446,7 @@ class HybridModel(eqx.Module):
         ``t0`` (or first observation) to its last observation, for smooth
         plots. ``ts`` gives one explicit grid for every experiment; it must
         not start before any experiment's start. Off the measured grid,
-        ``observed`` and ``observation_mask`` are empty. Each experiment
+        ``observed`` and ``mask`` are empty. Each experiment
         still integrates from its own start, so ``y0`` stays in place.
 
         ``data`` may be a ``Dataset`` from ``make_dataset`` or a sequence of
@@ -424,12 +493,23 @@ class HybridModel(eqx.Module):
                 raise ValueError(
                     "simulate: experiment= supplies y0, covariates and t0; do not pass them too"
                 )
-            measured = _per_experiment_arrays(experiment, tuple(experiment.channels)).ts
+            # The model's own channels, as predict and make_dataset use, so y0
+            # sits at the same time on every path.
+            absent = [name for name in self.output_channel_names if name not in experiment.channels]
+            if absent:
+                raise ValueError(
+                    f"simulate: experiment {experiment.exp_id!r} has no channel {absent}; it "
+                    f"needs every channel the model outputs, {list(self.output_channel_names)}"
+                )
+            measured = _per_experiment_arrays(experiment, self.output_channel_names).ts
             if ts is None:
                 ts = measured
             # y0 belongs to the experiment's own start: t0 when set, else its
-            # first observation time. Pin it so a caller's ts cannot move it.
-            start_time = experiment.t0 if experiment.t0 is not None else float(measured[0])
+            # first observation time. The measured axis already holds t0, in
+            # the axis's own precision, so a float32 rounding of t0 cannot put
+            # the start after the first time. Pin it so a caller's ts cannot
+            # move it.
+            start_time = float(measured[0])
             if n_points is not None:
                 ts = jnp.linspace(start_time, measured[-1], n_points, dtype=measured.dtype)
             y0, covariates, t0 = experiment.y0, experiment.covariates, start_time
@@ -457,13 +537,16 @@ class HybridModel(eqx.Module):
         offset = int(start < float(values[0]))
         grid = jnp.concatenate((jnp.asarray([start], times.dtype), times)) if offset else times
         cov = {name: jnp.asarray(value) for name, value in (covariates or {}).items()}
-        state = simulation_state(self.simulate_fn(self.predictors, grid, cov, initial, self.solver))
-        self._check_state_shape(state.shape, grid.shape[0], "simulate")
-        state = state[offset:]
-        output = jnp.asarray(self.state_to_output(state))
+        with _note_user_code("simulate", self.predictors, cov, initial.shape):
+            state = simulation_state(
+                self.simulate_fn(self.predictors, grid, cov, initial, self.solver)
+            )
+            self._check_state_shape(state.shape, grid.shape[0], "simulate")
+            state = state[offset:]
+            output = jnp.asarray(self.state_to_output(state))
         self._check_output_shape(output.shape, state.shape, "simulate")
         return ExperimentPrediction(
-            times=times,
+            ts=times,
             outputs=dict(zip(self.output_channel_names, output.T, strict=True)),
             state=state,
         )

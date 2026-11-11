@@ -12,10 +12,10 @@ loops implements both protocols, as ``SilentUI`` does.
 
 UI selection
 ------------
-Each training config has a ``verbose: bool`` field defaulting to
-``True`` (the Rich live-dashboard UI); ``False`` selects ``SilentUI``.
-An explicit ``ui=...`` argument to ``train_with_optax`` /
-``train_with_evosax`` always overrides both.
+``fit``, ``fit_ensemble``, ``train_with_optax`` and ``train_with_evosax``
+take ``verbose``, defaulting to ``True``: the Rich live dashboard, or the
+plain lines of ``ui/plain.py`` when output is not a terminal. ``False``
+selects ``SilentUI``. An explicit ``ui=...`` always overrides both.
 
 Compile events
 --------------
@@ -99,7 +99,7 @@ class TrainingUI(Protocol):
         """
         ...
 
-    def on_run_end(self, *, final_loss: float) -> None:
+    def on_run_end(self, *, returned_loss: float) -> None:
         """Fires once after every phase has completed (or training was aborted gracefully)."""
         ...
 
@@ -115,7 +115,7 @@ class EvosaxUI(Protocol):
     Differs from ``TrainingUI`` because the evosax loop has no phases and
     no per-step gradient loss. Each generation reports the best and mean
     fitness across its population instead. The run-level events use the
-    same argument names as ``TrainingUI`` (``total_steps``, ``final_loss``).
+    same argument names as ``TrainingUI`` (``total_steps``, ``returned_loss``).
 
     Event order during a typical run::
 
@@ -145,7 +145,7 @@ class EvosaxUI(Protocol):
         """Fires once per generation with population statistics."""
         ...
 
-    def on_run_end(self, *, final_loss: float) -> None:
+    def on_run_end(self, *, returned_loss: float) -> None:
         """Fires once after the last generation with the loss of the returned predictors."""
         ...
 
@@ -156,7 +156,7 @@ class EvosaxUI(Protocol):
 
 @contextmanager
 def close_run_on_error(ui: TrainingUI | EvosaxUI) -> Iterator[None]:
-    """Fire ``on_run_end(final_loss=nan)`` if the body raises, then re-raise.
+    """Fire ``on_run_end(returned_loss=nan)`` if the body raises, then re-raise.
 
     The trainers wrap everything after ``on_run_start`` in it, so a compile
     failure, a non-finite loss or Ctrl-C does not leave a Rich Live
@@ -165,14 +165,14 @@ def close_run_on_error(ui: TrainingUI | EvosaxUI) -> Iterator[None]:
     try:
         yield
     except BaseException:
-        ui.on_run_end(final_loss=math.nan)
+        ui.on_run_end(returned_loss=math.nan)
         raise
 
 
 class SilentUI:
     """No-op UI satisfying both ``TrainingUI`` and ``EvosaxUI``.
 
-    Selected when ``config.verbose=False``, and used in tests where stdout
+    Selected by ``verbose=False``, and used in tests where stdout
     would pollute captured logs. Every method takes ``**kwargs``, so a new
     event argument never breaks it.
     """

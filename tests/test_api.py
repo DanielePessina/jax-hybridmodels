@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata as metadata
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -41,6 +43,8 @@ CORE = [
     "count_trainable_params",
     "save",
     "load",
+    "reinitialize",
+    "reinitialize_pytree",
 ]
 
 
@@ -125,7 +129,9 @@ def test_replaced_functions_are_gone_from_their_modules(module, name):
 def test_distribution_metadata_matches_public_version():
     package = metadata.metadata("jax-hybridmodels")
     assert package["Name"] == "jax-hybridmodels"
-    assert package["Version"] == "0.2.0b1"
+    root = Path(__file__).resolve().parent.parent
+    declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    assert package["Version"] == declared
     assert package["License-Expression"] == "BSD-3-Clause"
     assert "LICENSE" in (package.get_all("License-File") or [])
     assert "Development Status :: 4 - Beta" in (package.get_all("Classifier") or [])

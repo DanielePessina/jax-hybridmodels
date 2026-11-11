@@ -18,7 +18,7 @@ from typing import Any
 import diffrax
 import equinox as eqx
 import jax.numpy as jnp
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 SOLVER_REGISTRY: dict[str, type[diffrax.AbstractSolver[Any]]] = {
     "Tsit5": diffrax.Tsit5,
@@ -49,9 +49,13 @@ for a neural ODE memory is usually the binding constraint.
   or a network inside the vector field.
 - ``Backsolve`` re-integrates the adjoint ODE backwards in constant
   memory. Cheapest in memory, but the reversed solve accumulates its own
-  error, so gradients can be wrong for stiff or chaotic systems.
+  error, so gradients can be wrong for stiff or chaotic systems. It
+  differentiates only through ``args`` and ``y0``: differentiating a value
+  the vector field closes over raises, so pass the predictors as ``args``.
 - ``ForwardMode`` is for forward-mode differentiation, which wins only
-  when parameters are far fewer than outputs.
+  when parameters are far fewer than outputs. Training takes reverse-mode
+  gradients and refuses it; inference with ``ad_mode="forward"`` can use
+  it.
 """
 
 
@@ -133,6 +137,11 @@ class SolverConfig(eqx.Module):
         Gains of the PID step-size controller. The defaults ``(0, 1, 0)``
         are diffrax's own and give plain I-control. See
         :meth:`stepsize_controller`.
+    throw : bool
+        Whether a failed solve raises, default ``True``. With ``False``, diffrax
+        returns non-finite states after the failure instead, which is what a
+        sampler needs: :mod:`jaxhybridmodels.inference` turns them into a rejected
+        proposal. A hand-written ``diffrax.diffeqsolve`` call must forward it.
     """
 
     solver: diffrax.AbstractSolver[Any] = eqx.field(static=True)
@@ -144,6 +153,7 @@ class SolverConfig(eqx.Module):
     pcoeff: float = eqx.field(static=True, default=0.0)
     icoeff: float = eqx.field(static=True, default=1.0)
     dcoeff: float = eqx.field(static=True, default=0.0)
+    throw: bool = eqx.field(static=True, default=True)
 
     def __init__(
         self,
@@ -157,6 +167,7 @@ class SolverConfig(eqx.Module):
         pcoeff: float = 0.0,
         icoeff: float = 1.0,
         dcoeff: float = 0.0,
+        throw: bool = True,
     ) -> None:
         """Construct and validate a solver configuration at the host boundary.
 
@@ -192,8 +203,11 @@ class SolverConfig(eqx.Module):
         self.pcoeff = pcoeff
         self.icoeff = icoeff
         self.dcoeff = dcoeff
+        self.throw = throw
 
-    def stepsize_controller(self) -> diffrax.PIDController:
+    def stepsize_controller(
+        self, *, jump_ts: ArrayLike | None = None
+    ) -> diffrax.AbstractStepSizeController:
         """Build the adaptive step-size controller this config describes.
 
         Removes a coercion every caller had to remember: diffrax broadcasts
@@ -205,15 +219,23 @@ class SolverConfig(eqx.Module):
         I-control, so this reproduces the ``PIDController(rtol, atol)`` the
         examples wrote by hand. Raise ``pcoeff`` to 0.3 or 0.4 to damp
         step-size oscillation on stiff problems.
+
+        ``jump_ts`` are times where the vector field jumps or bends. The
+        controller is wrapped in ``diffrax.ClipStepSizeController``, which
+        ends a step exactly on each and restarts the solver there.
         """
         atol = jnp.asarray(self.atol) if isinstance(self.atol, tuple) else self.atol
-        return diffrax.PIDController(
+        controller = diffrax.PIDController(
             rtol=self.rtol,
             atol=atol,
             pcoeff=self.pcoeff,
             icoeff=self.icoeff,
             dcoeff=self.dcoeff,
         )
+        times = None if jump_ts is None else jnp.ravel(jnp.asarray(jump_ts))
+        if times is None or times.size == 0:
+            return controller
+        return diffrax.ClipStepSizeController(controller, jump_ts=times)
 
     def diffeqsolve(
         self,
@@ -221,6 +243,8 @@ class SolverConfig(eqx.Module):
         ts: Array,
         y0: Array,
         args: Any = None,
+        *,
+        jump_ts: ArrayLike | None = None,
     ) -> diffrax.Solution:
         """Run the solve this config describes, so ``simulate_fn`` stays thin.
 
@@ -250,6 +274,13 @@ class SolverConfig(eqx.Module):
         args
             Optional static-or-traced value passed to the vector field's
             ``args`` (e.g. the predictors pytree, for Backsolve).
+        jump_ts
+            Times where the vector field jumps or bends, such as a
+            :class:`~jaxhybridmodels.profiles.Profile`'s ``jump_ts``. The
+            solver ends a step on each instead of stepping across it, which
+            a short pulse would otherwise pass unseen. May be traced, so a
+            breakpoint can come from a covariate. Times outside ``ts`` are
+            ignored.
 
         Returns
         -------
@@ -257,6 +288,12 @@ class SolverConfig(eqx.Module):
             The diffrax solution; ``.ys`` is the state trajectory
             ``[T, S]`` ``simulate_fn`` must return.
         """
+        if jump_ts is not None:
+            # In the time axis's dtype, which diffrax requires, and dropped when
+            # empty, as for a smooth profile, which diffrax cannot take.
+            jump_ts = jnp.ravel(jnp.asarray(jump_ts, dtype=jnp.asarray(ts).dtype))
+            if jump_ts.size == 0:
+                jump_ts = None
         return diffrax.diffeqsolve(
             term,
             self.solver,
@@ -266,9 +303,10 @@ class SolverConfig(eqx.Module):
             y0=y0,
             args=args,
             saveat=diffrax.SaveAt(ts=ts),
-            stepsize_controller=self.stepsize_controller(),
+            stepsize_controller=self.stepsize_controller(jump_ts=jump_ts),
             adjoint=self.adjoint,
             max_steps=self.max_steps,
+            throw=self.throw,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -295,7 +333,7 @@ class SolverConfig(eqx.Module):
         atol_serialised: float | list[float] = (
             list(self.atol) if isinstance(self.atol, tuple) else self.atol
         )
-        return {
+        record = {
             "solver": solver_name,
             "rtol": self.rtol,
             "atol": atol_serialised,
@@ -306,6 +344,11 @@ class SolverConfig(eqx.Module):
             "icoeff": self.icoeff,
             "dcoeff": self.dcoeff,
         }
+        # Only when off, so a default config writes the record it always did and
+        # hm.load does not warn about a solver mismatch on an older save.
+        if not self.throw:
+            record["throw"] = False
+        return record
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SolverConfig:
@@ -346,6 +389,7 @@ class SolverConfig(eqx.Module):
             pcoeff=d.get("pcoeff", 0.0),
             icoeff=d.get("icoeff", 1.0),
             dcoeff=d.get("dcoeff", 0.0),
+            throw=d.get("throw", True),
         )
 
 

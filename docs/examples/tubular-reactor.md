@@ -36,6 +36,13 @@ differences and dispersion central differences. Each of the six
 experiments has its own temperature $T$ and feed concentration, both
 covariates.
 
+The scheme is not an exact Danckwerts tube at Péclet 100. Upwinding adds
+numerical dispersion of about $u\,\Delta z/2 = 0.01$, equal to $D$, so the
+discretised tube behaves as Péclet 50. Holding a ghost cell before the inlet at
+the feed value is close to a Dirichlet inlet, not the Danckwerts flux
+condition; the zero-gradient outlet is the Danckwerts outlet. The data come
+from the same scheme as the model, so the fit is unaffected.
+
 Transport is known. The rate law is not. The data come from
 Langmuir-Hinshelwood kinetics,
 
@@ -80,10 +87,11 @@ each experiment, the start-up front, before the feed drop:
 
 ### Solver and adjoint
 
-The stiffest mode of the discretised operator is dispersion, at about
-$4D/\Delta z^2 = 100$ per unit time. That is mild, so explicit `Tsit5`
-takes a few hundred steps per solve. Halving $\Delta z$ quadruples that
-rate; past roughly 200 cells an implicit solver such as `Kvaerno3` takes
+The stiffest mode of the discretised operator decays at about
+$4D/\Delta z^2 + 2u/\Delta z = 100 + 100 = 200$ per unit time, dispersion
+plus upwind advection. That is mild, so explicit `Tsit5` takes a few hundred
+steps per solve. Refining $\Delta z$ raises the dispersion part as
+$1/\Delta z^2$; past roughly 200 cells an implicit solver such as `Kvaerno3` takes
 fewer steps.
 
 The config sets `adjoint=diffrax.RecursiveCheckpointAdjoint()`. The
@@ -109,7 +117,7 @@ where a wrong rate has acted for longer.
 ![Sensor traces for the coldest and hottest runs](assets/tubular-reactor/sensors.png)
 
 The first-order model also gets its constants wrong. It fits
-$E_a/R = 5139$ K against a true 4000 K. The true effective coefficient is
+$E_a/R = 5142$ K against a true 4000 K. The true effective coefficient is
 $k(T)/(1 + Kc)$. Cold runs convert little, so $c$ stays high and the
 coefficient is suppressed by the denominator; hot runs consume the
 reactant, so $c$ is low and the coefficient is close to $k(T)$. Seen
@@ -120,10 +128,10 @@ The learned rate law matches the truth across the measured box:
 
 | $c$ | $T$ (K) | true $r$ | learned $r$ |
 |---|---|---|---|
-| 0.2 | 310 | 0.196 | 0.196 |
-| 1.5 | 310 | 0.515 | 0.524 |
+| 0.2 | 310 | 0.196 | 0.193 |
+| 1.5 | 310 | 0.515 | 0.525 |
 | 0.2 | 350 | 0.857 | 0.840 |
-| 1.5 | 350 | 2.249 | 2.264 |
+| 1.5 | 350 | 2.249 | 2.273 |
 
 ![Learned rate against the truth at three temperatures](assets/tubular-reactor/rate_law.png)
 

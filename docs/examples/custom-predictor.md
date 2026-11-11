@@ -50,8 +50,8 @@ asks:
   frequency draw; because `BoundScaler` hands the inner predictor a latent
   input of roughly unit scale, a value near 1 is the sane start.
 - **How it re-initialises.** The restart
-  [tournament](/guide/training#the-tournament) calls
-  `initialized_with_key`. Without it, every float array is resampled from a
+  [restarts](/guide/training#restarts) call
+  `reinitialized`. Without it, every float array is resampled from a
   standard normal: the phases stop being uniform on $[0, 2\pi)$, the
   readout loses its $1/\sqrt{m}$ scale and `bandwidth` is ignored.
 - **How the bank is held fixed.** A module cannot declare its own field
@@ -88,20 +88,20 @@ dict, and `fit` takes them through `freeze=`:
 
 <<< @/../examples/custom_predictor/train_custom_predictor.py#mask
 
-The fit runs a three-restart tournament, which is what exercises
-`initialized_with_key`:
+The fit runs two restarts beside the starting values, which is what exercises
+`reinitialized`:
 
 <<< @/../examples/custom_predictor/train_custom_predictor.py#fit
 
 ## Results
 
-Default settings, seed 0, 400 steps after the tournament. "Worst rate
+Default settings, seed 0, 400 steps after the restarts. "Worst rate
 error" is the largest relative error in $k(T)$ across the seven sampled
 temperatures. The save and reload changes the learned rate by `0.000e+00`.
 
 | run | final data loss | $R^2$ | worst rate error |
 |---|---|---|---|
-| default: 64 features, bandwidth 1, bank frozen | 8.55e-05 | 0.9992 | 3.92% |
+| default: 64 features, bandwidth 1, bank frozen | 8.53e-05 | 0.9992 | 3.84% |
 | `--n-features 16` | 8.63e-05 | 0.9992 | 4.25% |
 | `--train-bank` | 8.46e-05 | 0.9993 | 3.34% |
 | `--bandwidth 8` | 8.44e-05 | 0.9993 | 3.35% |

@@ -33,6 +33,7 @@ export default defineConfig({
         { text: 'Custom Predictors', link: '/guide/custom-predictors' },
         { text: 'Extending', link: '/guide/extending' },
         { text: 'Ensembles', link: '/guide/ensembles' },
+        { text: 'Uncertainty', link: '/guide/uncertainty' },
         { text: 'Saving and loading', link: '/guide/serialization' },
         { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         { text: 'Recommendations', link: '/guide/recommendations' },
@@ -51,6 +52,8 @@ export default defineConfig({
         { text: 'Custom predictor', link: '/examples/custom-predictor' },
         { text: 'Custom training loop', link: '/examples/custom-loop' },
         { text: 'Mechanistic crystallisation', link: '/examples/crystallisation-mechanistic' },
+        { text: 'Shelf life', link: '/examples/shelf-life' },
+        { text: 'Multiple shooting', link: '/examples/multiple-shooting' },
       ],
       '/api/': [
         { text: 'Overview', link: '/api/' },
@@ -71,6 +74,7 @@ export default defineConfig({
         { text: 'Serialise', link: '/api/serialise' },
         { text: 'UI', link: '/api/ui' },
         { text: 'RNG', link: '/api/rng' },
+        { text: 'Inference', link: '/api/inference' },
       ],
     },
 

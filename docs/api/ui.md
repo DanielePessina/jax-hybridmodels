@@ -7,6 +7,8 @@ Training UIs are protocols implemented by `RichTrainingUI` / `RichEvosaxUI` (liv
 - [`TrainingUI`](#trainingui)
 - [`EvosaxUI`](#evosaxui)
 - [`SilentUI`](#silentui)
+- [`PlainTrainingUI`](#plaintrainingui)
+- [`PlainEvosaxUI`](#plainevosaxui)
 - [`RichTrainingUI`](#richtrainingui)
 - [`RichEvosaxUI`](#richevosaxui)
 
@@ -111,6 +113,7 @@ Fires after the last step of a phase, before any optimiser reset.
 ```python
 on_phase_start(
     self,
+    *,
     phase_idx: int,
     phase_steps: int,
     lr: float,
@@ -130,7 +133,7 @@ optax schedule moves it from there.
 #### `TrainingUI.on_run_end()`
 
 ```python
-on_run_end(self, *, final_loss: float) -> None
+on_run_end(self, *, returned_loss: float) -> None
 ```
 
 Fires once after every phase has completed (or training was aborted gracefully).
@@ -156,6 +159,7 @@ Fires once before the first phase. ``total_steps`` is the sum across phases.
 ```python
 on_step_end(
     self,
+    *,
     step_idx: int,
     phase_idx: int,
     loss: float,
@@ -192,7 +196,7 @@ Callback protocol for ``train_with_evosax``.
 Differs from ``TrainingUI`` because the evosax loop has no phases and
 no per-step gradient loss. Each generation reports the best and mean
 fitness across its population instead. The run-level events use the
-same argument names as ``TrainingUI`` (``total_steps``, ``final_loss``).
+same argument names as ``TrainingUI`` (``total_steps``, ``returned_loss``).
 
 Event order during a typical run::
 
@@ -268,7 +272,7 @@ Free-form log line; same level set as ``TrainingUI.on_message``.
 #### `EvosaxUI.on_run_end()`
 
 ```python
-on_run_end(self, *, final_loss: float) -> None
+on_run_end(self, *, returned_loss: float) -> None
 ```
 
 Fires once after the last generation with the loss of the returned predictors.
@@ -301,11 +305,43 @@ SilentUI()
 
 No-op UI satisfying both ``TrainingUI`` and ``EvosaxUI``.
 
-Selected when ``config.verbose=False``, and used in tests where stdout
+Selected by ``verbose=False``, and used in tests where stdout
 would pollute captured logs. Every method takes ``**kwargs``, so a new
 event argument never breaks it.
 
 <small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/base.py#L172)</small>
+
+---
+
+<a id="plaintrainingui"></a>
+
+### `PlainTrainingUI`
+
+<small>`from jaxhybridmodels.ui import PlainTrainingUI`</small>
+
+```python
+PlainTrainingUI()
+```
+
+[`TrainingUI`](/api/ui#trainingui) that prints plain lines.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/plain.py#L70)</small>
+
+---
+
+<a id="plainevosaxui"></a>
+
+### `PlainEvosaxUI`
+
+<small>`from jaxhybridmodels.ui import PlainEvosaxUI`</small>
+
+```python
+PlainEvosaxUI()
+```
+
+[`EvosaxUI`](/api/ui#evosaxui) that prints plain lines.
+
+<small>[Source](https://github.com/DanielePessina/jax-hybridmodels/blob/main/src/jaxhybridmodels/ui/plain.py#L96)</small>
 
 ---
 
@@ -317,6 +353,7 @@ event argument never breaks it.
 
 ```python
 RichTrainingUI(
+    *,
     console: 'Console | None' = None,
     recent_messages: 'int' = 5,
 ) -> None
@@ -351,6 +388,7 @@ sequential runs (used in tests).
 
 ```python
 RichEvosaxUI(
+    *,
     console: 'Console | None' = None,
     log_every: 'int | None' = None,
     recent_generations: 'int' = 5,
