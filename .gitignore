@@ -234,3 +234,6 @@ CLAUDE.md
 CONTEXT.md
 SPEC.md
 skills-lock.json
+
+# Usability evals, local only for now
+evals/
