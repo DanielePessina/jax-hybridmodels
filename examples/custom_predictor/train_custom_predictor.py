@@ -162,7 +162,7 @@ class RandomFourierPredictor(hm.Predictor):
     def reinitialized(self, *, key: Array) -> RandomFourierPredictor:
         """Re-init for restarts: a fresh bank and readout.
 
-        The tournament then puts frozen leaves back, so with the bank frozen
+        Restarts then put frozen leaves back, so with the bank frozen
         only the readout is actually redrawn.
 
         The default in ``reinitialize`` replaces every float

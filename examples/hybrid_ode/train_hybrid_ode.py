@@ -173,7 +173,7 @@ def main() -> None:
         help="Drop the residual network, leaving the rate network alone.",
     )
     parser.add_argument(
-        "--penalty-weight",
+        "--bound-penalty-weight",
         type=float,
         default=1e-3,
         help="Saturation penalty weight; 0 disables it.",

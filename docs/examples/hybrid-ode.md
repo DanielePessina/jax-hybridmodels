@@ -137,5 +137,5 @@ The grid covers each network's whole declared box, including inputs no experimen
 - `--mechanistic-only` drops the residual and shows the parameter contamination above.
 - `--inner kan` swaps both inner networks for KANs.
 - `--data rectangular` trains the same model on one full bucket.
-- `--penalty-weight 0` switches the saturation penalty off.
+- `--bound-penalty-weight 0` switches the saturation penalty off.
 - `--steps` and `--experiments` change the budget and the dataset size.

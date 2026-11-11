@@ -184,7 +184,7 @@ about twice the code.
 ## Things to try
 
 - `--updates 0` for the baselines alone.
-- `--penalty-weight 0`, then compare `05_latent_saturation.png`, which
+- `--bound-penalty-weight 0`, then compare `05_latent_saturation.png`, which
   shows where the sampled latents sit against the squash knee.
 - Raise `TAU_REF` in the script. Slower fouling brings the frozen model
   closer to the data and leaves less for a policy to learn.

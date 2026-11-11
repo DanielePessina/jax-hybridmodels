@@ -1061,7 +1061,7 @@ def main() -> None:
         "--rollouts", type=int, default=64, help="Policy noise samples per experiment per update"
     )
     parser.add_argument("--ppo-lr", type=float, default=3e-4)
-    parser.add_argument("--penalty-weight", type=float, default=1e-3)
+    parser.add_argument("--bound-penalty-weight", type=float, default=1e-3)
     parser.add_argument("--baseline-steps", type=int, default=600)
     parser.add_argument("--baseline-lr", type=float, default=3e-3)
     parser.add_argument(
